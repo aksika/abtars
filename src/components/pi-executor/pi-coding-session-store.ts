@@ -158,6 +158,12 @@ export class PiCodingSessionStore {
     return this.rowToRecord(row);
   }
 
+  /** #1635 — Run a caller-supplied body inside one transaction (used by the
+   * service for atomic turn-start: advance + CAS + claim acquire). */
+  transaction<T>(fn: () => T): T {
+    return this.db.transaction(fn);
+  }
+
   listForOwner(ownerPrincipal: string): PiCodingSessionRecord[] {
     return (this.db.prepare(
       `SELECT * FROM pi_coding_sessions WHERE owner_principal = ? AND state != 'ended' ORDER BY updated_at DESC`
@@ -190,7 +196,6 @@ export class PiCodingSessionStore {
     const params: unknown[] = [toState];
 
     const genClause = expectedGeneration !== undefined ? ` AND runtime_generation = ?` : "";
-    if (expectedGeneration !== undefined) params.push(expectedGeneration);
 
     if (updates) {
       const colMap: Record<keyof PiCodingTransitionUpdates, string> = {
@@ -219,10 +224,12 @@ export class PiCodingSessionStore {
       }
     }
 
+    // Bind order must mirror the SQL: SET clauses, then session_id, state IN,
+    // then the optional generation fence.
     const result = this.db.prepare(
       `UPDATE pi_coding_sessions SET ${setClauses.join(", ")}
        WHERE session_id = ? AND state IN (${placeholders})${genClause}`
-    ).run(...params, sessionId, ...fromArr);
+    ).run(...params, sessionId, ...fromArr, ...(expectedGeneration !== undefined ? [expectedGeneration] : []));
     if (result.changes !== 1) {
       const row = this.db.prepare(`SELECT state, runtime_generation FROM pi_coding_sessions WHERE session_id = ?`).get(sessionId);
       if (!row) return { applied: false, reason: "missing" };

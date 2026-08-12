@@ -1,0 +1,775 @@
+/**
+ * pi-coding-session-service.ts — #1635 interactive Pi coding sessions.
+ *
+ * One durable session row spans many turn generations. A Telegram turn is a
+ * transient RPC process: reserve a shared slot, atomically acquire the
+ * workspace claim + CAS idle -> starting, launch/switch to the proven
+ * transcript, prompt, and on `agent_end` persist proof, stop the process,
+ * release slot/claim/lease, and return to `idle`. There is no resident idle
+ * Telegram process and no eviction timer — the Pi transcript preserves
+ * continuity.
+ *
+ * Memory isolation is structural: the child env is built with
+ * memoryMode "none" and the routing boundary (coding-route.ts) short-circuits
+ * before every abmind path. This service never calls spin.spin(),
+ * buildPrompt(), or any memory hook.
+ */
+
+import { PiCodingSessionStore, type PiCodingSessionRecord } from "./pi-coding-session-store.js";
+import { PiWorkspaceClaimStore } from "./pi-workspace-claim-store.js";
+import { PiRuntimeHost } from "./pi-runtime-host.js";
+import type { PiExecutorConfig } from "./config.js";
+import { resolveAndValidateWorkspace, validatePersistedSession } from "./config.js";
+import { SupervisedPiRpcClient, type PiAgentEvent } from "./pi-rpc-client.js";
+import { projectPiEvent } from "./pi-event-projection.js";
+import type { RpcExtensionUIRequest } from "@earendil-works/pi-coding-agent";
+import type { Spin } from "../spin.js";
+import { captureGitEvidence, computeChangedFilesSummary } from "./evidence.js";
+import type { PiUiReply, ResumeCapability } from "./types.js";
+import { logInfo, logWarn } from "../logger.js";
+
+const TAG = "pi-coding";
+
+/** Internal sentinel: roll back the turn-start transaction. */
+const TURN_START_ROLLBACK = Symbol("pi_coding_turn_start_rollback");
+
+export interface PiCodingProjectionSink {
+  /** One editable progress message per turn (content-free lifecycle). */
+  progress(sessionId: string, text: string): void;
+  /** Tool name + lifecycle, no arguments, no output. */
+  tool(sessionId: string, name: string, started: boolean): void;
+  /** Correlated extension UI request (input/editor as prompts, select/confirm
+   * as inline controls — rendered by the sink). */
+  uiRequest(sessionId: string, request: RpcExtensionUIRequest): void;
+  /** Final assistant text, chunked by the sink to platform limits. */
+  assistantText(sessionId: string, text: string): void;
+  /** Final usage + changed-file summary. */
+  turnComplete(sessionId: string, summary: { usageJson?: string; changedFilesSummary?: string; error?: string }): void;
+  /** Bounded busy state — the turn did not start. */
+  busy(sessionId: string, reason: string): void;
+  /** Bounded retry response while starting/resuming. */
+  retry(sessionId: string, reason: string): void;
+  /** Truthful non-resumability with the derived capability. */
+  notResumable(sessionId: string, capability: Exclude<ResumeCapability, "available">, reason: string): void;
+}
+
+export interface PiCodingServiceDeps {
+  store: PiCodingSessionStore;
+  claims: PiWorkspaceClaimStore;
+  host: PiRuntimeHost;
+  config: PiExecutorConfig;
+  spin: Spin;
+  sink: PiCodingProjectionSink;
+}
+
+interface OwnedTurn {
+  sessionId: string;
+  generation: number;
+  client: SupervisedPiRpcClient;
+  workspacePath: string;
+  beforeEvidence: { head?: string; status?: string } | null;
+  settling: boolean;
+  abortTimer: ReturnType<typeof setTimeout> | null;
+  wallClockStart: number;
+  unsubTermination: (() => void) | null;
+  unsubEvents: (() => void) | null;
+  unsubUi: (() => void) | null;
+}
+
+export type TurnStartResult =
+  | { kind: "started" }
+  | { kind: "busy"; reason: string }
+  | { kind: "retry"; reason: string }
+  | { kind: "not_resumable"; capability: Exclude<ResumeCapability, "available">; reason: string }
+  | { kind: "error"; reason: string };
+
+export interface CreateCodingSessionResult {
+  sessionId: string;
+  spinSessionId: string;
+}
+
+export class PiCodingSessionService {
+  private readonly deps: PiCodingServiceDeps;
+  private readonly live = new Map<string, OwnedTurn>();
+
+  constructor(deps: PiCodingServiceDeps) {
+    this.deps = deps;
+  }
+
+  get liveCount(): number { return this.live.size; }
+
+  // ── session creation / listing ────────────────────────────────────────────
+
+  /**
+   * R6 — Owner-only creation, allowlisted alias resolved canonically at
+   * creation and at every launch/resume.
+   */
+  createCodingSession(input: {
+    ownerPrincipal: string;
+    workspaceAlias: string;
+    modelProvider?: string;
+    modelId?: string;
+    thinking?: string;
+  }): CreateCodingSessionResult {
+    const ws = resolveAndValidateWorkspace(input.workspaceAlias, this.deps.config);
+    if (ws.error) throw new Error(ws.error);
+
+    // R1.3 — the abTARS session envelope is the durable C session: listable,
+    // switchable, transportless, no memory recording.
+    const spinSession = this.deps.spin.allocateCodingExternalSession({
+      userId: input.ownerPrincipal,
+      platform: "telegram",
+      name: `Coding: ${input.workspaceAlias}`,
+      workingDir: ws.canonicalPath,
+      codingSessionId: "", // placeholder; replaced below after row creation
+    });
+
+    // The row is keyed by the envelope id — created after allocation.
+    const sessionId = spinSession.id;
+    this.deps.store.create({
+      sessionId,
+      ownerPrincipal: input.ownerPrincipal,
+      workspaceAlias: input.workspaceAlias,
+      canonicalPath: ws.canonicalPath,
+      modelProvider: input.modelProvider,
+      modelId: input.modelId,
+      thinking: input.thinking,
+    });
+    // Rewrite the envelope metadata with the durable identity (the id was not
+    // known before allocation).
+    (spinSession as unknown as Record<string, unknown>).externalMetadata = {
+      kind: "coding",
+      codingSessionId: sessionId,
+    };
+    this.deps.store.casTransition(sessionId, "creating", "idle");
+    logInfo(TAG, `Coding session ${sessionId} created for ${input.ownerPrincipal} (${input.workspaceAlias})`);
+    return { sessionId, spinSessionId: sessionId };
+  }
+
+  getSession(sessionId: string, callerPrincipal: string): PiCodingSessionRecord | null {
+    const rec = this.deps.store.get(sessionId);
+    if (!rec) return null;
+    if (rec.ownerPrincipal !== callerPrincipal) return null;
+    return rec;
+  }
+
+  listForOwner(ownerPrincipal: string): PiCodingSessionRecord[] {
+    return this.deps.store.listForOwner(ownerPrincipal);
+  }
+
+  // ── Telegram turn lifecycle ───────────────────────────────────────────────
+
+  /**
+   * R4 — A turn on an `idle` session. Ordering is load-bearing:
+   * reserve slot -> atomically (advance generation + CAS idle->starting +
+   * claim acquire) -> launch -> switch/prove or fresh identity -> running ->
+   * prompt. Every failure releases exactly what was acquired and leaves the
+   * durable session `idle` (or `interrupted` when continuity cannot be
+   * proven — Task 5).
+   */
+  async startTurn(input: {
+    sessionId: string;
+    text: string;
+    ownerPrincipal: string;
+    leaseOwner: string;
+  }): Promise<TurnStartResult> {
+    const rec = this.authorize(input.sessionId, input.ownerPrincipal);
+    if (!rec) return { kind: "error", reason: "Session not found" };
+    if (rec.state !== "idle" && rec.state !== "interrupted") {
+      return { kind: rec.state === "starting" || rec.state === "resuming" ? "retry" : "busy", reason: `Session is ${rec.state}` };
+    }
+
+    const ws = resolveAndValidateWorkspace(rec.workspaceAlias, this.deps.config);
+    if (ws.error) return { kind: "error", reason: ws.error };
+
+    // R4.6 — synchronously reserve the shared Pi slot before anything else.
+    if (!this.deps.host.tryReserveSlot()) {
+      return { kind: "busy", reason: "Pi capacity is full — retry when a slot frees up" };
+    }
+
+    const currentGen = rec.runtimeGeneration;
+    const intent: "initial" | "resume" = rec.piSessionId && rec.piSessionFile ? "resume" : "initial";
+
+    // Atomically: bump the generation, CAS idle -> starting, acquire the
+    // workspace claim. Any failure rolls the whole transaction back so the
+    // durable session stays idle.
+    let generation: number;
+    try {
+      const tx = this.txTurnStart(rec, currentGen, intent, input.leaseOwner, ws.canonicalPath);
+      if (!tx.ok) {
+        this.deps.host.releaseSlot();
+        return tx.busy
+          ? { kind: "busy", reason: "Workspace is busy — another Pi worker holds it" }
+          : { kind: "retry", reason: "Session is starting; retry shortly" };
+      }
+      generation = tx.generation;
+    } catch {
+      this.deps.host.releaseSlot();
+      return { kind: "error", reason: "Failed to start the turn" };
+    }
+
+    const turn = await this.launchTurn(rec, generation, ws.canonicalPath);
+    if (!turn.ok) return { kind: "error", reason: turn.reason };
+
+    const owned = turn.owned!;
+    this.live.set(input.sessionId, owned);
+    this.registerListeners(owned);
+
+    try {
+      // Prove or persist the session identity BEFORE running.
+      const identity = await this.resolveIdentity(rec, owned, intent);
+      if (!identity.ok) {
+        await this.teardownTurn(owned, identity.capability, "Session identity could not be proven");
+        return { kind: "not_resumable", capability: identity.capability, reason: identity.reason };
+      }
+
+      const running = this.deps.store.casTransition(
+        input.sessionId, "starting", "running",
+        {
+          piSessionId: identity.sessionId,
+          piSessionFile: identity.sessionFile,
+          observedPid: owned.client.pid,
+          resumeCapability: "available",
+          pendingRequestId: null,
+          pendingRequestType: null,
+        },
+        generation,
+      );
+      if (!running.applied) {
+        await this.teardownTurn(owned, "unsupported", "State changed mid-turn");
+        return { kind: "error", reason: "State changed mid-turn" };
+      }
+
+      await owned.client.prompt(input.text);
+      this.deps.store.touchActivity(input.sessionId);
+      return { kind: "started" };
+    } catch (err) {
+      await this.teardownTurn(owned, "session_missing", boundedError(err));
+      return { kind: "error", reason: boundedError(err) };
+    }
+  }
+
+  /** A message arriving mid-turn — Pi queues it. */
+  async followUp(sessionId: string, text: string, ownerPrincipal: string): Promise<TurnStartResult> {
+    const owned = this.live.get(sessionId);
+    if (!owned) return { kind: "busy", reason: "No active turn" };
+    const rec = this.authorize(sessionId, ownerPrincipal);
+    if (!rec) return { kind: "error", reason: "Session not found" };
+    if (rec.state !== "running") return { kind: "busy", reason: `Session is ${rec.state}` };
+    if (this.checkWallClock(owned)) return { kind: "error", reason: "Turn exceeded the wall clock — aborted" };
+    try {
+      await owned.client.followUp(text);
+      this.deps.store.touchActivity(sessionId);
+      return { kind: "started" };
+    } catch (err) {
+      return { kind: "error", reason: boundedError(err) };
+    }
+  }
+
+  /** `/steer` — interrupt the active turn with direction. */
+  async steer(sessionId: string, text: string, ownerPrincipal: string): Promise<TurnStartResult> {
+    const owned = this.live.get(sessionId);
+    if (!owned) return { kind: "busy", reason: "No active turn" };
+    const rec = this.authorize(sessionId, ownerPrincipal);
+    if (!rec) return { kind: "error", reason: "Session not found" };
+    if (rec.state !== "running") return { kind: "busy", reason: `Session is ${rec.state}` };
+    if (this.checkWallClock(owned)) return { kind: "error", reason: "Turn exceeded the wall clock — aborted" };
+    try {
+      await owned.client.steer(text);
+      this.deps.store.touchActivity(sessionId);
+      return { kind: "started" };
+    } catch (err) {
+      return { kind: "error", reason: boundedError(err) };
+    }
+  }
+
+  /** `/stop` — abort the turn only; the durable session survives. */
+  async stop(sessionId: string, ownerPrincipal: string): Promise<boolean> {
+    const owned = this.live.get(sessionId);
+    if (!owned) return false;
+    const rec = this.authorize(sessionId, ownerPrincipal);
+    if (!rec) return false;
+    if (owned.settling) return false;
+    this.cancelTurn(owned, "Cancelled by user");
+    return true;
+  }
+
+  /** Reply to a pending extension UI request (awaiting_input). */
+  async reply(sessionId: string, requestId: string, value: PiUiReply, ownerPrincipal: string): Promise<{ ok: boolean; reason?: string }> {
+    const owned = this.live.get(sessionId);
+    if (!owned) return { ok: false, reason: "No active turn" };
+    const rec = this.authorize(sessionId, ownerPrincipal);
+    if (!rec) return { ok: false, reason: "Session not found" };
+    if (rec.state !== "awaiting_input") return { ok: false, reason: `Session is ${rec.state}` };
+    if (rec.pendingRequestId !== requestId) return { ok: false, reason: "Request ID mismatch" };
+    const result = await owned.client.respondToUi(requestId, value).catch((err: Error) => ({
+      ok: false, delivery: "not_written" as const, error: err.message,
+    }));
+    if (result.delivery === "not_written") {
+      return { ok: false, reason: "Pi did not accept the reply" };
+    }
+    this.deps.store.casTransition(sessionId, "awaiting_input", "running", {
+      pendingRequestId: null, pendingRequestType: null,
+    });
+    this.deps.store.touchActivity(sessionId);
+    return { ok: true };
+  }
+
+  /**
+   * `//x` pass-through. Idle: the same transient runtime lifecycle as a turn
+   * (launch/switch, submit the command, teardown to idle). Running: follow_up
+   * (Pi's own queue is authoritative).
+   */
+  async passThrough(sessionId: string, command: string, ownerPrincipal: string): Promise<TurnStartResult> {
+    const rec = this.authorize(sessionId, ownerPrincipal);
+    if (!rec) return { kind: "error", reason: "Session not found" };
+    if (rec.state === "running") {
+      return this.followUp(sessionId, command, ownerPrincipal);
+    }
+    if (rec.state !== "idle" && rec.state !== "interrupted") {
+      return { kind: "retry", reason: `Session is ${rec.state}` };
+    }
+    const result = await this.startTurn({ sessionId, text: command, ownerPrincipal, leaseOwner: `passthrough:${ownerPrincipal}` });
+    return result;
+  }
+
+  /**
+   * `/compact` on an idle session: the same transient lifecycle, running Pi's
+   * native compaction, then persist proof and return to idle. Busy during a
+   * turn.
+   */
+  async compactSession(sessionId: string, instructions: string | undefined, ownerPrincipal: string): Promise<{ ok: boolean; message: string }> {
+    const rec = this.authorize(sessionId, ownerPrincipal);
+    if (!rec) return { ok: false, message: "Session not found" };
+    if (rec.state !== "idle" && rec.state !== "interrupted") {
+      return { ok: false, message: `Busy during a turn (${rec.state})` };
+    }
+    const ws = resolveAndValidateWorkspace(rec.workspaceAlias, this.deps.config);
+    if (ws.error) return { ok: false, message: ws.error };
+    if (!this.deps.host.tryReserveSlot()) {
+      return { ok: false, message: "Pi capacity is full — retry when a slot frees up" };
+    }
+    const currentGen = rec.runtimeGeneration;
+    const intent: "initial" | "resume" = rec.piSessionId && rec.piSessionFile ? "resume" : "initial";
+    let generation: number;
+    try {
+      const tx = this.txTurnStart(rec, currentGen, intent, `compact:${ownerPrincipal}`, ws.canonicalPath);
+      if (!tx.ok) {
+        this.deps.host.releaseSlot();
+        return { ok: false, message: tx.busy ? "Workspace is busy" : "Session is starting" };
+      }
+      generation = tx.generation;
+    } catch {
+      this.deps.host.releaseSlot();
+      return { ok: false, message: "Failed to start compaction" };
+    }
+
+    const turn = await this.launchTurn(rec, generation, ws.canonicalPath);
+    if (!turn.ok) {
+      return { ok: false, message: turn.reason };
+    }
+    const owned = turn.owned!;
+    this.live.set(sessionId, owned);
+    this.registerListeners(owned);
+    try {
+      const identity = await this.resolveIdentity(rec, owned, intent);
+      if (!identity.ok) {
+        await this.teardownTurn(owned, identity.capability, "Session identity could not be proven");
+        return { ok: false, message: identity.reason };
+      }
+      await owned.client.compact(instructions);
+      await this.finishTurn(owned, identity, "compact");
+      return { ok: true, message: "Compaction complete" };
+    } catch (err) {
+      await this.teardownTurn(owned, "session_missing", boundedError(err));
+      return { ok: false, message: boundedError(err) };
+    }
+  }
+
+  // ── session end / shutdown ────────────────────────────────────────────────
+
+  /**
+   * `/coding end` — stop any live turn, end the durable row and the Spin C
+   * envelope. Never touches the Pi transcript.
+   */
+  endSession(sessionId: string, ownerPrincipal: string): boolean {
+    const rec = this.authorize(sessionId, ownerPrincipal);
+    if (!rec) return false;
+    const owned = this.live.get(sessionId);
+    if (owned && !owned.settling) {
+      this.cancelTurn(owned, "Session ended by user");
+    }
+    this.deps.store.markEnded(sessionId);
+    try {
+      this.deps.spin.endCodingExternalSession(sessionId, sessionId);
+    } catch { /* best effort */ }
+    logInfo(TAG, `Coding session ${sessionId} ended (transcript preserved)`);
+    return true;
+  }
+
+  /** Bridge shutdown: abort every live turn; leave sessions interrupted. */
+  async interruptAll(): Promise<void> {
+    const snapshot = [...this.live.values()];
+    await Promise.all(snapshot.map(async (owned) => {
+      owned.settling = true;
+      const rec = this.deps.store.get(owned.sessionId);
+      const capability = rec ? await this.probeCapability(owned) : ("session_missing" as ResumeCapability);
+      this.deps.store.casTransition(owned.sessionId, ["starting", "running", "awaiting_input"], "interrupted", {
+        pendingRequestId: null, pendingRequestType: null,
+        resumeCapability: capability,
+      }, owned.generation);
+      await this.releaseTurn(owned);
+    }));
+    this.live.clear();
+  }
+
+  // ── internals ─────────────────────────────────────────────────────────────
+
+  private authorize(sessionId: string, ownerPrincipal: string): PiCodingSessionRecord | null {
+    const rec = this.deps.store.get(sessionId);
+    if (!rec || rec.ownerPrincipal !== ownerPrincipal) return null;
+    return rec;
+  }
+
+  /**
+   * Turn-start transaction: advance generation + CAS idle/interrupted ->
+   * starting + acquire the interactive workspace claim, atomically. Throwing
+   * the rollback sentinel rolls back every write so the session stays idle.
+   */
+  private txTurnStart(
+    rec: PiCodingSessionRecord,
+    currentGen: number,
+    intent: "initial" | "resume",
+    leaseOwner: string,
+    canonicalPath: string,
+  ): { ok: true; generation: number } | { ok: false; busy: boolean } {
+    let outcome: { ok: true; generation: number } | { ok: false; busy: boolean } = { ok: false, busy: false };
+    const run = (): void => {
+      if (!this.deps.store.advanceGeneration(rec.sessionId, currentGen, intent)) {
+        outcome = { ok: false, busy: false };
+        throw TURN_START_ROLLBACK;
+      }
+      const generation = currentGen + 1;
+      const cas = this.deps.store.casTransition(
+        rec.sessionId, ["idle", "interrupted"], "starting", {}, generation,
+      );
+      if (!cas.applied) {
+        outcome = { ok: false, busy: false };
+        throw TURN_START_ROLLBACK;
+      }
+      const claim = this.deps.claims.tryAcquireInTx({
+        canonicalPath,
+        ownerId: rec.sessionId,
+        generation,
+        ownerKind: "interactive",
+      });
+      if (claim.kind !== "claimed" && claim.kind !== "idempotent") {
+        outcome = { ok: false, busy: true };
+        throw TURN_START_ROLLBACK;
+      }
+      this.setLeaseInTx(rec.sessionId, generation, leaseOwner);
+      outcome = { ok: true, generation };
+    };
+    try {
+      this.deps.store.transaction(run);
+    } catch (err) {
+      if (err !== TURN_START_ROLLBACK) throw err;
+    }
+    return outcome;
+  }
+
+  private setLeaseInTx(sessionId: string, generation: number, leaseOwner: string): void {
+    this.deps.store.setLease(sessionId, {
+      frontend: "telegram-rpc",
+      owner: leaseOwner,
+      generation,
+      acquiredAt: new Date().toISOString(),
+    }, generation);
+  }
+
+  private async launchTurn(
+    rec: PiCodingSessionRecord,
+    generation: number,
+    canonicalPath: string,
+  ): Promise<{ ok: true; owned: OwnedTurn } | { ok: false; reason: string }> {
+    const launched = await this.deps.host.launch({
+      workspaceAlias: rec.workspaceAlias,
+      envIdentity: {
+        id: rec.sessionId,
+        ownerPrincipalId: rec.ownerPrincipal,
+        executionGeneration: generation,
+      },
+      memoryMode: rec.memoryMode,
+    });
+    if (!launched.ok) {
+      this.deps.claims.releaseForGeneration({ ownerId: rec.sessionId, generation });
+      this.deps.store.clearLease(rec.sessionId, generation);
+      this.deps.store.casTransition(rec.sessionId, "starting", "idle", {}, generation);
+      return { ok: false, reason: launched.error };
+    }
+    const owned: OwnedTurn = {
+      sessionId: rec.sessionId,
+      generation,
+      client: launched.client,
+      workspacePath: canonicalPath,
+      beforeEvidence: captureGitEvidence(canonicalPath),
+      settling: false,
+      abortTimer: null,
+      wallClockStart: Date.now(),
+      unsubTermination: null,
+      unsubEvents: null,
+      unsubUi: null,
+    };
+    return { ok: true, owned };
+  }
+
+  private registerListeners(owned: OwnedTurn): void {
+    owned.unsubTermination = owned.client.onTermination(() => {
+      this.onChildTerminated(owned);
+    });
+    owned.unsubEvents = owned.client.subscribe((event) => {
+      this.onRpcEvent(owned, event);
+    });
+    owned.unsubUi = owned.client.onUiRequest((request) => {
+      this.onUiRequest(owned, request);
+    });
+  }
+
+  private async resolveIdentity(
+    rec: PiCodingSessionRecord,
+    owned: OwnedTurn,
+    intent: "initial" | "resume",
+  ): Promise<{ ok: true; sessionId: string; sessionFile?: string } | { ok: false; capability: Exclude<ResumeCapability, "available">; reason: string }> {
+    try {
+      if (intent === "resume") {
+        // R4.4 — resume requires a proven target, never an inferred one.
+        const proof = validatePersistedSession({
+          sessionStorageRoot: this.deps.config.sessionStorageRoot,
+          expectedSessionId: rec.piSessionId,
+          sessionFile: rec.piSessionFile,
+        });
+        if (!proof.ok) {
+          this.deps.store.recordResumeCapability(rec.sessionId, proof.capability);
+          return { ok: false, capability: proof.capability, reason: proof.reason };
+        }
+        const switched = await owned.client.switchSession(proof.canonicalFile);
+        if (switched.cancelled) {
+          this.deps.store.recordResumeCapability(rec.sessionId, "session_missing");
+          return { ok: false, capability: "session_missing", reason: "Session switch was cancelled" };
+        }
+        const state = await owned.client.getState();
+        if (state.sessionId !== rec.piSessionId) {
+          this.deps.store.recordResumeCapability(rec.sessionId, "session_missing");
+          return { ok: false, capability: "session_missing", reason: "Switched session identity mismatch" };
+        }
+        const resumedProof = validatePersistedSession({
+          sessionStorageRoot: this.deps.config.sessionStorageRoot,
+          expectedSessionId: state.sessionId,
+          sessionFile: state.sessionFile,
+        });
+        if (!resumedProof.ok) {
+          this.deps.store.recordResumeCapability(rec.sessionId, resumedProof.capability);
+          return { ok: false, capability: resumedProof.capability, reason: resumedProof.reason };
+        }
+        return { ok: true, sessionId: state.sessionId, sessionFile: resumedProof.canonicalFile };
+      }
+      // Initial — persist the fresh identity with a truthfully derived
+      // capability, never an optimistic one.
+      const state = await owned.client.getState();
+      const proof = validatePersistedSession({
+        sessionStorageRoot: this.deps.config.sessionStorageRoot,
+        expectedSessionId: state.sessionId,
+        sessionFile: state.sessionFile,
+      });
+      if (!proof.ok) {
+        this.deps.store.recordResumeCapability(rec.sessionId, proof.capability);
+        return { ok: false, capability: proof.capability, reason: proof.reason };
+      }
+      return { ok: true, sessionId: state.sessionId, sessionFile: state.sessionFile };
+    } catch (err) {
+      return { ok: false, capability: "session_missing", reason: boundedError(err) };
+    }
+  }
+
+  /** Final agent_end: persist proof, gather bounded evidence, return to idle. */
+  private async finishTurn(
+    owned: OwnedTurn,
+    identity: { sessionId: string; sessionFile?: string },
+    why: "turn" | "compact",
+  ): Promise<void> {
+    const sessionId = owned.sessionId;
+    const afterEvidence = captureGitEvidence(owned.workspacePath);
+    const summary = computeChangedFilesSummary(owned.beforeEvidence, afterEvidence);
+    const usage = await owned.client.getSessionStats().catch(() => ({}));
+    const usageJson = JSON.stringify(usage).slice(0, 1000);
+    this.deps.store.casTransition(sessionId, "running", "idle", {
+      piSessionId: identity.sessionId,
+      piSessionFile: identity.sessionFile,
+      usageJson,
+      changedFilesSummary: summary,
+      resumeCapability: "available",
+      pendingRequestId: null,
+      pendingRequestType: null,
+    }, owned.generation);
+    this.deps.sink.turnComplete(sessionId, { usageJson, changedFilesSummary: summary });
+    await this.releaseTurn(owned);
+    logInfo(TAG, `Coding turn ${sessionId} (gen ${owned.generation}) returned to idle (${why})`);
+  }
+
+  /** Abort path: close the process, release slot/claim/lease, return to idle. */
+  private cancelTurn(owned: OwnedTurn, reason: string): void {
+    if (owned.settling) return;
+    owned.settling = true;
+    owned.client.abort().catch(() => {});
+    const graceMs = this.deps.config.abortGraceMs;
+    owned.abortTimer = setTimeout(() => {
+      if (this.live.get(owned.sessionId) !== owned) return;
+      void owned.client.close();
+      const afterEvidence = captureGitEvidence(owned.workspacePath);
+      const summary = computeChangedFilesSummary(owned.beforeEvidence, afterEvidence);
+      this.deps.store.casTransition(owned.sessionId, ["running", "awaiting_input", "starting"], "idle", {
+        changedFilesSummary: summary,
+        pendingRequestId: null, pendingRequestType: null,
+      }, owned.generation);
+      this.deps.sink.turnComplete(owned.sessionId, { changedFilesSummary: summary, error: reason });
+      void this.releaseTurn(owned);
+    }, graceMs);
+  }
+
+  /** Failure teardown with a truthful capability; session returns to idle. */
+  private async teardownTurn(
+    owned: OwnedTurn,
+    capability: ResumeCapability,
+    reason: string,
+  ): Promise<void> {
+    this.deps.store.casTransition(owned.sessionId, "starting", "idle", {
+      resumeCapability: capability,
+      pendingRequestId: null, pendingRequestType: null,
+    }, owned.generation);
+    this.deps.sink.turnComplete(owned.sessionId, { error: reason });
+    await this.releaseTurn(owned);
+  }
+
+  /** Release every generation-owned resource exactly once. */
+  private async releaseTurn(owned: OwnedTurn): Promise<void> {
+    if (owned.abortTimer) { clearTimeout(owned.abortTimer); owned.abortTimer = null; }
+    if (owned.unsubTermination) { owned.unsubTermination(); owned.unsubTermination = null; }
+    if (owned.unsubEvents) { owned.unsubEvents(); owned.unsubEvents = null; }
+    if (owned.unsubUi) { owned.unsubUi(); owned.unsubUi = null; }
+    try { await owned.client.close(); } catch { /* ignore */ }
+    this.deps.store.clearLease(owned.sessionId, owned.generation);
+    this.deps.claims.releaseForGeneration({ ownerId: owned.sessionId, generation: owned.generation });
+    this.deps.host.releaseSlot();
+    if (this.live.get(owned.sessionId) === owned) {
+      this.live.delete(owned.sessionId);
+    }
+  }
+
+  private async onChildTerminated(owned: OwnedTurn): Promise<void> {
+    if (owned.settling) return;
+    if (owned.client.closed) return;
+    if (owned.abortTimer) return; // cancelling — the grace timer settles
+    logWarn(TAG, `Unexpected Pi process termination for ${owned.sessionId} (gen=${owned.generation})`);
+    const afterEvidence = captureGitEvidence(owned.workspacePath);
+    const summary = computeChangedFilesSummary(owned.beforeEvidence, afterEvidence);
+    this.deps.store.casTransition(owned.sessionId, ["running", "awaiting_input", "starting"], "idle", {
+      changedFilesSummary: summary,
+      resumeCapability: "session_missing",
+      pendingRequestId: null, pendingRequestType: null,
+    }, owned.generation);
+    this.deps.sink.turnComplete(owned.sessionId, { changedFilesSummary: summary, error: "Pi process terminated unexpectedly" });
+    await this.releaseTurn(owned);
+  }
+
+  private async onRpcEvent(owned: OwnedTurn, event: PiAgentEvent): Promise<void> {
+    this.deps.store.touchActivity(owned.sessionId);
+    const proj = projectPiEvent(event);
+    for (const p of proj.progress) {
+      if (p.type === "tool_execution_start" || p.type === "tool_execution_end") {
+        try {
+          const name = (JSON.parse(p.json) as { name?: string }).name ?? "tool";
+          this.deps.sink.tool(owned.sessionId, name, p.type === "tool_execution_start");
+        } catch { /* ignore */ }
+      } else if (p.type === "agent_start" || p.type === "compaction" || p.type === "auto_retry") {
+        this.deps.sink.progress(owned.sessionId, p.type.replace(/_/g, " "));
+      }
+    }
+    if (proj.settleCompletion) {
+      // agent_end — persist proof and return the session to idle. Never
+      // settles a card, never deletes anything.
+      try {
+        const state = await owned.client.getState();
+        const identity = { sessionId: state.sessionId, sessionFile: state.sessionFile };
+        await this.finishTurn(owned, identity, "turn");
+      } catch (err) {
+        logWarn(TAG, `agent_end settlement failed for ${owned.sessionId}: ${boundedError(err)}`);
+        this.deps.store.casTransition(owned.sessionId, "running", "interrupted", {
+          resumeCapability: "session_missing",
+        }, owned.generation);
+        await this.releaseTurn(owned);
+      }
+    }
+  }
+
+  private async onUiRequest(owned: OwnedTurn, request: RpcExtensionUIRequest): Promise<void> {
+    this.deps.store.touchActivity(owned.sessionId);
+    const method = request.method;
+    const dialogMethods = new Set(["select", "confirm", "input", "editor"]);
+    if (dialogMethods.has(method)) {
+      const result = this.deps.store.casTransition(owned.sessionId, "running", "awaiting_input", {
+        pendingRequestId: request.id,
+        pendingRequestType: method as PiCodingUiType,
+      }, owned.generation);
+      if (result.applied) {
+        this.deps.sink.uiRequest(owned.sessionId, request);
+      } else {
+        logWarn(TAG, `UI request rejected for ${owned.sessionId} (gen=${owned.generation}, req=${request.id})`);
+      }
+    } else if (method === "notify") {
+      this.deps.sink.progress(owned.sessionId, String((request as { message?: unknown }).message ?? ""));
+    }
+  }
+
+  /** Event-driven per-turn wall clock — no new timers. An idle session is
+   * never killed by a process-age clock. */
+  private checkWallClock(owned: OwnedTurn): boolean {
+    if (Date.now() - owned.wallClockStart <= this.deps.config.maxWallClockMs) return false;
+    logWarn(TAG, `Coding turn ${owned.sessionId} exceeded max wall clock — aborting`);
+    this.cancelTurn(owned, "Cancelled: maximum wall clock exceeded");
+    return true;
+  }
+
+  /** Bounded live-state probe for interruption capability. */
+  private async probeCapability(owned: OwnedTurn): Promise<ResumeCapability> {
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    let state: { sessionId: string; sessionFile?: string } | null = null;
+    try {
+      state = await Promise.race([
+        owned.client.getState(),
+        new Promise<null>((resolve) => {
+          timer = setTimeout(() => resolve(null), 2_000);
+          if (typeof timer.unref === "function") timer.unref();
+        }),
+      ]);
+    } catch {
+      state = null;
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
+    if (!state) return "session_missing";
+    const proof = validatePersistedSession({
+      sessionStorageRoot: this.deps.config.sessionStorageRoot,
+      expectedSessionId: state.sessionId,
+      sessionFile: state.sessionFile,
+    });
+    return proof.ok ? "available" : proof.capability;
+  }
+}
+
+type PiCodingUiType = "select" | "confirm" | "input" | "editor";
+
+/** Bounded, content-free error text. */
+function boundedError(err: unknown): string {
+  const message = err instanceof Error ? err.message : String(err);
+  return message.slice(0, 300);
+}
