@@ -1145,6 +1145,15 @@ export class WorkerSupervisionStore {
     const leaseStore = new ExecutorLeaseStore(this.db);
     leaseStore.closeLease(input.attemptId, attempt.generation, `terminal:${effectiveState}`);
 
+    // A terminal attempt can no longer hold retry budget. In particular,
+    // input_requested must release the reservation without consuming it;
+    // ordinary terminal outcomes consume the reservation exactly once.
+    this.db.prepare(`
+      UPDATE retry_budget_reservations
+      SET status = ?, updated_at = datetime('now')
+      WHERE target_attempt_id = ? AND status IN ('active', 'claimed')
+    `).run(input.terminalCause === "input_requested" ? "released" : "consumed", input.attemptId);
+
     if (effectiveState === "completed" && input.envelope) {
       const existingResult = this.db.prepare(`SELECT 1 FROM worker_results WHERE attempt_id = ?`).get(input.attemptId);
       if (!existingResult) {

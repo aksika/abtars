@@ -1,4 +1,6 @@
-export type PiRunOrigin = "user" | "agent" | "peer";
+/** `supervised` is the subordinate Pi row owned by a Worker attempt; it has
+ * different terminal/card ownership from user/agent/peer Pi runs. */
+export type PiRunOrigin = "user" | "agent" | "peer" | "supervised";
 
 export type PiRunStatus =
   | "queued" | "starting" | "running" | "awaiting_input"

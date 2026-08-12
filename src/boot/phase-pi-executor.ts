@@ -176,6 +176,10 @@ export async function phasePiExecutor(ctx: BootCtx): Promise<void> {
   const { setPiService: setReconcilerService, requestReconcile, requestWorkerDispatch } = await import("../components/reconciler.js");
   setReconcilerService(service);
 
+  // Kept outside the wiring try so boot recovery can route supervised
+  // interruptions through the same Worker-owned settlement authority.
+  let settleSupervisedRecovery: ((runId: string, generation: number) => unknown) | null = null;
+
   // #1638: supervised/standalone terminal router. Every Pi process terminal
   // observation goes through the coordinator; supervised runs settle through
   // the Worker attempt, standalone runs keep their own card settlement.
@@ -183,6 +187,12 @@ export async function phasePiExecutor(ctx: BootCtx): Promise<void> {
     const { SupervisedPiSettlement } = await import("../components/pi-executor/supervised-pi-settlement.js");
     const { WorkerSupervisionStore } = await import("../components/worker-supervision-store.js");
     const coordinator = new SupervisedPiSettlement(store, new WorkerSupervisionStore(taskDb), config);
+    settleSupervisedRecovery = (runId, generation) => coordinator.settlePiExecution({
+      runId,
+      generation,
+      outcome: "failed",
+      metadata: { error: "interrupted by bridge restart" },
+    });
     executor.setSettlementRouter((observation) => coordinator.settlePiExecution(observation));
     // #1638: a supervised Pi input request suspends the run and settles the
     // attempt as input_requested (structured question evidence, zero charge).
@@ -224,6 +234,14 @@ export async function phasePiExecutor(ctx: BootCtx): Promise<void> {
   const recovery = store.recoverNonterminal();
   if (recovery.interrupted > 0) {
     logInfo(TAG, `Recovered ${recovery.interrupted} active Pi run(s) — interrupted`);
+  }
+  for (const runId of recovery.supervisedInterruptedRunIds ?? []) {
+    const run = store.get(runId);
+    if (!run) continue;
+    const result = settleSupervisedRecovery?.(runId, run.executionGeneration);
+    if (!result) {
+      logWarn(TAG, `Supervised Pi recovery for ${runId} could not reach the Worker settlement coordinator`);
+    }
   }
 
   ctx.piExecutorService = service;

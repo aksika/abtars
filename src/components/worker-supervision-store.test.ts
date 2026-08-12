@@ -687,6 +687,14 @@ describe("WorkerSupervisionStore", () => {
     it("#1638: input_requested charges zero and releases the reservation", () => {
       const s = new Store();
       const aid = setupAttempt(s, "pending", 5000);
+      expect(s.insertReservation({
+        source_attempt_id: "a_source_input",
+        target_attempt_id: aid,
+        reserved_tokens: 5000,
+        reserved_cost: 0,
+        reserved_switches: 0,
+      })).toBe(true);
+      expect(s.updateReservationStatus("a_source_input", "claimed")).toBe(true);
       s.lifecycleTransition(aid, ["pending"], "running");
       const result = s.terminalSettlement({
         attemptId: aid, expectedGeneration: 1, desiredState: "failed",
@@ -698,6 +706,7 @@ describe("WorkerSupervisionStore", () => {
       }
       const attempt = s.getAttempt(aid);
       expect(attempt?.charged_tokens).toBe(0);
+      expect(s.getReservation("a_source_input")?.status).toBe("released");
     });
 
     it("returns stale for generation mismatch", () => {

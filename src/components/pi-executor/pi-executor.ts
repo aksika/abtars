@@ -81,6 +81,12 @@ export class PiExecutor {
     this._onCapacityReleased = cb;
   }
 
+  /** Notify dispatchers when a pre-live startup path releases no owned
+   * process but still leaves a queued waiter eligible to run. */
+  notifyCapacityReleased(): void {
+    this._onCapacityReleased?.();
+  }
+
   /** #1358 — Subscribe to run state transitions. Returns unsubscribe function. */
   onTransition(cb: (runId: string, fromStatus: string | undefined, toStatus: string) => void): () => void {
     this._transitionSubs.add(cb);
@@ -168,12 +174,15 @@ export class PiExecutor {
 
       return "started";
     } catch (err) {
-      this.live.delete(runId);
-      await this.store.casTransition(runId, ["starting"], "failed", {
-        error: `Launch exception: ${err instanceof Error ? err.message : String(err)}`,
-      });
-      nerve.fire("card:failed", run.cardId);
-      this._fireTransition(runId, "starting", "failed");
+      const error = `Launch exception: ${err instanceof Error ? err.message : String(err)}`;
+      const owned = this.live.get(runId);
+      if (owned) {
+        await this._settleAndCleanup(owned, "failed", { error });
+      } else {
+        // Keep even pre-live exceptions on the single terminal router; a
+        // direct PiRunStore transition would strand the Worker attempt.
+        await this._settleAndCleanupGen(runId, generation, ["starting"], "failed", { error });
+      }
       return "error";
     }
   }
@@ -646,8 +655,23 @@ export class PiExecutor {
       // awaiting_input — the question becomes structured Worker failure
       // evidence and Orc answers on the retry.
       if (this._inputSuspendHook) {
-        const suspended = await this._inputSuspendHook(runId, owned.generation, request);
-        if (suspended) return;
+        // Block termination/progress callbacks while the coordinator proves
+        // the durable session and settles the Worker attempt. Once it has
+        // committed, the Pi process must be closed and removed from `live`;
+        // otherwise it keeps consuming a Pi slot after input_requested.
+        owned.settling = true;
+        let suspended = false;
+        try {
+          suspended = await this._inputSuspendHook(runId, owned.generation, request);
+        } catch (err) {
+          logWarn(TAG, `Input suspension failed for ${runId}: ${err instanceof Error ? err.message : String(err)}`);
+        }
+        if (suspended) {
+          await owned.client.close().catch(() => {});
+          this._releaseOwned(owned);
+          return;
+        }
+        owned.settling = false;
       }
       // #1358 review — the "ui" progress row is stored BEFORE the
       // awaiting_input transition so the in-transaction event emitter can

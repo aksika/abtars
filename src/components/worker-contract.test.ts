@@ -401,6 +401,14 @@ describe("normalizeContract", () => {
     }
   });
 
+  it("#1638: rejects a non-string workspace_alias instead of routing it as Spin", () => {
+    const result = normalizeContract({ ...MINIMAL_CONTRACT, workspace_alias: 42 });
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.errors.some(e => e.path === "$.workspace_alias" && e.tag === "type_error")).toBe(true);
+    }
+  });
+
   it("#1638: trims whitespace around the alias", () => {
     const result = normalizeContract({ ...MINIMAL_CONTRACT, workspace_alias: "  repo-a  " });
     expect(result.ok).toBe(true);

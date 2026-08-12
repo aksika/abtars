@@ -90,7 +90,7 @@ export type PiWorkspaceClaim =
   | { kind: "stale"; reason: string };
 
 export type PiReleaseResult =
-  | { released: true; runId: string; generation: number; canonicalPath: string }
+  | { released: true; runId: string; generation: number; canonicalPath: string; restoredQueued?: boolean }
   | { released: false; reason: "missing" | "not_holder" | "stale" };
 
 export type PiResumeCommit =
@@ -556,12 +556,15 @@ export class PiRunStore {
       if (input.continuity === "resumed" && (row.resume_capability as string) !== "available") return { committed: false, reason: "not_resumable" };
 
       const newGen = input.expectedGeneration + 1;
+      const nextSessionFile = input.continuity === "fresh" ? null : (input.sessionFile ?? null);
       const runResult = this.db.prepare(`
         UPDATE pi_runs
         SET status = 'queued',
             execution_generation = ?,
             current_session_id = ?,
-            pi_session_file = COALESCE(?, pi_session_file),
+            pi_session_file = CASE WHEN ? = 'fresh' THEN NULL ELSE COALESCE(?, pi_session_file) END,
+            pi_session_id = CASE WHEN ? = 'fresh' THEN NULL ELSE pi_session_id END,
+            resume_capability = CASE WHEN ? = 'fresh' THEN 'never_started' ELSE resume_capability END,
             observed_pid = NULL,
             pending_request_id = NULL,
             pending_request_type = NULL,
@@ -571,7 +574,16 @@ export class PiRunStore {
             error = NULL,
             updated_at = datetime('now')
         WHERE id = ? AND execution_generation = ? AND status IN ('interrupted', 'failed')
-      `).run(newGen, input.newSessionId, input.sessionFile ?? null, input.runId, input.expectedGeneration);
+      `).run(
+        newGen,
+        input.newSessionId,
+        input.continuity,
+        nextSessionFile,
+        input.continuity,
+        input.continuity,
+        input.runId,
+        input.expectedGeneration,
+      );
       if (runResult.changes === 0) return { committed: false, reason: "stale" };
 
       // #1358 review — mechanism A: the supervised generation bump commits
@@ -870,7 +882,15 @@ export class PiRunStore {
    * exact (canonical_path, run_id, execution_generation) holder, so a late
    * generation can never release a newer holder. Safe to repeat.
    */
-  releaseWorkspaceClaim(input: { canonicalPath: string; runId: string; generation: number }): PiReleaseResult {
+  releaseWorkspaceClaim(input: {
+    canonicalPath: string;
+    runId: string;
+    generation: number;
+    /** Capacity was proven unavailable before launch. Return this generation
+     * to queued so a later dispatch can claim it again. Other release paths
+     * intentionally leave the run terminal/starting state unchanged. */
+    restoreQueued?: boolean;
+  }): PiReleaseResult {
     const result = this.db.prepare(`
       DELETE FROM pi_workspace_claims
       WHERE canonical_path = ? AND run_id = ? AND execution_generation = ?
@@ -881,7 +901,27 @@ export class PiRunStore {
       `).get(input.canonicalPath) as { run_id: string } | undefined;
       return { released: false, reason: anyHolder ? "not_holder" : "missing" };
     }
-    return { released: true, runId: input.runId, generation: input.generation, canonicalPath: input.canonicalPath };
+    let restoredQueued = false;
+    if (input.restoreQueued) {
+      const reset = this.db.prepare(`
+        UPDATE pi_runs
+        SET status = 'queued', updated_at = datetime('now')
+        WHERE id = ? AND execution_generation = ? AND status = 'starting'
+      `).run(input.runId, input.generation);
+      restoredQueued = reset.changes === 1;
+    }
+    return { released: true, runId: input.runId, generation: input.generation, canonicalPath: input.canonicalPath, restoredQueued };
+  }
+
+  /** Release a holder when its alias can no longer be resolved. The run ID
+   * and execution generation are still an exact fence, so a late terminal
+   * observation cannot free a newer generation's claim. */
+  releaseWorkspaceClaimForGeneration(input: { runId: string; generation: number }): boolean {
+    const result = this.db.prepare(`
+      DELETE FROM pi_workspace_claims
+      WHERE run_id = ? AND execution_generation = ?
+    `).run(input.runId, input.generation);
+    return result.changes === 1;
   }
 
   /** #1638 — List every currently held canonical workspace claim. */
@@ -1038,14 +1078,15 @@ export class PiRunStore {
    * - terminal runs: unchanged
    * Returns queued card IDs that should be woken after Pi service registration.
    */
-  recoverNonterminal(): { interrupted: number; queuedCardIds: number[] } {
-    return this.db.transaction<{ interrupted: number; queuedCardIds: number[] }>(() => {
+  recoverNonterminal(): { interrupted: number; queuedCardIds: number[]; supervisedInterruptedRunIds: string[] } {
+    return this.db.transaction<{ interrupted: number; queuedCardIds: number[]; supervisedInterruptedRunIds: string[] }>(() => {
       const runs = this.db.prepare(
-        `SELECT id, status, card_id FROM pi_runs WHERE status NOT IN ('completed', 'failed', 'cancelled', 'interrupted')`
+        `SELECT id, status, card_id, origin, execution_generation FROM pi_runs WHERE status NOT IN ('completed', 'failed', 'cancelled', 'interrupted')`
       ).all() as Record<string, unknown>[];
 
       const activeStatuses = ["starting", "running", "awaiting_input", "cancelling"];
       const queuedCardIds: number[] = [];
+      const supervisedInterruptedRunIds: string[] = [];
       let interrupted = 0;
 
       for (const run of runs) {
@@ -1068,13 +1109,28 @@ export class PiRunStore {
                 updated_at = datetime('now')
             WHERE id = ? AND status = ?
           `).run(runId, status);
-          // Update card to failed/interrupted — #1590: through the helper.
-          kanbanTransition({
-            cardId, from: ["queued", "running"], to: "failed", actor: "restart_recovery",
-            reason: "interrupted by bridge restart",
-            fields: { error: "interrupted by bridge restart" },
-            emit: false,
-          }, this.db);
+          // A stale process cannot retain a workspace claim across restart.
+          // The exact run generation is fenced so a newer retry can never be
+          // released by an old recovery pass.
+          this.db.prepare(`
+            DELETE FROM pi_workspace_claims
+            WHERE run_id = ? AND execution_generation = ?
+          `).run(runId, run.execution_generation as number);
+
+          if (run.origin === "supervised") {
+            // Worker supervision owns the W-card terminal transition. Return
+            // the interrupted run to boot so the coordinator can settle the
+            // attempt through the canonical Worker transaction.
+            supervisedInterruptedRunIds.push(runId);
+          } else {
+            // Standalone Pi runs retain the historical Pi-card recovery path.
+            kanbanTransition({
+              cardId, from: ["queued", "running"], to: "failed", actor: "restart_recovery",
+              reason: "interrupted by bridge restart",
+              fields: { error: "interrupted by bridge restart" },
+              emit: false,
+            }, this.db);
+          }
           // #1358 review — mechanism A: boot interruption is a public
           // transition; its `interrupted` fact commits with the status change
           // so the origin sees it (and can later resume) after a restart.
@@ -1087,7 +1143,7 @@ export class PiRunStore {
         }
       }
 
-      return { interrupted, queuedCardIds };
+      return { interrupted, queuedCardIds, supervisedInterruptedRunIds };
     });
   }
 

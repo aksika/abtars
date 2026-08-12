@@ -98,6 +98,7 @@ describe("SupervisedPiSettlement (#1638)", () => {
     // run row terminal
     const run = piStore.get(runId);
     expect(run?.status).toBe("completed");
+    expect(workerStore.getResultByAttempt(attemptId)?.envelope.attempt.contract_digest).toBe("d");
   });
 
   it("persists a supplied structured failure envelope for an input_requested settlement", () => {

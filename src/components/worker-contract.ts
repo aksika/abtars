@@ -520,12 +520,16 @@ export function validateContract(raw: unknown): ValidationResult {
   }
 
   // #1638: workspace_alias is a typed bounded identifier when present.
-  if (obj["workspace_alias"] !== undefined && typeof obj["workspace_alias"] === "string") {
-    const trimmed = (obj["workspace_alias"] as string).trim();
-    if (trimmed.length === 0) {
-      errors.push(error("bad_format", "$.workspace_alias", "workspace_alias must be non-empty when present"));
-    } else if (!isValidWorkspaceAlias(trimmed)) {
-      errors.push(error("bad_format", "$.workspace_alias", `invalid workspace_alias "${trimmed}" — bounded alias required (no separators, traversal, or control characters)`));
+  if (obj["workspace_alias"] !== undefined) {
+    if (typeof obj["workspace_alias"] !== "string") {
+      errors.push(error("type_error", "$.workspace_alias", "workspace_alias must be a string when present"));
+    } else {
+      const trimmed = (obj["workspace_alias"] as string).trim();
+      if (trimmed.length === 0) {
+        errors.push(error("bad_format", "$.workspace_alias", "workspace_alias must be non-empty when present"));
+      } else if (!isValidWorkspaceAlias(trimmed)) {
+        errors.push(error("bad_format", "$.workspace_alias", `invalid workspace_alias "${trimmed}" — bounded alias required (no separators, traversal, or control characters)`));
+      }
     }
   }
 
@@ -641,7 +645,12 @@ export function normalizeContract(raw: unknown): NormalizeResult {
 
   const capabilitiesRaw = Array.isArray(obj["required_capabilities"]) ? (obj["required_capabilities"] as string[]) : [];
   const supportsRootCriteriaRaw = Array.isArray(obj["supports_root_criteria"]) ? (obj["supports_root_criteria"] as string[]) : undefined;
-  const workspaceAliasRaw = typeof obj["workspace_alias"] === "string" ? (obj["workspace_alias"] as string).trim() : undefined;
+  // Keep an explicitly supplied non-string value in the normalized object so
+  // validation rejects it instead of silently dropping the typed routing
+  // marker and accidentally turning a malformed coding contract into Spin.
+  const workspaceAliasRaw = typeof obj["workspace_alias"] === "string"
+    ? (obj["workspace_alias"] as string).trim()
+    : obj["workspace_alias"];
   const limitsRaw = (typeof obj["limits"] === "object" && obj["limits"] !== null) ? (obj["limits"] as Record<string, unknown>) : {};
   const provenanceRaw = (typeof obj["provenance"] === "object" && obj["provenance"] !== null) ? (obj["provenance"] as Record<string, unknown>) : undefined;
 

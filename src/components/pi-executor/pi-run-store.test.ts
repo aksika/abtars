@@ -628,6 +628,19 @@ describe("PiRunStore — #1395 UI claim/restore/setPending", () => {
       const card = db.prepare(`SELECT status FROM kanban_board WHERE id = ?`).get(7802) as { status: string };
       expect(card.status).toBe("running");
     });
+
+    it("capacity release restores a supervised generation to queued", () => {
+      const store = makeStore();
+      const runId = seedQueued(store, 7851, "repo-a");
+      expect(store.claimSupervisedGeneration({ runId, expectedGeneration: 1, canonicalPath: "/canon/capacity" }).kind).toBe("claimed");
+
+      const released = store.releaseWorkspaceClaim({
+        canonicalPath: "/canon/capacity", runId, generation: 1, restoreQueued: true,
+      });
+      expect(released.released).toBe(true);
+      expect(store.get(runId)?.status).toBe("queued");
+      expect(store.listWorkspaceClaims()).toHaveLength(0);
+    });
   });
 
   describe("queueSupervisedGeneration (#1638)", () => {
@@ -673,6 +686,23 @@ describe("PiRunStore — #1395 UI claim/restore/setPending", () => {
       const freshRun = seedInterrupted(store, 7904, "never_started");
       const fresh = store.resolveSessionContinuity(freshRun);
       expect(fresh.continuity).toBe("fresh");
+    });
+
+    it("fresh continuity clears the old session so start cannot resume it", () => {
+      const store = makeStore();
+      const runId = seedInterrupted(store, 7905, "available");
+      const db = (store as any).db as TaskDatabase;
+      db.prepare(`UPDATE pi_runs SET pi_session_id = 'old-session' WHERE id = ?`).run(runId);
+
+      const advanced = store.queueSupervisedGeneration({
+        runId, expectedGeneration: 1, newSessionId: "fresh-session", continuity: "fresh",
+      });
+      expect(advanced.committed).toBe(true);
+      const run = store.get(runId);
+      expect(run?.status).toBe("queued");
+      expect(run?.piSessionFile).toBeUndefined();
+      expect(run?.piSessionId).toBeUndefined();
+      expect(run?.resumeCapability).toBe("never_started");
     });
   });
 });

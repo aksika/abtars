@@ -48,8 +48,15 @@ export class SupervisedPiSettlement {
 
   /** Route one terminal Pi observation: supervised iff a Worker binding exists. */
   settlePiExecution(input: PiTerminalObservation): PiSettlementObservation {
+    const run = this.piStore.get(input.runId);
     const binding = this.workerStore.getAttemptForExecutorResource("pi", input.runId, input.generation);
     if (!binding) {
+      // A supervised run must never fall back to the standalone Pi-card
+      // settlement path if its binding is temporarily missing (for example
+      // during crash recovery). Failing closed preserves Worker ownership.
+      if (run?.origin === "supervised") {
+        return { kind: "stale", reason: "supervised run has no Worker binding" };
+      }
       // #1638: no Worker binding — standalone lane keeps its own settlement.
       const result = this.piStore.settleTerminal({
         runId: input.runId,
@@ -67,7 +74,6 @@ export class SupervisedPiSettlement {
     // generation-fenced release always runs — callers never need to supply it.
     let canonicalPath: string | undefined = input.canonicalPath;
     if (!canonicalPath) {
-      const run = this.piStore.get(input.runId);
       if (run) {
         const ws = resolveAndValidateWorkspace(run.workspaceAlias, this.piConfig);
         if (!ws.error) canonicalPath = ws.canonicalPath;
@@ -91,7 +97,7 @@ export class SupervisedPiSettlement {
         }
         const latest = this.workerStore.getLatestAttempt(attempt.card_id);
         if (!latest || latest.id !== attempt.id) return { kind: "stale", reason: "not latest attempt" };
-        void contractId;
+        if (attempt.contract_id !== contractId) return { kind: "stale", reason: "binding contract moved on" };
 
         // Replay: the attempt already terminal means this exact observation
         // was settled before — return the replay result without re-touching
@@ -99,6 +105,9 @@ export class SupervisedPiSettlement {
         if (this.workerStore.isAttemptTerminal(attempt.lifecycle)) {
           return { kind: "replayed" };
         }
+
+        const contract = this.workerStore.getContract(attempt.contract_id);
+        if (!contract) return { kind: "stale", reason: "contract missing" };
 
         // Pi run terminal transition — run row only, never the W card.
         const runResult = this.piStore.settleSupervisedRunInTransaction({
@@ -123,7 +132,7 @@ export class SupervisedPiSettlement {
                 id: attempt.id,
                 ordinal: attempt.ordinal,
                 contract_id: attempt.contract_id,
-                contract_digest: attempt.contract_id,
+                contract_digest: contract.contract_digest,
                 executor_kind: "pi",
                 executor_id: attempt.executor_id,
                 started_at: attempt.started_at,
@@ -159,6 +168,8 @@ export class SupervisedPiSettlement {
             runId: input.runId,
             generation: input.generation,
           });
+        } else {
+          this.piStore.releaseWorkspaceClaimForGeneration({ runId: input.runId, generation: input.generation });
         }
 
         return { kind: "settled", cardId: attempt.card_id, supervised: true, outcome: input.outcome };
@@ -200,6 +211,10 @@ export class SupervisedPiSettlement {
       if (validated.error) {
         sessionFile = undefined;
         logWarn(TAG, `input suspend ${input.runId}: session not durable (${validated.error}) — next generation will be fresh`);
+      } else {
+        // Persist the proven canonical path, not a caller-provided spelling or
+        // symlink, so the next generation resumes exactly the file we checked.
+        sessionFile = validated.canonicalPath;
       }
     }
 
@@ -211,6 +226,8 @@ export class SupervisedPiSettlement {
       return this.workerStore.db.transaction(() => {
         const latest = this.workerStore.getLatestAttempt(attempt.card_id);
         if (!latest || latest.id !== attempt.id) return { suspended: false, reason: "stale attempt" };
+        const contract = this.workerStore.getContract(attempt.contract_id);
+        if (!contract) return { suspended: false, reason: "contract missing" };
 
         // run -> interrupted (resumable when the session is durable)
         const interrupted = this.piStore.casTransition(input.runId, ["running", "awaiting_input", "starting"], "interrupted", {
@@ -228,7 +245,7 @@ export class SupervisedPiSettlement {
             id: attempt.id,
             ordinal: attempt.ordinal,
             contract_id: attempt.contract_id,
-            contract_digest: attempt.contract_id,
+            contract_digest: contract.contract_digest,
             executor_kind: "pi",
             executor_id: attempt.executor_id,
             started_at: attempt.started_at,
@@ -267,6 +284,8 @@ export class SupervisedPiSettlement {
             runId: input.runId,
             generation: input.generation,
           });
+        } else {
+          this.piStore.releaseWorkspaceClaimForGeneration({ runId: input.runId, generation: input.generation });
         }
 
         return { suspended: true };

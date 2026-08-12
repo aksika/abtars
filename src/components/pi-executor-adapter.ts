@@ -46,7 +46,9 @@ export class PiExecutorAdapter implements SwarmExecutorAdapter {
   }
 
   /** Ensure a binding exists for (attempt, generation) -> Pi run. Idempotent:
-   * the same card always resolves to the same run row. */
+   * the same card always resolves to the same run row. Initial execution
+   * binds generation 1; a retry advances the existing run row via
+   * queueSupervisedGeneration and binds resumed|fresh continuity. */
   private ensureBinding(claim: ExecutionClaim): { runId: string; resourceGeneration: number } | undefined {
     const existing = this.supervisionStore.getExecutorResourceBinding(claim.attemptId);
     if (existing) return { runId: existing.resourceId, resourceGeneration: existing.resourceGeneration };
@@ -60,7 +62,6 @@ export class PiExecutorAdapter implements SwarmExecutorAdapter {
       } catch { /* unreadable contract — default alias */ }
     }
     const run = this.executor.piStore.getByCardId(claim.cardId);
-    const sessionId = run?.currentSessionId ?? `${Date.now()}_C_pi_${claim.attemptId}`;
     const created = run
       ? { runId: run.id, generation: run.executionGeneration, created: false }
       : this.executor.piStore.createSupervisedRun({
@@ -68,21 +69,41 @@ export class PiExecutorAdapter implements SwarmExecutorAdapter {
           workspaceAlias,
           goal: `worker attempt ${claim.attemptId}`,
           ownerPrincipalId: `peer:${claim.executorId}`,
-          sessionId,
+          sessionId: `${Date.now()}_C_pi_${claim.attemptId}`,
         });
+    let resourceGeneration = created.generation;
+    let continuity: "initial" | "resumed" | "fresh" = "initial";
+    if (run && (run.status === "interrupted" || run.status === "failed")) {
+      // #1638: retry — advance the same run row; the session decides resumed
+      // vs fresh. Never a second run row, never a W-card touch.
+      const session = this.executor.piStore.resolveSessionContinuity(run.id);
+      const advanced = this.executor.piStore.queueSupervisedGeneration({
+        runId: run.id,
+        expectedGeneration: run.executionGeneration,
+        newSessionId: session.sessionId,
+        sessionFile: session.sessionFile,
+        continuity: session.continuity,
+      });
+      if (!advanced.committed || advanced.newGeneration === undefined) {
+        logWarn(TAG, `supervised generation advance failed for ${claim.attemptId}: ${advanced.reason}`);
+        return undefined;
+      }
+      resourceGeneration = advanced.newGeneration;
+      continuity = session.continuity;
+    }
     const outcome = this.supervisionStore.bindExecutorResource({
       attemptId: claim.attemptId,
       expectedAttemptGeneration: claim.generation,
       executorKind: "pi",
       resourceId: created.runId,
-      resourceGeneration: created.generation,
-      continuity: "initial",
+      resourceGeneration,
+      continuity,
     });
     if (outcome === "stale" || outcome === "conflict") {
       logWarn(TAG, `bind rejected for ${claim.attemptId}: ${outcome}`);
       return undefined;
     }
-    return { runId: created.runId, resourceGeneration: created.generation };
+    return { runId: created.runId, resourceGeneration };
   }
 
   /** #1638: resolve the configured canonical path for a supervised run. */
@@ -97,14 +118,15 @@ export class PiExecutorAdapter implements SwarmExecutorAdapter {
 
   async start(claim: ExecutionClaim): Promise<StartObservation> {
     try {
-      this.leaseUnsubscribers.get(claim.attemptId)?.();
-      this.leaseUnsubscribers.set(claim.attemptId, this.wireLeaseProgress(claim.attemptId, claim.generation, claim.executorId));
-      this._emitter().emitAlive(claim.attemptId, claim.generation, claim.executorId, "pi");
-    } catch { /* best-effort */ }
-
-    try {
       const binding = this.ensureBinding(claim);
       if (!binding) return { kind: "start_failed", reason: "resource binding failed", retryable: false };
+      // Bind first, then subscribe. Wiring before ensureBinding falls back to
+      // attemptId as a resource ID and silently drops all real Pi progress.
+      try {
+        this.leaseUnsubscribers.get(claim.attemptId)?.();
+        this.leaseUnsubscribers.set(claim.attemptId, this.wireLeaseProgress(claim.attemptId, claim.generation, claim.executorId));
+        this._emitter().emitAlive(claim.attemptId, claim.generation, claim.executorId, "pi");
+      } catch { /* best-effort */ }
       // #1638: acquire the shared canonical-workspace claim BEFORE launch.
       // Capacity/workspace contention maps to the generic deferred outcome —
       // the attempt returns to pending and no process is started.
@@ -123,7 +145,7 @@ export class PiExecutorAdapter implements SwarmExecutorAdapter {
       }
       if (this.executor.activeCount >= this.executor.maxConcurrent) {
         this.executor.piStore.releaseWorkspaceClaim({
-          canonicalPath: ws.canonicalPath, runId: binding.runId, generation: binding.resourceGeneration,
+          canonicalPath: ws.canonicalPath, runId: binding.runId, generation: binding.resourceGeneration, restoreQueued: true,
         });
         return { kind: "deferred", reason: "capacity", provesNoStart: true };
       }
@@ -137,6 +159,7 @@ export class PiExecutorAdapter implements SwarmExecutorAdapter {
           this.executor.piStore.releaseWorkspaceClaim({
             canonicalPath: ws.canonicalPath, runId: binding.runId, generation: binding.resourceGeneration,
           });
+          this.executor.notifyCapacityReleased();
           return { kind: "start_failed", reason: String(result), retryable: false };
       }
     } catch (err) {
@@ -183,6 +206,11 @@ export class PiExecutorAdapter implements SwarmExecutorAdapter {
         return { kind: "terminal", lifecycle: "failed" };
       case "cancelled":
         return { kind: "terminal", lifecycle: "cancelled" };
+      case "interrupted":
+        // Boot recovery converts an active Pi run to interrupted before the
+        // Worker coordinator settles it. Treat the durable interruption as a
+        // terminal failure observation if reconciliation gets there first.
+        return { kind: "terminal", lifecycle: "failed" };
       default:
         return { kind: "unknown", message: `status=${run.status}` };
     }
