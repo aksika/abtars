@@ -156,6 +156,46 @@ export class Spin {
     return true;
   }
 
+  /**
+   * #1635 — Allocate a non-active, transportless C session envelope for a
+   * durable interactive coding session. One envelope spans all turn
+   * generations: the metadata carries the durable coding-session identity
+   * instead of an immutable (runId, generation) pair, so per-turn teardown
+   * never ends the envelope.
+   */
+  allocateCodingExternalSession(spec: {
+    userId: string;
+    platform: string;
+    name: string;
+    workingDir: string;
+    codingSessionId: string;
+  }): ManagedSession {
+    const session = this.sessions.allocate({ type: "C", userId: spec.userId, platform: spec.platform, chatId: 0, active: false });
+    session.name = spec.name;
+    session.workingDir = spec.workingDir;
+    (session as unknown as Record<string, unknown>).externalMetadata = {
+      kind: "coding",
+      codingSessionId: spec.codingSessionId,
+    };
+    return session;
+  }
+
+  /**
+   * #1635 — End a coding-session envelope. Validates the durable identity
+   * (never a per-turn generation pair). Preserves the Pi transcript — only
+   * the abTARS envelope ends.
+   */
+  endCodingExternalSession(sessionId: string, codingSessionId: string): boolean {
+    const session = this.sessions.getById(sessionId);
+    if (!session) return false;
+    const meta = (session as unknown as Record<string, unknown>).externalMetadata as { kind?: string; codingSessionId?: string } | undefined;
+    if (!meta || meta.kind !== "coding" || meta.codingSessionId !== codingSessionId) return false;
+    const r = this.sessions.end(session.userId, session.platform, session.shortIndex);
+    if (typeof r === "string") return false;
+    this.finalizeSession(r, "external_ended");
+    return true;
+  }
+
   switchSession(userId: string, platform: string, index: number): ManagedSession | string {
     return this.sessions.switch(userId, platform, index);
   }
