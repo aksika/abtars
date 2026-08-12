@@ -179,4 +179,19 @@ describe("Local Swarm E2E", () => {
       expect(Number(ss.terminalChildren)).toBeGreaterThan(0);
     });
   }, CHILD_TIMEOUT_MS + 10_000);
+
+  it("pi_coding (#1638): alias contract routes to Pi, settles through the Worker lane, Orc accepts and delivers once", async () => {
+    await runScenario("pi_coding", (result) => {
+      expect(result.ok).toBe(true);
+      const ss = result.scenarioSpecific as Record<string, unknown>;
+      expect(ss).toBeDefined();
+      expect(ss.piAttemptExecutor).toBe("pi/pi-coding");
+      expect(ss.piRunStatus).toBe("completed");
+      expect(ss.piProvenance).toBe("pi");
+      expect(ss.workspaceClaimsReleased).toBe(true);
+      expect(result.terminal.projectState).toBe("accepted");
+      expect(result.terminal.cardStatus).toBe("delivered");
+      expect(result.counts.outboundDeliveries).toBe(1);
+    });
+  }, CHILD_TIMEOUT_MS + 10_000);
 });

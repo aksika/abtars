@@ -106,6 +106,7 @@ const spawnWorkerTool: ToolDefinition = {
       supports_root_criteria: { type: "string", description: "JSON array of DELEGATED root project criterion IDs this worker supports. Required for supervised spawns under a project contract with delegated criteria; Orc-owned criteria are not legal mapping targets. Ids must match exactly and are case-sensitive (#1363, #1604, #1605)" },
       max_duration_ms: { type: "number", description: "Maximum execution duration in milliseconds (positive integer)" },
       max_tokens: { type: "number", description: "Maximum token budget for this worker (positive integer; requires supervised criteria and is required when project is capped)" },
+      workspace_alias: { type: "string", description: "#1638: configured Pi workspace alias. Present routes this worker to the Pi executor (coding); absent routes to Spin." },
     },
     required: ["goal"],
   },
@@ -169,6 +170,7 @@ const spawnWorkerTool: ToolDefinition = {
       verification_commands: commandsRaw as Array<{ id: string; argv: string[]; cwd?: string; timeout_ms: number; criterion_ids: string[] }>,
       required_capabilities: capsRaw,
       supports_root_criteria: supportsRootCriteriaRaw.length > 0 ? supportsRootCriteriaRaw : undefined,
+      workspace_alias: args.workspace_alias?.trim() || undefined,
       limits: {
         ...(maxDurationMs !== undefined ? { max_duration_ms: maxDurationMs } : {}),
         ...(args.max_tokens !== undefined ? { max_tokens: Number(args.max_tokens) } : {}),

@@ -1560,6 +1560,7 @@ export class Spin {
         verification_commands: request.contract.verification_commands,
         required_capabilities: request.contract.required_capabilities,
         supports_root_criteria: request.contract.supports_root_criteria,
+        workspace_alias: request.contract.workspace_alias,
         limits: request.contract.limits,
         provenance: {
           root_card_id: 0,
@@ -1603,6 +1604,7 @@ export class Spin {
         requiredCapabilities: [...request.contract.required_capabilities],
         supportsRootCriteria: request.contract.supports_root_criteria ? [...request.contract.supports_root_criteria] : undefined,
         limits: { ...request.contract.limits },
+        workspaceAlias: request.contract.workspace_alias,
       });
       if ("error" in result) {
         throw new Error(`Contract creation rejected: ${result.error}`);

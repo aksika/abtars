@@ -886,6 +886,213 @@ async function runScheduledCap(): Promise<LocalSwarmResult> {
   };
 }
 
+// ── #1638 Task 9: Pi coding lane ─────────────────────────────────────────────
+
+/** Fake Pi executor on the REAL PiRunStore: the Pi binary/RPC probe and time
+ * are faked; the durable store, binding, workspace claims, settlement
+ * coordinator, Worker attempt lifecycle, and review gate stay real. */
+async function runPiCoding(): Promise<LocalSwarmResult> {
+  const { spin, requestReconcile, startReconciler, kanbanEnqueue, kanbanGetCard, kanbanGetChildren, kanbanRunning, WorkerSupervisionStore, ProjectReviewStore } = await setupEnvironment();
+  const { requireTaskDatabase } = await import("../../components/tasks/kanban-board.js");
+  const { PiRunStore } = await import("../../components/pi-executor/pi-run-store.js");
+  const { SupervisedPiSettlement } = await import("../../components/pi-executor/supervised-pi-settlement.js");
+  const { setPiService, setWorkerAdapter } = await import("../../components/reconciler.js");
+  const { PiExecutorAdapter } = await import("../../components/pi-executor-adapter.js");
+  const { deliverCard } = await import("../../components/tasks/kanban-delivery.js");
+
+  const db = requireTaskDatabase();
+  const piStore = new PiRunStore({ db });
+  const workerStore = new WorkerSupervisionStore(db);
+  // real canonical workspace + session root so the alias resolution succeeds
+  const { mkdirSync } = await import("node:fs");
+  mkdirSync("/tmp/pi-ws-a", { recursive: true });
+  mkdirSync("/tmp/pi-sessions", { recursive: true });
+  const piConfig = {
+    enabled: true, command: "fake-pi", fixedArgs: [],
+    workspaceAliases: { "repo-a": { path: "/tmp/pi-ws-a" } },
+    allowedEnv: [], maxConcurrent: 1, maxWallClockMs: 60000, abortGraceMs: 5000,
+    projectTrust: "never", sessionStorageRoot: "/tmp/pi-sessions",
+  };
+  const coordinator = new SupervisedPiSettlement(piStore, workerStore, piConfig as any);
+
+  // Fake Pi executor: start "launches" (marks the run started via the claim
+  // already committed by the adapter) and immediately settles completed
+  // through the coordinator — the same path a real Pi binary terminal uses.
+  const fakeExecutor = {
+    piStore,
+    maxConcurrent: 1,
+    activeCount: 0,
+    config: piConfig,
+    onTransition: () => () => {},
+    onProgress: () => () => {},
+    onCapacityReleased: () => {},
+    setSettlementRouter: () => {},
+    setInputSuspendHook: () => {},
+    startWithClaim: async (runId: string, generation: number, _sessionId: string): Promise<"started" | "error"> => {
+      const run = piStore.get(runId);
+      if (!run || run.executionGeneration !== generation) return "error";
+      piStore.casTransition(runId, ["starting"], "running");
+      // settle completed through the coordinator with a Pi envelope that
+      // carries real check evidence for the delegated criterion
+      const boundAttempt = workerStore.getAttemptForExecutorResource("pi", runId, generation);
+      if (!boundAttempt) return "error";
+      const contractRow = workerStore.getContractByCardId(boundAttempt.card_id);
+      const envelope = {
+        schema_version: 1,
+        attempt: {
+          id: boundAttempt.id, ordinal: boundAttempt.ordinal,
+          contract_id: boundAttempt.contract_id,
+          contract_digest: contractRow?.contract_digest ?? "d",
+          executor_kind: "pi", executor_id: "pi-coding",
+          started_at: boundAttempt.started_at, finished_at: new Date().toISOString(),
+        },
+        outcome: "completed" as const,
+        criteria: [{ criterion_id: "c1", status: "passed" as const, evidence_ids: ["check_c1"] }],
+        checks: [{ check_id: "check_c1", argv: ["node"], started_at: new Date().toISOString(), finished_at: new Date().toISOString(), timed_out: false, exit_code: 0, signal: null, stdout_excerpt: "", stderr_excerpt: "" }],
+        artifacts: [],
+        worker_report: { summary: "pi coding done", claims: [{ criterion_id: "c1", text: "implemented" }], unresolved_risks: [] },
+      };
+      const observation = coordinator.settlePiExecution({
+        runId, generation, outcome: "completed",
+        metadata: { resultSummary: "pi coding done" },
+        envelope: envelope as any,
+      });
+      return observation.kind === "settled" || observation.kind === "replayed" ? "started" : "error";
+    },
+    cancel: async () => true,
+  };
+
+  const service = { store: piStore, executor: fakeExecutor, config: piConfig };
+  setPiService(service as any);
+  setWorkerAdapter(new PiExecutorAdapter(fakeExecutor as any, workerStore) as any);
+
+  spin.setRuntime(createMockRuntime(100) as any);
+  const projectCardId = kanbanEnqueue("E2E Pi coding project", "test", undefined, {
+    type: "O", priority: "MEDIUM", deliveryMode: "deliver",
+  });
+  activeProjectCardId = projectCardId;
+  kanbanRunning(projectCardId);
+  startReconciler();
+
+  const { getOrcTools } = await import("../../components/transport/orc-tools.js");
+  const orcTools = getOrcTools();
+  const defineContractTool = orcTools.find(t => t.name === "define_project_contract")!;
+  const spawnWorkerTool = orcTools.find(t => t.name === "spawn_worker")!;
+  const reviewProjectTool = orcTools.find(t => t.name === "review_project")!;
+
+  const contractResult = await defineContractTool.execute({
+    goal: "Complete the E2E Pi coding scenario",
+    project_card_id: String(projectCardId),
+    criteria: JSON.stringify([
+      { id: "c1", description: "Coding criterion is met", required: true, execution_owner: "delegated", evidence_expectation: "observed" },
+    ]),
+    required_outputs: JSON.stringify([
+      { id: "o1", description: "Coding result", kind: "report", required: true },
+    ]),
+    constraints: JSON.stringify(["None"]),
+  });
+  if (contractResult.startsWith("[err]")) fail("define_contract", "CONTRACT_FAILED", contractResult);
+  requestReconcile(projectCardId);
+  await new Promise(r => setTimeout(r, 200));
+  emitCheckpoint("contract_defined");
+
+  const orcContext = { projectCardId };
+  const spawnResult = await spawnWorkerTool.execute({
+    goal: "Implement the coding task",
+    title: "Pi Coder",
+    project_card_id: String(projectCardId),
+    criteria: JSON.stringify([{ id: "c1", description: "Verify criterion c1" }]),
+    verification_commands: JSON.stringify([{ id: "check_c1", argv: ["node"], timeout_ms: 5_000, criterion_ids: ["c1"] }]),
+    supports_root_criteria: JSON.stringify(["c1"]),
+    workspace_alias: "repo-a",
+  }, { userId: "test", orcContext: orcContext as any });
+  const childIdMatch = spawnResult.match(/card #?(\d+)/);
+  const childCardId = childIdMatch ? Number(childIdMatch[1]) : (kanbanGetChildren(projectCardId).at(-1)?.id ?? 0);
+  if (!childCardId) fail("spawn_pi_worker", "NO_CHILD", spawnResult);
+  activeChildCardIds.push(childCardId);
+
+  // The Pi attempt must be executor pi/pi-coding with a workspace binding.
+  const attempts = workerStore.getAttemptsForCard(childCardId);
+  if (attempts.length !== 1) fail("pi_attempt", "ATTEMPT_COUNT", `attempts=${attempts.length}`);
+  const attempt = attempts[0]!;
+  if (attempt.executor_kind !== "pi" || attempt.executor_id !== "pi-coding") {
+    fail("pi_attempt", "WRONG_EXECUTOR", `${attempt.executor_kind}/${attempt.executor_id}`);
+  }
+
+  emitCheckpoint("pi_worker_spawned");
+  requestReconcile(projectCardId);
+  requestReconcile(childCardId);
+
+  // Dispatch runs the Pi lane: the fake executor settles completed through
+  // the coordinator; the attempt must complete with Pi provenance.
+  await eventually("pi-attempt-terminal", () => {
+    const a = workerStore.getAttempt(attempt.id);
+    return a && workerStore.isAttemptTerminal(a.lifecycle) ? a : null;
+  }, 30000);
+  const settled = workerStore.getAttempt(attempt.id)!;
+  if (settled.lifecycle !== "completed") fail("pi_settle", "NOT_COMPLETED", settled.lifecycle);
+  const resultRow = workerStore.getResultByAttempt(attempt.id);
+  if (!resultRow) fail("pi_settle", "NO_RESULT", "no Worker result for Pi attempt");
+  if (resultRow.envelope.attempt.executor_kind !== "pi") {
+    fail("pi_settle", "NO_PI_PROVENANCE", JSON.stringify(resultRow.envelope.attempt));
+  }
+  const piRun = piStore.getByCardId(childCardId);
+  if (!piRun || piRun.status !== "completed") fail("pi_settle", "RUN_NOT_COMPLETED", piRun?.status ?? "missing");
+  if (piStore.listWorkspaceClaims().length !== 0) fail("pi_settle", "CLAIM_LEAK", "workspace claim not released after settlement");
+
+  emitCheckpoint("pi_worker_settled");
+
+  const reviewStore = new ProjectReviewStore();
+  const supervision = await eventually("pi-project-supervision", () => reviewStore.getSupervision(projectCardId) ?? null);
+  const reviewCase = await eventually("pi-review-case", () => reviewStore.getLatestOpenCase(projectCardId) ?? null);
+  if (!reviewCase) fail("review_case", "NO_CASE", "No review case after Pi worker completed");
+  const snapshot = JSON.parse(reviewCase.case_json) as {
+    criterion_inputs: Array<{ criterion_id: string; observed_evidence_ids: string[]; worker_claim_ids: string[] }>;
+    child_summaries?: Array<{ executor_kind?: string; result?: unknown }>;
+  };
+  if (!snapshot.child_summaries?.some(c => c.executor_kind === "pi" && c.result)) {
+    fail("review_case", "NO_PI_CHILD", "review case lacks the Pi child summary with result");
+  }
+  const evidenceByCriterion = new Map(snapshot.criterion_inputs.map(input => [input.criterion_id, input.observed_evidence_ids.slice(0, 10)]));
+
+  const reviewResult = await reviewProjectTool.execute({
+    action: "accept",
+    project_card_id: String(projectCardId),
+    project_generation: String(supervision.generation),
+    review_case_id: reviewCase.id,
+    criteria: [
+      { criterion_id: "c1", verdict: "satisfied", evidence_ids: evidenceByCriterion.get("c1") ?? [], rationale: "Pi worker completed" },
+    ],
+    outputs: [{ output_id: "o1", disposition: "verified", evidence_ids: evidenceByCriterion.get("c1") ?? [] }],
+    contradictions: [],
+    residual_risks: [],
+    synthesis: "Coding criterion satisfied.",
+  }, { userId: "test", orcContext: orcContext as any });
+  const reviewOutcome = JSON.parse(reviewResult) as { outcome?: string };
+  if (reviewOutcome.outcome !== "accepted") fail("review_project", "REVIEW_FAILED", reviewResult);
+  emitCheckpoint("pi_project_accepted");
+  await deliverCard(kanbanGetCard(projectCardId)!, testDeliverDeps);
+
+  const finalCard = kanbanGetCard(projectCardId)!;
+  return {
+    schemaVersion: 2, ok: true, scenario, scenarioId, projectCardId,
+    childCardIds: [childCardId],
+    peakActiveWorkers: _peakActiveWorkers,
+    counts: readCounts(),
+    terminal: {
+      projectState: reviewStore.getSupervision(projectCardId)?.state ?? "unknown",
+      cardStatus: finalCard?.status ?? "unknown",
+      deliveryResult: finalCard?.delivery_result ?? "unknown",
+    },
+    scenarioSpecific: {
+      piAttemptExecutor: `${attempt.executor_kind}/${attempt.executor_id}`,
+      piRunStatus: piRun.status,
+      piProvenance: resultRow.envelope.attempt.executor_kind,
+      workspaceClaimsReleased: piStore.listWorkspaceClaims().length === 0,
+    },
+  };
+}
+
 // ── Main dispatch ────────────────────────────────────────────────────────────
 
 async function main(): Promise<void> {
@@ -907,6 +1114,9 @@ async function main(): Promise<void> {
         break;
       case "scheduled_cap":
         result = await runScheduledCap();
+        break;
+      case "pi_coding":
+        result = await runPiCoding();
         break;
       default:
         result = await runHappyPath();

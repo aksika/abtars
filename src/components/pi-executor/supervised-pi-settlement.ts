@@ -63,7 +63,17 @@ export class SupervisedPiSettlement {
         ? { kind: "stale", reason: String((result as { reason?: string }).reason ?? "unknown") }
         : { kind: "conflict", reason: "standalone settlement failed" };
     }
-    return this.settleSupervisedPiExecution(binding.card_id, binding.generation, binding.contract_id, input);
+    // #1638: resolve the canonical workspace from the run itself so the
+    // generation-fenced release always runs — callers never need to supply it.
+    let canonicalPath: string | undefined = input.canonicalPath;
+    if (!canonicalPath) {
+      const run = this.piStore.get(input.runId);
+      if (run) {
+        const ws = resolveAndValidateWorkspace(run.workspaceAlias, this.piConfig);
+        if (!ws.error) canonicalPath = ws.canonicalPath;
+      }
+    }
+    return this.settleSupervisedPiExecution(binding.card_id, binding.generation, binding.contract_id, { ...input, canonicalPath });
   }
 
   private settleSupervisedPiExecution(
@@ -103,12 +113,39 @@ export class SupervisedPiSettlement {
         // Canonical Worker terminal settlement — one body, in this transaction.
         const desiredState = input.outcome === "completed" ? "completed"
           : input.outcome === "failed" ? "failed" : "cancelled";
+        // #1638: a completed supervised Pi run always carries a Worker
+        // envelope with Pi provenance — the canonical body only persists a
+        // supplied envelope for completed outcomes.
+        const completedEnvelope: WorkerResultEnvelopeV1 | undefined = input.outcome === "completed"
+          ? {
+              schema_version: 1,
+              attempt: {
+                id: attempt.id,
+                ordinal: attempt.ordinal,
+                contract_id: attempt.contract_id,
+                contract_digest: attempt.contract_id,
+                executor_kind: "pi",
+                executor_id: attempt.executor_id,
+                started_at: attempt.started_at,
+                finished_at: new Date().toISOString(),
+              },
+              outcome: "completed",
+              criteria: [],
+              checks: [],
+              artifacts: [],
+              worker_report: {
+                summary: (input.metadata.resultSummary ?? "Pi execution completed").slice(0, 500),
+                claims: [],
+                unresolved_risks: [],
+              },
+            }
+          : undefined;
         const settlement = this.workerStore.settleAttemptInTransaction({
           attemptId: attempt.id,
           expectedGeneration: attempt.generation,
           desiredState,
           stableReason: `pi_${input.outcome}`,
-          envelope: input.envelope,
+          envelope: input.envelope ?? completedEnvelope,
         });
         if (settlement.kind === "stale" || settlement.kind === "conflict") {
           return { kind: "conflict", reason: `worker settlement ${settlement.kind}` };
