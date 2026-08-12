@@ -73,6 +73,52 @@ export async function phasePiExecutor(ctx: BootCtx): Promise<void> {
     spin: ctx.sessionManager!,
   });
 
+  // #1635 — interactive Pi coding sessions: durable store + claim seam + the
+  // session service. Wired after the executor so the shared host is the same
+  // instance that gates /pi run capacity.
+  try {
+    const { PiCodingSessionStore } = await import("../components/pi-executor/pi-coding-session-store.js");
+    const { PiWorkspaceClaimStore } = await import("../components/pi-executor/pi-workspace-claim-store.js");
+    const { PiCodingSessionService } = await import("../components/pi-executor/pi-coding-session-service.js");
+    const { setCodingRouteService } = await import("../components/pipeline/coding-route.js");
+    const { setCodingCommandService } = await import("../components/commands/handlers-coding.js");
+    const { createCodingProjectionSink, setCodingCallbackHandler } = await import("../platforms/telegram/telegram-coding-projection.js");
+
+    const codingStore = new PiCodingSessionStore(taskDb);
+    const claimStore = new PiWorkspaceClaimStore(taskDb);
+    const codingService = new PiCodingSessionService({
+      store: codingStore,
+      claims: claimStore,
+      host: executor.host,
+      config,
+      spin: ctx.sessionManager!,
+      sink: createCodingProjectionSink(codingStore),
+    });
+
+    // #1635 — restart reconciliation: interrupt live rows with proof-derived
+    // capabilities and clear stale leases/claims.
+    codingService.reconcileOnBoot();
+
+    setCodingRouteService(codingService);
+    setCodingCommandService(codingService);
+    ctx.sessionManager!.setCodingSessionTeardown((sessionId) => {
+      const rec = codingStore.get(sessionId);
+      if (!rec) return false;
+      return codingService.endSession(sessionId, rec.ownerPrincipal);
+    });
+    setCodingCallbackHandler(async (sessionId, requestId, value) => {
+      const rec = codingStore.get(sessionId);
+      if (!rec) return false;
+      const coerced = value === "true" ? true : value === "false" ? false : value;
+      const result = await codingService.reply(sessionId, requestId, coerced, rec.ownerPrincipal);
+      return result.ok;
+    });
+    ctx.codingSessionService = codingService;
+    logInfo(TAG, `Interactive Pi coding sessions ready`);
+  } catch (err) {
+    logWarn(TAG, `Interactive Pi coding sessions unavailable: ${err instanceof Error ? err.message : String(err)}`);
+  }
+
   // #1358 — Construct remote Pi lifecycle components and wire transition hook
   let localPeerName = "local";
   try {

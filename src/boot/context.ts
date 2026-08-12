@@ -149,6 +149,9 @@ export interface BootCtx {
   piExecutorService?: import("../components/pi-executor/pi-run-service.js").PiRunService;
   /** #1357: Disposer for Pi executor capability registration. Called on shutdown. */
   _piCapDisposer?: () => void;
+  /** #1635: interactive Pi coding session service (live-turn interruption on
+   * shutdown). */
+  codingSessionService?: import("../components/pi-executor/pi-coding-session-service.js").PiCodingSessionService;
 }
 
 /**

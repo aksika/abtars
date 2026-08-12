@@ -19,6 +19,7 @@ import {
   handleSoftware, handleTribe, handleMetrics,
 } from "./handlers.js";
 import { handleSession } from "./session-handler.js";
+import { handleCoding } from "./handlers-coding.js";
 import {
   handlePiRun, handlePiStatus, handlePiList, handlePiReply,
   handlePiSteer, handlePiCancel, handlePiResume, handlePiCompact,
@@ -72,6 +73,7 @@ registerExact("/whoami", handleWhoami);
 registerExact("/tribe", handleTribe);
 registerExact("/metrics", handleMetrics);
 registerExact("/session", handleSession);
+registerPrefix("/coding", handleCoding);
 
 // ── Prefix-match commands ───────────────────────────────────────────────────
 registerPrefix("/session ", handleSession);

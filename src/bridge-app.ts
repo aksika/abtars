@@ -78,6 +78,9 @@ export class Bridge {
       // run/card settlement, process + C-session + capacity cleanup) before
       // the process exits.
       await this.ctx.piExecutorService?.executor.interruptAll();
+      // #1635 — interactive coding turns are Pi processes too; abort them and
+      // leave the durable sessions interrupted (resumable with a proof).
+      await this.ctx.codingSessionService?.interruptAll();
       // #1357: Withdraw Pi capability registration on shutdown
       this.ctx._piCapDisposer?.();
     });

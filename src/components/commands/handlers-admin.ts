@@ -267,6 +267,11 @@ export async function handleHelp(_text: string, ctx: CommandContext): Promise<bo
     "/pi compact <runId> [instructions] — Native Pi compaction of a coding run",
     "/pi cancel <runId> — Cancel a Pi run",
     "/pi resume <runId> — Resume a Pi run",
+    "/coding — Interactive Pi coding session (resume most recent)",
+    "/coding new <alias> — New interactive coding session",
+    "/coding status — List coding sessions",
+    "/coding off — Leave coding mode",
+    "/coding end — End coding session (transcript preserved)",
   ];
   if (ctx.platform === "telegram") {
     cmds.push("/full — Raw output, TTS disabled", "/short — Clean responses (default)", "/healing — Toggle self-healer on/off");

@@ -77,9 +77,16 @@ export const codingRouteMiddleware: Middleware = async (ctx, next) => {
     if (!result.ok) await ctx.reply(`Pi compaction failed: ${result.message}`);
     return;
   }
-  // Ordinary text: an idle/interrupted session starts a turn; a running turn
-  // receives follow_up (Pi's own queue is authoritative — never double-queue).
-  const result = rec.state === "running"
+  // Ordinary text: a pending UI request gets the correlated reply; an
+  // idle/interrupted session starts a turn; a running turn receives follow_up
+  // (Pi's own queue is authoritative — never double-queue).
+  let result: import("../pi-executor/pi-coding-session-service.js").TurnStartResult;
+  if (rec.state === "awaiting_input" && rec.pendingRequestId) {
+    const ok = await svc.reply(sessionId, rec.pendingRequestId, text, ctx.userId);
+    await ctx.reply(ok.ok ? `* Answer submitted to Pi.` : `* Pi input reply failed (${ok.reason ?? "unknown"})`);
+    return;
+  }
+  result = rec.state === "running"
     ? await svc.followUp(sessionId, text, ctx.userId)
     : await svc.startTurn({ sessionId, text, ownerPrincipal: ctx.userId, leaseOwner });
   await replyForStartResult(ctx, result, "Pi is working");

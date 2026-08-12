@@ -26,6 +26,7 @@ import type { IKiroTransport } from "../../components/transport/kiro-transport.j
 import type { AbtarsMemoryRuntime } from "../../components/memory-runtime.js";
 import { loadUsers } from "../../components/user-registry.js";
 import { isModelPickerCallback, handleModelPickerCallback } from "./telegram-model-picker.js";
+import { isCodingCallback, handleCodingCallback } from "./telegram-coding-projection.js";
 
 const TAG = "telegram";
 
@@ -98,6 +99,11 @@ export class TelegramAdapter implements PlatformAdapter {
 
     await this.api.setMyCommands(BOT_COMMANDS.map(c => ({ command: c.name, description: c.description })))
       .catch((err) => logWarn(TAG, `setMyCommands failed: ${err instanceof Error ? err.message : String(err)}`));
+
+    // #1635 — register the adapter for interactive coding projection + inline
+    // control callbacks.
+    const { setTelegramCodingDelivery } = await import("./telegram-coding-projection.js");
+    setTelegramCodingDelivery(this, this.api);
 
     const home = abtarsHome();
     const offsetStore = createFileOffsetStore(`${home}/state/telegram-offset`);
@@ -192,7 +198,9 @@ export class TelegramAdapter implements PlatformAdapter {
       if (!chatId) return;
 
       try {
-      if (isModelPickerCallback(data)) {
+      if (isCodingCallback(data)) {
+        await handleCodingCallback(data, chatId);
+      } else if (isModelPickerCallback(data)) {
         await handleModelPickerCallback(data, chatId, this.api, this, {
           transport: this.deps.transport as any,
           pipeline: this.deps.pipeline as any,

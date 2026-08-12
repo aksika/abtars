@@ -159,6 +159,33 @@ export class PiCodingSessionService {
     return this.deps.store.listForOwner(ownerPrincipal);
   }
 
+  /** R1 — make the coding envelope the active session so inbound messages
+   * route through the coding boundary. */
+  activate(sessionId: string, ownerPrincipal: string): boolean {
+    const rec = this.authorize(sessionId, ownerPrincipal);
+    if (!rec) return false;
+    const spinSession = this.deps.spin.getSessionById(sessionId);
+    if (!spinSession || spinSession.status === "ended") return false;
+    const r = this.deps.spin.switchSession(ownerPrincipal, spinSession.platform, spinSession.shortIndex);
+    return typeof r !== "string";
+  }
+
+  /** R1 — return the owner to the platform's main session. */
+  async deactivate(sessionId: string, ownerPrincipal: string): Promise<boolean> {
+    const rec = this.authorize(sessionId, ownerPrincipal);
+    if (!rec) return false;
+    const spinSession = this.deps.spin.getSessionById(sessionId);
+    if (!spinSession) return false;
+    const active = this.deps.spin.getActiveSession(ownerPrincipal, spinSession.platform);
+    if (active.id !== sessionId) return true; // already deactivated
+    const { sessionType } = await import("../spin-types.js");
+    const local = this.deps.spin.listSessions(ownerPrincipal, spinSession.platform).sessions;
+    const main = local.find(s => sessionType(s) === "A" && s.status !== "ended");
+    if (!main) return false;
+    const r = this.deps.spin.switchSession(ownerPrincipal, spinSession.platform, main.shortIndex);
+    return typeof r !== "string";
+  }
+
   // ── Telegram turn lifecycle ───────────────────────────────────────────────
 
   /**

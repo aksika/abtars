@@ -12,6 +12,7 @@ export interface BotCommand {
 export const BOT_COMMANDS: readonly BotCommand[] = [
   { name: "reset", description: "Fresh session + exit coding" },
   { name: "session", description: "Session management" },
+  { name: "coding", description: "Interactive Pi coding session" },
   { name: "compact", description: "Compact context window" },
   { name: "status", description: "Operational health (PID, platforms, context)" },
   { name: "software", description: "Version, deploy info, rollback" },
