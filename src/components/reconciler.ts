@@ -60,7 +60,7 @@ function dispatchExecutor(executorKind: ExecutorKind, executorId: string): { kin
   }
   if (executorKind === "pi" && _piService) {
     const { PiExecutorAdapter } = require("./pi-executor-adapter.js") as typeof import("./pi-executor-adapter.js");
-    return { kind: "pi", id: executorId, adapter: new PiExecutorAdapter(_piService.executor) };
+    return { kind: "pi", id: executorId, adapter: new PiExecutorAdapter(_piService.executor, new WorkerSupervisionStore()) };
   }
   return undefined;
 }
@@ -1432,7 +1432,7 @@ function evaluateLease(card: KanbanCard): void {
         const svc = _piService;
         if (!svc) return undefined;
         const { PiExecutorAdapter } = require("./pi-executor-adapter.js") as typeof import("./pi-executor-adapter.js");
-        return new PiExecutorAdapter(svc.executor);
+        return new PiExecutorAdapter(svc.executor, new WorkerSupervisionStore());
       }
       return undefined;
     };
@@ -1776,7 +1776,7 @@ function resolveAdapterForRecovery(executorKind: ExecutorKind, _executorId: stri
     const svc = _piService;
     if (!svc) return undefined;
     const { PiExecutorAdapter } = require("./pi-executor-adapter.js") as typeof import("./pi-executor-adapter.js");
-    return new PiExecutorAdapter(svc.executor);
+    return new PiExecutorAdapter(svc.executor, new WorkerSupervisionStore());
   }
   return undefined;
 }

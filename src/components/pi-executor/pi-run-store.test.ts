@@ -499,4 +499,37 @@ describe("PiRunStore — #1395 UI claim/restore/setPending", () => {
       expect(deleted).toBe(0);
     });
   });
+
+  describe("createSupervisedRun (#1638)", () => {
+    function ensureCard(store: PiRunStore, cardId: number): void {
+      const db = (store as any).db as TaskDatabase;
+      db.prepare(`INSERT OR IGNORE INTO kanban_board (id, title, source, status) VALUES (?, ?, 'agent', 'queued')`).run(cardId, `w-card-${cardId}`);
+    }
+
+    it("creates one subordinate run row per W card at generation 1", () => {
+      const store = makeStore();
+      ensureCard(store, 7001);
+      const first = store.createSupervisedRun({
+        cardId: 7001, workspaceAlias: "repo-a", goal: "g", ownerPrincipalId: "peer:kp", sessionId: "s1",
+      });
+      expect(first.created).toBe(true);
+      expect(first.generation).toBe(1);
+
+      const again = store.createSupervisedRun({
+        cardId: 7001, workspaceAlias: "repo-a", goal: "g", ownerPrincipalId: "peer:kp", sessionId: "s1",
+      });
+      expect(again.created).toBe(false);
+      expect(again.runId).toBe(first.runId);
+      expect(store.getByCardId(7001)?.executionGeneration).toBe(1);
+    });
+
+    it("two W cards get distinct run rows", () => {
+      const store = makeStore();
+      ensureCard(store, 7101);
+      ensureCard(store, 7102);
+      const a = store.createSupervisedRun({ cardId: 7101, workspaceAlias: "repo-a", goal: "g", ownerPrincipalId: "p", sessionId: "s" });
+      const b = store.createSupervisedRun({ cardId: 7102, workspaceAlias: "repo-b", goal: "g", ownerPrincipalId: "p", sessionId: "s" });
+      expect(a.runId).not.toBe(b.runId);
+    });
+  });
 });

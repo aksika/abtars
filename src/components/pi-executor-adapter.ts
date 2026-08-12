@@ -2,18 +2,28 @@ import { logWarn } from "./logger.js";
 import { PiExecutor } from "./pi-executor/pi-executor.js";
 import { ExecutorProgressEmitter } from "./executor-progress-emitter.js";
 import type { SwarmExecutorAdapter, ExecutionClaim, ExecutorCapacity, StartObservation, CancelObservation, ExecutionObservation, CancelReason } from "./swarm-executor-types.js";
+import type { WorkerSupervisionStore } from "./worker-supervision-store.js";
 
 const TAG = "pi-adapter";
 
+/**
+ * #1638 — a supervised Pi attempt binds its runtime resource through the
+ * WorkerSupervisionStore binding columns; the attempt never doubles as a Pi
+ * run ID. The adapter creates one subordinate Pi run per W card (via
+ * PiRunStore.createSupervisedRun), binds generation 1 before launch, and
+ * resolves the binding for start/inspect/cancel/progress.
+ */
 export class PiExecutorAdapter implements SwarmExecutorAdapter {
   readonly kind = "pi" as const;
   readonly schedulingPolicy = { recovery: "inspectable" as const };
   private executor: PiExecutor;
+  private supervisionStore: WorkerSupervisionStore;
   private progressEmitter?: ExecutorProgressEmitter;
   private readonly leaseUnsubscribers = new Map<string, () => void>();
 
-  constructor(executor: PiExecutor, progressEmitter?: ExecutorProgressEmitter) {
+  constructor(executor: PiExecutor, supervisionStore: WorkerSupervisionStore, progressEmitter?: ExecutorProgressEmitter) {
     this.executor = executor;
+    this.supervisionStore = supervisionStore;
     this.progressEmitter = progressEmitter;
   }
 
@@ -35,6 +45,46 @@ export class PiExecutorAdapter implements SwarmExecutorAdapter {
     return this.capacitySnapshot();
   }
 
+  /** Ensure a binding exists for (attempt, generation) -> Pi run. Idempotent:
+   * the same card always resolves to the same run row. */
+  private ensureBinding(claim: ExecutionClaim): { runId: string; resourceGeneration: number } | undefined {
+    const existing = this.supervisionStore.getExecutorResourceBinding(claim.attemptId);
+    if (existing) return { runId: existing.resourceId, resourceGeneration: existing.resourceGeneration };
+    // #1638: the contract's workspace_alias is the only workspace locator.
+    const contractRow = this.supervisionStore.getContractByCardId(claim.cardId);
+    let workspaceAlias = "default";
+    if (contractRow) {
+      try {
+        const parsed = JSON.parse(contractRow.contract_json) as { workspace_alias?: string };
+        if (parsed.workspace_alias) workspaceAlias = parsed.workspace_alias;
+      } catch { /* unreadable contract — default alias */ }
+    }
+    const run = this.executor.piStore.getByCardId(claim.cardId);
+    const sessionId = run?.currentSessionId ?? `${Date.now()}_C_pi_${claim.attemptId}`;
+    const created = run
+      ? { runId: run.id, generation: run.executionGeneration, created: false }
+      : this.executor.piStore.createSupervisedRun({
+          cardId: claim.cardId,
+          workspaceAlias,
+          goal: `worker attempt ${claim.attemptId}`,
+          ownerPrincipalId: `peer:${claim.executorId}`,
+          sessionId,
+        });
+    const outcome = this.supervisionStore.bindExecutorResource({
+      attemptId: claim.attemptId,
+      expectedAttemptGeneration: claim.generation,
+      executorKind: "pi",
+      resourceId: created.runId,
+      resourceGeneration: created.generation,
+      continuity: "initial",
+    });
+    if (outcome === "stale" || outcome === "conflict") {
+      logWarn(TAG, `bind rejected for ${claim.attemptId}: ${outcome}`);
+      return undefined;
+    }
+    return { runId: created.runId, resourceGeneration: created.generation };
+  }
+
   async start(claim: ExecutionClaim): Promise<StartObservation> {
     try {
       this.leaseUnsubscribers.get(claim.attemptId)?.();
@@ -43,9 +93,11 @@ export class PiExecutorAdapter implements SwarmExecutorAdapter {
     } catch { /* best-effort */ }
 
     try {
-      const run = this.executor.piStore.get(claim.attemptId) as { currentSessionId?: string } | undefined;
-      const sessionId = run?.currentSessionId ?? `${Date.now()}_C_pi_${claim.attemptId}`;
-      const result = await this.executor.startWithClaim(claim.attemptId, claim.generation, sessionId);
+      const binding = this.ensureBinding(claim);
+      if (!binding) return { kind: "start_failed", reason: "resource binding failed", retryable: false };
+      const run = this.executor.piStore.get(binding.runId);
+      const sessionId = run?.currentSessionId ?? `${Date.now()}_C_pi_${binding.runId}`;
+      const result = await this.executor.startWithClaim(binding.runId, binding.resourceGeneration, sessionId);
       switch (result) {
         case "started":
           return { kind: "started", attemptId: claim.attemptId, generation: claim.generation, executorId: claim.executorId };
@@ -58,9 +110,19 @@ export class PiExecutorAdapter implements SwarmExecutorAdapter {
     }
   }
 
+  private resolveRunId(claim: ExecutionClaim): string | undefined {
+    const binding = this.supervisionStore.getExecutorResourceBinding(claim.attemptId);
+    if (binding) return binding.resourceId;
+    // Boot-recovery fallback: an attempt without a binding has no Pi run —
+    // do not fabricate one from the attempt ID.
+    return undefined;
+  }
+
   async cancel(claim: ExecutionClaim, _reason: CancelReason): Promise<CancelObservation> {
+    const runId = this.resolveRunId(claim);
+    if (!runId) return { kind: "cancelled", attemptId: claim.attemptId };
     try {
-      await this.executor.cancel(claim.attemptId);
+      await this.executor.cancel(runId);
       this.leaseUnsubscribers.get(claim.attemptId)?.();
       this.leaseUnsubscribers.delete(claim.attemptId);
       return { kind: "cancelled", attemptId: claim.attemptId };
@@ -71,7 +133,9 @@ export class PiExecutorAdapter implements SwarmExecutorAdapter {
   }
 
   async inspect(claim: ExecutionClaim): Promise<ExecutionObservation> {
-    const run = this.executor.piStore.get(claim.attemptId);
+    const runId = this.resolveRunId(claim);
+    if (!runId) return { kind: "unknown", message: "no Pi run binding" };
+    const run = this.executor.piStore.get(runId);
     if (!run) return { kind: "unknown", message: "run not found" };
     switch (run.status) {
       case "starting":
@@ -91,10 +155,12 @@ export class PiExecutorAdapter implements SwarmExecutorAdapter {
 
   /** Wire local Pi progress into the lease progress store. */
   wireLeaseProgress(attemptId: string, claimGeneration: number, executorId: string): () => void {
-    const unsubTransition = this.executor.onTransition((runId, _fromStatus, toStatus) => {
-      if (runId !== attemptId) return;
+    const binding = this.supervisionStore.getExecutorResourceBinding(attemptId);
+    const runId = binding?.resourceId ?? attemptId;
+    const unsubTransition = this.executor.onTransition((rid, _fromStatus, toStatus) => {
+      if (rid !== runId) return;
       const emitter = this._emitter();
-      const run = this.executor.piStore.get(runId);
+      const run = this.executor.piStore.get(rid);
       switch (toStatus) {
         case "running":
           if (_fromStatus === "awaiting_input" && run?.lastUiReplyRequestId) {
@@ -121,14 +187,14 @@ export class PiExecutorAdapter implements SwarmExecutorAdapter {
       }
     });
 
-    const unsubProgress = this.executor.onProgress((runId, payload, progressType) => {
-      if (runId !== attemptId) return;
+    const unsubProgress = this.executor.onProgress((rid, payload, progressType) => {
+      if (rid !== runId) return;
       const parsed = JSON.parse(payload) as Record<string, unknown>;
       const name = typeof parsed["name"] === "string" ? parsed["name"] : "tool";
       if (progressType === "tool_execution_start") {
-        this._emitter().emitToolStart(attemptId, claimGeneration, executorId, `pi-tool:${runId}:${name}`, name, undefined, "pi");
+        this._emitter().emitToolStart(attemptId, claimGeneration, executorId, `pi-tool:${rid}:${name}`, name, undefined, "pi");
       } else if (progressType === "tool_execution_end") {
-        this._emitter().emitToolEnd(attemptId, claimGeneration, executorId, `pi-tool:${runId}:${name}`, `pi-tool-end:${runId}:${name}:${Date.now()}`, "pi");
+        this._emitter().emitToolEnd(attemptId, claimGeneration, executorId, `pi-tool:${rid}:${name}`, `pi-tool-end:${rid}:${name}:${Date.now()}`, "pi");
       } else if (progressType === "agent_start") {
         this._emitter().emitAlive(attemptId, claimGeneration, executorId, "pi");
       }

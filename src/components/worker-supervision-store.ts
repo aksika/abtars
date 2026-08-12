@@ -59,6 +59,10 @@ export interface AttemptRow {
   output_tokens: number | null;
   charged_tokens: number;
   usage_charged_at: string | null;
+  /** #1638: durable executor-neutral runtime binding (Pi run id/generation). */
+  executor_resource_id: string | null;
+  executor_resource_generation: number | null;
+  execution_continuity: string | null;
 }
 
 export interface ReservationRow {
@@ -227,6 +231,20 @@ export class WorkerSupervisionStore {
     try { db.exec(`ALTER TABLE worker_attempts ADD COLUMN output_tokens INTEGER`); } catch {}
     try { db.exec(`ALTER TABLE worker_attempts ADD COLUMN charged_tokens INTEGER NOT NULL DEFAULT 0`); } catch {}
     try { db.exec(`ALTER TABLE worker_attempts ADD COLUMN usage_charged_at TEXT`); } catch {}
+    // #1638: executor-neutral runtime resource binding (Pi run id/generation).
+    // execution_continuity stays a plain TEXT column — SQLite cannot add a
+    // CHECK via ADD COLUMN; its 'initial'|'resumed'|'fresh' domain is enforced
+    // in the typed store operations below.
+    try { db.exec(`ALTER TABLE worker_attempts ADD COLUMN executor_resource_id TEXT`); } catch {}
+    try { db.exec(`ALTER TABLE worker_attempts ADD COLUMN executor_resource_generation INTEGER`); } catch {}
+    try { db.exec(`ALTER TABLE worker_attempts ADD COLUMN execution_continuity TEXT`); } catch {}
+    try {
+      db.exec(`
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_worker_attempt_runtime_generation
+        ON worker_attempts(executor_kind, executor_resource_id, executor_resource_generation)
+        WHERE executor_resource_id IS NOT NULL
+      `);
+    } catch {}
 
     // Backfill lifecycle for rows created before the #1364 state machine.
     db.exec(`
@@ -506,6 +524,60 @@ export class WorkerSupervisionStore {
 
   markAttemptStartObservable(attemptId: string): boolean {
     return this.lifecycleTransition(attemptId, ["claimed"], "starting");
+  }
+
+  // ── #1638: executor-neutral runtime resource binding ─────────────────────
+
+  /** Durable (attempt, generation) -> (resource id, resource generation)
+   * mapping. Requires the latest attempt with matching generation and
+   * executor kind in claimed|starting. An exact repeated bind is idempotent;
+   * any different tuple for an already-bound attempt conflicts. */
+  bindExecutorResource(input: {
+    attemptId: string;
+    expectedAttemptGeneration: number;
+    executorKind: ExecutorKind;
+    resourceId: string;
+    resourceGeneration: number;
+    continuity: "initial" | "resumed" | "fresh";
+  }): "bound" | "idempotent" | "stale" | "conflict" {
+    const attempt = this.db.prepare(`SELECT id, generation, executor_kind, lifecycle, executor_resource_id, executor_resource_generation FROM worker_attempts WHERE id = ?`).get(input.attemptId) as {
+      id: string; generation: number; executor_kind: string; lifecycle: AttemptLifecycle;
+      executor_resource_id: string | null; executor_resource_generation: number | null;
+    } | undefined;
+    if (!attempt) return "stale";
+    if (attempt.generation !== input.expectedAttemptGeneration) return "stale";
+    if (attempt.executor_kind !== input.executorKind) return "conflict";
+    if (attempt.lifecycle !== "claimed" && attempt.lifecycle !== "starting") return "stale";
+    if (attempt.executor_resource_id !== null && attempt.executor_resource_generation !== null) {
+      return attempt.executor_resource_id === input.resourceId
+        && attempt.executor_resource_generation === input.resourceGeneration
+        ? "idempotent" : "conflict";
+    }
+    const updated = this.db.prepare(`
+      UPDATE worker_attempts
+      SET executor_resource_id = ?, executor_resource_generation = ?, execution_continuity = ?
+      WHERE id = ? AND executor_resource_id IS NULL
+    `).run(input.resourceId, input.resourceGeneration, input.continuity, input.attemptId);
+    return updated.changes === 1 ? "bound" : "conflict";
+  }
+
+  getExecutorResourceBinding(attemptId: string): { resourceId: string; resourceGeneration: number; continuity: "initial" | "resumed" | "fresh" } | undefined {
+    const row = this.db.prepare(`
+      SELECT executor_resource_id, executor_resource_generation, execution_continuity
+      FROM worker_attempts WHERE id = ?
+    `).get(attemptId) as { executor_resource_id: string | null; executor_resource_generation: number | null; execution_continuity: string | null } | undefined;
+    if (!row || row.executor_resource_id === null || row.executor_resource_generation === null) return undefined;
+    const continuity = row.execution_continuity === "resumed" ? "resumed" as const
+      : row.execution_continuity === "fresh" ? "fresh" as const : "initial" as const;
+    return { resourceId: row.executor_resource_id, resourceGeneration: row.executor_resource_generation, continuity };
+  }
+
+  getAttemptForExecutorResource(kind: ExecutorKind, id: string, generation: number): AttemptRow | undefined {
+    return this.db.prepare(`
+      SELECT * FROM worker_attempts
+      WHERE executor_kind = ? AND executor_resource_id = ? AND executor_resource_generation = ?
+      ORDER BY generation DESC LIMIT 1
+    `).get(kind, id, generation) as AttemptRow | undefined;
   }
 
   markAttemptRunning(attemptId: string): boolean {

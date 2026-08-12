@@ -998,4 +998,79 @@ describe("WorkerSupervisionStore", () => {
       expect(result?.envelope.attempt.executor_id).toBe("pi-coding");
     });
   });
+
+  describe("executor resource binding (#1638)", () => {
+    function setupPiAttempt(s: InstanceType<typeof Store>, id = "a_bind"): void {
+      s.insertContract(TEST_CONTRACT, 101);
+      s.insertAttempt({
+        id, card_id: 101, contract_id: TEST_CONTRACT.id,
+        ordinal: 1, executor_kind: "pi", executor_id: "pi-coding",
+        status: "pending", started_at: "2026-01-01T00:00:00.000Z",
+      });
+    }
+
+    it("binds the first (attempt, generation) -> run tuple", () => {
+      const s = new Store();
+      setupPiAttempt(s);
+      s.lifecycleTransition("a_bind", ["pending"], "claimed");
+      const outcome = s.bindExecutorResource({
+        attemptId: "a_bind", expectedAttemptGeneration: 1, executorKind: "pi",
+        resourceId: "pirun_sup_1", resourceGeneration: 1, continuity: "initial",
+      });
+      expect(outcome).toBe("bound");
+      const binding = s.getExecutorResourceBinding("a_bind");
+      expect(binding).toEqual({ resourceId: "pirun_sup_1", resourceGeneration: 1, continuity: "initial" });
+      const reverse = s.getAttemptForExecutorResource("pi", "pirun_sup_1", 1);
+      expect(reverse?.id).toBe("a_bind");
+    });
+
+    it("an exact repeated bind is idempotent; a different tuple conflicts", () => {
+      const s = new Store();
+      setupPiAttempt(s);
+      s.lifecycleTransition("a_bind", ["pending"], "claimed");
+      s.bindExecutorResource({
+        attemptId: "a_bind", expectedAttemptGeneration: 1, executorKind: "pi",
+        resourceId: "pirun_sup_1", resourceGeneration: 1, continuity: "initial",
+      });
+      expect(s.bindExecutorResource({
+        attemptId: "a_bind", expectedAttemptGeneration: 1, executorKind: "pi",
+        resourceId: "pirun_sup_1", resourceGeneration: 1, continuity: "initial",
+      })).toBe("idempotent");
+      expect(s.bindExecutorResource({
+        attemptId: "a_bind", expectedAttemptGeneration: 1, executorKind: "pi",
+        resourceId: "pirun_sup_2", resourceGeneration: 1, continuity: "initial",
+      })).toBe("conflict");
+    });
+
+    it("rejects binding for a stale attempt generation or lifecycle", () => {
+      const s = new Store();
+      setupPiAttempt(s);
+      s.lifecycleTransition("a_bind", ["pending"], "claimed");
+      expect(s.bindExecutorResource({
+        attemptId: "a_bind", expectedAttemptGeneration: 99, executorKind: "pi",
+        resourceId: "pirun_sup_1", resourceGeneration: 1, continuity: "initial",
+      })).toBe("stale");
+      expect(s.bindExecutorResource({
+        attemptId: "a_bind", expectedAttemptGeneration: 1, executorKind: "pi",
+        resourceId: "pirun_sup_1", resourceGeneration: 1, continuity: "initial",
+      })).toBe("bound");
+      s.lifecycleTransition("a_bind", ["claimed"], "running");
+      // idempotency holds only in claimed|starting; a running attempt is stale
+      expect(s.bindExecutorResource({
+        attemptId: "a_bind", expectedAttemptGeneration: 1, executorKind: "pi",
+        resourceId: "pirun_sup_1", resourceGeneration: 1, continuity: "initial",
+      })).toBe("stale");
+    });
+
+    it("rejects binding across executor kinds and wrong resource generation lookup", () => {
+      const s = new Store();
+      setupPiAttempt(s);
+      s.lifecycleTransition("a_bind", ["pending"], "claimed");
+      expect(s.bindExecutorResource({
+        attemptId: "a_bind", expectedAttemptGeneration: 1, executorKind: "agent",
+        resourceId: "pirun_sup_1", resourceGeneration: 1, continuity: "initial",
+      })).toBe("conflict");
+      expect(s.getAttemptForExecutorResource("pi", "pirun_sup_1", 5)).toBeUndefined();
+    });
+  });
 });

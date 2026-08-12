@@ -292,6 +292,33 @@ export class PiRunStore {
     return this.rowToRecord(row);
   }
 
+  /**
+   * #1638 — Idempotently create the single subordinate Pi run row for a
+   * supervised W card. Never touches the W card or creates a Pi card: the
+   * Worker attempt owns the card lifecycle. Repeated creation for the same
+   * card returns the existing run. Initial execution starts at generation 1;
+   * retries advance the same row via queueSupervisedGeneration().
+   */
+  createSupervisedRun(input: {
+    cardId: number;
+    workspaceAlias: string;
+    goal: string;
+    ownerPrincipalId: string;
+    sessionId: string;
+  }): { runId: string; generation: number; created: boolean } {
+    const existing = this.db.prepare(`SELECT id, execution_generation FROM pi_runs WHERE card_id = ?`).get(input.cardId) as { id: string; execution_generation: number } | undefined;
+    if (existing) return { runId: existing.id, generation: existing.execution_generation, created: false };
+    const runId = `pirun_sup_${randomUUID().slice(0, 12)}`;
+    this.db.prepare(`INSERT INTO pi_runs (id, card_id, workspace_alias, operational_goal, owner_principal_id,
+      origin, origin_platform, origin_chat_id, origin_peer, origin_request_id, delivery_policy,
+      execution_generation, current_session_id, status, model_provider, model_id, thinking)
+      VALUES (?, ?, ?, ?, ?, 'supervised', NULL, NULL, NULL, NULL, 'leave_remote', 1, ?, 'queued', NULL, NULL, NULL)`).run(
+      runId, input.cardId, input.workspaceAlias, input.goal,
+      input.ownerPrincipalId, input.sessionId,
+    );
+    return { runId, generation: 1, created: true };
+  }
+
   list(filter?: { status?: PiRunStatus; ownerPrincipalId?: string }): PiRunRecord[] {
     let sql = `SELECT * FROM pi_runs`;
     const params: unknown[] = [];
