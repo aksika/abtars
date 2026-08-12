@@ -94,6 +94,8 @@ export interface ExecutionClaim {
 export class WorkerSupervisionStore {
   readonly db: TaskDatabase;
 
+  private static readonly EXECUTOR_IDENTITY_MIGRATION = "1637_executor_identity";
+
   constructor(db?: TaskDatabase) {
     this.db = db ?? requireTaskDatabase();
     this.migrate();
@@ -174,6 +176,17 @@ export class WorkerSupervisionStore {
       );
     `);
 
+    // Migration markers keep one-time data migrations out of the hot path.
+    // WorkerSupervisionStore is constructed by several lifecycle/read paths;
+    // without this marker #1637 would rescan and parse every worker result on
+    // each construction after the first upgrade.
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS worker_supervision_migrations (
+        name TEXT PRIMARY KEY,
+        applied_at TEXT NOT NULL DEFAULT (datetime('now'))
+      )
+    `);
+
     // Migrate old rows to revision 1 if worker_contracts_old exists and has data
     try {
       const oldExists = db.prepare(`SELECT name FROM sqlite_master WHERE type='table' AND name='worker_contracts_old'`).get();
@@ -231,46 +244,42 @@ export class WorkerSupervisionStore {
 
     // #1637: one durable executor identity. Normalize the two legacy attempt
     // synonyms (local_worker -> agent, remote_worker -> remote) and the
-    // built-in Spin ID (spin -> spin-local) for pending/unclaimed attempts,
-    // then normalize the embedded envelope JSON and recompute its digest —
-    // all in one transaction so the attempt row and its audit envelope can
-    // never advance contradictory. Idempotent: a second migration matches
-    // zero rows.
-    const legacyKindRows = db.prepare(`
-      SELECT id, executor_kind, executor_id, lifecycle FROM worker_attempts
-      WHERE executor_kind IN ('local_worker', 'remote_worker')
-         OR executor_id = 'spin'
-    `).all() as Array<{ id: string; executor_kind: string; executor_id: string; lifecycle: string }>;
-    if (legacyKindRows.length > 0 || this.legacyEnvelopeCount() > 0) {
-      db.transaction(() => {
-        for (const row of legacyKindRows) {
-          const kind = normalizeLegacyExecutorKind(row.executor_kind);
-          if (!kind) continue;
-          const id = normalizeLegacyExecutorId(kind, row.executor_id);
-          db.prepare(`
-            UPDATE worker_attempts SET executor_kind = ?, executor_id = ?
-            WHERE id = ?
-          `).run(kind, id, row.id);
-        }
-        this.migrateLegacyEnvelopes();
-      });
-    }
-  }
+    // built-in Spin ID (spin -> spin-local), then normalize the embedded
+    // envelope JSON and recompute its digest — all in one transaction so the
+    // attempt row and its audit envelope can never advance contradictory.
+    // The marker makes this genuinely one-time and the in-transaction check
+    // keeps concurrent store construction idempotent.
+    db.transaction(() => {
+      const applied = db.prepare(`
+        SELECT 1 FROM worker_supervision_migrations WHERE name = ?
+      `).get(WorkerSupervisionStore.EXECUTOR_IDENTITY_MIGRATION);
 
-  /** #1637: count rows whose embedded envelope still uses a legacy synonym. */
-  private legacyEnvelopeCount(): number {
-    try {
-      const rows = this.db.prepare(`SELECT envelope_json FROM worker_results`).all() as Array<{ envelope_json: string }>;
-      let count = 0;
-      for (const row of rows) {
-        const parsed = JSON.parse(row.envelope_json) as { attempt?: { executor_kind?: string; executor_id?: string } };
-        const kind = parsed?.attempt?.executor_kind;
-        if (kind === "local_worker" || kind === "remote_worker" || (kind === "agent" && parsed.attempt?.executor_id === "spin")) count++;
+      const legacyKindRows = db.prepare(`
+        SELECT id, executor_kind, executor_id, lifecycle FROM worker_attempts
+        WHERE executor_kind IN ('local_worker', 'remote_worker')
+           OR executor_id = 'spin'
+      `).all() as Array<{ id: string; executor_kind: string; executor_id: string; lifecycle: string }>;
+
+      // The marker avoids parsing every result after the first upgrade. The
+      // small attempt query still lets a migration fixture or an older writer
+      // inserted after the marker self-heal without scanning worker_results.
+      if (applied && legacyKindRows.length === 0) return;
+
+      for (const row of legacyKindRows) {
+        const kind = normalizeLegacyExecutorKind(row.executor_kind);
+        if (!kind) continue;
+        const id = normalizeLegacyExecutorId(kind, row.executor_id);
+        db.prepare(`
+          UPDATE worker_attempts SET executor_kind = ?, executor_id = ?
+          WHERE id = ?
+        `).run(kind, id, row.id);
       }
-      return count;
-    } catch {
-      return 0;
-    }
+      this.migrateLegacyEnvelopes();
+
+      db.prepare(`
+        INSERT INTO worker_supervision_migrations (name) VALUES (?)
+      `).run(WorkerSupervisionStore.EXECUTOR_IDENTITY_MIGRATION);
+    });
   }
 
   /** #1637: rewrite legacy executor synonyms inside stored envelope JSON and
