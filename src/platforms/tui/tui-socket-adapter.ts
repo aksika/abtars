@@ -75,6 +75,16 @@ const TAG = "tui";
 
 // ── #1397: Stream-suppression ledger types ────────────────────────────────
 
+/**
+ * #1319: Orc activity execution binding.
+ * `following` — persistent Orc session observed while idle; accepts only the
+ * next `execution.started`. `bound` — attached to one execution; accepts only
+ * that execution's events until its terminal event returns to `following`.
+ */
+type ActivityBinding =
+  | { state: "following"; sessionId: string }
+  | { state: "bound"; sessionId: string; executionId: string };
+
 interface StreamObservation {
   streamId: string;
   sequence: number;
@@ -172,6 +182,9 @@ export class TuiSocketAdapter implements PlatformAdapter {
 
   /** #1362: Attachment-scoped steering instruction ownership. Keyed by canonical server instruction ID. */
   private ownedSteer = new Map<string, { sessionId: string; executionId: string; connGen: number; attGen: number }>();
+
+  /** #1319: attachment-local Orc execution binding — idle-follow vs bound. */
+  private _activityBinding: ActivityBinding | null = null;
 
   constructor(deps: TuiAdapterDeps) {
     this.deps = deps;
@@ -451,6 +464,7 @@ export class TuiSocketAdapter implements PlatformAdapter {
     this._streamLedger.clear();
     this._activitySequence = 0;
     this._activityDirty = false;
+    this._activityBinding = null;
     this._statusRevision = 0;
   }
 
@@ -614,12 +628,37 @@ export class TuiSocketAdapter implements PlatformAdapter {
     if (!feed || !orcEntry) return;
 
     this._activitySequence = 0;
+    // #1319 R1: attach to an active Orc binds immediately; attach to an idle
+    // persistent Orc follows the session's next execution. One mutable
+    // predicate is the single filtering source — never duplicated in the UI.
+    this._activityBinding = orcEntry.activeExecutionId
+      ? { state: "bound", sessionId, executionId: orcEntry.activeExecutionId }
+      : { state: "following", sessionId };
+
     const filter = {
       sessionId,
-      executionId: orcEntry.activeExecutionId,
+      matches: (event: import("../../components/orc-activity-feed.js").OrcActivityEvent): boolean => {
+        const binding = this._activityBinding;
+        if (!binding || binding.sessionId !== event.sessionId) return false;
+        if (binding.state === "following") return event.kind === "execution.started";
+        return event.executionId === binding.executionId;
+      },
     };
     this._unsubActivity = feed.subscribe(filter, (event) => {
       if (!this._isAttCurrent(capturedConnGen, capturedAttGen)) return;
+      const binding = this._activityBinding;
+      if (!binding || binding.sessionId !== event.sessionId) return;
+      // #1319 R1: bind on execution.started before subsequent events are
+      // accepted; return to idle-follow only after the terminal event. A
+      // transition never resets the process sequence watermark.
+      if (binding.state === "following" && event.kind === "execution.started") {
+        this._activityBinding = { state: "bound", sessionId, executionId: event.executionId };
+      } else if (
+        binding.state === "bound" && binding.executionId === event.executionId
+        && (event.kind === "execution.completed" || event.kind === "execution.failed")
+      ) {
+        this._activityBinding = { state: "following", sessionId };
+      }
       if (event.sequence <= this._activitySequence) return;
       if (this._activityDirty) return;
       this._activitySequence = event.sequence;
@@ -636,7 +675,7 @@ export class TuiSocketAdapter implements PlatformAdapter {
     // Send the initial snapshot.
     const orcSession = spin.getSessionById(sessionId);
     if (orcSession) {
-      const snapshot = buildOrcActivitySnapshot(orcSession, new Map(), this._activitySequence);
+      const snapshot = buildOrcActivitySnapshot(orcSession, this._activitySequence);
       this._push({ t: "activity-snapshot", sequence: this._activitySequence, snapshot });
     }
   }
@@ -721,7 +760,7 @@ export class TuiSocketAdapter implements PlatformAdapter {
     this._writer.dropActivity();
 
     const seq = feed.currentSequence;
-    const snapshot = buildOrcActivitySnapshot(orcEntry, new Map(), seq);
+    const snapshot = buildOrcActivitySnapshot(orcEntry, seq);
     const res = this._writer.enqueue({ t: "activity-snapshot", sequence: seq, snapshot });
     if (res === "dropped") {
       return false;

@@ -457,3 +457,73 @@ describe("TuiFrameWriter — no producer awaits socket I/O", () => {
     writer.close();
   });
 });
+
+function discussion(seq: number, from: string, message: string): TuiServerFrame {
+  return {
+    t: "activity",
+    sequence: seq,
+    event: {
+      kind: "channel.message", from, to: "orc", message,
+      sequence: seq, timestamp: 0, sessionId: "x", executionId: "e", cardId: 7,
+    } as any,
+  };
+}
+
+describe("TuiFrameWriter — #1319 ordered discussion + omission marker", () => {
+  it("never coalesces two channel messages for the same card and keeps order", () => {
+    const { writer, prime } = makeWriter();
+    prime();
+    writer.enqueue(discussion(1, "w1", "first"));
+    writer.enqueue(discussion(2, "w1", "second"));
+    const acts = writer.queuedFrameList.filter((f) => f.t === "activity");
+    expect(acts.length).toBe(2);
+    const messages = acts.map((a) => (a as any).event.message);
+    expect(messages).toEqual(["first", "second"]);
+    writer.close();
+  });
+
+  it("discussion is evictable but terminal frames survive", () => {
+    const { writer, prime } = makeWriter({ maxFrames: 2, maxBytes: 400, maxFrameBytes: 200 });
+    prime();
+    writer.enqueue(discussion(1, "w1", "m1"));   // queued (1)
+    writer.enqueue(discussion(2, "w2", "m2"));   // queued (2) full
+    // A terminal frame evicts lowest-priority replaceable data — discussion
+    // (ordered, but transient) yields to the preserve-class terminal frame.
+    writer.enqueue({ t: "message", role: "assistant", markdown: "final" });
+    const q = writer.queuedFrameList;
+    expect(q.some((f) => f.t === "message")).toBe(true);
+    expect(q.filter((f) => f.t === "activity").length).toBeLessThan(2);
+    writer.close();
+  });
+
+  it("emits one bounded activity-gap marker on drain after discussion drops", () => {
+    const { writer, socket, prime } = makeWriter({ maxFrames: 1, maxBytes: 400, maxFrameBytes: 200 });
+    prime(); // socket blocked; the first buffered slot is spent
+    writer.enqueue(discussion(1, "w1", "m1"));   // queued (1) full
+    // New discussion cannot fit → evicts the queued discussion → gap recorded.
+    writer.enqueue(discussion(2, "w2", "m2"));   // enqueued after eviction
+    expect(writer.queuedFrames).toBe(1);
+    // Drain flushes, then the writer emits exactly one marker before later frames.
+    socket.emitDrain();
+    const gaps = socket.written.filter((w) => w.includes('"activity-gap"'));
+    expect(gaps.length).toBe(1);
+    const marker = JSON.parse(gaps[0]!) as { t: string; sequence: number };
+    expect(marker.t).toBe("activity-gap");
+    expect(marker.sequence).toBe(1); // sequence of the first dropped frame
+    // A later drain emits no second marker (nothing new dropped).
+    socket.emitDrain();
+    expect(socket.written.filter((w) => w.includes('"activity-gap"')).length).toBe(1);
+    writer.close();
+  });
+
+  it("clearAttachment resets a pending gap marker (belongs to the old attachment)", () => {
+    const { writer, socket, prime } = makeWriter({ maxFrames: 1, maxBytes: 400, maxFrameBytes: 200 });
+    prime();
+    writer.enqueue(discussion(1, "w1", "m1"));
+    writer.enqueue(discussion(2, "w2", "m2")); // evicts → gap pending
+    writer.clearAttachment();
+    socket.emitDrain();
+    expect(socket.written.some((w) => w.includes('"activity-gap"'))).toBe(false);
+    writer.close();
+  });
+});

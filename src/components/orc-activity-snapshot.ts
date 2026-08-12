@@ -39,7 +39,6 @@ function toActivityCard(card: KanbanCard): ActivityCard {
  */
 export function buildOrcActivitySnapshot(
   orcSession: ManagedSession,
-  _allSessions: Map<string, ManagedSession>,
   currentSequence: number,
 ): OrcActivitySnapshot {
   const base: OrcActivitySnapshot = {

@@ -28,6 +28,13 @@ export type UnsequencedOrcActivityEvent = Omit<OrcActivityEvent, "sequence">;
 export interface OrcActivityFilter {
   sessionId: string;
   executionId?: string;
+  /**
+   * #1319: dynamic per-event predicate — takes precedence over `executionId`.
+   * Evaluated at delivery time so a subscription can bind to a new execution
+   * in the same batch in which its `execution.started` is delivered (idle
+   * Orc follow → bound transition without losing the execution's events).
+   */
+  matches?: (event: OrcActivityEvent) => boolean;
 }
 
 export type OrcActivityListener = (event: OrcActivityEvent) => void;
@@ -67,7 +74,10 @@ export class OrcActivityFeed {
     } as OrcActivityEvent;
 
     for (const sub of this._subscribers) {
-      if (!this._matches(sub.filter, full)) continue;
+      // #1319: scope by session at publish (bounded queue); the full filter
+      // (executionId / dynamic predicate) is applied at delivery so binding
+      // transitions within a delivered batch are honored in order.
+      if (full.sessionId !== sub.filter.sessionId) continue;
 
       if (isCardKind(full.kind) && !TERMINAL_CARD_KINDS.has(full.kind) && full.cardId !== undefined) {
         const lastIdx = sub.pending.length - 1;
@@ -113,6 +123,7 @@ export class OrcActivityFeed {
 
   private _matches(filter: OrcActivityFilter, event: OrcActivityEvent): boolean {
     if (event.sessionId !== filter.sessionId) return false;
+    if (filter.matches) return filter.matches(event);
     if (filter.executionId !== undefined) {
       return event.executionId === filter.executionId;
     }
@@ -128,6 +139,9 @@ export class OrcActivityFeed {
       if (batch.length === 0) return;
       try {
         for (const event of batch) {
+          // #1319: filter at delivery so a predicate can observe transitions
+          // caused by earlier events in the same batch.
+          if (!this._matches(sub.filter, event)) continue;
           sub.listener(event);
         }
       } catch (err) {

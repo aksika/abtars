@@ -44,12 +44,13 @@ export type TuiFrameClass =
   | "snapshot"    // activity-snapshot (recovery) — coalesce to latest
   | "status"      // runtime status — coalesce to latest revision
   | "progress"    // nonterminal incremental activity — coalesce per card
+  | "discussion"  // #1319: ordered channel messages — never coalesced (R5)
   | "chunk"       // model stream delta — coalesce per stream, lowest keep
   | "stream-start" // #1612: visible stream start — coalesce per stream
   | "typing";     // typing indicator — lowest priority
 
 /** Eviction order from lowest priority (drop first) to highest. */
-const EVICT_ORDER: TuiFrameClass[] = ["typing", "stream-start", "status", "progress", "chunk"];
+const EVICT_ORDER: TuiFrameClass[] = ["typing", "stream-start", "status", "progress", "discussion", "chunk"];
 
 export type TuiFrameWriterResult = "written" | "queued" | "coalesced" | "dropped";
 
@@ -97,6 +98,11 @@ export class TuiFrameWriter {
   /** #1612: latest execution ID observed per stream (for truncation terminals). */
   private readonly _streamExecutions = new Map<string, string>();
 
+  /** #1319 R5: discussion frames were dropped under pressure — one bounded
+   *  omission marker is emitted when the socket is writable again. */
+  private _discussionGap = false;
+  private _discussionGapSequence = 0;
+
   private readonly _onDrain: () => void;
   private readonly _onError: (err: Error) => void;
 
@@ -111,6 +117,14 @@ export class TuiFrameWriter {
     this._onDrain = () => {
       if (this._closed || !this._opts.isCurrent()) return;
       this._writable = true;
+      // #1319 R5: after dropped discussion, enqueue ONE bounded omission
+      // marker (before later queued frames) — never a silent gap, never a
+      // claim that a card snapshot recovered the discussion.
+      if (this._discussionGap) {
+        const marker: TuiServerFrame = { t: "activity-gap", sequence: this._discussionGapSequence };
+        try { this._socket.write(encodeFrame(marker)); } catch { /* best effort */ }
+        this._discussionGap = false;
+      }
       this._flush();
       // Adapter may now enqueue an authoritative recovery snapshot.
       this._opts.onWritable();
@@ -182,6 +196,10 @@ export class TuiFrameWriter {
           this._opts.onSemanticOverflow();
           return "dropped";
         }
+        if (clsInfo.cls === "discussion") {
+          this._markDiscussionGap(working as { sequence?: unknown });
+          return "dropped";
+        }
         if (clsInfo.cls === "typing" || clsInfo.cls === "status") {
           return "dropped";
         }
@@ -220,6 +238,9 @@ export class TuiFrameWriter {
     this._queue = this._queue.filter((q) => q.cls === "control" || q.cls === "terminal");
     this._recomputeBytes();
     this._streamExecutions.clear();
+    // #1319: a pending gap marker belongs to the previous attachment.
+    this._discussionGap = false;
+    this._discussionGapSequence = 0;
   }
 
   /** Idempotent. Remove writer listeners, clear queued data, invalidate. */
@@ -234,6 +255,8 @@ export class TuiFrameWriter {
     this._queuedFrames = 0;
     this._truncatedStreams.clear();
     this._streamExecutions.clear();
+    this._discussionGap = false;
+    this._discussionGapSequence = 0;
   }
 
   // ── Internals ─────────────────────────────────────────────────────
@@ -281,7 +304,17 @@ export class TuiFrameWriter {
       this._markTruncated(q.streamId);
     } else if (q.cls === "progress") {
       this._opts.onSemanticOverflow();
+    } else if (q.cls === "discussion") {
+      this._markDiscussionGap(q.frame as { sequence?: unknown });
     }
+  }
+
+  /** #1319 R5: record that discussion frames were dropped (first gap only). */
+  private _markDiscussionGap(frame: { sequence?: unknown }): void {
+    if (this._discussionGap) return;
+    this._discussionGap = true;
+    const seq = frame.sequence;
+    this._discussionGapSequence = typeof seq === "number" ? seq : 0;
   }
 
   /** Evict lowest-priority replaceable frames until `need` fits. */
@@ -478,8 +511,15 @@ function classify(frame: TuiServerFrame): {
         e.kind === "card.delivered" || e.kind === "execution.completed" ||
         e.kind === "execution.failed";
       if (terminal) return { cls: "terminal" };
+      // #1319 R5: channel messages are ordered, append-only discussion —
+      // never card-progress coalescing, identity is the event sequence.
+      if (e.kind === "channel.message") return { cls: "discussion" };
       return { cls: "progress", cardId: e.cardId };
     }
+    case "activity-gap":
+      // #1319 R5: bounded omission marker — preserve-class, never enqueued
+      // by normal producers (writer writes it directly on drain).
+      return { cls: "terminal" };
   }
 }
 
@@ -513,6 +553,8 @@ function boundFrame(frame: TuiServerFrame, maxFrameBytes: number, _maxChunkBytes
       case "chunk-end":
         return { t: "chunk-end", id: frame.id, executionId: frame.executionId, reason: frame.reason };
       case "typing":
+        return frame;
+      case "activity-gap":
         return frame;
     }
   };

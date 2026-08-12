@@ -59,6 +59,9 @@ export type TuiServerFrame =
   // #1319: Orc activity
   | { t: "activity-snapshot"; sequence: number; snapshot: OrcActivitySnapshot }
   | { t: "activity"; sequence: number; event: OrcActivityEvent }
+  // #1319 R5: bounded omission marker — writer pressure dropped discussion
+  // frames. Contains no discarded content and never claims replay.
+  | { t: "activity-gap"; sequence: number }
   | { t: "status"; status: import("./runtime-status.js").TuiRuntimeStatus };
 
 export function encodeFrame(f: TuiServerFrame | TuiClientFrame): string {
@@ -268,7 +271,8 @@ export function isServerFrame(x: unknown): x is TuiServerFrame {
   return t === "ready" || t === "error" || t === "message" ||
          t === "stream-start" || t === "chunk" || t === "chunk-end" ||
          t === "tool-start" || t === "typing" || t === "steer-ack" ||
-         t === "activity-snapshot" || t === "activity" || t === "status";
+         t === "activity-snapshot" || t === "activity" || t === "activity-gap"
+         || t === "status";
 }
 
 /** True if the parsed frame looks like a TuiClientFrame (narrowing helper). */

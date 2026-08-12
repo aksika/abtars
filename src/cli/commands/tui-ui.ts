@@ -20,7 +20,7 @@
  * Terminal/socket/exit ownership stays in `tui.ts` (design §6).
  */
 
-import type { OrcActivitySnapshot } from "../../components/orc-activity-snapshot.js";
+import type { OrcActivitySnapshot, ActivityCard } from "../../components/orc-activity-snapshot.js";
 import type { OrcActivityEvent } from "../../components/orc-activity-feed.js";
 import type { TuiServerFrame } from "../../platforms/tui/tui-protocol.js";
 import type { TuiRuntimeStatus, TuiUsageSnapshot } from "../../platforms/tui/runtime-status.js";
@@ -43,6 +43,8 @@ const MAX_STREAMS_PER_EXECUTION = 20;
 const MAX_COMPARISON_BYTES = 64 * 1024;
 const MAX_ACTIVITY_ROWS = 100;
 const MAX_SYSTEM_TEXT_BYTES = 2 * 1024;
+/** #1319 R5: discussion keeps its own newest bounded window. */
+const MAX_DISCUSSION_ROWS = 50;
 
 // ── Footer formatting (#1355 contract) ───────────────────────────────────
 
@@ -106,6 +108,48 @@ function boundText(text: string, maxBytes: number): string {
   return res;
 }
 
+/** UTF-8-safe byte-bounded slice of already-sanitized text (no re-stripping). */
+function boundUtf8(text: string, maxBytes: number): string {
+  let res = "";
+  let bytes = 0;
+  for (const ch of text) {
+    const b = Buffer.byteLength(ch, "utf8");
+    if (bytes + b > maxBytes) break;
+    res += ch;
+    bytes += b;
+  }
+  return res;
+}
+
+/**
+ * #1319 R4: complete terminal-escape + control stripping for untrusted
+ * channel text. Removes complete CSI/OSC/DCS/SOS/PM/APC sequences (both
+ * C0 ESC and C1 forms), then remaining C0/C1 controls, then normalizes
+ * embedded CR/LF/tab to a single visible space, then trims. Never strips
+ * only the ESC byte while leaving a printable control-sequence tail.
+ */
+// eslint-disable-next-line no-control-regex
+const ANSI_ESCAPE_SEQUENCE = new RegExp(
+  [
+    "\u001b\\[[0-9:;<=>?]*[ -/]*[@-~]",                    // CSI (ESC [ … final)
+    "\u009b[0-9:;<=>?]*[ -/]*[@-~]",                       // CSI (C1 0x9B)
+    "\u001b\\][^\u0007\u001b]*(?:\u0007|\u001b\\\\)",      // OSC → BEL | ST
+    "\u009d[^\u0007\u001b]*(?:\u0007|\u001b\\\\)",         // OSC (C1)
+    "\u001b[PX^_][^\u0007\u001b]*(?:\u0007|\u001b\\\\)",   // DCS/SOS/PM/APC → ST
+    "[\u0090\u0098\u009e\u009f][^\u0007\u001b]*(?:\u0007|\u001b\\\\)", // C1 DCS/SOS/PM/APC
+    "\u001b[ -/]*[@-~]",                                   // remaining two-char ESC forms
+  ].join("|"),
+  "g",
+);
+
+export function sanitizeDiscussionText(text: string): string {
+  let s = text.replace(ANSI_ESCAPE_SEQUENCE, "");
+  // eslint-disable-next-line no-control-regex
+  s = s.replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f]/g, "");
+  s = s.replace(/[\t\n\r]+/g, " ");
+  return s.trim();
+}
+
 /** Native-colored editor theme (border + select list) for the abtars shell,
  *  built from the loaded Pi theme through PUBLIC exports only. Must be passed
  *  at Editor construction — the editor renders with `theme.borderColor` and
@@ -165,15 +209,63 @@ export function projectSafeActivity(input: unknown): SafeActivityRow | null {
 export function projectActivitySnapshot(snapshot: OrcActivitySnapshot): SafeActivityRow[] {
   const rows: SafeActivityRow[] = [];
   if (!snapshot || typeof snapshot !== "object") return rows;
-  const cards = (snapshot as unknown as { cards?: Array<{ cardId?: unknown; status?: unknown }> }).cards;
-  if (Array.isArray(cards)) {
-    for (const card of cards) {
-      if (rows.length >= MAX_ACTIVITY_ROWS) break;
-      const row = projectSafeActivity({ kind: "card.running", cardId: card?.cardId ?? null, status: card?.status });
-      if (row) rows.push(row);
-    }
-  }
+  const seen = new Set<number>();
+  const add = (card: ActivityCard | undefined, kind: string, label: string): void => {
+    if (!card || seen.has(card.id)) return;
+    if (rows.length >= MAX_ACTIVITY_ROWS) return;
+    seen.add(card.id);
+    rows.push({ key: `card:${card.id}`, label, state: boundText(card.status, 40), kind });
+  };
+  // #1319: consume the canonical snapshot shape directly — root first, then
+  // active descendants, then recent direct terminal children not already
+  // represented by identity. Active state wins over a recent-terminal entry.
+  add(snapshot.root, "root", `root #${snapshot.root?.id ?? 0}`);
+  for (const card of snapshot.activeChildren) add(card, "card.running", `card #${card.id}`);
+  for (const card of snapshot.recentDirectChildren) add(card, "card.completed", `card #${card.id}`);
   return rows;
+}
+
+// ── Safe untrusted discussion projection (design §5.1, R4) ───────────────
+
+export interface SafeDiscussionRow {
+  /** Sequence-based identity — never card-based (R5: no replace-in-place). */
+  key: string;
+  /** Sanitized, bounded `[from -> to]` provenance. */
+  provenance: string;
+  /** Sanitized, bounded message body. */
+  message: string;
+}
+
+const MAX_DISCUSSION_FROM_BYTES = 64;
+const MAX_DISCUSSION_TO_BYTES = 64;
+const MAX_DISCUSSION_MESSAGE_BYTES = 512;
+
+/**
+ * #1319 R4: project ONLY a typed `channel.message` event into a bounded
+ * plain-text discussion row. Reads exactly `from`, `to`, and `message`; all
+ * other unstructured fields stay rejected under the #1338 boundary. The
+ * result is never fed to Markdown or message components — the renderer uses
+ * plain `Text` with the dedicated untrusted-discussion style.
+ */
+export function projectSafeDiscussion(input: unknown): SafeDiscussionRow | null {
+  if (!input || typeof input !== "object") return null;
+  const obj = input as { kind?: unknown; from?: unknown; to?: unknown; message?: unknown; sequence?: unknown };
+  if (obj.kind !== "channel.message") return null;
+  if (typeof obj.from !== "string" || typeof obj.message !== "string") return null;
+
+  const from = sanitizeDiscussionText(boundUtf8(obj.from, MAX_DISCUSSION_FROM_BYTES));
+  const to = typeof obj.to === "string"
+    ? sanitizeDiscussionText(boundUtf8(obj.to, MAX_DISCUSSION_TO_BYTES))
+    : "";
+  const message = sanitizeDiscussionText(boundUtf8(obj.message, MAX_DISCUSSION_MESSAGE_BYTES));
+  if (!message) return null;
+
+  const sequence = typeof obj.sequence === "number" ? obj.sequence : 0;
+  return {
+    key: `seq:${sequence}`,
+    provenance: to ? `[${from} -> ${to}]` : `[${from}]`,
+    message,
+  };
 }
 
 // ── Assistant-message factory (design §2.1) ──────────────────────────────
@@ -300,6 +392,7 @@ export class TuiApp {
 
   private _headerText: import("@earendil-works/pi-tui").Text | null = null;
   private _activity: import("@earendil-works/pi-tui").Container | null = null;
+  private _discussion: import("@earendil-works/pi-tui").Container | null = null;
   private _transcript: import("@earendil-works/pi-tui").Container | null = null;
   private _footer: import("@earendil-works/pi-tui").Text | null = null;
 
@@ -322,6 +415,10 @@ export class TuiApp {
   /** Activity sequence guards (#1319 semantics). */
   private _activitySequence = 0;
   private readonly _activityRows = new Map<string, import("@earendil-works/pi-tui").Text>();
+
+  /** #1319 R5: ordered, append-only discussion rows — newest bounded window. */
+  private readonly _discussionRows: Array<{ key: string; text: import("@earendil-works/pi-tui").Text }> = [];
+  private _discussionGapCount = 0;
 
   private _latestStatus: TuiRuntimeStatus | null = null;
 
@@ -413,6 +510,9 @@ export class TuiApp {
         case "activity":
           this._handleActivityEvent(frame.sequence, frame.event);
           return;
+        case "activity-gap":
+          this._handleActivityGap();
+          return;
         case "status":
           this._handleStatus(frame.status);
           return;
@@ -444,6 +544,7 @@ export class TuiApp {
     this._executions.clear();
     this._executionOrder.length = 0;
     this._activityRows.clear();
+    this._discussionRows.length = 0;
   }
 
   // ── Frame handlers ─────────────────────────────────────────────────
@@ -553,6 +654,18 @@ export class TuiApp {
   private _handleActivityEvent(sequence: number, event: OrcActivityEvent): void {
     if (sequence < this._activitySequence) return;
     this._activitySequence = sequence;
+
+    // #1319 R4: channel discussion is its own collection — sanitized plain
+    // text with provenance, never a card-progress replacement.
+    if (event.kind === "channel.message") {
+      const row = projectSafeDiscussion(event);
+      if (row && this._discussion) {
+        this._appendDiscussionRow(row.key, row.provenance, row.message);
+      }
+      this._ui.requestRender();
+      return;
+    }
+
     const row = projectSafeActivity(event);
     if (!row || !this._activity) return;
     const existing = this._activityRows.get(row.key);
@@ -566,6 +679,37 @@ export class TuiApp {
     }
     this._ui.requestRender();
   }
+
+  /** #1319 R5: truthful signal that writer pressure omitted discussion. */
+  private _handleActivityGap(): void {
+    this._discussionGapCount++;
+    this._appendDiscussionRow(`gap:${this._discussionGapCount}`, "", "[some worker/Orc messages omitted]");
+    this._ui.requestRender();
+  }
+
+  /** Append one bounded plain-text discussion row (newest window). */
+  private _appendDiscussionRow(key: string, provenance: string, message: string): void {
+    if (!this._discussion) return;
+    const text = new this._m.tui.Text(
+      provenance ? `${provenance} ${message}` : message,
+      0,
+      0,
+      this._discussionStyle,
+    );
+    this._discussionRows.push({ key, text });
+    this._discussion.addChild(text);
+    while (this._discussionRows.length > MAX_DISCUSSION_ROWS) {
+      const oldest = this._discussionRows.shift()!;
+      try { this._discussion.removeChild(oldest.text); } catch { /* best effort */ }
+    }
+  }
+
+  /** #1319 R4: visually distinct untrusted-discussion styling (italic —
+   *  markdown theme has no public muted color on this package surface). */
+  private readonly _discussionStyle = (s: string): string => {
+    const italic = this._markdownTheme.italic;
+    return typeof italic === "function" ? italic(s) : s;
+  };
 
   // ── Shell construction ─────────────────────────────────────────────
 
@@ -589,14 +733,17 @@ export class TuiApp {
     this._headerText = headerText;
 
     const activity = new this._m.tui.Container();
+    const discussion = new this._m.tui.Container();
     const transcript = new this._m.tui.Container();
     const footer = new this._m.tui.Text("", 0, 0);
     this._activity = activity;
+    this._discussion = discussion;
     this._transcript = transcript;
     this._footer = footer;
 
     this._ui.addChild(header);
     this._ui.addChild(activity);
+    this._ui.addChild(discussion);
     this._ui.addChild(transcript);
     this._ui.addChild(this._editor);
     this._ui.addChild(footer);
@@ -749,8 +896,8 @@ export class TuiApp {
       this._busyActive = true;
       this._busy.setMessage(this._toolLabel || "Working");
       if (!this._busyInTree && this._transcript) {
-        // Insert the loader between the activity region and the transcript:
-        // header, activity, busy, transcript, editor, footer.
+        // Insert the loader between the discussion region and the transcript:
+        // header, activity, discussion, busy, transcript, editor, footer.
         this._ui.removeChild(this._transcript);
         this._ui.addChild(this._busy);
         this._ui.addChild(this._transcript);
@@ -786,11 +933,14 @@ export class TuiApp {
     this._executionOrder.length = 0;
     this._activityRows.clear();
     this._activitySequence = 0;
+    this._discussionRows.length = 0;
+    this._discussionGapCount = 0;
     this._toolLabel = null;
     this._latestStatus = null;
     this._setBusy(false);
     try {
       this._activity?.clear();
+      this._discussion?.clear();
       this._transcript?.clear();
       this._footer?.setText("");
     } catch { /* best effort */ }

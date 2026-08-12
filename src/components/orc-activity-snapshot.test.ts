@@ -35,12 +35,10 @@ function orcSession(overrides: Partial<ManagedSession> = {}): ManagedSession {
   } as ManagedSession;
 }
 
-const SESSIONS = new Map<string, ManagedSession>();
-
 describe("buildOrcActivitySnapshot", () => {
   it("returns base snapshot for idle Orc with no root", () => {
     const s = orcSession({ busy: false, activeExecutionId: undefined, activeRootCardId: undefined });
-    const snap = buildOrcActivitySnapshot(s, SESSIONS, 5);
+    const snap = buildOrcActivitySnapshot(s, 5);
     expect(snap.sessionId).toBe(s.id);
     expect(snap.executionId).toBeUndefined();
     expect(snap.busy).toBe(false);
@@ -53,7 +51,7 @@ describe("buildOrcActivitySnapshot", () => {
     const rootId = Kanban.kanbanEnqueue("test project", "test", undefined, { priority: "HIGH" });
     const s = orcSession({ busy: true, activeExecutionId: "e1", activeRootCardId: rootId });
 
-    const snap = buildOrcActivitySnapshot(s, SESSIONS, 10);
+    const snap = buildOrcActivitySnapshot(s, 10);
     expect(snap.root).toBeDefined();
     expect(snap.root!.title).toBe("test project");
     expect(snap.root!.status).toBe("queued");
@@ -63,7 +61,7 @@ describe("buildOrcActivitySnapshot", () => {
 
   it("handles missing root card gracefully", () => {
     const s = orcSession({ activeRootCardId: 99999 });
-    const snap = buildOrcActivitySnapshot(s, SESSIONS, 1);
+    const snap = buildOrcActivitySnapshot(s, 1);
     expect(snap.root).toBeDefined();
     expect(snap.root!.title).toBe("(unknown)");
   });
@@ -75,7 +73,7 @@ describe("buildOrcActivitySnapshot", () => {
     Kanban.kanbanEnqueue("child2", "test", undefined, { parent_id: rootId });
 
     const s = orcSession({ busy: true, activeExecutionId: "e1", activeRootCardId: rootId });
-    const snap = buildOrcActivitySnapshot(s, SESSIONS, 1);
+    const snap = buildOrcActivitySnapshot(s, 1);
     expect(snap.root).toBeDefined();
     expect(snap.activeChildren.length).toBe(2);
     expect(snap.activeChildren.every(c => c.status === "queued")).toBe(true);
@@ -90,13 +88,13 @@ describe("buildOrcActivitySnapshot", () => {
     Kanban.kanbanComplete(childId, null, "all done");
 
     const s = orcSession({ busy: false, activeRootCardId: rootId });
-    const snap = buildOrcActivitySnapshot(s, SESSIONS, 2);
+    const snap = buildOrcActivitySnapshot(s, 2);
     expect(snap.recentDirectChildren.length).toBeGreaterThanOrEqual(1);
     expect(snap.recentDirectChildren[0].status).toBe("done");
   });
 
   it("never throws on malformed input", () => {
     const bad = { id: "bad" } as ManagedSession;
-    expect(() => buildOrcActivitySnapshot(bad, SESSIONS, 0)).not.toThrow();
+    expect(() => buildOrcActivitySnapshot(bad, 0)).not.toThrow();
   });
 });

@@ -1908,3 +1908,148 @@ describe("TuiSocketAdapter — ended pipeline attachment reconciliation (#1533)"
     conn.destroy();
   });
 });
+
+// ── #1319 execution-follow binding (R1) ─────────────────────────────────
+
+describe("TuiSocketAdapter — #1319 idle Orc execution-follow", () => {
+  let sockPath: string;
+  let adapter: TuiSocketAdapter;
+
+  beforeEach(() => { sockPath = tmpSocketPath(); });
+  afterEach(() => { if (adapter) adapter.stop(); });
+
+  it("idle attach follows the next execution's card and channel activity, rejects stale, then follows a second execution", async () => {
+    const feed = new OrcActivityFeed();
+    const orc = { id: "1749563282_O_01" } as unknown as ManagedSession;
+    // Idle: activeExecutionId is undefined at attach time.
+    const mockSpin = makeMockSpin({ orcSession: orc, orcBusy: false }).spin;
+
+    adapter = new TuiSocketAdapter({
+      spin: mockSpin,
+      onMessage: makeRecoveryHandler(),
+      socketPath: sockPath,
+      orcActivityFeed: feed,
+    });
+    await adapter.start();
+
+    const { conn, frames } = await attachAndCollect(sockPath, { kind: "orc" });
+    await new Promise((r) => setTimeout(r, 40));
+    expect(frames.some((f) => f.t === "ready")).toBe(true);
+
+    const OID = "1749563282_O_01";
+    const publish = (kind: string, executionId: string, cardId?: number, message?: string): void => {
+      feed.publish({
+        kind,
+        ...(message !== undefined ? { from: "worker", to: "orc", message } : {}),
+        title: cardId !== undefined ? `card ${cardId}` : undefined,
+        status: "running",
+        cardId,
+        sessionId: OID,
+        executionId,
+      } as any);
+    };
+
+    // Execution 1 starts — idle attach binds to it.
+    publish("execution.started", "exec_1");
+    publish("card.queued", "exec_1", 101);
+    publish("channel.message", "exec_1", 101, "discussing plan");
+    publish("execution.completed", "exec_1");
+    await new Promise((r) => setTimeout(r, 40));
+
+    const kinds = frames
+      .filter((f) => f.t === "activity")
+      .map((f) => (f as any).event.kind as string);
+    expect(kinds).toEqual([
+      "execution.started",
+      "card.queued",
+      "channel.message",
+      "execution.completed",
+    ]);
+    const channel = frames.find(
+      (f) => f.t === "activity" && (f as any).event?.kind === "channel.message",
+    ) as Extract<TuiServerFrame, { t: "activity" }> | undefined;
+    expect(channel?.event).toMatchObject({ from: "worker", to: "orc", message: "discussing plan" });
+
+    // After terminal settlement the binding returns to idle-follow: late
+    // events from the settled execution are rejected.
+    publish("card.completed", "exec_1", 101);
+    await new Promise((r) => setTimeout(r, 40));
+    expect(frames.filter((f) => f.t === "activity" && (f as any).event?.kind === "card.completed").length).toBe(0);
+
+    // Execution 2 starts — the same attachment follows it.
+    publish("execution.started", "exec_2");
+    publish("card.queued", "exec_2", 202);
+    await new Promise((r) => setTimeout(r, 40));
+    const exec2Events = frames
+      .filter((f) => f.t === "activity" && (f as any).event?.executionId === "exec_2")
+      .map((f) => (f as any).event.kind as string);
+    expect(exec2Events).toEqual(["execution.started", "card.queued"]);
+
+    conn.destroy();
+  });
+
+  it("idle attach receives a burst published synchronously (delivery-time predicate binding)", async () => {
+    const feed = new OrcActivityFeed();
+    const orc = { id: "1749563282_O_01" } as unknown as ManagedSession;
+    const mockSpin = makeMockSpin({ orcSession: orc, orcBusy: false }).spin;
+
+    adapter = new TuiSocketAdapter({
+      spin: mockSpin,
+      onMessage: makeRecoveryHandler(),
+      socketPath: sockPath,
+      orcActivityFeed: feed,
+    });
+    await adapter.start();
+
+    const { conn, frames } = await attachAndCollect(sockPath, { kind: "orc" });
+    await new Promise((r) => setTimeout(r, 40));
+
+    // Full execution published in ONE stack before any microtask delivery:
+    // start → card → channel → terminal. The predicate must bind at delivery
+    // time, not lose the mid-burst events at publish time.
+    const OID = "1749563282_O_01";
+    feed.publish({ kind: "execution.started", sessionId: OID, executionId: "exec_1" } as any);
+    feed.publish({ kind: "card.queued", title: "c", status: "queued", cardId: 5, sessionId: OID, executionId: "exec_1" } as any);
+    feed.publish({ kind: "channel.message", from: "w", to: "orc", message: "burst", sessionId: OID, executionId: "exec_1", cardId: 5 } as any);
+    feed.publish({ kind: "execution.completed", summary: "done", sessionId: OID, executionId: "exec_1" } as any);
+    await new Promise((r) => setTimeout(r, 40));
+
+    const kinds = frames
+      .filter((f) => f.t === "activity")
+      .map((f) => (f as any).event.kind as string);
+    expect(kinds).toEqual(["execution.started", "card.queued", "channel.message", "execution.completed"]);
+    conn.destroy();
+  });
+
+  it("superseding attach stops delivery to the replaced attachment", async () => {
+    const feed = new OrcActivityFeed();
+    const orc = { id: "1749563282_O_01" } as unknown as ManagedSession;
+    const mockSpin = makeMockSpin({ orcSession: orc, orcBusy: false }).spin;
+
+    adapter = new TuiSocketAdapter({
+      spin: mockSpin,
+      onMessage: makeRecoveryHandler(),
+      socketPath: sockPath,
+      orcActivityFeed: feed,
+    });
+    await adapter.start();
+
+    const first = await attachAndCollect(sockPath, { kind: "orc" });
+    await new Promise((r) => setTimeout(r, 40));
+    const second = await attachAndCollect(sockPath, { kind: "orc" });
+    await new Promise((r) => setTimeout(r, 40));
+
+    const OID = "1749563282_O_01";
+    feed.publish({ kind: "execution.started", sessionId: OID, executionId: "exec_1" } as any);
+    feed.publish({ kind: "card.queued", title: "c", status: "queued", cardId: 5, sessionId: OID, executionId: "exec_1" } as any);
+    await new Promise((r) => setTimeout(r, 40));
+
+    // Only the second (current) attachment receives activity.
+    const firstActivity = first.frames.filter((f) => f.t === "activity");
+    expect(firstActivity.length).toBe(0);
+    expect(second.frames.filter((f) => f.t === "activity").length).toBeGreaterThanOrEqual(2);
+
+    first.conn.destroy();
+    second.conn.destroy();
+  });
+});
