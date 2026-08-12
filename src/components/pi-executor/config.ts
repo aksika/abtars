@@ -1,6 +1,7 @@
 import { configDir } from "../transport-config.js";
-import { existsSync, readFileSync, realpathSync, statSync, openSync, readSync, closeSync } from "node:fs";
-import { resolve, isAbsolute, relative, sep } from "node:path";
+import { existsSync, readFileSync, realpathSync, statSync, openSync, readSync, closeSync, mkdirSync } from "node:fs";
+import { resolve, isAbsolute, relative, sep, join } from "node:path";
+import { abtarsHome } from "../../paths.js";
 import { logInfo, logWarn, logDebug } from "../logger.js";
 import type { ResumeCapability } from "./types.js";
 
@@ -87,7 +88,10 @@ export function loadPiConfig(): PiExecutorConfig | null {
       maxWallClockMs: raw.maxWallClockMs ?? 30 * 60 * 1000,
       abortGraceMs: raw.abortGraceMs ?? 10_000,
       projectTrust: raw.projectTrust ?? "never",
-      sessionStorageRoot: raw.sessionStorageRoot ?? "",
+      // Durable Pi session files live under the abtars state directory by
+      // default — the operator may still override with an explicit absolute
+      // path. Empty/missing falls back to `~/.abtars/state`.
+      sessionStorageRoot: resolveSessionStorageRoot(raw.sessionStorageRoot),
     };
 
     logInfo(TAG, `Pi executor loaded: ${config.command} (${Object.keys(config.workspaceAliases).length} aliases, max ${config.maxConcurrent} concurrent)`);
@@ -96,6 +100,27 @@ export function loadPiConfig(): PiExecutorConfig | null {
     logWarn(TAG, `${p}: failed to load — ${err instanceof Error ? err.message : String(err)}`);
     return null;
   }
+}
+
+/**
+ * Resolve the effective durable Pi session storage root. An explicit absolute
+ * operator value wins; missing or empty falls back to the abtars `state/`
+ * directory (the canonical runtime-state location). The directory is created
+ * best-effort so a fresh install never fails with `policy_changed`.
+ */
+export function resolveSessionStorageRoot(raw: string | undefined): string {
+  if (raw && raw.trim()) {
+    if (!isAbsolute(raw.trim())) {
+      logWarn(TAG, `sessionStorageRoot "${raw}" is not absolute — falling back to the state directory`);
+      return join(abtarsHome(), "state");
+    }
+    return raw.trim();
+  }
+  const fallback = join(abtarsHome(), "state");
+  try {
+    mkdirSync(fallback, { recursive: true });
+  } catch { /* best effort — the validator reports policy_changed if missing */ }
+  return fallback;
 }
 
 export function resolveAndValidateWorkspace(alias: string, config: PiExecutorConfig): { canonicalPath: string; error?: string } {

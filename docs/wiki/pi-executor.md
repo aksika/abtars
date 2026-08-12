@@ -72,7 +72,7 @@ override via the `/pi run` command takes precedence.
 | `maxWallClockMs` | 1800000 (30min) | Hard wall-clock limit |
 | `projectTrust` | `"never"` | `"always"` or `"never"` — maps to Pi's `--approve`/`--no-approve` |
 | `workspaceAliases` | — | Named workspace paths; only allowlisted aliases are usable |
-| `sessionStorageRoot` | `""` | Absolute path for durable Pi session files |
+| `sessionStorageRoot` | `~/.abtars/state` | Absolute path for durable Pi session files. Missing or empty falls back to the abtars `state/` directory (the canonical runtime-state location) |
 
 ## Commands
 

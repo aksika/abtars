@@ -5,9 +5,9 @@
 import { describe, it, expect, vi, beforeAll, afterAll, beforeEach, afterEach } from "vitest";
 import { posix, win32 } from "node:path";
 import { isPathWithinRoot, resolveAndValidateWorkspace, validatePiWorkspaceAliases, type PiExecutorConfig, loadPiConfig } from "./config.js";
-import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
+import { mkdtempSync, writeFileSync, rmSync, existsSync } from "node:fs";
 import { join } from "node:path";
-import { tmpdir } from "node:os";
+import { tmpdir, homedir } from "node:os";
 
 let mockConfigDir = "/nonexistent";
 
@@ -289,6 +289,25 @@ describe("loadPiConfig", () => {
     expect(cfg!.enabled).toBe(true);
     expect(cfg!.command).toBe("pi");
     expect(cfg!.workspaceAliases).toHaveProperty("work");
+  });
+
+  it("#1635: sessionStorageRoot defaults to the abtars state directory, never empty", () => {
+    writeFileSync(configPath, JSON.stringify({
+      enabled: true, command: "pi", workspaceAliases: { work: { path: "/tmp" } },
+    }), "utf-8");
+    const cfg = loadPiConfig()!;
+    expect(cfg.sessionStorageRoot).toBe(join(homedir(), ".abtars", "state"));
+    expect(existsSync(cfg.sessionStorageRoot)).toBe(true); // created best-effort
+    // an explicit absolute path wins
+    writeFileSync(configPath, JSON.stringify({
+      enabled: true, command: "pi", workspaceAliases: { work: { path: "/tmp" } }, sessionStorageRoot: "/tmp/pi-sess",
+    }), "utf-8");
+    expect(loadPiConfig()!.sessionStorageRoot).toBe("/tmp/pi-sess");
+    // an explicit empty string also falls back (empty = default)
+    writeFileSync(configPath, JSON.stringify({
+      enabled: true, command: "pi", workspaceAliases: { work: { path: "/tmp" } }, sessionStorageRoot: "",
+    }), "utf-8");
+    expect(loadPiConfig()!.sessionStorageRoot).toBe(join(homedir(), ".abtars", "state"));
   });
 
   it("#1638: defaults maxConcurrent to 3 and preserves an explicit operator value", () => {
