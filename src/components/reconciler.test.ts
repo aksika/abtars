@@ -321,7 +321,7 @@ describe("Reconciler — #1411 domain guard", () => {
     it("queued card with pending attempt dispatches once", async () => {
       cardHasContractMock.mockReturnValue(true);
       getContractForCardMock.mockReturnValue({ id: "c_1" });
-      getLatestAttemptMock.mockReturnValue({ id: "a_1", lifecycle: "pending" });
+      getLatestAttemptMock.mockReturnValue({ id: "a_1", lifecycle: "pending", executor_kind: "agent", executor_id: "spin-local", generation: 1 });
       setupDispatchPump(1);
       mod.requestReconcile(1);
       await flush();
@@ -336,7 +336,7 @@ describe("Reconciler — #1411 domain guard", () => {
     it("dispatches exactly once under duplicate wakeups", async () => {
       cardHasContractMock.mockReturnValue(true);
       getContractForCardMock.mockReturnValue({ id: "c_1" });
-      getLatestAttemptMock.mockReturnValue({ id: "a_1", lifecycle: "pending" });
+      getLatestAttemptMock.mockReturnValue({ id: "a_1", lifecycle: "pending", executor_kind: "agent", executor_id: "spin-local", generation: 1 });
       setupDispatchPump(1);
       for (let i = 0; i < 10; i++) {
         mod.requestReconcile(1);
@@ -358,7 +358,7 @@ describe("Reconciler — #1411 domain guard", () => {
 
     it("queued card with non-pending lifecycle does not dispatch", async () => {
       cardHasContractMock.mockReturnValue(true);
-      getLatestAttemptMock.mockReturnValue({ id: "a_1", lifecycle: "running" });
+      getLatestAttemptMock.mockReturnValue({ id: "a_1", lifecycle: "running", executor_kind: "agent", executor_id: "spin-local", generation: 1 });
       kanbanGetCardMock.mockReturnValue(makeCard({ status: "queued" }));
       mod.requestReconcile(1);
       await flush();
@@ -368,7 +368,7 @@ describe("Reconciler — #1411 domain guard", () => {
     it("two supervised card IDs can each make progress", async () => {
       cardHasContractMock.mockReturnValue(true);
       getContractForCardMock.mockReturnValue({ id: "c_1" });
-      getLatestAttemptMock.mockReturnValue({ id: "a_1", lifecycle: "pending" });
+      getLatestAttemptMock.mockReturnValue({ id: "a_1", lifecycle: "pending", executor_kind: "agent", executor_id: "spin-local", generation: 1 });
 
       const card1 = { id: 1, parent_id: 100, status: "queued", type: "W", title: "test", priority: "MEDIUM", created_at: new Date().toISOString() } as any;
       const card2 = { id: 2, parent_id: 100, status: "queued", type: "W", title: "test", priority: "MEDIUM", created_at: new Date().toISOString() } as any;
@@ -403,7 +403,7 @@ describe("Reconciler — #1411 domain guard", () => {
       // Re-mock everything else
       const { WorkerSupervisionService: WSS } = await import("./worker-supervision-service.js");
       cardHasContractMock.mockReturnValue(true);
-      getLatestAttemptMock.mockReturnValue({ id: "a_1", lifecycle: "failed" });
+      getLatestAttemptMock.mockReturnValue({ id: "a_1", lifecycle: "failed", executor_kind: "agent", executor_id: "spin-local", generation: 1 });
       kanbanGetCardMock.mockReturnValue(makeCard({ status: "failed" }));
 
       const localMod = await import("./reconciler.js");
@@ -595,7 +595,7 @@ describe("Reconciler — #1546 scheduled-root driver", () => {
     kanbanGetChildrenMock.mockReturnValue(opts.children ?? []);
     if (opts.attemptLifecycle !== undefined) {
       getLatestAttemptMock.mockReturnValue(
-        opts.attemptLifecycle === null ? null : { id: "a_1", lifecycle: opts.attemptLifecycle },
+        opts.attemptLifecycle === null ? null : { id: "a_1", lifecycle: opts.attemptLifecycle, executor_kind: "agent", executor_id: "spin-local", generation: 1 },
       );
     }
   }

@@ -228,7 +228,10 @@ export function makeScheduledProjectFixture(
                 attemptId: `att_fixture_${workerId}`,
               });
               if (!("error" in created)) {
-                const claim = new WorkerStore().claimAttempt(workerId, created.contract.id, "agent", "fixture", 1);
+                const pending = new WorkerStore().getAttempt(created.attemptId);
+                const claim = pending
+                  ? new WorkerStore().claimAttempt(workerId, created.contract.id, pending.executor_kind, pending.executor_id, 1)
+                  : null;
                 if (claim) new WorkerStore().markAttemptRunning(claim.attemptId);
               }
             } catch { /* best effort — the card alone still carries custody */ }
@@ -281,7 +284,10 @@ export function makeScheduledProjectFixture(
               attemptId: `att_fixture_repair_${repairWorkerId}`,
             });
             if (!("error" in created)) {
-              const claim = new WorkerStore().claimAttempt(repairWorkerId, created.contract.id, "agent", "fixture", 1);
+              const pending = new WorkerStore().getAttempt(created.attemptId);
+              const claim = pending
+                ? new WorkerStore().claimAttempt(repairWorkerId, created.contract.id, pending.executor_kind, pending.executor_id, 1)
+                : null;
               if (claim) new WorkerStore().markAttemptRunning(claim.attemptId);
             }
           } catch { /* best effort */ }

@@ -29,7 +29,7 @@ const TEST_ENVELOPE: WorkerResultEnvelopeV1 = {
     ordinal: 1,
     contract_id: "c_test_001",
     contract_digest: TEST_CONTRACT.digest,
-    executor_kind: "local_worker",
+    executor_kind: "agent",
     executor_id: "spin-01",
     started_at: "2026-07-12T00:00:00.000Z",
     finished_at: "2026-07-12T00:01:00.000Z",
@@ -110,7 +110,7 @@ describe("WorkerSupervisionStore", () => {
       card_id: 101,
       contract_id: "c_test_001",
       ordinal: 1,
-      executor_kind: "local_worker",
+      executor_kind: "agent",
       executor_id: "spin-01",
       status: "pending",
       started_at: "2026-07-12T00:00:00.000Z",
@@ -126,12 +126,12 @@ describe("WorkerSupervisionStore", () => {
     store.insertContract(TEST_CONTRACT, 101);
     store.insertAttempt({
       id: "a_test_001", card_id: 101, contract_id: "c_test_001",
-      ordinal: 1, executor_kind: "local_worker", executor_id: "spin-01",
+      ordinal: 1, executor_kind: "agent", executor_id: "spin-01",
       status: "pending", started_at: "2026-07-12T00:00:00.000Z",
     });
     expect(() => store.insertAttempt({
       id: "a_test_002", card_id: 101, contract_id: "c_test_001",
-      ordinal: 1, executor_kind: "local_worker", executor_id: "spin-01",
+      ordinal: 1, executor_kind: "agent", executor_id: "spin-01",
       status: "pending", started_at: "2026-07-12T00:00:00.000Z",
     })).toThrow();
   });
@@ -141,12 +141,12 @@ describe("WorkerSupervisionStore", () => {
     store.insertContract(TEST_CONTRACT, 101);
     store.insertAttempt({
       id: "a_002", card_id: 101, contract_id: "c_test_001",
-      ordinal: 2, executor_kind: "local_worker", executor_id: "spin-01",
+      ordinal: 2, executor_kind: "agent", executor_id: "spin-01",
       status: "pending", started_at: "2026-07-12T00:00:00.000Z",
     });
     store.insertAttempt({
       id: "a_001", card_id: 101, contract_id: "c_test_001",
-      ordinal: 1, executor_kind: "local_worker", executor_id: "spin-01",
+      ordinal: 1, executor_kind: "agent", executor_id: "spin-01",
       status: "pending", started_at: "2026-07-12T00:00:00.000Z",
     });
     const attempts = store.getAttemptsForCard(101);
@@ -161,7 +161,7 @@ describe("WorkerSupervisionStore", () => {
     expect(store.nextOrdinal(101)).toBe(1);
     store.insertAttempt({
       id: "a_001", card_id: 101, contract_id: "c_test_001",
-      ordinal: 1, executor_kind: "local_worker", executor_id: "spin-01",
+      ordinal: 1, executor_kind: "agent", executor_id: "spin-01",
       status: "pending", started_at: "2026-07-12T00:00:00.000Z",
     });
     expect(store.nextOrdinal(101)).toBe(2);
@@ -171,7 +171,7 @@ describe("WorkerSupervisionStore", () => {
     const store = new Store();
     store.insertAttempt({
       id: "a_test_001", card_id: 101, contract_id: "c_test_001",
-      ordinal: 1, executor_kind: "local_worker", executor_id: "spin-01",
+      ordinal: 1, executor_kind: "agent", executor_id: "spin-01",
       status: "running", started_at: "2026-07-12T00:00:00.000Z",
     });
     store.insertResult("a_test_001", TEST_ENVELOPE);
@@ -184,7 +184,7 @@ describe("WorkerSupervisionStore", () => {
     const store = new Store();
     store.insertAttempt({
       id: "a_test_001", card_id: 101, contract_id: "c_test_001",
-      ordinal: 1, executor_kind: "local_worker", executor_id: "spin-01",
+      ordinal: 1, executor_kind: "agent", executor_id: "spin-01",
       status: "running", started_at: "2026-07-12T00:00:00.000Z",
     });
     const result = store.terminalSettlement({ attemptId: "a_test_001", expectedGeneration: 1, desiredState: "completed", stableReason: "test", envelope: TEST_ENVELOPE });
@@ -261,7 +261,7 @@ describe("WorkerSupervisionStore", () => {
     const store = new Store();
     store.insertAttempt({
       id: "a_pending_cancel", card_id: 101, contract_id: "c_test_001",
-      ordinal: 1, executor_kind: "local_worker", executor_id: "spin-01",
+      ordinal: 1, executor_kind: "agent", executor_id: "spin-01",
       status: "pending", started_at: "2026-07-12T00:00:00.000Z",
     });
     expect(store.cancelPendingAttempt("a_pending_cancel", "project_abort")).toBe(true);
@@ -315,7 +315,7 @@ describe("WorkerSupervisionStore", () => {
     const store = new Store();
     store.insertAttempt({
       id: "a_test_001", card_id: 101, contract_id: "c_test_001",
-      ordinal: 1, executor_kind: "local_worker", executor_id: "spin-01",
+      ordinal: 1, executor_kind: "agent", executor_id: "spin-01",
       status: "running", started_at: "2026-07-12T00:00:00.000Z",
     });
     store.terminalSettlement({ attemptId: "a_test_001", expectedGeneration: 1, desiredState: "completed", stableReason: "test", envelope: TEST_ENVELOPE });
@@ -327,7 +327,7 @@ describe("WorkerSupervisionStore", () => {
     const store = new Store();
     store.insertAttempt({
       id: "a_test_001", card_id: 101, contract_id: "c_test_001",
-      ordinal: 1, executor_kind: "local_worker", executor_id: "spin-01",
+      ordinal: 1, executor_kind: "agent", executor_id: "spin-01",
       status: "running", started_at: "2026-07-12T00:00:00.000Z",
     });
     store.terminalSettlement({ attemptId: "a_test_001", expectedGeneration: 1, desiredState: "completed", stableReason: "test", envelope: TEST_ENVELOPE });
@@ -342,7 +342,7 @@ describe("WorkerSupervisionStore", () => {
     expect(store.cardHasSettledAttempts(101)).toBe(false);
     store.insertAttempt({
       id: "a_test_001", card_id: 101, contract_id: "c_test_001",
-      ordinal: 1, executor_kind: "local_worker", executor_id: "spin-01",
+      ordinal: 1, executor_kind: "agent", executor_id: "spin-01",
       status: "running", started_at: "2026-07-12T00:00:00.000Z",
     });
     store.terminalSettlement({ attemptId: "a_test_001", expectedGeneration: 1, desiredState: "completed", stableReason: "test", envelope: TEST_ENVELOPE });
@@ -356,12 +356,12 @@ describe("WorkerSupervisionStore", () => {
       store.db.transaction(() => {
         store.insertAttempt({
           id: "a_001", card_id: 101, contract_id: "c_test_001",
-          ordinal: 1, executor_kind: "local_worker", executor_id: "spin-01",
+          ordinal: 1, executor_kind: "agent", executor_id: "spin-01",
           status: "pending", started_at: "now",
         });
         store.insertAttempt({
           id: "a_002", card_id: 101, contract_id: "c_test_001",
-          ordinal: 1, executor_kind: "local_worker", executor_id: "spin-01",
+          ordinal: 1, executor_kind: "agent", executor_id: "spin-01",
           status: "pending", started_at: "now",
         });
       });
@@ -377,7 +377,7 @@ describe("WorkerSupervisionStore", () => {
       store.insertContract(TEST_CONTRACT, 101);
       store.insertAttempt({
         id: "a_lc_001", card_id: 101, contract_id: "c_test_001",
-        ordinal: 1, executor_kind: "local_worker", executor_id: "spin-01",
+        ordinal: 1, executor_kind: "agent", executor_id: "spin-01",
         status: "pending", started_at: "2026-07-12T00:00:00.000Z",
       });
     });
@@ -453,7 +453,7 @@ describe("WorkerSupervisionStore", () => {
       store.completeAttempt("a_lc_001");
       store.insertAttempt({
         id: "a_lc_002", card_id: 101, contract_id: "c_test_001",
-        ordinal: 2, executor_kind: "local_worker", executor_id: "spin-01",
+        ordinal: 2, executor_kind: "agent", executor_id: "spin-01",
         status: "pending", started_at: "2026-07-12T00:00:00.000Z",
       });
       const claim2 = store.claimAttempt(101, "c_test_001", "agent", "spin-01", 2);
@@ -568,6 +568,21 @@ describe("WorkerSupervisionStore", () => {
         executorMax: 3, projectId, reservedTokens: 20,
       });
       expect(result.kind).toBe("budget_wait");
+    });
+
+    it("refuses executor_mismatch when the requested pair differs from the stored pending pair", () => {
+      const s = new Store();
+      const { projectId, cardId, attemptId } = setupProjectAndChild(s);
+      const result = s.claimAttemptWithinLimits({
+        cardId, attemptId, contractId: "c_201",
+        executorKind: "pi", executorId: "pi-coding", generation: 1,
+        executorMax: 3, projectId, reservedTokens: 0,
+      });
+      expect(result.kind).toBe("executor_mismatch");
+      const unchanged = s.getAttempt(attemptId);
+      expect(unchanged?.lifecycle).toBe("pending");
+      expect(unchanged?.executor_kind).toBe("agent");
+      expect(unchanged?.executor_id).toBe("spin-local");
     });
   });
 
@@ -789,6 +804,140 @@ describe("WorkerSupervisionStore", () => {
       // The reservation is still active (claimed by a live retry attempt) —
       // age alone must not delete it even though its source attempt is gone.
       expect(store.db.prepare(`SELECT * FROM retry_budget_reservations WHERE source_attempt_id = 'a_old'`).get()).toBeDefined();
+    });
+  });
+
+  describe("executor identity migration (#1637)", () => {
+    it("normalizes legacy attempt kinds and built-in Spin ID, and recomputes envelope digests", async () => {
+      const store = new Store();
+      store.insertContract(TEST_CONTRACT, 101);
+      // Legacy rows as they existed before #1637: local_worker/spin attempt
+      // plus an envelope whose embedded kind uses the old vocabulary.
+      store.db.prepare(`
+        INSERT INTO worker_attempts
+          (id, card_id, contract_id, ordinal, executor_kind, executor_id, status, lifecycle, started_at)
+        VALUES ('a_legacy', 101, ?, 1, 'local_worker', 'spin', 'pending', 'pending', '2026-01-01T00:00:00.000Z')
+      `).run(TEST_CONTRACT.id);
+      store.db.prepare(`
+        INSERT INTO worker_attempts
+          (id, card_id, contract_id, ordinal, executor_kind, executor_id, status, lifecycle, started_at)
+        VALUES ('a_remote_legacy', 101, ?, 2, 'remote_worker', 'molty-x', 'pending', 'pending', '2026-01-01T00:00:00.000Z')
+      `).run(TEST_CONTRACT.id);
+      const legacyEnvelope = {
+        schema_version: 1,
+        attempt: {
+          id: "a_legacy",
+          ordinal: 1,
+          contract_id: TEST_CONTRACT.id,
+          contract_digest: TEST_CONTRACT.digest,
+          executor_kind: "local_worker",
+          executor_id: "spin",
+          started_at: "2026-01-01T00:00:00.000Z",
+          finished_at: "2026-01-01T00:01:00.000Z",
+        },
+        outcome: "failed",
+        criteria: [],
+        checks: [],
+        artifacts: [],
+        worker_report: { summary: "legacy", claims: [], unresolved_risks: [] },
+      };
+      const legacyJson = JSON.stringify(legacyEnvelope);
+      const legacyDigest = store.db.prepare(`SELECT * FROM worker_results WHERE attempt_id = ?`).get("a_legacy") as { envelope_digest: string } | undefined;
+      store.db.prepare(`
+        INSERT INTO worker_results (attempt_id, envelope_json, envelope_digest, created_at)
+        VALUES ('a_legacy', ?, 'stale-digest', '2026-01-01T00:00:00.000Z')
+      `).run(legacyJson);
+      void legacyDigest;
+
+      // A second constructor run is the migration trigger — same as a restart.
+      const store2 = new Store();
+
+      const local = store2.getAttempt("a_legacy");
+      expect(local?.executor_kind).toBe("agent");
+      expect(local?.executor_id).toBe("spin-local");
+      const remote = store2.getAttempt("a_remote_legacy");
+      expect(remote?.executor_kind).toBe("remote");
+      expect(remote?.executor_id).toBe("molty-x");
+
+      const result = store2.getResult("a_legacy");
+      expect(result).toBeDefined();
+      const migratedEnvelope = JSON.parse(result!.envelope_json) as WorkerResultEnvelopeV1;
+      expect(migratedEnvelope.attempt.executor_kind).toBe("agent");
+      expect(migratedEnvelope.attempt.executor_id).toBe("spin-local");
+      // digest recomputed from the exact updated JSON, not the stale value
+      // (the store hashes the raw envelope JSON string, sha256)
+      const { createHash } = await import("node:crypto") as typeof import("node:crypto");
+      const expectedDigest = createHash("sha256").update(result!.envelope_json, "utf-8").digest("hex");
+      expect(result!.envelope_digest).toBe(expectedDigest);
+      expect(result!.envelope_digest).not.toBe("stale-digest");
+
+      // A second migration pass is a no-op: no legacy values remain.
+      const store3 = new Store();
+      const again = store3.getAttempt("a_legacy");
+      expect(again?.executor_kind).toBe("agent");
+      expect(store3.db.prepare(`SELECT COUNT(*) AS cnt FROM worker_attempts WHERE executor_kind IN ('local_worker','remote_worker') OR executor_id = 'spin'`).get()).toEqual({ cnt: 0 });
+    });
+
+    it("a pending pre-upgrade local_worker/spin attempt dispatches and its claim validates the stored pair", () => {
+      const store = new Store();
+      store.insertContract(TEST_CONTRACT, 101);
+      store.db.prepare(`
+        INSERT INTO worker_attempts
+          (id, card_id, contract_id, ordinal, executor_kind, executor_id, status, lifecycle, started_at)
+        VALUES ('a_legacy2', 101, ?, 1, 'local_worker', 'spin', 'pending', 'pending', '2026-01-01T00:00:00.000Z')
+      `).run(TEST_CONTRACT.id);
+
+      const store2 = new Store();
+      const migrated = store2.getAttempt("a_legacy2");
+      expect(migrated?.executor_kind).toBe("agent");
+      expect(migrated?.executor_id).toBe("spin-local");
+
+      // Claiming with the canonical pair succeeds and does NOT rewrite the identity columns.
+      const claim = store2.claimAttempt(101, TEST_CONTRACT.id, "agent", "spin-local", 1);
+      expect(claim).not.toBeNull();
+      const claimed = store2.getAttempt("a_legacy2");
+      expect(claimed?.lifecycle).toBe("claimed");
+      expect(claimed?.executor_kind).toBe("agent");
+      expect(claimed?.executor_id).toBe("spin-local");
+    });
+
+    it("claim rejects a requested executor pair different from the stored pending pair", () => {
+      const store = new Store();
+      store.insertContract(TEST_CONTRACT, 101);
+      store.insertAttempt({
+        id: "a_pair", card_id: 101, contract_id: TEST_CONTRACT.id,
+        ordinal: 1, executor_kind: "agent", executor_id: "spin-local",
+        status: "pending", started_at: "2026-01-01T00:00:00.000Z",
+      });
+      expect(store.claimAttempt(101, TEST_CONTRACT.id, "agent", "other-id", 1)).toBeNull();
+      expect(store.claimAttempt(101, TEST_CONTRACT.id, "pi", "pi-coding", 1)).toBeNull();
+      const unchanged = store.getAttempt("a_pair");
+      expect(unchanged?.lifecycle).toBe("pending");
+      expect(unchanged?.executor_kind).toBe("agent");
+      expect(unchanged?.executor_id).toBe("spin-local");
+    });
+
+    it("a canonical pi attempt's absence envelope reports executor_kind pi", () => {
+      const store = new Store();
+      store.insertContract(TEST_CONTRACT, 101);
+      store.insertAttempt({
+        id: "a_pi", card_id: 101, contract_id: TEST_CONTRACT.id,
+        ordinal: 1, executor_kind: "pi", executor_id: "pi-coding",
+        status: "pending", started_at: "2026-01-01T00:00:00.000Z",
+      });
+      store.db.prepare(`
+        UPDATE worker_attempts SET lifecycle = 'running', status = 'running' WHERE id = 'a_pi'
+      `).run();
+      const settlement = store.terminalSettlement({
+        attemptId: "a_pi",
+        expectedGeneration: 1,
+        desiredState: "failed",
+        stableReason: "test",
+      });
+      expect(settlement.kind).toBe("settled");
+      const result = store.getResultByAttempt("a_pi");
+      expect(result?.envelope.attempt.executor_kind).toBe("pi");
+      expect(result?.envelope.attempt.executor_id).toBe("pi-coding");
     });
   });
 });

@@ -326,7 +326,7 @@ describe("WorkerSupervisionService", () => {
       const first = store.getAttempt(created.attemptId)!;
       store.insertAttempt({
         id: "a_newer", card_id: 101, contract_id: first.contract_id,
-        ordinal: 2, executor_kind: "local_worker", executor_id: "spin-01",
+        ordinal: 2, executor_kind: "agent", executor_id: "spin-01",
         status: "running", started_at: "2026-07-12T00:01:00.000Z",
       });
 

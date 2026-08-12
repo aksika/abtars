@@ -16,6 +16,7 @@ import { resolveSchedulingPolicy, deriveDeadline } from "./swarm-dispatch-policy
 import { LeaseReconciliationService } from "./executor-lease-reconciler.js";
 import type { LifecycleWakeScheduler } from "./lifecycle-wake-scheduler.js";
 import { ExecutorLeaseStore } from "./executor-lease-store.js";
+import { AGENT_EXECUTOR_ID, type ExecutorKind } from "./worker-executor-identity.js";
 import { ProjectReviewStore, type ProjectState, type ProjectSupervisionRow } from "./project-acceptance/project-review-store.js";
 import { ReviewCaseAssembler } from "./project-acceptance/project-review-case.js";
 import { readProjectCriterionCoverage, coverageSignature } from "./project-acceptance/project-criterion-coverage.js";
@@ -50,11 +51,12 @@ function workerAdapter(): SwarmExecutorAdapter {
   return _workerAdapter ??= new SpinWorkerAdapter();
 }
 
-function dispatchExecutor(executorKind: string, executorId: string): { kind: "agent" | "pi"; id: string; adapter: SwarmExecutorAdapter } | undefined {
-  if (executorKind === "local_worker" || executorKind === "agent") {
-    // Older attempts were created as local_worker/spin. They are still Spin
-    // attempts, but all new claims use the durable executor identity below.
-    return { kind: "agent", id: "spin-local", adapter: workerAdapter() };
+function dispatchExecutor(executorKind: ExecutorKind, executorId: string): { kind: "agent" | "pi"; id: string; adapter: SwarmExecutorAdapter } | undefined {
+  // #1637: one durable executor identity — the attempt column is the
+  // canonical vocabulary (agent | pi | remote). Dispatch executes the stored
+  // identity unchanged; it never substitutes a synonym.
+  if (executorKind === "agent") {
+    return { kind: "agent", id: executorId, adapter: workerAdapter() };
   }
   if (executorKind === "pi" && _piService) {
     const { PiExecutorAdapter } = require("./pi-executor-adapter.js") as typeof import("./pi-executor-adapter.js");
@@ -1260,7 +1262,7 @@ async function dispatchOnePass(): Promise<void> {
     const latestAttempt = store.getLatestAttempt(card.id);
     if (!latestAttempt || latestAttempt.lifecycle !== "pending") continue;
 
-    const executor = dispatchExecutor(latestAttempt.executor_kind ?? "local_worker", latestAttempt.executor_id ?? "spin");
+    const executor = dispatchExecutor(latestAttempt.executor_kind, latestAttempt.executor_id);
     if (!executor) continue;
     const capacityKey = `${executor.kind}:${executor.id}`;
     let capacity = capacities.get(capacityKey);
@@ -1400,7 +1402,7 @@ function evaluateLease(card: KanbanCard): void {
     const latestAttempt = supStore.getLatestAttempt(card.id);
     if (!latestAttempt) return;
 
-    const adapterResolver = (executorKind: string, _executorId: string) => {
+    const adapterResolver = (executorKind: ExecutorKind, _executorId: string) => {
       if (executorKind === "agent") return workerAdapter();
       if (executorKind === "pi") {
         const svc = _piService;
@@ -1477,7 +1479,7 @@ function buildRetryService(): import("./retry/retry-service.js").RetryService {
   const { LocalExecutorCatalog } = require("./retry/local-executor-catalog.js") as typeof import("./retry/local-executor-catalog.js");
   const { providerForAdapter } = require("./retry/local-executor-catalog.js") as typeof import("./retry/local-executor-catalog.js");
   const catalog = new LocalExecutorCatalog({
-    spinProvider: providerForAdapter(workerAdapter(), "spin"),
+    spinProvider: providerForAdapter(workerAdapter(), AGENT_EXECUTOR_ID),
   });
   return new RetryService({ executorCatalog: catalog });
 }
@@ -1744,7 +1746,7 @@ function runBootRecovery(): void {
   }
 }
 
-function resolveAdapterForRecovery(executorKind: string, _executorId: string): SwarmExecutorAdapter | undefined {
+function resolveAdapterForRecovery(executorKind: ExecutorKind, _executorId: string): SwarmExecutorAdapter | undefined {
   if (executorKind === "agent") return workerAdapter();
   if (executorKind === "pi") {
     const svc = _piService;

@@ -184,7 +184,7 @@ describe("ReviewCaseAssembler coverage read-model (#1604)", () => {
       card_id: lane3,
       contract_id: lane3Contract.id,
       ordinal: 1,
-      executor_kind: "local_worker",
+      executor_kind: "agent",
       executor_id: "spin",
       status: "failed",
       started_at: new Date().toISOString(),
@@ -264,7 +264,7 @@ describe("projectReviewBrief decision-ready projection (#1620)", () => {
       ],
       uncovered_criteria: ["c_gap"],
       child_summaries: [
-        { card_id: 1001, contract_id: "cc_1", outcome: "completed", criterion_statuses: [{ criterion_id: "c_sup", status: "passed" }], attempts: 2, executor_kind: "local_worker" },
+        { card_id: 1001, contract_id: "cc_1", outcome: "completed", criterion_statuses: [{ criterion_id: "c_sup", status: "passed" }], attempts: 2, executor_kind: "agent" },
       ],
       peer_contributions: [
         { card_id: 2001, peer: "molty", outcome: "completed", projection_summary: "Molty completed the analysis", root_criteria: ["c_sup"], provenance: '{"receiver_peer":"molty"}' },

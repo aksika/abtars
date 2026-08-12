@@ -163,7 +163,7 @@ function makeEnvelope(childId: number, contractId: string, rootCriterionId: stri
   const now = new Date().toISOString();
   return {
     schema_version: 1,
-    attempt: { id: `a_${childId}_1`, ordinal: 1, contract_id: contractId, contract_digest: `d_${contractId}`, executor_kind: "local_worker", executor_id: "spin-local", started_at: now, finished_at: now },
+    attempt: { id: `a_${childId}_1`, ordinal: 1, contract_id: contractId, contract_digest: `d_${contractId}`, executor_kind: "agent", executor_id: "spin-local", started_at: now, finished_at: now },
     outcome: "completed",
     criteria: [{ criterion_id: rootCriterionId, status: "passed", evidence_ids: [`chk_${childId}`] }],
     checks: [{ check_id: `chk_${childId}`, argv: ["echo", "ok"], started_at: now, finished_at: now, timed_out: false, exit_code: 0, signal: null, stdout_excerpt: "ok", stderr_excerpt: "" }],

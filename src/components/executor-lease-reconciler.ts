@@ -1,4 +1,5 @@
 import type { SwarmExecutorAdapter, ExecutionClaim, CancelReason } from "./swarm-executor-types.js";
+import type { ExecutorKind } from "./worker-executor-identity.js";
 import { ExecutorLeaseStore } from "./executor-lease-store.js";
 import { evaluateLease, applyInspectionOutcome } from "./executor-lease-policy.js";
 import type { LeasePolicy, AttemptLeaseSnapshotV1 } from "./executor-progress.js";
@@ -10,7 +11,7 @@ import { logSwarmTrace } from "./swarm-trace.js";
 const TAG = "lease-reconciler";
 
 export interface AdapterResolver {
-  (executorKind: string, executorId: string): SwarmExecutorAdapter | undefined;
+  (executorKind: ExecutorKind, executorId: string): SwarmExecutorAdapter | undefined;
 }
 
 export class LeaseReconciliationService {

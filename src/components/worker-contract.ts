@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import type { ExecutorKind } from "./worker-executor-identity.js";
 
 export type CriterionStatus = "passed" | "failed" | "not_run" | "inconclusive";
 export type WorkerOutcome = "completed" | "failed" | "cancelled" | "timed_out";
@@ -121,7 +122,7 @@ export interface WorkerResultEnvelopeV1 {
     readonly ordinal: number;
     readonly contract_id: string;
     readonly contract_digest: string;
-    readonly executor_kind: "local_worker" | "remote_worker";
+    readonly executor_kind: ExecutorKind;
     readonly executor_id: string;
     readonly started_at: string;
     readonly finished_at: string;
@@ -675,7 +676,7 @@ export function validateEnvelope(raw: unknown): ValidationResult {
     if (!isNonEmptyString(a["contract_id"])) errors.push(error("missing_field", "$.attempt.contract_id", "contract_id is required"));
     if (!isNonEmptyString(a["contract_digest"])) errors.push(error("missing_field", "$.attempt.contract_digest", "contract_digest is required"));
     const ek = a["executor_kind"];
-    if (ek !== "local_worker" && ek !== "remote_worker") errors.push(error("type_error", "$.attempt.executor_kind", 'must be "local_worker" or "remote_worker"'));
+    if (ek !== "agent" && ek !== "pi" && ek !== "remote") errors.push(error("type_error", "$.attempt.executor_kind", 'must be "agent", "pi" or "remote"'));
     if (!isNonEmptyString(a["executor_id"])) errors.push(error("missing_field", "$.attempt.executor_id", "executor_id is required"));
     if (!isNonEmptyString(a["started_at"])) errors.push(error("missing_field", "$.attempt.started_at", "started_at is required"));
     if (!isNonEmptyString(a["finished_at"])) errors.push(error("missing_field", "$.attempt.finished_at", "finished_at is required"));

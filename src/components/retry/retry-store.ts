@@ -3,6 +3,7 @@ import type { FailureClassificationV1 } from "./failure-classifier.js";
 import type { RetryPolicyDecision } from "./retry-policy.js";
 import type { RetryDirectiveV1 } from "./retry-directive.js";
 import type { WorkerAcceptanceContractV1 } from "../worker-contract.js";
+import type { ExecutorKind } from "../worker-executor-identity.js";
 
 export interface ClassificationRow {
   id: string;
@@ -208,11 +209,11 @@ export class RetryStore {
     directive: RetryDirectiveV1,
     revisedContract: WorkerAcceptanceContractV1,
     targetAttemptId: string,
-    _executorKind: string,
+    _executorKind: ExecutorKind,
     _executorId: string,
     _earliestClaimAt: string,
     budgetReservation: { tokens: number; cost: number; switches: number },
-    attemptInsert: { id: string; card_id: number; contract_id: string; ordinal: number; executor_kind: string; executor_id: string; status: string; started_at: string; source_attempt_id: string; earliest_claim_at: string },
+    attemptInsert: { id: string; card_id: number; contract_id: string; ordinal: number; executor_kind: ExecutorKind; executor_id: string; status: string; started_at: string; source_attempt_id: string; earliest_claim_at: string },
   ): AcceptRetryOutcome {
     try {
       return this.db.transaction((): AcceptRetryOutcome => {

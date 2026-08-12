@@ -6,6 +6,7 @@ import { WorkerSupervisionService } from "../worker-supervision-service.js";
 import { WorkerSupervisionStore } from "../worker-supervision-store.js";
 import type { WorkerResultEnvelopeV1 } from "../worker-contract.js";
 import { redactEnvelope } from "../worker-contract.js";
+import type { ExecutorKind } from "../worker-executor-identity.js";
 import { REVIEW_ACTIONS, CRITERION_VERDICTS, OUTPUT_DISPOSITIONS, CONTRADICTION_DISPOSITIONS } from "./project-review-contract.js";
 
 // ── Types ─────────────────────────────────────────────────────────────────────
@@ -79,7 +80,7 @@ export interface ReviewCaseSnapshot {
     outcome: string;
     criterion_statuses: readonly { criterion_id: string; status: string }[];
     attempts: number;
-    executor_kind: string;
+    executor_kind: ExecutorKind | "unknown";
   }[];
 
   /** #1433/#1493: Peer contribution cards linked to this project — claims, not observations */
@@ -208,7 +209,7 @@ export class ReviewCaseAssembler {
       outcome: string;
       criterion_statuses: Array<{ criterion_id: string; status: string }>;
       attempts: number;
-      executor_kind: string;
+      executor_kind: ExecutorKind | "unknown";
       result?: WorkerResultEnvelopeV1;
     }> = [];
 
@@ -398,7 +399,7 @@ export interface ProjectReviewChildBriefV1 {
   outcome: string;
   criterion_statuses: Array<{ criterion_id: string; status: string }>;
   attempts: number;
-  executor_kind: string;
+  executor_kind: ExecutorKind | "unknown";
 }
 
 export interface ProjectReviewBriefV1 {
@@ -509,7 +510,7 @@ export function projectReviewBrief(
       status: truncateProse(status.status, 64),
     })),
     attempts: child.attempts,
-    executor_kind: truncateProse(child.executor_kind, 64),
+    executor_kind: truncateProse(child.executor_kind, 64) as ExecutorKind | "unknown",
   }));
 
   const contradictions: ContradictionCandidate[] = snapshot.contradiction_candidates.map(candidate => ({

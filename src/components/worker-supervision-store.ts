@@ -2,6 +2,14 @@ import { requireTaskDatabase, type TaskDatabase } from "./tasks/kanban-board.js"
 import type { WorkerAcceptanceContractV1, WorkerResultEnvelopeV1 } from "./worker-contract.js";
 import { ExecutorLeaseStore } from "./executor-lease-store.js";
 import { logSwarmTrace } from "./swarm-trace.js";
+import {
+  isExecutorKind,
+  normalizeLegacyExecutorId,
+  normalizeLegacyExecutorKind,
+  type ExecutorKind,
+} from "./worker-executor-identity.js";
+
+export type { ExecutorKind } from "./worker-executor-identity.js";
 
 export type AttemptLifecycle =
   | "pending"
@@ -13,8 +21,6 @@ export type AttemptLifecycle =
   | "failed"
   | "cancelled"
   | "timed_out";
-
-export type ExecutorKind = "agent" | "pi" | "remote";
 
 export interface ContractRow {
   id: string;
@@ -34,7 +40,7 @@ export interface AttemptRow {
   card_id: number;
   contract_id: string;
   ordinal: number;
-  executor_kind: string;
+  executor_kind: ExecutorKind;
   executor_id: string;
   generation: number;
   lifecycle: AttemptLifecycle;
@@ -222,6 +228,79 @@ export class WorkerSupervisionStore {
       END
       WHERE lifecycle = 'pending' AND status <> 'pending'
     `);
+
+    // #1637: one durable executor identity. Normalize the two legacy attempt
+    // synonyms (local_worker -> agent, remote_worker -> remote) and the
+    // built-in Spin ID (spin -> spin-local) for pending/unclaimed attempts,
+    // then normalize the embedded envelope JSON and recompute its digest —
+    // all in one transaction so the attempt row and its audit envelope can
+    // never advance contradictory. Idempotent: a second migration matches
+    // zero rows.
+    const legacyKindRows = db.prepare(`
+      SELECT id, executor_kind, executor_id, lifecycle FROM worker_attempts
+      WHERE executor_kind IN ('local_worker', 'remote_worker')
+         OR executor_id = 'spin'
+    `).all() as Array<{ id: string; executor_kind: string; executor_id: string; lifecycle: string }>;
+    if (legacyKindRows.length > 0 || this.legacyEnvelopeCount() > 0) {
+      db.transaction(() => {
+        for (const row of legacyKindRows) {
+          const kind = normalizeLegacyExecutorKind(row.executor_kind);
+          if (!kind) continue;
+          const id = normalizeLegacyExecutorId(kind, row.executor_id);
+          db.prepare(`
+            UPDATE worker_attempts SET executor_kind = ?, executor_id = ?
+            WHERE id = ?
+          `).run(kind, id, row.id);
+        }
+        this.migrateLegacyEnvelopes();
+      });
+    }
+  }
+
+  /** #1637: count rows whose embedded envelope still uses a legacy synonym. */
+  private legacyEnvelopeCount(): number {
+    try {
+      const rows = this.db.prepare(`SELECT envelope_json FROM worker_results`).all() as Array<{ envelope_json: string }>;
+      let count = 0;
+      for (const row of rows) {
+        const parsed = JSON.parse(row.envelope_json) as { attempt?: { executor_kind?: string; executor_id?: string } };
+        const kind = parsed?.attempt?.executor_kind;
+        if (kind === "local_worker" || kind === "remote_worker" || (kind === "agent" && parsed.attempt?.executor_id === "spin")) count++;
+      }
+      return count;
+    } catch {
+      return 0;
+    }
+  }
+
+  /** #1637: rewrite legacy executor synonyms inside stored envelope JSON and
+   * recompute the digest from the exact updated JSON. Throws (rolling back
+   * the caller's transaction) when a targeted envelope cannot be parsed. */
+  private migrateLegacyEnvelopes(): void {
+    const rows = this.db.prepare(`SELECT attempt_id, envelope_json, envelope_digest FROM worker_results`).all() as Array<{ attempt_id: string; envelope_json: string; envelope_digest: string }>;
+    for (const row of rows) {
+      let parsed: { attempt?: { executor_kind?: string; executor_id?: string } };
+      try {
+        parsed = JSON.parse(row.envelope_json) as { attempt?: { executor_kind?: string; executor_id?: string } };
+      } catch (err) {
+        throw new Error(`migration aborted: worker_results.${row.attempt_id} envelope is not valid JSON: ${err instanceof Error ? err.message : String(err)}`);
+      }
+      const attempt = parsed.attempt;
+      if (!attempt || typeof attempt !== "object") continue;
+      const kind = normalizeLegacyExecutorKind(attempt.executor_kind);
+      if (!kind && !(attempt.executor_kind === "agent" && attempt.executor_id === "spin")) continue;
+      const newKind = kind ?? (attempt.executor_kind as "agent");
+      attempt.executor_kind = newKind;
+      if (typeof attempt.executor_id === "string") {
+        attempt.executor_id = normalizeLegacyExecutorId(newKind, attempt.executor_id);
+      }
+      const updatedJson = JSON.stringify(parsed);
+      const updatedDigest = this.computeEnvelopeDigest(updatedJson);
+      this.db.prepare(`
+        UPDATE worker_results SET envelope_json = ?, envelope_digest = ?
+        WHERE attempt_id = ?
+      `).run(updatedJson, updatedDigest, row.attempt_id);
+    }
   }
 
   insertContract(contract: WorkerAcceptanceContractV1, cardId: number): void {
@@ -261,7 +340,7 @@ export class WorkerSupervisionStore {
     card_id: number;
     contract_id: string;
     ordinal: number;
-    executor_kind: string;
+    executor_kind: ExecutorKind;
     executor_id: string;
     remote_task_id?: number;
     status: string;
@@ -329,6 +408,10 @@ export class WorkerSupervisionStore {
     const latest = this.getLatestAttempt(cardId);
     if (!latest) return null;
     if (latest.lifecycle !== "pending") return null;
+    // #1637: the pending attempt owns its executor identity. Claim validates
+    // the stored pair and never rewrites either column with dispatch-resolved
+    // values — dispatch or retry must not silently reroute an accepted contract.
+    if (latest.executor_kind !== executorKind || latest.executor_id !== executorId) return null;
 
     const attemptId = latest.id;
 
@@ -345,8 +428,6 @@ export class WorkerSupervisionStore {
     };
 
     const updated = this.lifecycleTransition(attemptId, ["pending"], "claimed", {
-      executor_kind: executorKind,
-      executor_id: executorId,
       generation: String(generation),
       claimed_at: claimedAt,
       hard_deadline_at: hardDeadlineAt ?? null,
@@ -593,7 +674,7 @@ export class WorkerSupervisionStore {
         ordinal: attempt.ordinal,
         contract_id: attempt.contract_id,
         contract_digest: contractRow?.contract_digest ?? "",
-        executor_kind: attempt.executor_kind === "remote" ? "remote_worker" : "local_worker",
+        executor_kind: attempt.executor_kind,
         executor_id: attempt.executor_id,
         started_at: attempt.started_at,
         finished_at: new Date(now).toISOString(),
@@ -608,7 +689,7 @@ export class WorkerSupervisionStore {
 
   // ── #1510: Atomic capacity-and-budget-guarded claim ─────────────────────
 
-  getActiveAttemptCountForExecutor(executorKind: string, executorId: string): number {
+  getActiveAttemptCountForExecutor(executorKind: ExecutorKind, executorId: string): number {
     const sql = `
       SELECT COUNT(*) AS cnt FROM worker_attempts
       WHERE executor_kind = ? AND executor_id = ?
@@ -618,7 +699,7 @@ export class WorkerSupervisionStore {
     return row?.cnt ?? 0;
   }
 
-  getActiveAttemptsForExecutor(executorKind: string, executorId: string): AttemptRow[] {
+  getActiveAttemptsForExecutor(executorKind: ExecutorKind, executorId: string): AttemptRow[] {
     return this.db.prepare(`
       SELECT * FROM worker_attempts
       WHERE executor_kind = ? AND executor_id = ?
@@ -679,12 +760,20 @@ export class WorkerSupervisionStore {
     try {
       return this.db.transaction(() => {
         const attempt = this.db.prepare(`
-          SELECT id, lifecycle, ordinal FROM worker_attempts
+          SELECT id, lifecycle, ordinal, executor_kind, executor_id FROM worker_attempts
           WHERE id = ? AND card_id = ?
-        `).get(input.attemptId, input.cardId) as { id: string; lifecycle: AttemptLifecycle; ordinal: number } | undefined;
+        `).get(input.attemptId, input.cardId) as { id: string; lifecycle: AttemptLifecycle; ordinal: number; executor_kind: string; executor_id: string } | undefined;
         if (!attempt) return { kind: "stale", reason: "attempt not found" };
         if (attempt.lifecycle !== "pending") return { kind: "stale", reason: `attempt lifecycle is ${attempt.lifecycle}` };
         if (!this.isCardLatestAttempt(input.cardId, input.attemptId)) return { kind: "stale", reason: "not latest attempt" };
+        // #1637: the pending attempt owns its executor identity. Claim
+        // validates the stored pair; dispatch resolution is never permission
+        // to rewrite the attempt's executor kind or ID.
+        if (!isExecutorKind(attempt.executor_kind) ||
+            attempt.executor_kind !== input.executorKind ||
+            attempt.executor_id !== input.executorId) {
+          return { kind: "executor_mismatch", reason: `attempt is ${attempt.executor_kind}/${attempt.executor_id}, requested ${input.executorKind}/${input.executorId}` };
+        }
 
         const card = this.db.prepare(`
           SELECT status, parent_id FROM kanban_board WHERE id = ?
@@ -736,10 +825,10 @@ export class WorkerSupervisionStore {
         const claimedAt = new Date().toISOString();
         const updated = this.db.prepare(`
           UPDATE worker_attempts
-          SET lifecycle = 'claimed', claimed_at = ?, generation = ?, executor_kind = ?, executor_id = ?,
+          SET lifecycle = 'claimed', claimed_at = ?, generation = ?,
               hard_deadline_at = ?, reserved_tokens = ?
           WHERE id = ? AND lifecycle = 'pending'
-        `).run(claimedAt, input.generation, input.executorKind, input.executorId,
+        `).run(claimedAt, input.generation,
               input.hardDeadlineAt ?? null, input.reservedTokens, input.attemptId);
         if (updated.changes !== 1) return { kind: "claim_failed", reason: "update did not match" };
 

@@ -509,7 +509,7 @@ describe("spin(spec) — unified session API (#1271)", () => {
     function makeEnvelope(criteria: Array<{ status: string }>): any {
       return {
         schema_version: 1,
-        attempt: { id: "a_1", ordinal: 1, contract_id: "c_1", contract_digest: "d", executor_kind: "local_worker", executor_id: "e", started_at: "", finished_at: "" },
+        attempt: { id: "a_1", ordinal: 1, contract_id: "c_1", contract_digest: "d", executor_kind: "agent", executor_id: "e", started_at: "", finished_at: "" },
         outcome: "completed",
         criteria,
         checks: [],

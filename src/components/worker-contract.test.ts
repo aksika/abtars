@@ -50,7 +50,7 @@ const MINIMAL_ENVELOPE: Record<string, unknown> = {
     ordinal: 1,
     contract_id: "c_test_001",
     contract_digest: "abc123",
-    executor_kind: "local_worker",
+    executor_kind: "agent",
     executor_id: "spin-01",
     started_at: "2026-07-12T00:00:00.000Z",
     finished_at: "2026-07-12T00:01:00.000Z",

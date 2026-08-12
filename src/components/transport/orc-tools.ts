@@ -407,8 +407,9 @@ const reviewWorkerFailureTool: ToolDefinition = {
       const { LocalExecutorCatalog } = await import("../retry/local-executor-catalog.js");
       const { providerForAdapter } = await import("../retry/local-executor-catalog.js");
       const { SpinWorkerAdapter } = await import("../spin-worker-adapter.js");
+      const { AGENT_EXECUTOR_ID } = await import("../worker-executor-identity.js");
       const catalog = new LocalExecutorCatalog({
-        spinProvider: providerForAdapter(new SpinWorkerAdapter(), "spin"),
+        spinProvider: providerForAdapter(new SpinWorkerAdapter(), AGENT_EXECUTOR_ID),
       });
       const service = new RetryService({ executorCatalog: catalog });
       const packet = service.getReviewPacket(attemptId, projectCardId);

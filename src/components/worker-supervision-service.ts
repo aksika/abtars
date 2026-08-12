@@ -3,6 +3,7 @@ import { createHash } from "node:crypto";
 import { isAbsolute, relative, resolve, sep } from "node:path";
 import { WorkerSupervisionStore } from "./worker-supervision-store.js";
 import { normalizeContract, createContractId, createAttemptId, validateEnvelope } from "./worker-contract.js";
+import { AGENT_EXECUTOR_ID } from "./worker-executor-identity.js";
 import { logWarn } from "./logger.js";
 import { logSwarmTrace } from "./swarm-trace.js";
 import type { WorkerAcceptanceContractV1, WorkerResultEnvelopeV1, CriterionStatus, VerificationObservation, ArtifactObservation, RetryContext } from "./worker-contract.js";
@@ -76,9 +77,6 @@ function isWithinWorkspace(workingDir: string, candidate: string): boolean {
 }
 
 /** Map internal executor names to the stable Worker result-contract vocabulary. */
-export function toWorkerExecutorKind(kind: string): "local_worker" | "remote_worker" {
-  return kind === "remote" || kind === "remote_worker" ? "remote_worker" : "local_worker";
-}
 
 export class WorkerSupervisionService {
   private store: WorkerSupervisionStore;
@@ -159,8 +157,8 @@ export class WorkerSupervisionService {
         card_id: cardId,
         contract_id: normalized.contract.id,
         ordinal: this.store.nextOrdinal(cardId),
-        executor_kind: "local_worker",
-        executor_id: "spin",
+        executor_kind: "agent",
+        executor_id: AGENT_EXECUTOR_ID,
         status: "pending",
         started_at: new Date().toISOString(),
       });
@@ -290,7 +288,7 @@ export class WorkerSupervisionService {
     // been migrated to Reconciler-issued claims. Production supervised Spin
     // always supplies attemptId and therefore cannot bypass the claim path.
     if (!attemptId && targetAttempt.lifecycle === "pending") {
-      const claim = this.store.claimAttempt(cardId, contract.id, "agent", "legacy-service", targetAttempt.generation || 1);
+      const claim = this.store.claimAttempt(cardId, contract.id, targetAttempt.executor_kind, targetAttempt.executor_id, targetAttempt.generation || 1);
       if (!claim) return { settled: false, summary: "execution claim rejected", stale: true };
       targetAttempt = this.store.getAttempt(claim.attemptId);
       if (!targetAttempt || !this.store.markAttemptRunning(targetAttempt.id)) {
@@ -313,7 +311,7 @@ export class WorkerSupervisionService {
         ordinal: targetAttempt.ordinal,
         contract_id: contract.id,
         contract_digest: contract.digest,
-        executor_kind: toWorkerExecutorKind(targetAttempt.executor_kind),
+        executor_kind: targetAttempt.executor_kind,
         executor_id: targetAttempt.executor_id,
         started_at: targetAttempt.started_at,
         finished_at: new Date().toISOString(),
