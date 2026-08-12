@@ -19,6 +19,8 @@ const mockPiExecutor = vi.hoisted(() => vi.fn(function () {
     onCapacityReleased: vi.fn(),
     setSettlementRouter: vi.fn(),
     setInputSuspendHook: vi.fn(),
+    setExternalSessionCloser: vi.fn(),
+    setInterruptRouter: vi.fn(),
     startWithClaim: vi.fn(),
   };
 }));

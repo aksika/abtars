@@ -2,7 +2,7 @@
  * config.test.ts — #1394 Pi workspace path containment and alias validation.
  */
 
-import { describe, it, expect, vi, beforeAll, afterAll } from "vitest";
+import { describe, it, expect, vi, beforeAll, afterAll, beforeEach, afterEach } from "vitest";
 import { posix, win32 } from "node:path";
 import { isPathWithinRoot, resolveAndValidateWorkspace, validatePiWorkspaceAliases, type PiExecutorConfig, loadPiConfig } from "./config.js";
 import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
@@ -300,5 +300,94 @@ describe("loadPiConfig", () => {
       enabled: true, command: "pi", workspaceAliases: { work: { path: "/tmp" } }, maxConcurrent: 1,
     }), "utf-8");
     expect(loadPiConfig()!.maxConcurrent).toBe(1);
+  });
+});
+
+// ── #1647: bounded persisted-session proof ──────────────────────────────
+
+describe("validatePersistedSession (#1647)", () => {
+  let sessionRoot: string;
+
+  beforeEach(() => {
+    sessionRoot = mkdtempSync(join(tmpdir(), "pi-session-proof-"));
+  });
+
+  afterEach(() => {
+    rmSync(sessionRoot, { recursive: true, force: true });
+  });
+
+  async function importValidator() {
+    return import("./config.js");
+  }
+
+  it("returns available only when the header id matches and the file is inside the root", async () => {
+    const { validatePersistedSession } = await importValidator();
+    const file = join(sessionRoot, "a.jsonl");
+    writeFileSync(file, JSON.stringify({ type: "session", id: "sess-1" }) + "\n", "utf-8");
+    const ok = validatePersistedSession({ sessionStorageRoot: sessionRoot, expectedSessionId: "sess-1", sessionFile: file });
+    expect(ok).toEqual({ ok: true, sessionId: "sess-1", canonicalFile: file });
+    // Mismatched expected id -> session_missing.
+    const mismatch = validatePersistedSession({ sessionStorageRoot: sessionRoot, expectedSessionId: "sess-2", sessionFile: file });
+    expect(mismatch).toMatchObject({ ok: false, capability: "session_missing" });
+  });
+
+  it("maps identity absence, malformed, empty, and wrong-type headers to non-available capabilities", async () => {
+    const { validatePersistedSession } = await importValidator();
+    const neverStarted = validatePersistedSession({ sessionStorageRoot: sessionRoot, expectedSessionId: undefined, sessionFile: undefined });
+    expect(neverStarted).toMatchObject({ ok: false, capability: "never_started" });
+    const incomplete = validatePersistedSession({ sessionStorageRoot: sessionRoot, expectedSessionId: "s", sessionFile: undefined });
+    expect(incomplete).toMatchObject({ ok: false, capability: "session_missing" });
+    const missingFile = validatePersistedSession({ sessionStorageRoot: sessionRoot, expectedSessionId: "s", sessionFile: join(sessionRoot, "gone.jsonl") });
+    expect(missingFile).toMatchObject({ ok: false, capability: "session_missing" });
+    const emptyFile = join(sessionRoot, "empty.jsonl");
+    writeFileSync(emptyFile, "", "utf-8");
+    const empty = validatePersistedSession({ sessionStorageRoot: sessionRoot, expectedSessionId: "s", sessionFile: emptyFile });
+    expect(empty).toMatchObject({ ok: false, capability: "session_missing" });
+    const malformed = join(sessionRoot, "bad.jsonl");
+    writeFileSync(malformed, "this is not json\n", "utf-8");
+    const bad = validatePersistedSession({ sessionStorageRoot: sessionRoot, expectedSessionId: "s", sessionFile: malformed });
+    expect(bad).toMatchObject({ ok: false, capability: "session_missing" });
+    const wrongType = join(sessionRoot, "wrong.jsonl");
+    writeFileSync(wrongType, JSON.stringify({ type: "message", id: "s" }) + "\n", "utf-8");
+    const wt = validatePersistedSession({ sessionStorageRoot: sessionRoot, expectedSessionId: "s", sessionFile: wrongType });
+    expect(wt).toMatchObject({ ok: false, capability: "session_missing" });
+  });
+
+  it("rejects an over-limit first record without loading the conversation", async () => {
+    const { validatePersistedSession } = await importValidator();
+    const file = join(sessionRoot, "huge.jsonl");
+    const hugeFirstLine = JSON.stringify({ type: "session", id: "s", payload: "x".repeat(80 * 1024) });
+    writeFileSync(file, hugeFirstLine + "\n", "utf-8");
+    const result = validatePersistedSession({ sessionStorageRoot: sessionRoot, expectedSessionId: "s", sessionFile: file });
+    expect(result).toMatchObject({ ok: false, capability: "session_missing" });
+    expect((result as { reason: string }).reason).toContain("64 KiB");
+  });
+
+  it("treats an outside-root target as policy_changed, not session_missing", async () => {
+    const { validatePersistedSession } = await importValidator();
+    const outside = join(tmpdir(), `outside-${Date.now()}.jsonl`);
+    writeFileSync(outside, JSON.stringify({ type: "session", id: "s" }) + "\n", "utf-8");
+    const result = validatePersistedSession({ sessionStorageRoot: sessionRoot, expectedSessionId: "s", sessionFile: outside });
+    expect(result).toMatchObject({ ok: false, capability: "policy_changed" });
+    rmSync(outside, { force: true });
+  });
+
+  it("maps a vanished or misconfigured session root to policy_changed", async () => {
+    const { validatePersistedSession } = await importValidator();
+    const file = join(sessionRoot, "a.jsonl");
+    writeFileSync(file, JSON.stringify({ type: "session", id: "s" }) + "\n", "utf-8");
+    const gone = validatePersistedSession({ sessionStorageRoot: join(sessionRoot, "no-such-root"), expectedSessionId: "s", sessionFile: file });
+    expect(gone).toMatchObject({ ok: false, capability: "policy_changed" });
+    const unset = validatePersistedSession({ sessionStorageRoot: "", expectedSessionId: "s", sessionFile: file });
+    expect(unset).toMatchObject({ ok: false, capability: "policy_changed" });
+  });
+
+  it("never loads or logs conversation content in reasons", async () => {
+    const { validatePersistedSession } = await importValidator();
+    const file = join(sessionRoot, "secret.jsonl");
+    writeFileSync(file, JSON.stringify({ type: "session", id: "other" }) + "\n" + JSON.stringify({ secret: "private-conversation-data" }) + "\n", "utf-8");
+    const result = validatePersistedSession({ sessionStorageRoot: sessionRoot, expectedSessionId: "s", sessionFile: file });
+    expect(result.ok).toBe(false);
+    expect(JSON.stringify(result)).not.toContain("private-conversation-data");
   });
 });

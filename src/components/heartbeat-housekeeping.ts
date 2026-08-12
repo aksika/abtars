@@ -161,7 +161,15 @@ export function createHousekeepingTask(deps: HousekeepingDeps): HeartbeatTask {
   async function prunePiCommands(): Promise<void> {
     const { requireTaskDatabase } = await import("./tasks/kanban-board.js");
     const { PiRunStore } = await import("./pi-executor/pi-run-store.js");
-    const store = new PiRunStore({ db: requireTaskDatabase() });
+    // The configured session root is irrelevant to command/approval pruning;
+    // pass the config value when resolvable, else an empty root (never used
+    // by the cleanup methods).
+    let sessionStorageRoot = "";
+    try {
+      const { loadPiConfig } = await import("./pi-executor/config.js");
+      sessionStorageRoot = loadPiConfig()?.sessionStorageRoot ?? "";
+    } catch { /* best effort */ }
+    const store = new PiRunStore({ db: requireTaskDatabase(), sessionStorageRoot });
     const commands = store.cleanupOldCommands(7 * 24);
     const approvals = store.cleanupConsumedApprovals(7 * 24);
     if (commands > 0 || approvals > 0) {

@@ -5,11 +5,15 @@ import { MAX_PROGRESS_ENTRIES } from "./types.js";
 import type { TaskDatabase } from "../tasks/kanban-board.js";
 import { kanbanTransition, sqliteNow } from "../tasks/kanban-board.js";
 import { completePendingRequestInTransaction, ensureRequestLedgerSchema } from "../pi-request-ledger.js";
+import { validatePersistedSession, type SessionProof } from "./config.js";
 
 export type RpcDelivery = "not_written" | "written_unacknowledged";
 
 export interface PiRunStoreDeps {
   db: TaskDatabase;
+  /** Configured Pi session storage root — the store validates persisted
+   * session targets authoritatively (resume admission, boot recovery). */
+  sessionStorageRoot: string;
 }
 
 /**
@@ -76,7 +80,7 @@ export interface PiTerminalMetadata {
 
 export type PiTerminalSettlement =
   | { committed: true; outcome: PiTerminalOutcome; cardId: number }
-  | { committed: false; reason: "stale_generation" | "wrong_status" | "missing" };
+  | { committed: false; reason: "stale_generation" | "wrong_status" | "missing" | "card_mismatch" };
 
 export type PiStartClaim =
   | { claimed: true; runId: string; generation: number }
@@ -95,14 +99,25 @@ export type PiReleaseResult =
 
 export type PiResumeCommit =
   | { committed: true; runId: string; newGeneration: number; cardId: number }
-  | { committed: false; reason: "stale" | "not_resumable" | "card_mismatch" };
+  | { committed: false; reason: "stale" | "not_resumable" | "session_missing" | "card_mismatch" };
+
+/** #1647 — result of the paired standalone interruption transaction. */
+export type PiInterruptionResult =
+  | { committed: true; runId: string; generation: number; cardId: number }
+  | { committed: false; reason: "missing" | "stale_generation" | "wrong_status" | "card_mismatch" | "supervised" };
+
+/** Internal sentinel: roll back the enclosing transaction after a mutation
+ * outcome (card CAS, run count) failed. Never escapes the store boundary. */
+const ROLLBACK_SENTINEL = Symbol("pi_run_store_rollback");
 
 export class PiRunStore {
   private readonly db: TaskDatabase;
+  private readonly sessionStorageRoot: string;
   private remoteEmitter: RemotePiTransitionEmitter | null = null;
 
   constructor(deps: PiRunStoreDeps) {
     this.db = deps.db;
+    this.sessionStorageRoot = deps.sessionStorageRoot;
     this.migrate();
     ensureRequestLedgerSchema(this.db);
   }
@@ -151,6 +166,23 @@ export class PiRunStore {
     )`);
     try { this.db.exec(`ALTER TABLE pi_runs ADD COLUMN origin_request_id TEXT`); } catch {}
     try { this.db.exec(`ALTER TABLE pi_runs ADD COLUMN delivery_policy TEXT NOT NULL DEFAULT 'leave_remote'`); } catch {}
+    // #1647 — explicit reason the current generation starts. New writes are
+    // always 'initial'; queueResumeGeneration() is the only path that writes
+    // 'resume'. Never derived from the generation number or nullable fields.
+    try { this.db.exec(`ALTER TABLE pi_runs ADD COLUMN generation_intent TEXT NOT NULL DEFAULT 'initial'`); } catch {}
+    // #1647 — one-time backfill: a standalone generation > 1 could only have
+    // advanced through queueResumeGeneration(); supervised rows (which advance
+    // through queueSupervisedGeneration) stay 'initial'. Idempotent: after the
+    // first pass the predicate is already satisfied. Runtime code never
+    // repeats this inference.
+    try {
+      this.db.exec(`
+        UPDATE pi_runs SET generation_intent = 'resume'
+        WHERE execution_generation > 1
+          AND origin != 'supervised'
+          AND generation_intent = 'initial'
+      `);
+    } catch { /* column may not exist on an exotic prior schema */ }
     this.db.exec(`CREATE INDEX IF NOT EXISTS idx_pi_runs_status ON pi_runs(status)`);
     this.db.exec(`CREATE INDEX IF NOT EXISTS idx_pi_runs_card_id ON pi_runs(card_id)`);
     // #1395 — diagnostic reply-outcome columns (idempotent)
@@ -255,8 +287,9 @@ export class PiRunStore {
 
       this.db.prepare(`INSERT INTO pi_runs (id, card_id, workspace_alias, operational_goal, owner_principal_id,
         origin, origin_platform, origin_chat_id, origin_peer, origin_request_id, delivery_policy,
-        execution_generation, current_session_id, status, model_provider, model_id, thinking)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, 'queued', ?, ?, ?)`).run(
+        execution_generation, generation_intent, current_session_id, status, resume_capability,
+        model_provider, model_id, thinking)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, 'initial', ?, 'queued', 'never_started', ?, ?, ?)`).run(
         input.runId, cardId, input.workspaceAlias, input.goal,
         input.ownerPrincipalId, input.origin, input.originPlatform ?? null,
         input.originChatId ?? null, input.originPeer ?? null, input.originRequestId ?? null,
@@ -336,8 +369,9 @@ export class PiRunStore {
     const runId = `pirun_sup_${randomUUID().slice(0, 12)}`;
     this.db.prepare(`INSERT INTO pi_runs (id, card_id, workspace_alias, operational_goal, owner_principal_id,
       origin, origin_platform, origin_chat_id, origin_peer, origin_request_id, delivery_policy,
-      execution_generation, current_session_id, status, model_provider, model_id, thinking)
-      VALUES (?, ?, ?, ?, ?, 'supervised', NULL, NULL, NULL, NULL, 'leave_remote', 1, ?, 'queued', NULL, NULL, NULL)`).run(
+      execution_generation, generation_intent, current_session_id, status, resume_capability,
+      model_provider, model_id, thinking)
+      VALUES (?, ?, ?, ?, ?, 'supervised', NULL, NULL, NULL, NULL, 'leave_remote', 1, 'initial', ?, 'queued', 'never_started', NULL, NULL, NULL)`).run(
       runId, input.cardId, input.workspaceAlias, input.goal,
       input.ownerPrincipalId, input.sessionId,
     );
@@ -409,11 +443,14 @@ export class PiRunStore {
   }
 
   /**
-   * #1396 — Atomically transition a Pi run to its terminal outcome and update
-   * the linked Kanban card in one transaction.  Predicates on run id,
+   * #1396/#1647 — Atomically transition a Pi run to its terminal outcome,
+   * update the linked Kanban card, and release the exact generation's
+   * workspace claim in ONE transaction. Predicates on run id,
    * execution_generation, and expected statuses so that only one concurrent
-   * contender wins.  Publishes no Nerve event — the caller fires the mapped
-   * event only after commit.
+   * contender wins. The card transition outcome and the run update count are
+   * mandatory predicates: if either loses, neither durable record changes
+   * (rollback). Publishes no Nerve event — the caller fires the mapped event
+   * only after commit.
    */
   settleTerminal(input: {
     runId: string;
@@ -422,7 +459,7 @@ export class PiRunStore {
     outcome: PiTerminalOutcome;
     metadata: PiTerminalMetadata;
   }): PiTerminalSettlement {
-    return this.db.transaction<PiTerminalSettlement>(() => {
+    const fn = (): PiTerminalSettlement => {
       // Read current run (within the transaction)
       const runRow = this.db.prepare(
         `SELECT card_id, execution_generation, status FROM pi_runs WHERE id = ?`
@@ -463,29 +500,175 @@ export class PiRunStore {
       // Update linked kanban card — #1590: through the single transition
       // helper, inside the same transaction. Events fire at the executor
       // layer after commit, so emit is disabled here (no double fire).
-      if (input.outcome === "completed") {
-        kanbanTransition({
-          cardId, from: ["running"], to: "done", actor: "pi_run_settle",
-          reason: "pi run settled",
-          attemptId: input.runId,
-          claimGeneration: input.generation,
-          fields: { result_summary: input.metadata.resultSummary?.slice(0, 4000) ?? null, completed_at: sqliteNow() },
-          emit: false,
-        }, this.db);
-      } else {
-        // failed or cancelled → kanban_board status = 'failed'
-        kanbanTransition({
-          cardId, from: ["running"], to: "failed", actor: "pi_run_settle",
-          reason: "pi run failed",
-          attemptId: input.runId,
-          claimGeneration: input.generation,
-          fields: { error: input.metadata.error?.slice(0, 1000) ?? input.outcome, completed_at: sqliteNow() },
-          emit: false,
-        }, this.db);
-      }
+      // #1647: a lost card CAS rolls back the run update — the run and its
+      // card always settle as one generation.
+      const cardOutcome = input.outcome === "completed"
+        ? kanbanTransition({
+            cardId, from: ["running"], to: "done", actor: "pi_run_settle",
+            reason: "pi run settled",
+            attemptId: input.runId,
+            claimGeneration: input.generation,
+            fields: { result_summary: input.metadata.resultSummary?.slice(0, 4000) ?? null, completed_at: sqliteNow() },
+            emit: false,
+          }, this.db)
+        : kanbanTransition({
+            cardId, from: ["running"], to: "failed", actor: "pi_run_settle",
+            reason: "pi run failed",
+            attemptId: input.runId,
+            claimGeneration: input.generation,
+            fields: { error: input.metadata.error?.slice(0, 1000) ?? input.outcome, completed_at: sqliteNow() },
+            emit: false,
+          }, this.db);
+      if (cardOutcome.kind !== "applied") throw ROLLBACK_SENTINEL;
+
+      // #1647 — release the exact generation's workspace claim in the same
+      // transaction (exact (run_id, execution_generation) fence).
+      this.db.prepare(`
+        DELETE FROM pi_workspace_claims
+        WHERE run_id = ? AND execution_generation = ?
+      `).run(input.runId, input.generation);
 
       return { committed: true, outcome: input.outcome, cardId };
-    });
+    };
+    try {
+      return this.db.transaction(fn);
+    } catch (err) {
+      if (err === ROLLBACK_SENTINEL) return { committed: false, reason: "card_mismatch" };
+      throw err;
+    }
+  }
+
+  /**
+   * #1647 — Paired standalone interruption. One transaction:
+   *   run: starting|running|awaiting_input|cancelling -> interrupted
+   *   card: running -> failed
+   * plus cleared PID/pending-input authority, the truthful resume
+   * capability/session proof, generation-fenced workspace release, and the
+   * durable interrupted fact. A card CAS loss rolls back the run update;
+   * duplicate or stale interruption mutates nothing. Supervised runs are
+   * refused here — the Worker attempt owns the W card (see
+   * interruptSupervisedRun).
+   */
+  interruptGeneration(input: {
+    runId: string;
+    generation: number;
+    continuity: SessionProof;
+  }): PiInterruptionResult {
+    const fn = (): PiInterruptionResult => {
+      const runRow = this.db.prepare(
+        `SELECT id, card_id, execution_generation, status, origin, pi_session_id, pi_session_file
+         FROM pi_runs WHERE id = ?`
+      ).get(input.runId) as Record<string, unknown> | undefined;
+      if (!runRow) return { committed: false, reason: "missing" };
+      if ((runRow.execution_generation as number) !== input.generation) return { committed: false, reason: "stale_generation" };
+      const status = runRow.status as string;
+      if (!["starting", "running", "awaiting_input", "cancelling"].includes(status)) return { committed: false, reason: "wrong_status" };
+      if ((runRow.origin as string) === "supervised") return { committed: false, reason: "supervised" };
+      const cardId = runRow.card_id as number;
+
+      // Persist the truthful proof identity/capability. A non-available proof
+      // keeps the historical identity fields but records the derived
+      // capability — the generation cannot claim resumability.
+      const proof = input.continuity.ok
+        ? { piSessionId: input.continuity.sessionId, piSessionFile: input.continuity.canonicalFile }
+        : { piSessionId: (runRow.pi_session_id as string | null) ?? undefined, piSessionFile: (runRow.pi_session_file as string | null) ?? undefined };
+      const capability: ResumeCapability = input.continuity.ok ? "available" : input.continuity.capability;
+
+      const runResult = this.db.prepare(`
+        UPDATE pi_runs
+        SET status = 'interrupted',
+            observed_pid = NULL,
+            pending_request_id = NULL,
+            pending_request_type = NULL,
+            pi_session_id = ?,
+            pi_session_file = ?,
+            resume_capability = ?,
+            updated_at = datetime('now')
+        WHERE id = ? AND execution_generation = ? AND status IN ('starting', 'running', 'awaiting_input', 'cancelling')
+      `).run(proof.piSessionId ?? null, proof.piSessionFile ?? null, capability, input.runId, input.generation);
+      if (runResult.changes !== 1) return { committed: false, reason: "wrong_status" };
+
+      // Paired card: running -> failed. A lost CAS rolls back the interruption.
+      const cardOutcome = kanbanTransition({
+        cardId, from: ["running"], to: "failed", actor: "pi_interrupt",
+        reason: "run interrupted",
+        attemptId: input.runId,
+        claimGeneration: input.generation,
+        fields: { error: "interrupted" },
+        emit: false,
+      }, this.db);
+      if (cardOutcome.kind !== "applied") throw ROLLBACK_SENTINEL;
+
+      // Generation-fenced workspace release inside the same transaction.
+      this.db.prepare(`
+        DELETE FROM pi_workspace_claims
+        WHERE run_id = ? AND execution_generation = ?
+      `).run(input.runId, input.generation);
+
+      // #1358 review — mechanism A: interruption and its fact commit together.
+      if (this.remoteEmitter) {
+        this.remoteEmitter.emitTransitionInTx({
+          runId: input.runId,
+          fromStatus: status,
+          toStatus: "interrupted",
+        });
+      }
+
+      return { committed: true, runId: input.runId, generation: input.generation, cardId };
+    };
+    try {
+      return this.db.transaction(fn);
+    } catch (err) {
+      if (err === ROLLBACK_SENTINEL) return { committed: false, reason: "card_mismatch" };
+      throw err;
+    }
+  }
+
+  /**
+   * #1647 — Run-row-only interruption for a SUPERVISED Pi generation. Never
+   * touches any card: the Worker attempt owns the W card. Must run inside the
+   * coordinator's transaction (same pattern as settleSupervisedRunInTransaction).
+   */
+  interruptSupervisedRun(input: {
+    runId: string;
+    generation: number;
+    continuity: SessionProof;
+  }): boolean {
+    const runRow = this.db.prepare(
+      `SELECT id, execution_generation, status, pi_session_id, pi_session_file FROM pi_runs WHERE id = ? AND origin = 'supervised'`
+    ).get(input.runId) as Record<string, unknown> | undefined;
+    if (!runRow) return false;
+    if ((runRow.execution_generation as number) !== input.generation) return false;
+    const status = runRow.status as string;
+    if (!["starting", "running", "awaiting_input", "cancelling"].includes(status)) return false;
+
+    const proof = input.continuity.ok
+      ? { piSessionId: input.continuity.sessionId, piSessionFile: input.continuity.canonicalFile }
+      : { piSessionId: (runRow.pi_session_id as string | null) ?? undefined, piSessionFile: (runRow.pi_session_file as string | null) ?? undefined };
+    const capability: ResumeCapability = input.continuity.ok ? "available" : input.continuity.capability;
+
+    const runResult = this.db.prepare(`
+      UPDATE pi_runs
+      SET status = 'interrupted',
+          observed_pid = NULL,
+          pending_request_id = NULL,
+          pending_request_type = NULL,
+          pi_session_id = ?,
+          pi_session_file = ?,
+          resume_capability = ?,
+          updated_at = datetime('now')
+      WHERE id = ? AND execution_generation = ? AND status IN ('starting', 'running', 'awaiting_input', 'cancelling')
+    `).run(proof.piSessionId ?? null, proof.piSessionFile ?? null, capability, input.runId, input.generation);
+    if (runResult.changes !== 1) return false;
+
+    if (this.remoteEmitter) {
+      this.remoteEmitter.emitTransitionInTx({
+        runId: input.runId,
+        fromStatus: status,
+        toStatus: "interrupted",
+      });
+    }
+    return true;
   }
 
   /**
@@ -999,34 +1182,61 @@ export class PiRunStore {
   }
 
   /**
-   * #1405 — Atomically create a new resume generation: increment generation,
-   * set run and card to queued, clear terminal fields. Returns the commit or
-   * a typed conflict.
+   * #1647 — Atomic resume admission. The single transaction that advances a
+   * standalone Pi run to a new resume generation:
+   *
+   * 1. verifies run id, expected generation, status `interrupted|failed`, and
+   *    `resume_capability='available'`;
+   * 2. revalidates the PERSISTED session target (row's pi_session_id/file)
+   *    inside the store boundary, so direct callers cannot bypass validation
+   *    or supply a replacement target;
+   * 3. updates exactly one pi_runs row to generation N+1, queued, with
+   *    `generation_intent='resume'` while preserving the verified target;
+   * 4. applies exactly one linked-card transition `failed|done -> queued`;
+   * 5. appends the durable remote `resumed` transition fact with the bump.
+   *
+   * Any run-update count other than one, or a card outcome other than
+   * `applied`, rolls back the whole transaction (both durable records stay
+   * unchanged). The caller compensates the preallocated external C session.
    */
   queueResumeGeneration(input: {
     runId: string;
     expectedGeneration: number;
     newSessionId: string;
-    sessionFile: string;
   }): PiResumeCommit {
-    return this.db.transaction<PiResumeCommit>(() => {
+    const fn = (): PiResumeCommit => {
       const row = this.db.prepare(
-        `SELECT id, execution_generation, status, card_id, resume_capability FROM pi_runs WHERE id = ?`
+        `SELECT id, execution_generation, status, card_id, resume_capability, origin,
+                pi_session_id, pi_session_file FROM pi_runs WHERE id = ?`
       ).get(input.runId) as Record<string, unknown> | undefined;
       if (!row) return { committed: false, reason: "stale" };
       if ((row.execution_generation as number) !== input.expectedGeneration) return { committed: false, reason: "stale" };
       if ((row.status as string) !== "interrupted" && (row.status as string) !== "failed") return { committed: false, reason: "not_resumable" };
       if ((row.resume_capability as string) !== "available") return { committed: false, reason: "not_resumable" };
 
+      // Authoritative in-store revalidation of the persisted target — no
+      // caller-supplied file, no path-existence shortcut.
+      const proof = validatePersistedSession({
+        sessionStorageRoot: this.sessionStorageRoot,
+        expectedSessionId: (row.pi_session_id as string | null) ?? undefined,
+        sessionFile: (row.pi_session_file as string | null) ?? undefined,
+      });
+      if (!proof.ok) {
+        return { committed: false, reason: "session_missing" };
+      }
+
       const cardId = row.card_id as number;
       const newGen = input.expectedGeneration + 1;
 
-      // Update run
+      // Update run — exactly one row. Keep the verified Pi target, set the
+      // explicit resume intent, clear only generation-terminal fields.
       const runResult = this.db.prepare(`
         UPDATE pi_runs
         SET status = 'queued',
             execution_generation = ?,
+            generation_intent = 'resume',
             current_session_id = ?,
+            pi_session_id = ?,
             pi_session_file = ?,
             observed_pid = NULL,
             pending_request_id = NULL,
@@ -1038,12 +1248,13 @@ export class PiRunStore {
             resume_capability = 'available',
             updated_at = datetime('now')
         WHERE id = ? AND execution_generation = ? AND status IN ('interrupted', 'failed')
-      `).run(newGen, input.newSessionId, input.sessionFile, input.runId, input.expectedGeneration);
+      `).run(newGen, input.newSessionId, proof.sessionId, proof.canonicalFile, input.runId, input.expectedGeneration);
+      if (runResult.changes !== 1) throw ROLLBACK_SENTINEL;
 
       // Update card — #1590: through the transition helper (failed|done →
-      // queued is legal; the pi-run-service layer fires card:queued after
-      // commit, so emit is disabled here).
-      kanbanTransition({
+      // queued is legal; the service layer fires card:queued after commit, so
+      // emit is disabled here). A lost CAS rolls back the generation bump.
+      const cardOutcome = kanbanTransition({
         cardId,
         from: ["failed", "done"],
         to: "queued",
@@ -1054,11 +1265,12 @@ export class PiRunStore {
         fields: { completed_at: null, error: null, result_summary: null },
         emit: false,
       }, this.db);
+      if (cardOutcome.kind !== "applied") throw ROLLBACK_SENTINEL;
 
       // #1358 review — mechanism A: the generation bump and its `resumed`
       // fact commit together. The origin may advance generations only through
       // this authenticated fact, so it must never be lost to a crash.
-      if (runResult.changes > 0 && this.remoteEmitter) {
+      if (this.remoteEmitter) {
         this.remoteEmitter.emitTransitionInTx({
           runId: input.runId,
           fromStatus: row.status as string,
@@ -1068,20 +1280,35 @@ export class PiRunStore {
       }
 
       return { committed: true, runId: input.runId, newGeneration: newGen, cardId };
-    });
+    };
+    try {
+      return this.db.transaction(fn);
+    } catch (err) {
+      if (err === ROLLBACK_SENTINEL) return { committed: false, reason: "card_mismatch" };
+      throw err;
+    }
   }
 
   /**
-   * #1405 — Recover all non-terminal Pi runs at boot.
-   * - queued runs: preserved as-is, return their card IDs for post-registration wakeup
+   * #1405/#1647 — Recover all non-terminal Pi runs at boot.
+   * - queued runs: preserved as-is (generation_intent intact); a queued
+   *   `resume` generation is revalidated and refused (capability recorded)
+   *   when its target disappeared before dispatch; return their card IDs for
+   *   post-registration wakeup.
    * - active runs (starting/running/awaiting_input/cancelling): interrupted
-   * - terminal runs: unchanged
+   *   with the SAME paired run/card predicates as graceful shutdown — the
+   *   capability is derived from the bounded session proof, never from
+   *   `pi_session_id IS NOT NULL`. A card conflict rolls back that row's
+   *   mutation. Supervised rows never get their W card touched; they are
+   *   returned for Worker-owned settlement.
+   * - terminal runs: unchanged.
    * Returns queued card IDs that should be woken after Pi service registration.
    */
   recoverNonterminal(): { interrupted: number; queuedCardIds: number[]; supervisedInterruptedRunIds: string[] } {
-    return this.db.transaction<{ interrupted: number; queuedCardIds: number[]; supervisedInterruptedRunIds: string[] }>(() => {
+    const fn = (): { interrupted: number; queuedCardIds: number[]; supervisedInterruptedRunIds: string[] } => {
       const runs = this.db.prepare(
-        `SELECT id, status, card_id, origin, execution_generation FROM pi_runs WHERE status NOT IN ('completed', 'failed', 'cancelled', 'interrupted')`
+        `SELECT id, status, card_id, origin, execution_generation, pi_session_id, pi_session_file,
+                generation_intent, resume_capability FROM pi_runs WHERE status NOT IN ('completed', 'failed', 'cancelled', 'interrupted')`
       ).all() as Record<string, unknown>[];
 
       const activeStatuses = ["starting", "running", "awaiting_input", "cancelling"];
@@ -1093,58 +1320,109 @@ export class PiRunStore {
         const runId = run.id as string;
         const cardId = run.card_id as number;
         const status = run.status as string;
+        const generation = run.execution_generation as number;
 
         if (status === "queued") {
           queuedCardIds.push(cardId);
-          // Clear stale observed PID
-          this.db.prepare(`UPDATE pi_runs SET observed_pid = NULL, updated_at = datetime('now') WHERE id = ?`).run(runId);
+          // Clear stale observed PID — fenced to the exact generation.
+          this.db.prepare(`UPDATE pi_runs SET observed_pid = NULL, updated_at = datetime('now')
+            WHERE id = ? AND execution_generation = ?`).run(runId, generation);
+          // #1647 — a queued resume generation whose target vanished before
+          // dispatch must fail closed: record the derived capability without
+          // rewriting the explicit intent.
+          if ((run.generation_intent as string) === "resume") {
+            const proof = validatePersistedSession({
+              sessionStorageRoot: this.sessionStorageRoot,
+              expectedSessionId: (run.pi_session_id as string | null) ?? undefined,
+              sessionFile: (run.pi_session_file as string | null) ?? undefined,
+            });
+            if (!proof.ok && (run.resume_capability as string) === "available") {
+              this.db.prepare(`UPDATE pi_runs SET resume_capability = ?, updated_at = datetime('now')
+                WHERE id = ? AND execution_generation = ?`).run(proof.capability, runId, generation);
+            }
+          }
         } else if (activeStatuses.includes(status)) {
-          this.db.prepare(`
+          // #1647 — capability from bounded session proof, never ID presence.
+          const proof = validatePersistedSession({
+            sessionStorageRoot: this.sessionStorageRoot,
+            expectedSessionId: (run.pi_session_id as string | null) ?? undefined,
+            sessionFile: (run.pi_session_file as string | null) ?? undefined,
+          });
+          const capability: ResumeCapability = proof.ok ? "available" : proof.capability;
+
+          if (run.origin === "supervised") {
+            // Worker supervision owns the W-card terminal transition. Interrupt
+            // the run row only (with truthful capability) and return the run to
+            // boot so the coordinator settles the attempt through the canonical
+            // Worker transaction.
+            const runResult = this.db.prepare(`
+              UPDATE pi_runs
+              SET status = 'interrupted',
+                  observed_pid = NULL,
+                  pending_request_id = NULL,
+                  pending_request_type = NULL,
+                  resume_capability = ?,
+                  updated_at = datetime('now')
+              WHERE id = ? AND execution_generation = ? AND status IN ('starting', 'running', 'awaiting_input', 'cancelling')
+            `).run(capability, runId, generation);
+            if (runResult.changes === 1) {
+              this.db.prepare(`
+                DELETE FROM pi_workspace_claims
+                WHERE run_id = ? AND execution_generation = ?
+              `).run(runId, generation);
+              if (this.remoteEmitter) {
+                this.remoteEmitter.emitTransitionInTx({ runId, fromStatus: status, toStatus: "interrupted" });
+              }
+              supervisedInterruptedRunIds.push(runId);
+              interrupted++;
+            }
+            continue;
+          }
+
+          // Standalone: paired run/card interruption — a lost card CAS rolls
+          // back this row's mutation rather than committing disagreement.
+          const runResult = this.db.prepare(`
             UPDATE pi_runs
             SET status = 'interrupted',
                 observed_pid = NULL,
                 pending_request_id = NULL,
                 pending_request_type = NULL,
-                resume_capability = CASE WHEN pi_session_id IS NOT NULL THEN 'available' ELSE 'never_started' END,
+                resume_capability = ?,
                 updated_at = datetime('now')
-            WHERE id = ? AND status = ?
-          `).run(runId, status);
-          // A stale process cannot retain a workspace claim across restart.
-          // The exact run generation is fenced so a newer retry can never be
-          // released by an old recovery pass.
+            WHERE id = ? AND execution_generation = ? AND status IN ('starting', 'running', 'awaiting_input', 'cancelling')
+          `).run(capability, runId, generation);
+          if (runResult.changes !== 1) continue;
+          const cardOutcome = kanbanTransition({
+            cardId, from: ["queued", "running"], to: "failed", actor: "restart_recovery",
+            reason: "interrupted by bridge restart",
+            fields: { error: "interrupted by bridge restart" },
+            emit: false,
+          }, this.db);
+          if (cardOutcome.kind !== "applied") throw ROLLBACK_SENTINEL;
+          // Release the stale exact-generation workspace claim in the winning
+          // transaction.
           this.db.prepare(`
             DELETE FROM pi_workspace_claims
             WHERE run_id = ? AND execution_generation = ?
-          `).run(runId, run.execution_generation as number);
-
-          if (run.origin === "supervised") {
-            // Worker supervision owns the W-card terminal transition. Return
-            // the interrupted run to boot so the coordinator can settle the
-            // attempt through the canonical Worker transaction.
-            supervisedInterruptedRunIds.push(runId);
-          } else {
-            // Standalone Pi runs retain the historical Pi-card recovery path.
-            kanbanTransition({
-              cardId, from: ["queued", "running"], to: "failed", actor: "restart_recovery",
-              reason: "interrupted by bridge restart",
-              fields: { error: "interrupted by bridge restart" },
-              emit: false,
-            }, this.db);
-          }
+          `).run(runId, generation);
           // #1358 review — mechanism A: boot interruption is a public
           // transition; its `interrupted` fact commits with the status change
           // so the origin sees it (and can later resume) after a restart.
           if (this.remoteEmitter) {
-            this.remoteEmitter.emitTransitionInTx({
-              runId, fromStatus: status, toStatus: "interrupted",
-            });
+            this.remoteEmitter.emitTransitionInTx({ runId, fromStatus: status, toStatus: "interrupted" });
           }
           interrupted++;
         }
       }
 
       return { interrupted, queuedCardIds, supervisedInterruptedRunIds };
-    });
+    };
+    try {
+      return this.db.transaction(fn);
+    } catch (err) {
+      if (err === ROLLBACK_SENTINEL) return { interrupted: 0, queuedCardIds: [], supervisedInterruptedRunIds: [] };
+      throw err;
+    }
   }
 
   /** Query all queued Pi card IDs (for Reconciler lookup). */
@@ -1203,6 +1481,7 @@ export class PiRunStore {
       originRequestId: (row.origin_request_id as string | null) ?? undefined,
       deliveryPolicy: (row.delivery_policy as "leave_remote" | "patch_artifact" | "commit_push" | null) ?? "leave_remote",
       executionGeneration: row.execution_generation as number,
+      generationIntent: (row.generation_intent as PiRunRecord["generationIntent"] | null) ?? "initial",
       currentSessionId: (row.current_session_id as string | null) ?? undefined,
       status: row.status as PiRunStatus,
       resumeCapability: row.resume_capability as ResumeCapability,

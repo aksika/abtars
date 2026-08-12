@@ -221,7 +221,8 @@ export class PiRunService {
       throw new Error(`Pi session file not found at ${run.piSessionFile}`);
     }
 
-    // Validate session file
+    // Early rejection optimization — the store revalidates the persisted
+    // target authoritatively inside the admission transaction.
     const validated = validateSessionFile(this.deps.config.sessionStorageRoot, run.piSessionFile);
     if (validated.error) {
       throw new Error(`Session file validation failed: ${validated.error}`);
@@ -245,12 +246,13 @@ export class PiRunService {
       throw new Error(`Failed to allocate Spin session for resume: ${err instanceof Error ? err.message : String(err)}`);
     }
 
-    // Atomic resume generation commit
+    // Atomic resume admission — the store revalidates the persisted session
+    // target and requires BOTH the run update and the card transition to
+    // land, or neither (rollback).
     const commit = this.deps.store.queueResumeGeneration({
       runId,
       expectedGeneration: run.executionGeneration,
       newSessionId: spinSessionId,
-      sessionFile: validated.canonicalPath!,
     });
 
     if (!commit.committed) {

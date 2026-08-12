@@ -71,7 +71,7 @@ let wsPath: string;
 
 function makeService(configOverrides: Record<string, unknown> = {}): PiRunService {
   const db = createTestDb();
-  const store = new PiRunStore({ db });
+  const store = new PiRunStore({ db, sessionStorageRoot: "/tmp/sessions" });
   const executor = {
     execute: mockExecute,
     reply: mockReply,
@@ -335,7 +335,7 @@ describe("PiRunService.compact() (#1406)", () => {
 
   function makeCompactService(): { svc: PiRunService; db: TaskDatabase } {
     const db = createTestDb();
-    const store = new PiRunStore({ db });
+    const store = new PiRunStore({ db, sessionStorageRoot: "/tmp/sessions" });
     const executor = {
       execute: mockExecute,
       reply: mockReply,

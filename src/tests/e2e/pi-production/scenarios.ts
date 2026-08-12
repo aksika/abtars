@@ -8,6 +8,9 @@
  */
 
 import { createHash } from "node:crypto";
+import { readFileSync, readdirSync, readlinkSync, existsSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import { join } from "node:path";
 import { TIMEOUTS, type PiAcceptanceLane, type ProviderScript, type RequestExpectation, type ProviderSummary } from "./contracts.js";
 import { ScriptedProvider } from "./scripted-provider.js";
 import { TuiAcceptanceClient } from "./tui-client.js";
@@ -609,6 +612,81 @@ async function cancellation(ctx: PiAcceptanceContext): Promise<void> {
   }
 }
 
+// ── Scenario 12: Pi terminal cleanup (core) — #1647 ────────────────────────
+
+/**
+ * Terminal cleanup for a real spawned Pi child, offline: after a terminal
+ * generation, its external C session is gone from /sessions, no Pi process
+ * survives under the run root, and no workspace claim remains. The run
+ * itself is driven over the real TUI and the real Pi RPC boundary with no
+ * credentials — the prompt fails closed and the lifecycle settles.
+ */
+async function piTerminalCleanup(ctx: PiAcceptanceContext): Promise<void> {
+  const goal = ctx.markers.next("PI-CLEAN");
+  const runRoot = join(ctx.abtarsHome, "..");
+
+  // 1. Create a Pi run over the real TUI.
+  const created = await ctx.tui.sendAndAwaitReply(`/pi run --workspace default ${goal}`);
+  const runId = created.markdown.match(/Run: `([^`]+)`/)?.[1];
+  if (!runId) {
+    throw new Error(`pi run creation reply had no run id: ${created.markdown.slice(0, 300)}`);
+  }
+
+  // 2. Wait for a terminal state (offline prompt fails closed).
+  await waitFor(async () => {
+    const status = await ctx.tui.sendAndAwaitReply(`/pi status ${runId}`);
+    const m = status.markdown.match(/Status:\s*(\w+)/);
+    const s = m?.[1] ?? "";
+    return ["completed", "failed", "cancelled", "interrupted"].includes(s) ? s : undefined;
+  }, 120_000, `pi run ${runId} terminal`);
+
+  // 3. The external C session is gone: /sessions carries no entry naming the
+  //    run's goal (session name is `Pi: <goal slice 60>`).
+  await waitFor(async () => {
+    const sessions = await ctx.tui.sendAndAwaitReply("/sessions");
+    return sessions.markdown.includes(goal) ? undefined : true;
+  }, 15_000, `no C session for ${runId} in /sessions`);
+  const sessionsAfter = await ctx.tui.sendAndAwaitReply("/sessions");
+  if (sessionsAfter.markdown.includes(goal)) {
+    throw new Error("external C session for the terminal Pi generation still visible in /sessions");
+  }
+
+  // 4. No Pi process survives under the run root.
+  const piChildren = () => {
+    const out: Array<{ pid: number }> = [];
+    let entries: string[];
+    try { entries = readdirSync("/proc"); } catch { return out; }
+    for (const entry of entries) {
+      if (!/^\d+$/.test(entry)) continue;
+      const pid = Number(entry);
+      try {
+        const comm = readFileSync(`/proc/${pid}/comm`, "utf8").trim();
+        if (comm !== "pi") continue;
+        const cwd = readlinkSync(`/proc/${pid}/cwd`);
+        if (!cwd.startsWith(runRoot)) continue;
+        out.push({ pid });
+      } catch { /* process vanished mid-scan */ }
+    }
+    return out;
+  };
+  await waitFor(async () => (piChildren().length === 0 ? true : undefined), 15_000, "no pi child processes after terminal");
+  if (piChildren().length > 0) {
+    throw new Error(`orphan pi process(es) after terminal generation: ${piChildren().map(p => p.pid).join(",")}`);
+  }
+
+  // 5. No workspace claim remains for the run, and the row is terminal.
+  const dbPath = join(ctx.abtarsHome, "kanban", "kanban.db");
+  if (!existsSync(dbPath)) throw new Error(`kanban db missing at ${dbPath}`);
+  const claims = execFileSync("sqlite3", [dbPath, `SELECT COUNT(*) FROM pi_workspace_claims WHERE run_id = '${runId}'`], { encoding: "utf-8" }).trim();
+  if (claims !== "0") {
+    throw new Error(`workspace claim(s) remain for terminal run ${runId}: ${claims}`);
+  }
+  const row = execFileSync("sqlite3", [dbPath, `SELECT status FROM pi_runs WHERE id = '${runId}'`], { encoding: "utf-8" }).trim();
+  if (!["completed", "failed", "cancelled", "interrupted"].includes(row)) {
+    throw new Error(`pi run ${runId} not terminal after cleanup (status=${row})`);
+  }
+}
+
 // ── Registry ────────────────────────────────────────────────────────────────
 
 export const PI_SCENARIOS: PiScenario[] = [
@@ -625,6 +703,7 @@ export const PI_SCENARIOS: PiScenario[] = [
   { name: "cancellation-deadline", profiles: ["full"], run: cancellation },
   { name: "scheduled-orc-round-limit", profiles: ["full"], run: scheduledOrcRoundLimit },
   { name: "scheduled-orc-round-limit-restart", profiles: ["full"], run: scheduledOrcRoundLimitRestart },
+  { name: "pi-terminal-cleanup", profiles: ["core", "full"], run: piTerminalCleanup },
 ];
 
 export function scenariosForProfile(profile: "core" | "full"): PiScenario[] {

@@ -55,9 +55,17 @@ export async function phasePiExecutor(ctx: BootCtx): Promise<void> {
   const { PiExecutor } = await import("../components/pi-executor/pi-executor.js");
   const { PiRunService } = await import("../components/pi-executor/pi-run-service.js");
 
-  const store = new PiRunStore({ db: taskDb });
+  const store = new PiRunStore({ db: taskDb, sessionStorageRoot: config.sessionStorageRoot });
 
   const executor = new PiExecutor(config, store);
+  // #1647 — generation-fenced external C session closer, wired from spin.
+  executor.setExternalSessionCloser((sessionId, expected) => {
+    try {
+      return ctx.sessionManager!.endExternalSession(sessionId, expected);
+    } catch {
+      return false;
+    }
+  });
   const service = new PiRunService({
     store,
     executor,
@@ -194,6 +202,10 @@ export async function phasePiExecutor(ctx: BootCtx): Promise<void> {
       metadata: { error: "interrupted by bridge restart" },
     });
     executor.setSettlementRouter((observation) => coordinator.settlePiExecution(observation));
+    // #1647 — typed interruption routing: standalone goes through the paired
+    // store operation, supervised settles the Worker attempt in the same
+    // transaction (the W card stays Worker-owned).
+    executor.setInterruptRouter((input) => coordinator.interruptPiExecution(input));
     // #1638: a supervised Pi input request suspends the run and settles the
     // attempt as input_requested (structured question evidence, zero charge).
     executor.setInputSuspendHook(async (runId, generation, request) => {

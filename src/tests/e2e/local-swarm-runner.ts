@@ -922,7 +922,7 @@ async function runPiCoding(): Promise<LocalSwarmResult> {
   const { deliverCard } = await import("../../components/tasks/kanban-delivery.js");
 
   const db = requireTaskDatabase();
-  const piStore = new PiRunStore({ db });
+  const piStore = new PiRunStore({ db, sessionStorageRoot: "/tmp/pi-sessions" });
   const workerStore = new WorkerSupervisionStore(db);
   // real canonical workspace + session root so the alias resolution succeeds
   const { mkdirSync } = await import("node:fs");

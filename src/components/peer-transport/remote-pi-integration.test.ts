@@ -7,6 +7,8 @@
 
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { randomUUID } from "node:crypto";
+import { mkdirSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
 import { resolveNativeDep } from "../../utils/lazy-require.js";
 
 type SqliteDb = { prepare(sql: string): any; exec(sql: string): void; pragma(s: string): void; transaction<T>(fn: () => T): () => T };
@@ -74,7 +76,7 @@ describe("Remote Pi Integration (#1358)", () => {
     const Database = resolveNativeDep("better-sqlite3") as typeof import("better-sqlite3");
     db = new Database(":memory:");
     taskDb = createTaskDatabase(db);
-    store = new PiRunStore({ db: taskDb });
+    store = new PiRunStore({ db: taskDb, sessionStorageRoot: "/tmp/sessions" });
     producer = new RemotePiEventProducer({ store });
     deliveryManager = new RemotePiDeliveryManager({ store, eventProducer: producer, localPeerName: "origin-peer" });
     originReducer = new RemotePiOriginReducer(new SqliteProjectionStore(taskDb));
@@ -1163,9 +1165,10 @@ describe("Remote Pi Integration (#1358)", () => {
       const runId = "atomic-chain-" + randomUUID().slice(0, 6);
       const run = createDelegatedRun(runId);
 
-      // queued → starting → running
+      // queued → starting → running (card paired to running like production)
       expect(store.casTransition(runId, "queued", "starting")).toBe(true);
       expect(store.casTransition(runId, "starting", "running")).toBe(true);
+      db.prepare(`UPDATE kanban_board SET status = 'running' WHERE id = ?`).run(run.cardId);
 
       // running → awaiting_input (dialog enter)
       expect(store.setPendingUi({ runId, generation: 1, requestId: "req-9", requestType: "select" }).ok).toBe(true);
@@ -1175,12 +1178,26 @@ describe("Remote Pi Integration (#1358)", () => {
       const claim = store.claimPendingUi({ runId, generation: 1, requestId: "req-9" });
       expect(claim.claimed).toBe(true);
 
-      // running → interrupted (shutdown / cancellation path)
-      expect(store.casTransition(runId, "running", "interrupted")).toBe(true);
+      // A durable persisted session target so resume admission can revalidate
+      // the target inside the store (generation_intent='resume' is written by
+      // queueResumeGeneration, never inferred from the generation number).
+      const sessionRoot = "/tmp/sessions";
+      mkdirSync(sessionRoot, { recursive: true });
+      const sessionFile = join(sessionRoot, `sess-${runId}.jsonl`);
+      writeFileSync(sessionFile, JSON.stringify({ type: "session", id: "sess-pi-1" }) + "\n", "utf-8");
+      db.prepare(`UPDATE pi_runs SET pi_session_id = 'sess-pi-1', pi_session_file = ?, resume_capability = 'available' WHERE id = ?`).run(sessionFile, runId);
 
-      // interrupted → queued with generation bump (approved resume)
+      // running → interrupted — the paired run/card interruption (the card is
+      // running → failed in the same transaction; the claim row may not exist).
+      const interrupted = store.interruptGeneration({
+        runId, generation: 1, continuity: { ok: true, sessionId: "sess-pi-1", canonicalFile: sessionFile },
+      });
+      expect(interrupted.committed).toBe(true);
+
+      // interrupted → queued with generation bump (approved resume) — the
+      // store revalidates the PERSISTED target; no caller-supplied file.
       const resume = store.queueResumeGeneration({
-        runId, expectedGeneration: 1, newSessionId: "s2", sessionFile: "/tmp/x.json",
+        runId, expectedGeneration: 1, newSessionId: "s2",
       });
       expect(resume.committed).toBe(true);
       expect(resume.newGeneration).toBe(2);
@@ -1196,14 +1213,19 @@ describe("Remote Pi Integration (#1358)", () => {
       const resumedProjection = JSON.parse(resumedEvent.projection_json) as { generation: number; status: string };
       expect(resumedProjection.generation).toBe(2);
       expect(resumedProjection.status).toBe("queued");
+      // Explicit intent persisted on the resumed generation.
+      expect(store.get(runId)!.generationIntent).toBe("resume");
       void run;
     });
 
     it("settleTerminal commits the terminal event with the transition", () => {
       const runId = "atomic-term-" + randomUUID().slice(0, 6);
-      createDelegatedRun(runId);
+      const run = createDelegatedRun(runId);
       expect(store.casTransition(runId, "queued", "starting")).toBe(true);
       expect(store.casTransition(runId, "starting", "running")).toBe(true);
+      // Card paired to running like production (claimQueuedGeneration pairs
+      // run queued→starting with card queued→running in one transaction).
+      db.prepare(`UPDATE kanban_board SET status = 'running' WHERE id = ?`).run(run.cardId);
 
       const settlement = store.settleTerminal({
         runId, generation: 1, expectedStatuses: ["running"],

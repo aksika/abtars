@@ -16,7 +16,7 @@ import type { PiRunStore, PiTerminalMetadata, PiTerminalOutcome } from "./pi-run
 import type { WorkerSupervisionStore } from "../worker-supervision-store.js";
 import type { WorkerResultEnvelopeV1 } from "../worker-contract.js";
 import { logWarn } from "../logger.js";
-import { validateSessionFile, resolveAndValidateWorkspace, type PiExecutorConfig } from "./config.js";
+import { validatePersistedSession, resolveAndValidateWorkspace, type PiExecutorConfig, type SessionProof } from "./config.js";
 
 const TAG = "supervised-pi-settlement";
 
@@ -181,6 +181,80 @@ export class SupervisedPiSettlement {
   }
 
   /**
+   * #1647 — Typed interruption of a live Pi generation. With a Worker
+   * binding, the run row is interrupted with the truthful proof and the
+   * Worker attempt settles as failed in ONE transaction (the W card is owned
+   * by the attempt, never by the Pi lane). Without a binding, standalone
+   * runs use the paired PiRunStore.interruptGeneration; a supervised run
+   * without a binding fails closed and is left for boot recovery.
+   */
+  interruptPiExecution(input: {
+    runId: string;
+    generation: number;
+    continuity: SessionProof;
+  }): { interrupted: boolean; supervised: boolean; reason?: string } {
+    const binding = this.workerStore.getAttemptForExecutorResource("pi", input.runId, input.generation);
+    if (!binding) {
+      const run = this.piStore.get(input.runId);
+      if (run?.origin === "supervised") {
+        return { interrupted: false, supervised: true, reason: "supervised run has no Worker binding" };
+      }
+      const result = this.piStore.interruptGeneration(input);
+      return result.committed
+        ? { interrupted: true, supervised: false }
+        : { interrupted: false, supervised: false, reason: result.reason };
+    }
+    try {
+      return this.workerStore.db.transaction(() => {
+        // Re-read + validate the latest attempt inside the transaction.
+        const attempt = this.workerStore.getAttemptForExecutorResource("pi", input.runId, input.generation);
+        if (!attempt || attempt.card_id !== binding.card_id || attempt.generation !== binding.generation) {
+          return { interrupted: false, supervised: true, reason: "binding moved" };
+        }
+        const latest = this.workerStore.getLatestAttempt(attempt.card_id);
+        if (!latest || latest.id !== attempt.id) {
+          return { interrupted: false, supervised: true, reason: "not latest attempt" };
+        }
+        const contract = this.workerStore.getContract(attempt.contract_id);
+        if (!contract) return { interrupted: false, supervised: true, reason: "contract missing" };
+
+        if (this.workerStore.isAttemptTerminal(attempt.lifecycle)) {
+          // The attempt already settled (e.g. timed out mid-run) — interrupt
+          // only the subordinate run row, never the W card.
+          const runOnly = this.piStore.interruptSupervisedRun(input);
+          return { interrupted: runOnly, supervised: true, reason: runOnly ? undefined : "run interruption lost" };
+        }
+
+        // Pi run -> interrupted (run row only, truthful capability).
+        const runInterrupted = this.piStore.interruptSupervisedRun(input);
+        if (!runInterrupted) return { interrupted: false, supervised: true, reason: "run interruption lost" };
+
+        // Worker attempt -> failed through the canonical body. The run row
+        // update and the attempt settlement commit or roll back together.
+        const settlement = this.workerStore.settleAttemptInTransaction({
+          attemptId: attempt.id,
+          expectedGeneration: attempt.generation,
+          desiredState: "failed",
+          stableReason: "pi_interrupted",
+        });
+        if (settlement.kind === "stale" || settlement.kind === "conflict") {
+          // Roll back the run-row interruption too — the pair must commit
+          // atomically.
+          throw new Error(`supervised interruption: worker settlement ${settlement.kind}`);
+        }
+
+        // Generation-fenced workspace release inside the same transaction.
+        this.piStore.releaseWorkspaceClaimForGeneration({ runId: input.runId, generation: input.generation });
+
+        return { interrupted: true, supervised: true };
+      });
+    } catch (err) {
+      logWarn(TAG, `supervised interruption failed for ${input.runId}: ${err instanceof Error ? err.message : String(err)}`);
+      return { interrupted: false, supervised: true, reason: "exception" };
+    }
+  }
+
+  /**
    * #1638 — supervised input suspension. A live Pi question on a supervised
    * run never parks the process in awaiting_input: the question becomes
    * structured Worker failure evidence (input_requested), the run moves to
@@ -200,22 +274,23 @@ export class SupervisedPiSettlement {
     const run = this.piStore.get(input.runId);
     if (!run) return { suspended: false, reason: "run missing" };
 
-    // Prove the session file is durable AND inside the configured session
-    // root BEFORE stopping the process. No proof -> the next generation must
-    // be fresh; the question still settles as input_requested.
-    let resumeAvailable = false;
+    // Prove the session is durable AND carries the persisted identity BEFORE
+    // stopping the process — bounded header/ID proof, never path existence.
+    // No proof -> the next generation must be fresh; the question still
+    // settles as input_requested.
     let sessionFile = input.sessionFile;
-    if (sessionFile) {
-      const validated = validateSessionFile(this.piConfig.sessionStorageRoot, sessionFile);
-      resumeAvailable = validated.error === undefined;
-      if (validated.error) {
-        sessionFile = undefined;
-        logWarn(TAG, `input suspend ${input.runId}: session not durable (${validated.error}) — next generation will be fresh`);
-      } else {
-        // Persist the proven canonical path, not a caller-provided spelling or
-        // symlink, so the next generation resumes exactly the file we checked.
-        sessionFile = validated.canonicalPath;
-      }
+    const proof = validatePersistedSession({
+      sessionStorageRoot: this.piConfig.sessionStorageRoot,
+      expectedSessionId: run.piSessionId,
+      sessionFile: sessionFile ?? run.piSessionFile,
+    });
+    if (proof.ok) {
+      // Persist the proven canonical path, not a caller-provided spelling or
+      // symlink, so the next generation resumes exactly the file we checked.
+      sessionFile = proof.canonicalFile;
+    } else {
+      sessionFile = undefined;
+      logWarn(TAG, `input suspend ${input.runId}: session not resumable (${proof.reason}) — next generation will be fresh`);
     }
 
     // Canonical workspace path for the generation-fenced release.
@@ -234,7 +309,7 @@ export class SupervisedPiSettlement {
           pendingRequestId: null,
           pendingRequestType: null,
           piSessionFile: sessionFile ?? undefined,
-          resumeCapability: resumeAvailable ? "available" : "never_started",
+          resumeCapability: proof.ok ? "available" : proof.capability,
         });
         if (!interrupted) return { suspended: false, reason: "run transition lost" };
 

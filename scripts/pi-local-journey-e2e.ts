@@ -23,7 +23,7 @@
  * violation recorded. Evidence is written to test-results/pi-local-journey/.
  */
 
-import { mkdirSync, rmSync, existsSync, readFileSync, writeFileSync, chmodSync, mkdtempSync, statSync, realpathSync, readdirSync, copyFileSync, readlinkSync } from "node:fs";
+import { mkdirSync, existsSync, readFileSync, writeFileSync, chmodSync, mkdtempSync, statSync, realpathSync, readdirSync, copyFileSync, readlinkSync } from "node:fs";
 import { join, resolve, dirname } from "node:path";
 import { tmpdir } from "node:os";
 import { randomUUID } from "node:crypto";
@@ -31,7 +31,7 @@ import { execFileSync, execSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { ScriptedProvider } from "../src/tests/e2e/pi-production/scripted-provider.js";
 import { TuiAcceptanceClient } from "../src/tests/e2e/pi-production/tui-client.js";
-import { SpawnedChild, waitFor, delay } from "../src/tests/e2e/pi-production/child-process.js";
+import { SpawnedChild, waitFor } from "../src/tests/e2e/pi-production/child-process.js";
 import { FIXTURE_MODEL_A, FIXTURE_MODEL_B, FIXTURE_PROVIDER, FIXTURE_API_KEY_ENV, MASTER_USER_ID } from "../src/tests/e2e/pi-production/bridge-config.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -60,11 +60,6 @@ function record(step: string, ok: boolean, detail: string): void {
   const icon = ok ? "+" : "x";
   console.log(`[${icon}] ${step}: ${detail.slice(0, 400)}`);
 }
-function recordDetail(step: string, ok: boolean, detail: unknown): void {
-  record(step, ok, typeof detail === "string" ? detail : JSON.stringify(detail));
-}
-
-// ── Parsing helpers (production /pi reply shapes) ───────────────────────────
 
 interface PiRunRef { runId: string; cardId: number; sessionId: string; generation: number }
 interface PiStatusView { status: string; generation: number; sessionId?: string; pendingRequestId?: string; pendingRequestType?: string; error?: string; resultSummary?: string }
@@ -250,7 +245,7 @@ async function restartBridge(): Promise<void> {
 
 // ── TUI helpers ─────────────────────────────────────────────────────────────
 
-async function tuiCommand(text: string, what: string): Promise<{ reply: string }> {
+async function tuiCommand(text: string, _what: string): Promise<{ reply: string }> {
   const reply = await tui.sendAndAwaitReply(text);
   return { reply: reply.markdown };
 }
@@ -367,12 +362,10 @@ async function setup(): Promise<void> {
 
   const piExecutable = resolvePiExecutable();
   if (!piExecutable) throw new Error("standalone `pi` executable not found on PATH");
-  const version = execSync(`${JSON.stringify(piExecutable)} --version 2>&1 || true`, { encoding: "utf-8" }).trim();
 
   // ── transport.json — fixture provider for Main only ──────────────────────
   writeRestricted(join(abtarsHome, "config", "transport.json"), JSON.stringify({
     schemaVersion: 3,
-    activeRoute: "pi-ai",
     routes: {
       "pi-ai": {
         agents: { main: { model: FIXTURE_MODEL_A, provider: FIXTURE_PROVIDER } },
@@ -590,7 +583,7 @@ async function journey(deadline: number): Promise<void> {
   const resumeReply = await tuiCommand(`/pi resume ${r2.runId}`, "run2 resume");
   const resumed = parseRunReply(resumeReply.reply);
   const resumeGen2 = resumed && resumed.generation === 2 && resumed.sessionId !== r2.sessionId;
-  record("run2-resume", !!resumed && resumeGen2, resumeGen2 ? `generation=2 new session=${resumed!.sessionId}` : `resume reply: ${resumeReply.reply.slice(0, 220)}`);
+  record("run2-resume", !!resumed && !!resumeGen2, resumeGen2 ? `generation=2 new session=${resumed!.sessionId}` : `resume reply: ${resumeReply.reply.slice(0, 220)}`);
   if (resumed && resumeGen2) {
     const running2 = await waitForRunStatus(r2.runId, ["running", "awaiting_input", "completed", "failed"], 240_000);
     record("run2-resume-running", ["running", "awaiting_input"].includes(running2.status), `post-resume status=${running2.status}`);
@@ -631,15 +624,10 @@ function auditDb(): { runs: Array<Record<string, unknown>>; cards: Array<Record<
 // ── Main ────────────────────────────────────────────────────────────────────
 
 async function main(): Promise<void> {
-  const keepArtifacts = process.argv.includes("--keep-artifacts");
   const startedAt = Date.now();
-  const deadline = startedAt + JOURNEY_DEADLINE_MS;
-
   const piExecutable = resolvePiExecutable();
   if (!piExecutable) {
-    console.error("blocked: standalone `pi` executable not found on PATH");
     process.exitCode = 1;
-    return;
   }
 
   // Build the deployed bundle once.

@@ -1,7 +1,8 @@
 import { configDir } from "../transport-config.js";
-import { existsSync, readFileSync, realpathSync, statSync } from "node:fs";
+import { existsSync, readFileSync, realpathSync, statSync, openSync, readSync, closeSync } from "node:fs";
 import { resolve, isAbsolute, relative, sep } from "node:path";
 import { logInfo, logWarn, logDebug } from "../logger.js";
+import type { ResumeCapability } from "./types.js";
 
 const TAG = "pi-config";
 
@@ -208,4 +209,124 @@ export function validateSessionFile(
     return { error: `Session file "${canonicalFile}" escapes session storage root "${canonicalRoot}"` };
   }
   return { canonicalPath: canonicalFile };
+}
+
+// ── #1647: bounded persisted-session proof ─────────────────────────────────
+
+/**
+ * Proof that a persisted Pi session target is genuinely resumable. The header
+ * read is bounded (at most 64 KiB or through the first newline) and
+ * content-free in errors: it never loads or logs the conversation.
+ */
+export type SessionProof =
+  | { ok: true; sessionId: string; canonicalFile: string }
+  | { ok: false; capability: Exclude<ResumeCapability, "available">; reason: string };
+
+const SESSION_HEADER_MAX_BYTES = 64 * 1024;
+
+/**
+ * #1647 — The single canonical validator for a persisted Pi session target.
+ * Used by service, store, executor, interruption, and boot recovery. A saved
+ * session is resumable only when all of these hold:
+ *
+ * - session ID and absolute session-file path are present;
+ * - the configured root and file canonicalize successfully;
+ * - the target is a regular file inside that root;
+ * - a bounded read of the first JSONL record yields `{"type":"session","id":...}`
+ *   with the id equal to the expected session ID.
+ *
+ * Capability vocabulary is truthful: `available` only when every check passes;
+ * `never_started` when no identity was established; `session_missing` for
+ * absent/unreadable/malformed/mismatched identity; `policy_changed` when the
+ * configured root or containment policy no longer permits the target.
+ */
+export function validatePersistedSession(input: {
+  sessionStorageRoot: string;
+  expectedSessionId?: string;
+  sessionFile?: string;
+}): SessionProof {
+  if (!input.expectedSessionId && !input.sessionFile) {
+    return { ok: false, capability: "never_started", reason: "no Pi session identity established" };
+  }
+  if (!input.expectedSessionId || !input.sessionFile) {
+    return { ok: false, capability: "session_missing", reason: "incomplete persisted session identity" };
+  }
+  if (!input.sessionStorageRoot) {
+    return { ok: false, capability: "policy_changed", reason: "sessionStorageRoot not configured" };
+  }
+  if (!isAbsolute(input.sessionStorageRoot)) {
+    return { ok: false, capability: "policy_changed", reason: "sessionStorageRoot must be absolute" };
+  }
+  let canonicalRoot: string;
+  try {
+    canonicalRoot = realpathSync(input.sessionStorageRoot);
+  } catch {
+    return { ok: false, capability: "policy_changed", reason: "sessionStorageRoot not found" };
+  }
+  if (!isAbsolute(input.sessionFile)) {
+    return { ok: false, capability: "session_missing", reason: "Session file path must be absolute" };
+  }
+  // Containment on the resolved file: a symlink escaping the root is a policy
+  // change, not a missing session.
+  let canonicalFile: string;
+  try {
+    canonicalFile = realpathSync(input.sessionFile);
+  } catch {
+    return { ok: false, capability: "session_missing", reason: "Session file not found" };
+  }
+  if (!isPathWithinRoot(canonicalRoot, canonicalFile)) {
+    return { ok: false, capability: "policy_changed", reason: "Session file escapes session storage root" };
+  }
+  // Remaining path checks (regular file) through the shared inner helper.
+  const validated = validateSessionFile(input.sessionStorageRoot, input.sessionFile);
+  if (validated.error) {
+    return { ok: false, capability: "session_missing", reason: validated.error };
+  }
+  canonicalFile = validated.canonicalPath!;
+
+  const header = readSessionHeader(canonicalFile);
+  if (!header.ok) {
+    return { ok: false, capability: "session_missing", reason: header.reason };
+  }
+  if (header.id !== input.expectedSessionId) {
+    return { ok: false, capability: "session_missing", reason: "Session header id does not match the persisted session id" };
+  }
+  return { ok: true, sessionId: header.id, canonicalFile };
+}
+
+/** Bounded first-record read: at most 64 KiB or through the first newline. */
+function readSessionHeader(canonicalFile: string): { ok: true; id: string } | { ok: false; reason: string } {
+  let fd: number;
+  try {
+    fd = openSync(canonicalFile, "r");
+  } catch {
+    return { ok: false, reason: "Session file unreadable" };
+  }
+  try {
+    const buf = Buffer.alloc(SESSION_HEADER_MAX_BYTES);
+    const bytesRead = readSync(fd, buf, 0, buf.length, 0);
+    const data = bytesRead < buf.length ? buf.subarray(0, bytesRead) : buf;
+    const nl = data.indexOf(0x0a);
+    if (nl === -1) {
+      return { ok: false, reason: bytesRead >= SESSION_HEADER_MAX_BYTES ? "Session header exceeds the 64 KiB bound" : "Session file has no first record" };
+    }
+    const line = data.subarray(0, nl).toString("utf-8").trim();
+    if (!line) return { ok: false, reason: "Session header record is empty" };
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(line);
+    } catch {
+      return { ok: false, reason: "Session header is not valid JSON" };
+    }
+    const obj = parsed as { type?: unknown; id?: unknown };
+    if (obj === null || typeof obj !== "object" || obj.type !== "session") {
+      return { ok: false, reason: "First record is not a session header" };
+    }
+    if (typeof obj.id !== "string" || obj.id.length === 0) {
+      return { ok: false, reason: "Session header has no id" };
+    }
+    return { ok: true, id: obj.id };
+  } finally {
+    try { closeSync(fd); } catch { /* ignore */ }
+  }
 }

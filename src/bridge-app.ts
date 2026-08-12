@@ -73,8 +73,11 @@ export class Bridge {
     });
     await step("dashboard", () => this.ctx.dashboardServer?.stop());
     await step("services", () => this.ctx.registry.stopAll());
-    await step("pi-executor", () => {
-      this.ctx.piExecutorService?.executor.interruptAll();
+    await step("pi-executor", async () => {
+      // #1647 — graceful interruption must complete (bounded probes, typed
+      // run/card settlement, process + C-session + capacity cleanup) before
+      // the process exits.
+      await this.ctx.piExecutorService?.executor.interruptAll();
       // #1357: Withdraw Pi capability registration on shutdown
       this.ctx._piCapDisposer?.();
     });

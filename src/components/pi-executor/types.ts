@@ -2,6 +2,10 @@
  * different terminal/card ownership from user/agent/peer Pi runs. */
 export type PiRunOrigin = "user" | "agent" | "peer" | "supervised";
 
+/** Why the current execution generation starts. Never derived from the
+ * generation number or nullable session fields — persisted explicitly. */
+export type PiGenerationIntent = "initial" | "resume";
+
 export type PiRunStatus =
   | "queued" | "starting" | "running" | "awaiting_input"
   | "cancelling" | "completed" | "failed" | "cancelled"
@@ -77,6 +81,7 @@ export interface PiRunRecord {
   originRequestId?: string;
   deliveryPolicy?: "leave_remote" | "patch_artifact" | "commit_push";
   executionGeneration: number;
+  generationIntent: PiGenerationIntent;
   currentSessionId?: string;
   status: PiRunStatus;
   resumeCapability: ResumeCapability;
