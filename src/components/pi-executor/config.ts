@@ -213,7 +213,15 @@ export function validateSessionFile(
   } catch {
     return { error: `Session file "${filePath}" not found` };
   }
-  const st = statSync(canonicalFile);
+  let st: ReturnType<typeof statSync>;
+  try {
+    st = statSync(canonicalFile);
+  } catch {
+    // The file can disappear (or become unreadable) between realpath and
+    // stat. Treat that race as a missing session rather than letting a raw
+    // filesystem exception escape the lifecycle validator.
+    return { error: "Session file unreadable" };
+  }
   if (!st.isFile()) return { error: "Session path is not a regular file" };
   if (!isPathWithinRoot(canonicalRoot, canonicalFile)) {
     return { error: `Session file "${canonicalFile}" escapes session storage root "${canonicalRoot}"` };
@@ -336,6 +344,11 @@ function readSessionHeader(canonicalFile: string): { ok: true; id: string } | { 
       return { ok: false, reason: "Session header has no id" };
     }
     return { ok: true, id: obj.id };
+  } catch {
+    // A read can fail after open (for example, a concurrent replacement or a
+    // permissions race). Resume admission must fail closed with a bounded,
+    // content-free proof rather than throwing an OS error.
+    return { ok: false, reason: "Session file unreadable" };
   } finally {
     try { closeSync(fd); } catch { /* ignore */ }
   }

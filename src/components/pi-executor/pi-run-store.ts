@@ -81,7 +81,7 @@ export interface PiTerminalMetadata {
 
 export type PiTerminalSettlement =
   | { committed: true; outcome: PiTerminalOutcome; cardId: number }
-  | { committed: false; reason: "stale_generation" | "wrong_status" | "missing" | "card_mismatch" };
+  | { committed: false; reason: "stale_generation" | "wrong_status" | "missing" | "card_mismatch" | "supervised" };
 
 export type PiStartClaim =
   | { claimed: true; runId: string; generation: number }
@@ -390,7 +390,7 @@ export class PiRunStore {
     thinking: string; pendingRequestId: string | null; pendingRequestType: PiPendingRequestType | null;
     resultSummary: string; changedFilesSummary: string; usageJson: string;
     error: string; resumeCapability: ResumeCapability;
-  }>): boolean {
+  }>, expectedGeneration?: number): boolean {
     const fromArr = Array.isArray(fromStatus) ? fromStatus : [fromStatus];
     const setClauses = [`status = ?`, `updated_at = datetime('now')`];
     const params: unknown[] = [toStatus];
@@ -412,6 +412,8 @@ export class PiRunStore {
       if (updates.resumeCapability !== undefined) { setClauses.push(`resume_capability = ?`); params.push(updates.resumeCapability); }
     }
     params.push(id, ...fromArr);
+    if (expectedGeneration !== undefined) params.push(expectedGeneration);
+    const generationPredicate = expectedGeneration === undefined ? "" : " AND execution_generation = ?";
     // #1358 review — mechanism A: the transition and its outbox event commit
     // together. If the event append fails, the transition rolls back with it.
     const fn = (): boolean => {
@@ -420,7 +422,7 @@ export class PiRunStore {
       const preGen = updates?.executionGeneration !== undefined
         ? (this.db.prepare(`SELECT execution_generation FROM pi_runs WHERE id = ?`).get(id) as { execution_generation: number } | undefined)?.execution_generation
         : undefined;
-      const result = this.db.prepare(`UPDATE pi_runs SET ${setClauses.join(", ")} WHERE id = ? AND status IN (${fromArr.map(() => "?").join(",")})`).run(...params);
+      const result = this.db.prepare(`UPDATE pi_runs SET ${setClauses.join(", ")} WHERE id = ? AND status IN (${fromArr.map(() => "?").join(",")})${generationPredicate}`).run(...params);
       if (result.changes > 0 && this.remoteEmitter) {
         this.remoteEmitter.emitTransitionInTx({
           runId: id,
@@ -457,13 +459,17 @@ export class PiRunStore {
     const fn = (): PiTerminalSettlement => {
       // Read current run (within the transaction)
       const runRow = this.db.prepare(
-        `SELECT card_id, execution_generation, status FROM pi_runs WHERE id = ?`
+        `SELECT card_id, execution_generation, status, origin FROM pi_runs WHERE id = ?`
       ).get(input.runId);
       if (!runRow) return { committed: false, reason: "missing" };
 
-      const row = runRow as { card_id: number; execution_generation: number; status: string };
+      const row = runRow as { card_id: number; execution_generation: number; status: string; origin: string };
       if (row.execution_generation !== input.generation) return { committed: false, reason: "stale_generation" };
       if (!input.expectedStatuses.includes(row.status as PiRunStatus)) return { committed: false, reason: "wrong_status" };
+      // A supervised run's W-card belongs to the Worker coordinator. The
+      // standalone terminal path must fail closed even when called directly
+      // without the coordinator/router wiring.
+      if (row.origin === "supervised") return { committed: false, reason: "supervised" };
       const cardId = row.card_id;
 
       // Build run update — #1395 also clears pending fields on terminal settlement
@@ -789,8 +795,12 @@ export class PiRunStore {
     return { continuity: "fresh", sessionId: `s_${Date.now()}` };
   }
 
-  touchActivity(id: string): void {
-    this.db.prepare(`UPDATE pi_runs SET last_rpc_activity_at = datetime('now'), updated_at = datetime('now') WHERE id = ?`).run(id);
+  touchActivity(id: string, expectedGeneration?: number): void {
+    if (expectedGeneration === undefined) {
+      this.db.prepare(`UPDATE pi_runs SET last_rpc_activity_at = datetime('now'), updated_at = datetime('now') WHERE id = ?`).run(id);
+      return;
+    }
+    this.db.prepare(`UPDATE pi_runs SET last_rpc_activity_at = datetime('now'), updated_at = datetime('now') WHERE id = ? AND execution_generation = ?`).run(id, expectedGeneration);
   }
 
   // #1395 — Claim a pending UI request atomically.
@@ -949,8 +959,15 @@ export class PiRunStore {
     return { ok: true };
   }
 
-  addProgress(runId: string, kind: string, payload: string): void {
-    this.db.prepare(`INSERT INTO pi_run_progress (run_id, kind, payload) VALUES (?, ?, ?)`).run(runId, kind, payload);
+  addProgress(runId: string, kind: string, payload: string, expectedGeneration?: number): void {
+    const inserted = expectedGeneration === undefined
+      ? this.db.prepare(`INSERT INTO pi_run_progress (run_id, kind, payload) VALUES (?, ?, ?)`).run(runId, kind, payload)
+      : this.db.prepare(`
+          INSERT INTO pi_run_progress (run_id, kind, payload)
+          SELECT ?, ?, ?
+          WHERE EXISTS (SELECT 1 FROM pi_runs WHERE id = ? AND execution_generation = ?)
+        `).run(runId, kind, payload, runId, expectedGeneration);
+    if (inserted.changes === 0) return;
     const count = this.db.prepare(`SELECT COUNT(*) as cnt FROM pi_run_progress WHERE run_id = ?`).get(runId) as { cnt: number } | undefined;
     if (count && count.cnt > MAX_PROGRESS_ENTRIES) {
       this.db.prepare(`DELETE FROM pi_run_progress WHERE id IN (SELECT id FROM pi_run_progress WHERE run_id = ? ORDER BY id ASC LIMIT ?)`).run(runId, count.cnt - MAX_PROGRESS_ENTRIES);
@@ -1190,6 +1207,7 @@ export class PiRunStore {
       ).get(input.runId) as Record<string, unknown> | undefined;
       if (!row) return { committed: false, reason: "stale" };
       if ((row.execution_generation as number) !== input.expectedGeneration) return { committed: false, reason: "stale" };
+      if ((row.origin as string) === "supervised") return { committed: false, reason: "not_resumable" };
       if ((row.status as string) !== "interrupted" && (row.status as string) !== "failed") return { committed: false, reason: "not_resumable" };
       if ((row.resume_capability as string) !== "available") return { committed: false, reason: "not_resumable" };
 
@@ -1201,6 +1219,14 @@ export class PiRunStore {
         sessionFile: (row.pi_session_file as string | null) ?? undefined,
       });
       if (!proof.ok) {
+        // Keep the persisted capability truthful for direct callers too. The
+        // run generation, status, and linked card remain untouched, while a
+        // later admission attempt is prevented from repeating a known-bad
+        // proof.
+        this.db.prepare(`
+          UPDATE pi_runs SET resume_capability = ?, updated_at = datetime('now')
+          WHERE id = ? AND execution_generation = ? AND status IN ('interrupted', 'failed')
+        `).run(proof.capability, input.runId, input.expectedGeneration);
         return { committed: false, reason: "session_missing" };
       }
 
@@ -1360,35 +1386,50 @@ export class PiRunStore {
 
           // Standalone: paired run/card interruption — a lost card CAS rolls
           // back this row's mutation rather than committing disagreement.
-          const runResult = this.db.prepare(`
-            UPDATE pi_runs
-            SET status = 'interrupted',
-                observed_pid = NULL,
-                pending_request_id = NULL,
-                pending_request_type = NULL,
-                resume_capability = ?,
-                updated_at = datetime('now')
-            WHERE id = ? AND execution_generation = ? AND status IN ('starting', 'running', 'awaiting_input', 'cancelling')
-          `).run(capability, runId, generation);
-          if (runResult.changes !== 1) continue;
-          const cardOutcome = kanbanTransition({
-            cardId, from: ["queued", "running"], to: "failed", actor: "restart_recovery",
-            reason: "interrupted by bridge restart",
-            fields: { error: "interrupted by bridge restart" },
-            emit: false,
-          }, this.db);
-          if (cardOutcome.kind !== "applied") throw ROLLBACK_SENTINEL;
-          // Release the stale exact-generation workspace claim in the winning
-          // transaction.
-          this.db.prepare(`
-            DELETE FROM pi_workspace_claims
-            WHERE run_id = ? AND execution_generation = ?
-          `).run(runId, generation);
-          // #1358 review — mechanism A: boot interruption is a public
-          // transition; its `interrupted` fact commits with the status change
-          // so the origin sees it (and can later resume) after a restart.
-          if (this.remoteEmitter) {
-            this.remoteEmitter.emitTransitionInTx({ runId, fromStatus: status, toStatus: "interrupted" });
+          // Isolate each standalone row. A card CAS conflict for one run must
+          // roll back only that run's recovery mutation, not discard recovery
+          // already committed for unrelated rows in this transaction.
+          this.db.exec("SAVEPOINT pi_recovery_row");
+          try {
+            const runResult = this.db.prepare(`
+              UPDATE pi_runs
+              SET status = 'interrupted',
+                  observed_pid = NULL,
+                  pending_request_id = NULL,
+                  pending_request_type = NULL,
+                  resume_capability = ?,
+                  updated_at = datetime('now')
+              WHERE id = ? AND execution_generation = ? AND status IN ('starting', 'running', 'awaiting_input', 'cancelling')
+            `).run(capability, runId, generation);
+            if (runResult.changes !== 1) {
+              this.db.exec("RELEASE SAVEPOINT pi_recovery_row");
+              continue;
+            }
+            const cardOutcome = kanbanTransition({
+              cardId, from: ["queued", "running"], to: "failed", actor: "restart_recovery",
+              reason: "interrupted by bridge restart",
+              fields: { error: "interrupted by bridge restart" },
+              emit: false,
+            }, this.db);
+            if (cardOutcome.kind !== "applied") throw ROLLBACK_SENTINEL;
+            // Release the stale exact-generation workspace claim in the
+            // winning transaction.
+            this.db.prepare(`
+              DELETE FROM pi_workspace_claims
+              WHERE run_id = ? AND execution_generation = ?
+            `).run(runId, generation);
+            // #1358 review — mechanism A: boot interruption is a public
+            // transition; its `interrupted` fact commits with the status
+            // change so the origin sees it after a restart.
+            if (this.remoteEmitter) {
+              this.remoteEmitter.emitTransitionInTx({ runId, fromStatus: status, toStatus: "interrupted" });
+            }
+            this.db.exec("RELEASE SAVEPOINT pi_recovery_row");
+          } catch (err) {
+            this.db.exec("ROLLBACK TO SAVEPOINT pi_recovery_row");
+            this.db.exec("RELEASE SAVEPOINT pi_recovery_row");
+            if (err === ROLLBACK_SENTINEL) continue;
+            throw err;
           }
           interrupted++;
         }

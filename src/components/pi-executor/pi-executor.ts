@@ -41,6 +41,8 @@ export interface PiTerminalObservation {
   runId: string;
   generation: number;
   outcome: PiTerminalOutcome;
+  /** Optional narrow status fence for pre-live failures. */
+  expectedStatuses?: PiRunStatus[];
   metadata: { resultSummary?: string; changedFilesSummary?: string; usageJson?: string; error?: string; piSessionId?: string };
   envelope?: import("../worker-contract.js").WorkerResultEnvelopeV1;
   canonicalPath?: string;
@@ -148,11 +150,19 @@ export class PiExecutor {
    * before spawning so early exit/error cannot escape observation.
    */
   async startWithClaim(runId: string, generation: number, sessionId: string): Promise<"started" | "error"> {
-    if (this._stopped) return "error";
-
     const run = this.store.get(runId);
-    if (!run || run.executionGeneration !== generation) return "error";
-    if (run.status !== "starting") return "error";
+    if (!run || run.executionGeneration !== generation || run.status !== "starting") {
+      // Reconciler can lose the race with shutdown or a newer generation
+      // after claiming a C session. Release only this exact generation.
+      this.store.releaseWorkspaceClaimForGeneration({ runId, generation });
+      try { this._endExternalSession?.(sessionId, { runId, generation }); } catch { /* best effort */ }
+      return "error";
+    }
+    if (this._stopped) {
+      await this._settleAndCleanupGen(runId, generation, ["starting"], "failed", { error: "Pi executor is stopping" });
+      try { this._endExternalSession?.(sessionId, { runId, generation }); } catch { /* best effort */ }
+      return "error";
+    }
 
     // #1635 — synchronously reserve the shared process slot before spawn.
     // Capacity contention settles this generation; the reconciler's advisory
@@ -190,6 +200,7 @@ export class PiExecutor {
         // `_startProcess`; the CAS-fail branch settles nothing, so the
         // release here covers both (releaseSlot is guarded).
         this.host.releaseSlot();
+        this.store.releaseWorkspaceClaimForGeneration({ runId, generation });
         // #1647 — a launch failure still ends the generation's external C
         // session (generation-fenced by the spin layer).
         this._endExternalSession?.(sessionId, { runId, generation });
@@ -217,7 +228,7 @@ export class PiExecutor {
           await this._settleAndCleanup(owned, "failed", { error: "Failed to transition run to running" });
           return "error";
         }
-        const promptOk = await this._submitPrompt(runId, run.operationalGoal);
+        const promptOk = await this._submitPrompt(runId, run.operationalGoal, generation);
         if (!promptOk) {
           await this._settleAndCleanup(owned, "failed", { error: "Initial prompt submission failed" });
           return "error";
@@ -260,6 +271,7 @@ export class PiExecutor {
    * original goal nor a post-failure continuation.
    */
   private async _startResumed(owned: OwnedProcess, run: PiRunRecord): Promise<boolean> {
+    await this._configureModel(owned, run);
     // Validate the saved target from the claimed run record — path checks and
     // the bounded header/ID proof, never path existence alone.
     const proof = validatePersistedSession({
@@ -268,10 +280,9 @@ export class PiExecutor {
       sessionFile: run.piSessionFile,
     });
     if (!proof.ok) {
-      await this._settleAndCleanup(owned, "failed", { error: `Resume target invalid: ${proof.reason}` });
+      await this._settleAndCleanup(owned, "failed", { error: "Resume target failed persisted-session validation" });
       return false;
     }
-    await this._configureModel(owned, run);
     try {
       await owned.client.switchSession(proof.canonicalFile);
       const state = await owned.client.getState();
@@ -285,14 +296,20 @@ export class PiExecutor {
         sessionFile: state.sessionFile,
       });
       if (!resumedProof.ok) {
-        await this._settleAndCleanup(owned, "failed", { error: `Resumed session invalid: ${resumedProof.reason}` });
+        await this._settleAndCleanup(owned, "failed", { error: "Resumed session failed persisted-session validation" });
+        return false;
+      }
+      if (resumedProof.canonicalFile !== proof.canonicalFile) {
+        // Pi must report the exact saved identity we admitted. A different
+        // valid session under the same root is not a successful resume.
+        await this._settleAndCleanup(owned, "failed", { error: "Switched session file identity mismatch" });
         return false;
       }
       const transitioned = this.store.casTransition(run.id, "starting", "running", {
         piSessionId: state.sessionId,
         piSessionFile: resumedProof.canonicalFile,
         resumeCapability: "available",
-      });
+      }, run.executionGeneration);
       if (!transitioned) {
         // Post-switch running CAS lost — close the owned process and the
         // exact C session, never send followUp.
@@ -301,7 +318,7 @@ export class PiExecutor {
       }
       this._fireTransition(run.id, "starting", "running");
       await owned.client.followUp("Continue where we left off");
-      this.store.touchActivity(run.id);
+      this.store.touchActivity(run.id, run.executionGeneration);
       return true;
     } catch (err) {
       await this._settleAndCleanup(owned, "failed", {
@@ -326,9 +343,9 @@ export class PiExecutor {
     const capability: ResumeCapability = proof.ok ? "available" : proof.capability;
     const transitioned = this.store.casTransition(run.id, "starting", "running", {
       piSessionId: state.sessionId,
-      piSessionFile: state.sessionFile ?? undefined,
+      piSessionFile: proof.ok ? proof.canonicalFile : undefined,
       resumeCapability: capability,
-    });
+    }, run.executionGeneration);
     if (transitioned) {
       this._fireTransition(run.id, "starting", "running");
     }
@@ -369,8 +386,9 @@ export class PiExecutor {
     }
     const client = launched.client;
 
-    if (!this.store.casTransition(run.id, ["starting"], "starting", { observedPid: client.pid })) {
+    if (!this.store.casTransition(run.id, ["starting"], "starting", { observedPid: client.pid }, gen)) {
       await client.close();
+      await this._settleAndCleanupGen(run.id, gen, ["starting"], "failed", { error: "Pi run generation changed before launch" });
       return null;
     }
 
@@ -378,8 +396,8 @@ export class PiExecutor {
     const unsubTermination = client.onTermination((event) => {
       this._onChildTerminated(run.id, gen, event);
     });
-    const unsubEvents = client.subscribe((event) => this._onRpcEvent(run.id, event));
-    const unsubUi = client.onUiRequest((request) => this._onUiRequest(run.id, request));
+    const unsubEvents = client.subscribe((event) => this._onRpcEvent(run.id, gen, event));
+    const unsubUi = client.onUiRequest((request) => this._onUiRequest(run.id, gen, request));
 
     return {
       client,
@@ -419,12 +437,12 @@ export class PiExecutor {
     });
   }
 
-  private async _submitPrompt(runId: string, goal: string): Promise<boolean> {
+  private async _submitPrompt(runId: string, goal: string, expectedGeneration: number): Promise<boolean> {
     const owned = this.live.get(runId);
-    if (!owned) return false;
+    if (!owned || owned.generation !== expectedGeneration || owned.settling) return false;
     try {
       await owned.client.prompt(goal);
-      this.store.touchActivity(runId);
+      this.store.touchActivity(runId, expectedGeneration);
       return true;
     } catch (err) {
       logWarn(TAG, `Prompt submission failed for ${runId}: ${err instanceof Error ? err.message : String(err)}`);
@@ -439,7 +457,7 @@ export class PiExecutor {
     if (!owned) return false;
     try {
       await owned.client.steer(text);
-      this.store.touchActivity(runId);
+      this.store.touchActivity(runId, owned.generation);
       return true;
     } catch { return false; }
   }
@@ -465,7 +483,7 @@ export class PiExecutor {
       this.store.recordUiReplyOutcome({ runId, generation, requestId, outcome: "delivery_unknown" });
       this._fireTransition(runId, "awaiting_input", "running");
     }
-    this.store.touchActivity(runId);
+    this.store.touchActivity(runId, generation);
     return { claimed: true, requestType: claim.requestType };
   }
 
@@ -552,7 +570,7 @@ export class PiExecutor {
         new Promise<void>(resolve => setTimeout(resolve, 10_000)),
       ]);
       if (lifecycleTimer) { clearTimeout(lifecycleTimer); lifecycleTimer = null; }
-      this.store.touchActivity(input.runId);
+      this.store.touchActivity(input.runId, input.expectedGeneration);
       if (!compactionEnded) {
         logDebug(TAG, `Run ${input.runId}: compact response ok, no compaction_end observed (${Date.now() - started}ms)`);
       }
@@ -614,7 +632,7 @@ export class PiExecutor {
       committed: this.store.settleTerminal({
         runId: observation.runId,
         generation: observation.generation,
-        expectedStatuses: ["running", "cancelling", "starting", "awaiting_input"],
+        expectedStatuses: observation.expectedStatuses ?? ["running", "cancelling", "starting", "awaiting_input"],
         outcome: observation.outcome,
         metadata: observation.metadata,
       }).committed,
@@ -629,37 +647,38 @@ export class PiExecutor {
   ): Promise<void> {
     if (owned.settling) return;
     owned.settling = true;
+    try {
+      const { committed, supervised } = this.settleTerminalObservation({
+        runId: owned.runId,
+        generation: owned.generation,
+        outcome,
+        metadata,
+      });
 
-    const { committed, supervised } = this.settleTerminalObservation({
-      runId: owned.runId,
-      generation: owned.generation,
-      outcome,
-      metadata,
-    });
-
-    if (committed) {
-      // #1638: supervised runs settle through the Worker lane — the W card
-      // and its events are owned there; only standalone Pi cards get a
-      // Pi-lane card event here.
-      if (!supervised) {
-        const cardId = this.store.get(owned.runId)?.cardId ?? 0;
-        if (outcome === "completed") {
-          nerve.fire("card:done", cardId);
-        } else {
-          nerve.fire("card:failed", cardId);
+      if (committed) {
+        // #1638: supervised runs settle through the Worker lane — the W card
+        // and its events are owned there; only standalone Pi cards get a
+        // Pi-lane card event here.
+        if (!supervised) {
+          const cardId = this.store.get(owned.runId)?.cardId ?? 0;
+          if (outcome === "completed") {
+            nerve.fire("card:done", cardId);
+          } else {
+            nerve.fire("card:failed", cardId);
+          }
         }
+        this._fireTransition(owned.runId, undefined, outcome);
+      } else {
+        logWarn(TAG, `Terminal CAS lost for ${owned.runId} (gen=${owned.generation} outcome=${outcome})`);
       }
-      this._fireTransition(owned.runId, undefined, outcome);
-    } else {
-      logWarn(TAG, `Terminal CAS lost for ${owned.runId} (gen=${owned.generation} outcome=${outcome})`);
+    } catch (err) {
+      // Durable settlement is best effort here, but process/slot/C-session
+      // cleanup is mandatory even if a router, emitter, or event subscriber
+      // throws.
+      logWarn(TAG, `Terminal cleanup settlement failed for ${owned.runId}: ${err instanceof Error ? err.message : String(err)}`);
+    } finally {
+      await this._releaseOwned(owned);
     }
-
-    // #1647 — generation-fenced release of the exact workspace claim when the
-    // winning settlement did not already release it (exact fence: can never
-    // free a newer generation's holder).
-    this.store.releaseWorkspaceClaimForGeneration({ runId: owned.runId, generation: owned.generation });
-
-    await this._releaseOwned(owned);
   }
 
   private async _settleAndCleanupGen(
@@ -667,27 +686,35 @@ export class PiExecutor {
     outcome: PiTerminalOutcome,
     metadata: { error?: string; changedFilesSummary?: string },
   ): Promise<void> {
-    void expectedStatuses;
-    const { committed, supervised } = this.settleTerminalObservation({
-      runId,
-      generation,
-      outcome,
-      metadata,
-    });
-    if (committed) {
-      if (!supervised) {
-        nerve.fire("card:failed", this.store.get(runId)?.cardId ?? 0);
+    try {
+      const { committed, supervised } = this.settleTerminalObservation({
+        runId,
+        generation,
+        outcome,
+        expectedStatuses,
+        metadata,
+      });
+      if (committed) {
+        if (!supervised) {
+          nerve.fire("card:failed", this.store.get(runId)?.cardId ?? 0);
+        }
+        this._fireTransition(runId, undefined, outcome);
       }
-      this._fireTransition(runId, undefined, outcome);
-    }
-    // #1647 — no owned process here (pre-live failure): end the generation's
-    // external C session from the run record, exact-generation fenced.
-    const run = this.store.get(runId);
-    if (run?.currentSessionId) {
-      try {
-        this._endExternalSession?.(run.currentSessionId, { runId, generation });
-      } catch (err) {
-        logWarn(TAG, `External session cleanup failed for ${runId}: ${err instanceof Error ? err.message : String(err)}`);
+    } catch (err) {
+      logWarn(TAG, `Pre-live cleanup settlement failed for ${runId}: ${err instanceof Error ? err.message : String(err)}`);
+    } finally {
+      // #1647 — no owned process here (pre-live failure): release the exact
+      // workspace claim and end only this generation's external C session.
+      try { this.store.releaseWorkspaceClaimForGeneration({ runId, generation }); } catch (err) {
+        logWarn(TAG, `Workspace claim cleanup failed for ${runId}: ${err instanceof Error ? err.message : String(err)}`);
+      }
+      const run = this.store.get(runId);
+      if (run?.executionGeneration === generation && run.currentSessionId) {
+        try {
+          this._endExternalSession?.(run.currentSessionId, { runId, generation });
+        } catch (err) {
+          logWarn(TAG, `External session cleanup failed for ${runId}: ${err instanceof Error ? err.message : String(err)}`);
+        }
       }
     }
   }
@@ -700,6 +727,11 @@ export class PiExecutor {
     if (owned.unsubTermination) { owned.unsubTermination(); owned.unsubTermination = null; }
     if (owned.unsubEvents) { owned.unsubEvents(); owned.unsubEvents = null; }
     if (owned.unsubUi) { owned.unsubUi(); owned.unsubUi = null; }
+    try {
+      this.store.releaseWorkspaceClaimForGeneration({ runId: owned.runId, generation: owned.generation });
+    } catch (err) {
+      logWarn(TAG, `Workspace claim cleanup failed for ${owned.runId}: ${err instanceof Error ? err.message : String(err)}`);
+    }
     if (owned.client) {
       try { await owned.client.close(); } catch { /* ignore */ }
     }
@@ -724,7 +756,7 @@ export class PiExecutor {
     if (owned.settling) return;
     if (!this.store.casTransition(runId, ["running", "awaiting_input", "starting"], "cancelling", {
       pendingRequestId: null, pendingRequestType: null,
-    })) return;
+    }, owned.generation)) return;
     this._fireTransition(runId, undefined, "cancelling");
 
     owned.client.abort().catch(() => {});
@@ -732,7 +764,7 @@ export class PiExecutor {
     const graceMs = this.config_.abortGraceMs;
     owned.abortTimer = setTimeout(async () => {
       if (this.live.get(runId) !== owned) return;
-      await owned.client.close();
+      try { await owned.client.close(); } catch { /* settlement still owns cleanup */ }
       const afterEvidence = captureGitEvidence(owned.workspacePath);
       const summary = computeChangedFilesSummary(owned.beforeEvidence, afterEvidence);
       await this._settleAndCleanup(owned, "cancelled", {
@@ -743,13 +775,15 @@ export class PiExecutor {
 
   // ── RPC event handler ─────────────────────────────────────────────────────
 
-  private async _onRpcEvent(runId: string, event: PiAgentEvent): Promise<void> {
+  private async _onRpcEvent(runId: string, expectedGeneration: number, event: PiAgentEvent): Promise<void> {
+    const owned = this.live.get(runId);
+    if (!owned || owned.generation !== expectedGeneration || owned.settling) return;
     // Every frame from Pi counts as activity (drives timeout/idle logic).
-    this.store.touchActivity(runId);
+    this.store.touchActivity(runId, expectedGeneration);
 
     const proj = projectPiEvent(event);
     for (const p of proj.progress) {
-      this.store.addProgress(runId, p.type, p.json);
+      this.store.addProgress(runId, p.type, p.json, expectedGeneration);
       for (const cb of this._progressSubs) {
           try { cb(runId, p.json, p.type); } catch { /* best effort */ }
       }
@@ -758,23 +792,21 @@ export class PiExecutor {
     else if (proj.log?.level === "debug") logDebug(TAG, `${proj.log.message} [run=${runId}]`);
 
     if (proj.settleCompletion) {
-      const owned = this.live.get(runId);
-      if (!owned || owned.settling) return;
       await this._settleCompletion(runId, owned);
     }
   }
 
   /** Handle official extension_ui_request frames. Dialog methods enter awaiting_input;
    *  fire-and-forget methods are bounded progress/display events. */
-  private async _onUiRequest(runId: string, request: RpcExtensionUIRequest): Promise<void> {
-    this.store.touchActivity(runId);
+  private async _onUiRequest(runId: string, expectedGeneration: number, request: RpcExtensionUIRequest): Promise<void> {
+    const owned = this.live.get(runId);
+    if (!owned || owned.generation !== expectedGeneration || owned.settling) return;
+    this.store.touchActivity(runId, expectedGeneration);
 
     const method = request.method;
     const dialogMethods = new Set(["select", "confirm", "input", "editor"]);
 
     if (dialogMethods.has(method)) {
-      const owned = this.live.get(runId);
-      if (!owned) return;
       // #1638: supervised runs suspend for input instead of parking in
       // awaiting_input — the question becomes structured Worker failure
       // evidence and Orc answers on the retry.
@@ -794,6 +826,7 @@ export class PiExecutor {
           await this._releaseOwned(owned);
           return;
         }
+        if (this.live.get(runId) !== owned || owned.generation !== expectedGeneration) return;
         owned.settling = false;
       }
       // #1358 review — the "ui" progress row is stored BEFORE the
@@ -809,7 +842,7 @@ export class PiExecutor {
         options: (request as any).options,
         defaultValue: (request as any).defaultValue,
         filePattern: undefined,
-      }));
+      }), expectedGeneration);
       const result = this.store.setPendingUi({
         runId, generation: owned.generation, requestId: request.id, requestType: method as PiPendingRequestType,
       });
@@ -819,7 +852,7 @@ export class PiExecutor {
         logWarn(TAG, `UI request rejected for ${runId} (gen=${owned.generation}, req=${request.id}): ${result.reason}`);
       }
     } else if (method === "notify") {
-      this.store.addProgress(runId, "ui_notify", JSON.stringify({ message: (request as any).message }));
+      this.store.addProgress(runId, "ui_notify", JSON.stringify({ message: (request as any).message }), expectedGeneration);
     }
   }
 
@@ -885,29 +918,36 @@ export class PiExecutor {
     await Promise.all(snapshot.map(async (owned) => {
       if (owned.abortTimer) { clearTimeout(owned.abortTimer); owned.abortTimer = null; }
       owned.settling = true;
-
-      const proof = await this._interruptProof(owned);
-      let interrupted = false;
-      if (this._interruptRouter) {
-        interrupted = this._interruptRouter({ runId: owned.runId, generation: owned.generation, continuity: proof }).interrupted === true;
-      } else {
-        const direct = this.store.interruptGeneration({ runId: owned.runId, generation: owned.generation, continuity: proof });
-        if (direct.committed) {
-          interrupted = true;
-        } else if (direct.reason === "supervised") {
-          // Degraded corner (no coordinator wired): run-row-only interruption,
-          // never touching the W card — matches the pre-#1647 behavior.
-          interrupted = this.store.casTransition(
-            owned.runId,
-            ["starting", "running", "awaiting_input", "cancelling"],
-            "interrupted",
-            { pendingRequestId: null, pendingRequestType: null },
-          );
+      try {
+        const proof = await this._interruptProof(owned);
+        let interrupted = false;
+        if (this._interruptRouter) {
+          interrupted = this._interruptRouter({ runId: owned.runId, generation: owned.generation, continuity: proof }).interrupted === true;
+        } else {
+          const direct = this.store.interruptGeneration({ runId: owned.runId, generation: owned.generation, continuity: proof });
+          if (direct.committed) {
+            interrupted = true;
+          } else if (direct.reason === "supervised") {
+            // Degraded corner (no coordinator wired): run-row-only
+            // interruption, never touching the W card.
+            interrupted = this.store.casTransition(
+              owned.runId,
+              ["starting", "running", "awaiting_input", "cancelling"],
+              "interrupted",
+              { pendingRequestId: null, pendingRequestType: null },
+              owned.generation,
+            );
+          }
         }
+        if (interrupted) this._fireTransition(owned.runId, undefined, "interrupted");
+      } catch (err) {
+        logWarn(TAG, `Interruption settlement failed for ${owned.runId}: ${err instanceof Error ? err.message : String(err)}`);
+      } finally {
+        // Shutdown must not strand a process, external C session, capacity
+        // slot, or workspace claim when durable interruption loses a race or
+        // throws.
+        await this._releaseOwned(owned);
       }
-      if (interrupted) this._fireTransition(owned.runId, undefined, "interrupted");
-
-      await this._releaseOwned(owned);
     }));
   }
 

@@ -849,6 +849,25 @@ describe("PiRunStore — #1395 UI claim/restore/setPending", () => {
         expect(store.queueResumeGeneration({ runId, expectedGeneration: 1, newSessionId: "x" }).reason).toBe("card_mismatch");
       } finally { cleanup(); }
     });
+
+    it("admission refuses supervised rows so the Pi lane cannot own a W card", () => {
+      const { store, root, cleanup } = makeSessionStore();
+      try {
+        const file = writeSession(root, "supervised.jsonl", "sup-session");
+        const runId = "res-supervised";
+        seedActive(store, 7933, runId, {
+          origin: "supervised", status: "interrupted", piSessionId: "sup-session",
+          piSessionFile: file, resumeCapability: "available",
+        });
+        const db = (store as any).db as TaskDatabase;
+        db.prepare(`UPDATE kanban_board SET status = 'failed' WHERE id = ?`).run(7933);
+
+        const commit = store.queueResumeGeneration({ runId, expectedGeneration: 1, newSessionId: "new-c" });
+        expect(commit).toEqual({ committed: false, reason: "not_resumable" });
+        expect(store.get(runId)!.executionGeneration).toBe(1);
+        expect(cardStatus(store, 7933)).toBe("failed");
+      } finally { cleanup(); }
+    });
   });
 
   describe("#1647 — paired standalone finalization", () => {
@@ -998,6 +1017,32 @@ describe("PiRunStore — #1395 UI claim/restore/setPending", () => {
       } finally { cleanup(); }
     });
 
+    it("settleTerminal refuses supervised rows without touching the W card", () => {
+      const { store, cleanup } = makeSessionStore();
+      try {
+        const runId = "term-supervised";
+        seedActive(store, 7947, runId, { origin: "supervised" });
+        const result = store.settleTerminal({
+          runId, generation: 1, expectedStatuses: ["running"], outcome: "failed", metadata: { error: "x" },
+        });
+        expect(result).toEqual({ committed: false, reason: "supervised" });
+        expect(store.get(runId)!.status).toBe("running");
+        expect(cardStatus(store, 7947)).toBe("running");
+      } finally { cleanup(); }
+    });
+
+    it("casTransition fences lifecycle writes to the expected generation", () => {
+      const { store, cleanup } = makeSessionStore();
+      try {
+        const runId = "cas-generation";
+        seedActive(store, 7948, runId, { generation: 2 });
+        expect(store.casTransition(runId, "running", "failed", { error: "stale" }, 1)).toBe(false);
+        expect(store.get(runId)!.status).toBe("running");
+        expect(store.casTransition(runId, "running", "failed", { error: "current" }, 2)).toBe(true);
+        expect(store.get(runId)!.error).toBe("current");
+      } finally { cleanup(); }
+    });
+
     it("recoverNonterminal derives capability from session proof, not ID presence", () => {
       const { store, root, cleanup } = makeSessionStore();
       try {
@@ -1052,6 +1097,25 @@ describe("PiRunStore — #1395 UI claim/restore/setPending", () => {
         expect(store.get(runId)!.status).toBe("interrupted");
         // W card untouched by the Pi lane.
         expect(cardStatus(store, 7954)).toBe("running");
+      } finally { cleanup(); }
+    });
+
+    it("recoverNonterminal isolates a card CAS conflict to that row", () => {
+      const { store, cleanup } = makeSessionStore();
+      try {
+        const conflict = "rec-card-conflict";
+        const winner = "rec-card-winner";
+        seedActive(store, 7955, conflict);
+        seedActive(store, 7956, winner);
+        const db = (store as any).db as TaskDatabase;
+        db.prepare(`UPDATE kanban_board SET status = 'done' WHERE id = ?`).run(7955);
+
+        const recovery = store.recoverNonterminal();
+        expect(recovery.interrupted).toBe(1);
+        expect(store.get(conflict)!.status).toBe("running");
+        expect(cardStatus(store, 7955)).toBe("done");
+        expect(store.get(winner)!.status).toBe("interrupted");
+        expect(cardStatus(store, 7956)).toBe("failed");
       } finally { cleanup(); }
     });
   });

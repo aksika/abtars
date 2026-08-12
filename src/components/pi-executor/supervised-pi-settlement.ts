@@ -13,6 +13,7 @@
  * Pi-card transition).
  */
 import type { PiRunStore, PiTerminalMetadata, PiTerminalOutcome } from "./pi-run-store.js";
+import type { PiRunStatus } from "./types.js";
 import type { WorkerSupervisionStore } from "../worker-supervision-store.js";
 import type { WorkerResultEnvelopeV1 } from "../worker-contract.js";
 import { logWarn } from "../logger.js";
@@ -24,6 +25,8 @@ export interface PiTerminalObservation {
   runId: string;
   generation: number;
   outcome: PiTerminalOutcome;
+  /** Optional narrow status fence for pre-live failures. */
+  expectedStatuses?: PiRunStatus[];
   metadata: PiTerminalMetadata;
   /** #1638: supplied structured Worker envelope (e.g. an input_requested
    * question) — persisted for non-completed outcomes by the canonical body. */
@@ -61,7 +64,7 @@ export class SupervisedPiSettlement {
       const result = this.piStore.settleTerminal({
         runId: input.runId,
         generation: input.generation,
-        expectedStatuses: ["starting", "running", "awaiting_input", "interrupted"],
+        expectedStatuses: input.expectedStatuses ?? ["starting", "running", "awaiting_input", "interrupted"],
         outcome: input.outcome,
         metadata: input.metadata,
       });
@@ -113,7 +116,7 @@ export class SupervisedPiSettlement {
         const runResult = this.piStore.settleSupervisedRunInTransaction({
           runId: input.runId,
           generation: input.generation,
-          expectedStatuses: ["starting", "running", "awaiting_input", "interrupted"],
+          expectedStatuses: input.expectedStatuses ?? ["starting", "running", "awaiting_input", "interrupted"],
           outcome: input.outcome,
           metadata: input.metadata,
         });
@@ -310,7 +313,7 @@ export class SupervisedPiSettlement {
           pendingRequestType: null,
           piSessionFile: sessionFile ?? undefined,
           resumeCapability: proof.ok ? "available" : proof.capability,
-        });
+        }, input.generation);
         if (!interrupted) return { suspended: false, reason: "run transition lost" };
 
         // canonical Worker settlement with the structured question envelope

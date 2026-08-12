@@ -703,7 +703,12 @@ export const PI_SCENARIOS: PiScenario[] = [
   { name: "cancellation-deadline", profiles: ["full"], run: cancellation },
   { name: "scheduled-orc-round-limit", profiles: ["full"], run: scheduledOrcRoundLimit },
   { name: "scheduled-orc-round-limit-restart", profiles: ["full"], run: scheduledOrcRoundLimitRestart },
-  { name: "pi-terminal-cleanup", profiles: ["core", "full"], run: piTerminalCleanup },
+  // This scenario intentionally relies on the offline/fail-closed Pi prompt.
+  // The full profile leaves the fixture session on model B and runs scheduled
+  // provider traffic immediately before this scenario, so it is not an
+  // offline boundary and can wait forever for an unscripted provider turn.
+  // Core exercises both transport lanes while preserving that contract.
+  { name: "pi-terminal-cleanup", profiles: ["core"], run: piTerminalCleanup },
 ];
 
 export function scenariosForProfile(profile: "core" | "full"): PiScenario[] {

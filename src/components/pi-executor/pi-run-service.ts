@@ -1,7 +1,6 @@
-import { existsSync } from "node:fs";
 import { PiRunStore } from "./pi-run-store.js";
 import { PiExecutor } from "./pi-executor.js";
-import { resolveAndValidateWorkspace, validateSessionFile, type PiExecutorConfig } from "./config.js";
+import { resolveAndValidateWorkspace, validatePersistedSession, type PiExecutorConfig } from "./config.js";
 import type { PiRunRecord, PiRunView, PiRunRef, PiRunRequest, PiRunStatus, PiUiReply, PiModelSelection } from "./types.js";
 import { MAX_GOAL_CHARS } from "./types.js";
 import type { Spin } from "../spin.js";
@@ -212,20 +211,25 @@ export class PiRunService {
     const ws = resolveAndValidateWorkspace(run.workspaceAlias, this.deps.config);
     if (ws.error) throw new Error(`Workspace policy changed: ${ws.error}`);
 
-    if (!run.piSessionFile) {
-      throw new Error(`Run ${runId} has no saved session file — cannot resume`);
-    }
-
-    if (!existsSync(run.piSessionFile)) {
-      this.deps.store.casTransition(runId, run.status, run.status, { resumeCapability: "session_missing" });
-      throw new Error(`Pi session file not found at ${run.piSessionFile}`);
-    }
-
-    // Early rejection optimization — the store revalidates the persisted
-    // target authoritatively inside the admission transaction.
-    const validated = validateSessionFile(this.deps.config.sessionStorageRoot, run.piSessionFile);
-    if (validated.error) {
-      throw new Error(`Session file validation failed: ${validated.error}`);
+    // Early rejection optimization using the same bounded identity proof as
+    // the store and executor. The store repeats this check in its admission
+    // transaction, so a direct caller cannot bypass it or race a replacement.
+    // Keep the user-facing error content-free: session paths and file details
+    // are lifecycle internals, not API diagnostics.
+    const proof = validatePersistedSession({
+      sessionStorageRoot: this.deps.config.sessionStorageRoot,
+      expectedSessionId: run.piSessionId,
+      sessionFile: run.piSessionFile,
+    });
+    if (!proof.ok) {
+      this.deps.store.casTransition(
+        runId,
+        run.status,
+        run.status,
+        { resumeCapability: proof.capability },
+        run.executionGeneration,
+      );
+      throw new Error(`Run ${runId} is not resumable (${proof.capability})`);
     }
 
     const newGen = run.executionGeneration + 1;
@@ -249,11 +253,20 @@ export class PiRunService {
     // Atomic resume admission — the store revalidates the persisted session
     // target and requires BOTH the run update and the card transition to
     // land, or neither (rollback).
-    const commit = this.deps.store.queueResumeGeneration({
-      runId,
-      expectedGeneration: run.executionGeneration,
-      newSessionId: spinSessionId,
-    });
+    let commit;
+    try {
+      commit = this.deps.store.queueResumeGeneration({
+        runId,
+        expectedGeneration: run.executionGeneration,
+        newSessionId: spinSessionId,
+      });
+    } catch (err) {
+      // Admission can fail by throwing (for example, an outbox/card write
+      // failure), not only by returning a losing CAS. The preallocated C
+      // session must be compensated on both paths.
+      try { this.deps.spin.endExternalSession(spinSessionId, { runId, generation: newGen }); } catch { /* best effort */ }
+      throw err;
+    }
 
     if (!commit.committed) {
       // Compensate: end the pre-allocated session
