@@ -274,10 +274,15 @@ export class WorkerSupervisionStore {
           WHERE id = ?
         `).run(kind, id, row.id);
       }
+
+      // The expensive envelope rewrite and the marker insert run only on the
+      // first upgrade; a later legacy attempt row self-heals through the query
+      // above without rescanning worker_results.
+      if (applied) return;
       this.migrateLegacyEnvelopes();
 
       db.prepare(`
-        INSERT INTO worker_supervision_migrations (name) VALUES (?)
+        INSERT OR IGNORE INTO worker_supervision_migrations (name) VALUES (?)
       `).run(WorkerSupervisionStore.EXECUTOR_IDENTITY_MIGRATION);
     });
   }

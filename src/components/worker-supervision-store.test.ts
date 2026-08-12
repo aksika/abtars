@@ -713,6 +713,63 @@ describe("WorkerSupervisionStore", () => {
       expect(chargedBefore.charged_tokens).toBe(150);
       expect(chargedAfter.charged_tokens).toBe(150);
     });
+
+    // #1638 Task 1 characterization: TODAY a supplied envelope on a
+    // non-completed outcome is DISCARDED and the absence envelope is written.
+    // Task 6 deliberately changes this to persist genuine failure evidence.
+    // This assertion pins the pre-change behavior so the Task 6 diff is
+    // intentional, not incidental.
+    it("CHARACTERIZATION: non-completed settlement discards a supplied envelope and writes the absence envelope", () => {
+      const s = new Store();
+      s.insertContract(TEST_CONTRACT, 101);
+      const aid = setupAttempt(s, "pending");
+      s.lifecycleTransition(aid, ["pending"], "running");
+      const supplied: WorkerResultEnvelopeV1 = {
+        schema_version: 1,
+        attempt: {
+          id: aid, ordinal: 1, contract_id: TEST_CONTRACT.id,
+          contract_digest: TEST_CONTRACT.digest,
+          executor_kind: "agent", executor_id: "spin-local",
+          started_at: "2026-01-01T00:00:00.000Z", finished_at: "2026-01-01T00:01:00.000Z",
+        },
+        outcome: "failed",
+        criteria: [],
+        checks: [],
+        artifacts: [],
+        worker_report: { summary: "real failure evidence", claims: [], unresolved_risks: [] },
+        error: { code: "INPUT_REQUESTED", message: "question pending" },
+      };
+      const result = s.terminalSettlement({
+        attemptId: aid, expectedGeneration: 1, desiredState: "failed",
+        stableReason: "input_requested", envelope: supplied,
+      });
+      expect(result.kind).toBe("settled");
+      const stored = s.getResultByAttempt(aid);
+      expect(stored?.envelope.worker_report.summary).not.toBe("real failure evidence");
+      expect(stored?.envelope.outcome).toBe("failed");
+    });
+
+    // #1638 Task 1 characterization: no-alias contract settles a failed
+    // attempt with the absence envelope whose criteria are derived not_run.
+    it("CHARACTERIZATION: no-alias failed attempt stores absence envelope with not_run criteria", () => {
+      const s = new Store();
+      const now = new Date().toISOString();
+      s.db.prepare(`INSERT OR IGNORE INTO kanban_board (id, title, source, status, type, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)`).run(501, "proj", "t", "running", "O", now, now);
+      s.db.prepare(`INSERT OR IGNORE INTO kanban_board (id, title, source, status, type, parent_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`).run(502, "child", "t", "queued", "W", 501, now, now);
+      s.insertContract(TEST_CONTRACT, 502);
+      s.insertAttempt({
+        id: "a_noalias", card_id: 502, contract_id: TEST_CONTRACT.id, ordinal: 1,
+        executor_kind: "agent", executor_id: "spin-local", status: "pending", started_at: now,
+      });
+      s.lifecycleTransition("a_noalias", ["pending"], "running");
+      s.terminalSettlement({
+        attemptId: "a_noalias", expectedGeneration: 1, desiredState: "failed",
+        stableReason: "executor_unavailable",
+      });
+      const stored = s.getResultByAttempt("a_noalias");
+      expect(stored?.envelope.attempt.executor_kind).toBe("agent");
+      expect(stored?.envelope.criteria).toEqual([{ criterion_id: "c1", status: "not_run", evidence_ids: [] }]);
+    });
   });
 
   describe("pruneTerminalAttempts (#1551)", () => {
@@ -811,6 +868,9 @@ describe("WorkerSupervisionStore", () => {
     it("normalizes legacy attempt kinds and built-in Spin ID, and recomputes envelope digests", async () => {
       const store = new Store();
       store.insertContract(TEST_CONTRACT, 101);
+      // Simulate a pre-#1637 database: the migration marker table does not
+      // exist yet (a legacy deployment never had it), and legacy rows exist.
+      store.db.exec(`DROP TABLE worker_supervision_migrations`);
       // Legacy rows as they existed before #1637: local_worker/spin attempt
       // plus an envelope whose embedded kind uses the old vocabulary.
       store.db.prepare(`
@@ -842,12 +902,10 @@ describe("WorkerSupervisionStore", () => {
         worker_report: { summary: "legacy", claims: [], unresolved_risks: [] },
       };
       const legacyJson = JSON.stringify(legacyEnvelope);
-      const legacyDigest = store.db.prepare(`SELECT * FROM worker_results WHERE attempt_id = ?`).get("a_legacy") as { envelope_digest: string } | undefined;
       store.db.prepare(`
         INSERT INTO worker_results (attempt_id, envelope_json, envelope_digest, created_at)
         VALUES ('a_legacy', ?, 'stale-digest', '2026-01-01T00:00:00.000Z')
       `).run(legacyJson);
-      void legacyDigest;
 
       // A second constructor run is the migration trigger — same as a restart.
       const store2 = new Store();
