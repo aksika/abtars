@@ -82,7 +82,7 @@ export function loadPiConfig(): PiExecutorConfig | null {
       fixedArgs,
       workspaceAliases: raw.workspaceAliases,
       allowedEnv: raw.allowedEnv ?? [],
-      maxConcurrent: raw.maxConcurrent ?? 1,
+      maxConcurrent: raw.maxConcurrent ?? 3,
       maxWallClockMs: raw.maxWallClockMs ?? 30 * 60 * 1000,
       abortGraceMs: raw.abortGraceMs ?? 10_000,
       projectTrust: raw.projectTrust ?? "never",

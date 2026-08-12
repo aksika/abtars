@@ -13,6 +13,7 @@ import { WorkerSupervisionStore } from "./worker-supervision-store.js";
 import { SpinWorkerAdapter } from "./spin-worker-adapter.js";
 import type { SwarmExecutorAdapter, ExecutionClaim } from "./swarm-executor-types.js";
 import { resolveSchedulingPolicy, deriveDeadline } from "./swarm-dispatch-policy.js";
+import { resolveAndValidateWorkspace } from "./pi-executor/config.js";
 import { LeaseReconciliationService } from "./executor-lease-reconciler.js";
 import type { LifecycleWakeScheduler } from "./lifecycle-wake-scheduler.js";
 import { ExecutorLeaseStore } from "./executor-lease-store.js";
@@ -1165,8 +1166,22 @@ function reconcilePiCard(card: KanbanCard): void {
     return;
   }
 
-  const claim = svc.store.claimQueuedGeneration(card.id);
+  // #1638: the canonical workspace path is the shared admission key. An
+  // unresolvable alias cannot start; a busy path keeps run+card queued.
+  const ws = resolveAndValidateWorkspace(run.workspaceAlias, svc.config);
+  if (ws.error) {
+    logWarn(TAG, `Pi card ${card.id}: workspace alias invalid — ${ws.error}`);
+    return;
+  }
+
+  const claim = svc.store.claimQueuedGeneration(card.id, ws.canonicalPath);
   if (!claim.claimed) {
+    if (claim.reason === "busy" || claim.reason === "not_startable") {
+      // #1638/#1648: paired waiting state — run and card stay queued, no
+      // process or workspace claim held. A release wake starts it later.
+      logInfo(TAG, `Pi card ${card.id} waiting: ${claim.reason} (${run.workspaceAlias} busy)`);
+      return;
+    }
     logWarn(TAG, `Failed to claim Pi card ${card.id}: ${claim.reason}`);
     return;
   }
@@ -1402,6 +1417,34 @@ async function dispatchOnePass(): Promise<void> {
     if (observation.kind === "started" || observation.kind === "already_started") {
       store.markAttemptRunning(claim.attemptId);
       logSwarmTrace({ event: "worker_started", card: card.id, attempt: claim.attemptId, generation: claim.generation, executor: claim.executorId });
+    } else if (observation.kind === "deferred" && observation.provesNoStart === true) {
+      // #1638: proven-no-start contention (Pi capacity/workspace busy). The
+      // attempt returns to pending without settling or consuming retry; a
+      // later shared release wake re-dispatches it. Executor-neutral branch —
+      // only Pi emits deferred today. No dispatch dirty flag: the wake (or
+      // periodic reconciliation) is the recovery floor.
+      const deferOutcome = store.deferClaimAfterProvenNoStart({
+        attemptId: claim.attemptId,
+        expectedGeneration: claim.generation,
+        reason: observation.reason,
+      });
+      logSwarmTrace({
+        event: "worker_deferred",
+        card: card.id,
+        attempt: claim.attemptId,
+        generation: claim.generation,
+        reason: `${observation.reason} (defer=${deferOutcome})`,
+      });
+      if (deferOutcome !== "deferred") {
+        logWarn(TAG, `defer failed (${deferOutcome}) for ${claim.attemptId} — settling as start failure`);
+        store.terminalSettlement({
+          attemptId: claim.attemptId,
+          expectedGeneration: claim.generation,
+          desiredState: "failed",
+          stableReason: `start_failed: deferred_${observation.reason}`,
+        });
+        kanbanFail(card.id, `worker start deferred but could not requeue: ${observation.reason}`);
+      }
     } else {
       logSwarmTrace({ event: "worker_start_failed", card: card.id, attempt: claim.attemptId, reason: "start_failed" });
       store.terminalSettlement({

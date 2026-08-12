@@ -80,7 +80,18 @@ export type PiTerminalSettlement =
 
 export type PiStartClaim =
   | { claimed: true; runId: string; generation: number }
-  | { claimed: false; reason: "missing" | "not_queued" | "card_mismatch" };
+  | { claimed: false; reason: "missing" | "not_queued" | "card_mismatch" | "busy" | "not_startable" };
+
+/** #1638 — result of the shared canonical-workspace claim. */
+export type PiWorkspaceClaim =
+  | { kind: "claimed"; runId: string; generation: number }
+  | { kind: "idempotent"; runId: string; generation: number }
+  | { kind: "busy"; holderRunId: string }
+  | { kind: "stale"; reason: string };
+
+export type PiReleaseResult =
+  | { released: true; runId: string; generation: number; canonicalPath: string }
+  | { released: false; reason: "missing" | "not_holder" | "stale" };
 
 export type PiResumeCommit =
   | { committed: true; runId: string; newGeneration: number; cardId: number }
@@ -212,6 +223,20 @@ export class PiRunStore {
       consumed_at TEXT NOT NULL DEFAULT (datetime('now'))
     )`);
     this.db.exec(`CREATE INDEX IF NOT EXISTS idx_remote_approvals_run ON remote_pi_approvals_consumed(run_id)`);
+
+    // #1638 — Shared canonical-workspace claim. At most one process-holding
+    // run generation per canonical path across standalone and supervised Pi
+    // lanes. The canonical path is an equality key only — never shown raw in
+    // Orc output. Alias synonyms resolve to the same key and therefore
+    // contend on the same claim.
+    this.db.exec(`CREATE TABLE IF NOT EXISTS pi_workspace_claims (
+      canonical_path TEXT PRIMARY KEY,
+      run_id TEXT NOT NULL,
+      execution_generation INTEGER NOT NULL,
+      owner_kind TEXT NOT NULL CHECK(owner_kind IN ('standalone','supervised')),
+      acquired_at TEXT NOT NULL,
+      UNIQUE(run_id, execution_generation)
+    )`);
   }
 
   /**
@@ -660,11 +685,114 @@ export class PiRunStore {
   // ── #1405: atomic lifecycle operations ──────────────────────────────────────
 
   /**
-   * #1405 — Atomically claim a queued Pi run and its linked card.
-   * Transitions run queued→starting, card queued→running in one transaction.
-   * Returns the claim or a typed conflict.
+   * #1638 — The single transactional body for claiming a canonical workspace
+   * before a Pi process start. Both standalone and supervised lanes call this.
+   * Inside one SQLite transaction it:
+   *   1. validates run ID, expected Pi generation and a pre-start run status;
+   *   2. inserts `pi_workspace_claims` using the canonical path primary key;
+   *   3. treats the exact same (run,generation) holder as idempotent;
+   *   4. advances the Pi run to `starting` only after the insert wins.
+   * A primary-key conflict returns `busy`; no process has started. The card
+   * transition (standalone) or the Worker attempt (supervised) is handled by
+   * the caller, never here.
    */
-  claimQueuedGeneration(cardId: number): PiStartClaim {
+  private claimWorkspaceForStartInTx(input: {
+    runId: string;
+    expectedGeneration: number;
+    canonicalPath: string;
+    ownerKind: "standalone" | "supervised";
+  }): PiWorkspaceClaim {
+    const runRow = this.db.prepare(
+      `SELECT id, execution_generation, status FROM pi_runs WHERE id = ?`
+    ).get(input.runId) as Record<string, unknown> | undefined;
+    if (!runRow) return { kind: "stale", reason: "missing" };
+    if ((runRow.execution_generation as number) !== input.expectedGeneration) return { kind: "stale", reason: "generation" };
+    if ((runRow.status as string) !== "queued" && (runRow.status as string) !== "starting") return { kind: "stale", reason: "not_queued" };
+
+    // The exact same (run,generation) holder is idempotent — even when the
+    // run already advanced to starting by an earlier claim.
+    const exactHolder = this.db.prepare(`
+      SELECT run_id FROM pi_workspace_claims WHERE canonical_path = ? AND run_id = ? AND execution_generation = ?
+    `).get(input.canonicalPath, input.runId, input.expectedGeneration) as { run_id: string } | undefined;
+    if (exactHolder) return { kind: "idempotent", runId: input.runId, generation: input.expectedGeneration };
+
+    try {
+      this.db.prepare(`
+        INSERT INTO pi_workspace_claims (canonical_path, run_id, execution_generation, owner_kind, acquired_at)
+        VALUES (?, ?, ?, ?, datetime('now'))
+      `).run(input.canonicalPath, input.runId, input.expectedGeneration, input.ownerKind);
+    } catch {
+      const holder = this.db.prepare(`
+        SELECT run_id, execution_generation FROM pi_workspace_claims WHERE canonical_path = ?
+      `).get(input.canonicalPath) as { run_id: string; execution_generation: number } | undefined;
+      if (holder && holder.run_id === input.runId && holder.execution_generation === input.expectedGeneration) {
+        return { kind: "idempotent", runId: input.runId, generation: input.expectedGeneration };
+      }
+      return { kind: "busy", holderRunId: holder?.run_id ?? "unknown" };
+    }
+
+    const runChanged = this.db.prepare(
+      `UPDATE pi_runs SET status = 'starting', updated_at = datetime('now') WHERE id = ? AND status = 'queued'`
+    ).run(input.runId);
+    if (runChanged.changes === 0) {
+      this.db.prepare(`
+        DELETE FROM pi_workspace_claims WHERE canonical_path = ? AND run_id = ? AND execution_generation = ?
+      `).run(input.canonicalPath, input.runId, input.expectedGeneration);
+      return { kind: "stale", reason: "run_claim_lost" };
+    }
+
+    // #1358 review — mechanism A: queued → starting commits with its outbox
+    // event (emitted only when an emitter is wired, i.e. remote-delegated).
+    if (this.remoteEmitter) {
+      this.remoteEmitter.emitTransitionInTx({
+        runId: input.runId,
+        fromStatus: "queued",
+        toStatus: "starting",
+      });
+    }
+
+    return { kind: "claimed", runId: input.runId, generation: input.expectedGeneration };
+  }
+
+  /**
+   * #1638 — Generation-fenced release of a workspace claim. Deletes only the
+   * exact (canonical_path, run_id, execution_generation) holder, so a late
+   * generation can never release a newer holder. Safe to repeat.
+   */
+  releaseWorkspaceClaim(input: { canonicalPath: string; runId: string; generation: number }): PiReleaseResult {
+    const result = this.db.prepare(`
+      DELETE FROM pi_workspace_claims
+      WHERE canonical_path = ? AND run_id = ? AND execution_generation = ?
+    `).run(input.canonicalPath, input.runId, input.generation);
+    if (result.changes === 0) {
+      const anyHolder = this.db.prepare(`
+        SELECT run_id FROM pi_workspace_claims WHERE canonical_path = ?
+      `).get(input.canonicalPath) as { run_id: string } | undefined;
+      return { released: false, reason: anyHolder ? "not_holder" : "missing" };
+    }
+    return { released: true, runId: input.runId, generation: input.generation, canonicalPath: input.canonicalPath };
+  }
+
+  /** #1638 — List every currently held canonical workspace claim. */
+  listWorkspaceClaims(): Array<{ canonicalPath: string; runId: string; generation: number; ownerKind: "standalone" | "supervised" }> {
+    return (this.db.prepare(`
+      SELECT canonical_path, run_id, execution_generation, owner_kind FROM pi_workspace_claims
+    `).all() as Array<{ canonical_path: string; run_id: string; execution_generation: number; owner_kind: "standalone" | "supervised" }>).map(r => ({
+      canonicalPath: r.canonical_path,
+      runId: r.run_id,
+      generation: r.execution_generation,
+      ownerKind: r.owner_kind,
+    }));
+  }
+
+  /**
+   * #1405 — Atomically claim a queued Pi run and its linked card.
+   * Transitions run queued→starting, card queued→running in one transaction,
+   * but ONLY after the shared canonical-workspace claim succeeds. If the
+   * shared cap/workspace is busy, both run and card remain queued (paired
+   * waiting state) and nothing is acquired.
+   */
+  claimQueuedGeneration(cardId: number, canonicalPath: string): PiStartClaim {
     return this.db.transaction<PiStartClaim>(() => {
       const runRow = this.db.prepare(
         `SELECT id, execution_generation, status FROM pi_runs WHERE card_id = ? AND status = 'queued'`
@@ -674,13 +802,13 @@ export class PiRunStore {
       const runId = runRow.id as string;
       const gen = runRow.execution_generation as number;
 
-      // Run queued → starting
-      const runChanged = this.db.prepare(
-        `UPDATE pi_runs SET status = 'starting', updated_at = datetime('now') WHERE id = ? AND status = 'queued'`
-      ).run(runId);
-      if (runChanged.changes === 0) return { claimed: false, reason: "not_queued" };
+      const wsClaim = this.claimWorkspaceForStartInTx({
+        runId, expectedGeneration: gen, canonicalPath, ownerKind: "standalone",
+      });
+      if (wsClaim.kind === "busy") return { claimed: false, reason: "busy" };
+      if (wsClaim.kind === "stale") return { claimed: false, reason: "not_startable" };
 
-      // Card queued → running
+      // Card queued → running — #1590: through the transition helper.
       const cardOutcome = kanbanTransition({
         cardId, from: ["queued"], to: "running", actor: "pi_run_dispatch",
         reason: "pi dispatch claim",
@@ -689,22 +817,33 @@ export class PiRunStore {
         emit: false,
       }, this.db);
       if (cardOutcome.kind !== "applied") {
-        // Compensate — roll back the run transition
+        this.releaseWorkspaceClaim({ canonicalPath, runId, generation: gen });
         this.db.prepare(`UPDATE pi_runs SET status = 'queued', updated_at = datetime('now') WHERE id = ?`).run(runId);
         return { claimed: false, reason: "card_mismatch" };
       }
 
-      // #1358 review — mechanism A: queued → starting commits with its
-      // outbox event.
-      if (this.remoteEmitter) {
-        this.remoteEmitter.emitTransitionInTx({
-          runId,
-          fromStatus: "queued",
-          toStatus: "starting",
-        });
-      }
-
       return { claimed: true, runId, generation: gen };
+    });
+  }
+
+  /**
+   * #1638 — Supervised variant of the shared workspace claim. Acquires the
+   * canonical workspace and advances the subordinate Pi run queued→starting
+   * WITHOUT touching the W card. Returns the claim for the adapter to map to
+   * StartObservation.deferred on busy.
+   */
+  claimSupervisedGeneration(input: {
+    runId: string;
+    expectedGeneration: number;
+    canonicalPath: string;
+  }): PiWorkspaceClaim {
+    return this.db.transaction<PiWorkspaceClaim>(() => {
+      return this.claimWorkspaceForStartInTx({
+        runId: input.runId,
+        expectedGeneration: input.expectedGeneration,
+        canonicalPath: input.canonicalPath,
+        ownerKind: "supervised",
+      });
     });
   }
 

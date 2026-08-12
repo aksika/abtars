@@ -775,6 +775,62 @@ export class WorkerSupervisionStore {
 
   // ── #1510: Atomic capacity-and-budget-guarded claim ─────────────────────
 
+  // ── #1638: proven-no-start deferral ─────────────────────────────────────
+
+  /**
+   * #1638 — Atomically return a `starting` attempt to `pending` after the
+   * adapter proved no process was started (typed `provesNoStart` observation).
+   * CAS requires the latest matching attempt generation in `starting`, then:
+   * - returns lifecycle/status to `pending`;
+   * - clears claimed_at, hard_deadline_at, and reservation accounting;
+   * - closes the executor lease with `deferred:<reason>`;
+   * - flips this attempt's retry reservation `claimed` -> `active` if one
+   *   exists (state hygiene, not budget accounting — the attempt is never
+   *   settled, so retry budget is preserved by non-settlement);
+   * - leaves the card queued and attempt ordinal/generation unchanged.
+   * Never settles the attempt; never consumes retry budget.
+   */
+  deferClaimAfterProvenNoStart(input: {
+    attemptId: string;
+    expectedGeneration: number;
+    reason: "capacity" | "resource_busy";
+  }): "deferred" | "stale" | "conflict" {
+    try {
+      return this.db.transaction(() => {
+        const attempt = this.db.prepare(`SELECT * FROM worker_attempts WHERE id = ?`).get(input.attemptId) as AttemptRow | undefined;
+        if (!attempt) return "stale";
+        const latest = this.db.prepare(`SELECT id FROM worker_attempts WHERE card_id = ? ORDER BY ordinal DESC LIMIT 1`).get(attempt.card_id) as { id: string } | undefined;
+        if (!latest || latest.id !== input.attemptId) return "stale";
+        if (attempt.generation !== input.expectedGeneration) return "stale";
+        if (attempt.lifecycle !== "starting") return "stale";
+
+        const updated = this.db.prepare(`
+          UPDATE worker_attempts
+          SET lifecycle = 'pending', status = 'pending',
+              claimed_at = NULL, hard_deadline_at = NULL,
+              reserved_tokens = 0, earliest_claim_at = NULL
+          WHERE id = ? AND lifecycle = 'starting'
+        `).run(input.attemptId);
+        if (updated.changes !== 1) return "conflict";
+
+        const leaseStore = new ExecutorLeaseStore(this.db);
+        leaseStore.closeLease(input.attemptId, attempt.generation, `deferred:${input.reason}`);
+
+        if (attempt.source_attempt_id) {
+          this.db.prepare(`
+            UPDATE retry_budget_reservations SET status = 'active', updated_at = datetime('now')
+            WHERE source_attempt_id = ? AND target_attempt_id = ? AND status = 'claimed'
+          `).run(attempt.source_attempt_id, input.attemptId);
+        }
+
+        logSwarmTrace({ event: "attempt_deferred", card: attempt.card_id, attempt: input.attemptId, generation: attempt.generation, reason: input.reason });
+        return "deferred";
+      });
+    } catch {
+      return "conflict";
+    }
+  }
+
   getActiveAttemptCountForExecutor(executorKind: ExecutorKind, executorId: string): number {
     const sql = `
       SELECT COUNT(*) AS cnt FROM worker_attempts

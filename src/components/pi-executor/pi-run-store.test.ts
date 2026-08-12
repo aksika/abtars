@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { homedir } from "node:os";
 import { PiRunStore } from "./pi-run-store.js";
 import type { TaskDatabase } from "../tasks/kanban-board.js";
+import { ensureKanbanBoardSchema } from "../tasks/kanban-board.js";
 
 const _require = createRequire(import.meta.url);
 const sharedPath = join(homedir(), ".local", "lib", "node_modules", "better-sqlite3");
@@ -30,6 +31,9 @@ function createTestDb(): TaskDatabase {
     result_summary TEXT,
     result_path TEXT
   )`);
+  // #1638: the shared claim path transitions cards through the production
+  // helper — the fixture must use the real board schema so it can never drift.
+  ensureKanbanBoardSchema(raw);
   // Wrap transaction() like requireTaskDatabase() does
   return {
     prepare(sql: string) {
@@ -530,6 +534,99 @@ describe("PiRunStore — #1395 UI claim/restore/setPending", () => {
       const a = store.createSupervisedRun({ cardId: 7101, workspaceAlias: "repo-a", goal: "g", ownerPrincipalId: "p", sessionId: "s" });
       const b = store.createSupervisedRun({ cardId: 7102, workspaceAlias: "repo-b", goal: "g", ownerPrincipalId: "p", sessionId: "s" });
       expect(a.runId).not.toBe(b.runId);
+    });
+  });
+
+  describe("canonical workspace claims (#1638)", () => {
+    function seedQueued(store: PiRunStore, cardId: number, alias: string): string {
+      const db = (store as any).db as TaskDatabase;
+      db.prepare(`INSERT OR IGNORE INTO kanban_board (id, title, source, status, type) VALUES (?, ?, 'agent', 'queued', 'W')`).run(cardId, `w-${cardId}`);
+      db.prepare(`INSERT INTO pi_runs (id, card_id, workspace_alias, operational_goal, owner_principal_id, origin, execution_generation, current_session_id, status) VALUES (?, ?, ?, 'g', 'p', 'supervised', 1, 's', 'queued')`).run(`pirun_${cardId}`, cardId, alias);
+      return `pirun_${cardId}`;
+    }
+
+    it("first claim wins; a second run on the same canonical path is busy", () => {
+      const store = makeStore();
+      const a = seedQueued(store, 7201, "repo-a");
+      const b = seedQueued(store, 7202, "repo-a");
+      const first = store.claimSupervisedGeneration({ runId: a, expectedGeneration: 1, canonicalPath: "/canon/repo-a" });
+      expect(first.kind).toBe("claimed");
+      const second = store.claimSupervisedGeneration({ runId: b, expectedGeneration: 1, canonicalPath: "/canon/repo-a" });
+      expect(second.kind).toBe("busy");
+      // the losing run stays queued with no claim and no process
+      expect(store.get(b)?.status).toBe("queued");
+      expect(store.listWorkspaceClaims()).toHaveLength(1);
+    });
+
+    it("alias synonyms contend on the same canonical path", () => {
+      const store = makeStore();
+      const a = seedQueued(store, 7301, "repo-a");
+      const b = seedQueued(store, 7302, "repo-b");
+      const first = store.claimSupervisedGeneration({ runId: a, expectedGeneration: 1, canonicalPath: "/canon/shared" });
+      expect(first.kind).toBe("claimed");
+      const second = store.claimSupervisedGeneration({ runId: b, expectedGeneration: 1, canonicalPath: "/canon/shared" });
+      expect(second.kind).toBe("busy");
+    });
+
+    it("distinct workspaces can both claim", () => {
+      const store = makeStore();
+      const a = seedQueued(store, 7401, "repo-a");
+      const b = seedQueued(store, 7402, "repo-b");
+      expect(store.claimSupervisedGeneration({ runId: a, expectedGeneration: 1, canonicalPath: "/canon/a" }).kind).toBe("claimed");
+      expect(store.claimSupervisedGeneration({ runId: b, expectedGeneration: 1, canonicalPath: "/canon/b" }).kind).toBe("claimed");
+      expect(store.listWorkspaceClaims()).toHaveLength(2);
+    });
+
+    it("exact same (run,generation) holder is idempotent", () => {
+      const store = makeStore();
+      const a = seedQueued(store, 7501, "repo-a");
+      expect(store.claimSupervisedGeneration({ runId: a, expectedGeneration: 1, canonicalPath: "/canon/a" }).kind).toBe("claimed");
+      expect(store.claimSupervisedGeneration({ runId: a, expectedGeneration: 1, canonicalPath: "/canon/a" }).kind).toBe("idempotent");
+    });
+
+    it("stale release cannot free a newer claim holder", () => {
+      const store = makeStore();
+      const a = seedQueued(store, 7601, "repo-a");
+      store.claimSupervisedGeneration({ runId: a, expectedGeneration: 1, canonicalPath: "/canon/a" });
+      // a stale generation (never held) cannot release the live holder
+      const stale = store.releaseWorkspaceClaim({ canonicalPath: "/canon/a", runId: a, generation: 99 });
+      expect(stale.released).toBe(false);
+      expect(store.listWorkspaceClaims()).toHaveLength(1);
+      // the real holder releases cleanly
+      const real = store.releaseWorkspaceClaim({ canonicalPath: "/canon/a", runId: a, generation: 1 });
+      expect(real.released).toBe(true);
+      expect(store.listWorkspaceClaims()).toHaveLength(0);
+    });
+
+    it("standalone claimQueuedGeneration keeps run+card queued while the path is busy", () => {
+      const store = makeStore();
+      const holder = seedQueued(store, 7701, "repo-a");
+      const waiter = seedQueued(store, 7702, "repo-a");
+      store.claimSupervisedGeneration({ runId: holder, expectedGeneration: 1, canonicalPath: "/canon/shared" });
+      const claim = store.claimQueuedGeneration(7702, "/canon/shared");
+      expect(claim.claimed).toBe(false);
+      expect(claim.reason).toBe("busy");
+      expect(store.get(waiter)?.status).toBe("queued");
+      const db = (store as any).db as TaskDatabase;
+      const card = db.prepare(`SELECT status FROM kanban_board WHERE id = ?`).get(7702) as { status: string };
+      expect(card.status).toBe("queued");
+    });
+
+    it("standalone claimQueuedGeneration starts after the holder releases", () => {
+      const store = makeStore();
+      const holder = seedQueued(store, 7801, "repo-a");
+      const waiter = seedQueued(store, 7802, "repo-a");
+      store.claimSupervisedGeneration({ runId: holder, expectedGeneration: 1, canonicalPath: "/canon/shared" });
+      expect(store.claimQueuedGeneration(7802, "/canon/shared").claimed).toBe(false);
+      store.releaseWorkspaceClaim({ canonicalPath: "/canon/shared", runId: holder, generation: 1 });
+      const claim = store.claimQueuedGeneration(7802, "/canon/shared");
+      expect(claim.claimed).toBe(true);
+      if (claim.claimed) {
+        expect(store.get(claim.runId)?.status).toBe("starting");
+      }
+      const db = (store as any).db as TaskDatabase;
+      const card = db.prepare(`SELECT status FROM kanban_board WHERE id = ?`).get(7802) as { status: string };
+      expect(card.status).toBe("running");
     });
   });
 });

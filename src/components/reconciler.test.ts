@@ -70,6 +70,7 @@ const workerContractExistsMock = vi.fn().mockReturnValue(true);
 const claimAttemptMock = vi.fn().mockImplementation((cardId: number, contractId: string, executorKind: string, executorId: string, generation: number) => ({
   attemptId: "a_1", cardId, contractId, executorKind, executorId, generation, claimedAt: new Date().toISOString(),
 }));
+const deferClaimAfterProvenNoStartMock = vi.fn().mockReturnValue("deferred");
 const markAttemptStartObservableMock = vi.fn().mockReturnValue(true);
 const markAttemptRunningMock = vi.fn().mockReturnValue(true);
 const failAttemptMock = vi.fn().mockReturnValue(true);
@@ -98,6 +99,7 @@ vi.mock("./worker-supervision-store.js", () => {
       getActiveAttemptCountForExecutor = getActiveAttemptCountForExecutorMock;
       terminalSettlement = terminalSettlementMock;
       claimAttemptWithinLimits = claimAttemptWithinLimitsMock;
+      deferClaimAfterProvenNoStart = deferClaimAfterProvenNoStartMock;
     },
   };
 });
@@ -433,6 +435,40 @@ describe("Reconciler — #1411 domain guard", () => {
       await flush();
       // No dispatch since Pi service is null, but importantly no crash
       expect(dispatchMock).not.toHaveBeenCalled();
+    });
+
+    it("#1638: a proven-no-start deferred observation returns the attempt to pending without settling", async () => {
+      deferClaimAfterProvenNoStartMock.mockReturnValue("deferred");
+      terminalSettlementMock.mockClear();
+      deferClaimAfterProvenNoStartMock.mockClear();
+      getLatestAttemptMock.mockReturnValue({ id: "a_1", lifecycle: "pending", executor_kind: "agent", executor_id: "spin-local", generation: 1 });
+      cardHasContractMock.mockReturnValue(true);
+      getContractForCardMock.mockReturnValue({ id: "c_1" });
+      const piCard = { id: 2, parent_id: 100, status: "queued", type: "W", title: "coding", priority: "MEDIUM", created_at: new Date().toISOString() } as any;
+      kanbanQueuedDispatchOrderMock.mockReturnValue([piCard]);
+      kanbanGetCardMock.mockImplementation((id: number) => {
+        if (id === 2) return piCard;
+        if (id === 100) return { id: 100, status: "running", max_tokens: null, tokens_used: 0, type: "O" } as any;
+        return null;
+      });
+      // Replace the adapter with a deferred-returning one — the branch is
+      // executor-neutral (only Pi emits it today, but any adapter may).
+      const mod2 = await import("./reconciler.js");
+      mod2.setWorkerAdapter({
+        kind: "agent",
+        capacity: async () => ({ available: 1, max: 1 }),
+        start: async () => ({ kind: "deferred", reason: "resource_busy", provesNoStart: true }),
+        cancel: async () => ({ kind: "cancelled", attemptId: "a_1" }),
+        inspect: async () => ({ kind: "running", lifecycle: "running" }),
+      } as any);
+      mod2.requestReconcile(2);
+      await flush();
+      await new Promise(r => setTimeout(r, 10));
+      await flush();
+      expect(deferClaimAfterProvenNoStartMock).toHaveBeenCalledWith(expect.objectContaining({
+        attemptId: "a_1", expectedGeneration: 1, reason: "resource_busy",
+      }));
+      expect(terminalSettlementMock).not.toHaveBeenCalled();
     });
   });
 

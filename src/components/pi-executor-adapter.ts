@@ -85,6 +85,16 @@ export class PiExecutorAdapter implements SwarmExecutorAdapter {
     return { runId: created.runId, resourceGeneration: created.generation };
   }
 
+  /** #1638: resolve the configured canonical path for a supervised run. */
+  private resolveCanonicalPath(runId: string): { canonicalPath: string } | undefined {
+    const run = this.executor.piStore.get(runId);
+    if (!run) return undefined;
+    const { resolveAndValidateWorkspace } = require("./pi-executor/config.js") as typeof import("./pi-executor/config.js");
+    const ws = resolveAndValidateWorkspace(run.workspaceAlias, this.executor.config);
+    if (ws.error || !ws.canonicalPath) return undefined;
+    return { canonicalPath: ws.canonicalPath };
+  }
+
   async start(claim: ExecutionClaim): Promise<StartObservation> {
     try {
       this.leaseUnsubscribers.get(claim.attemptId)?.();
@@ -95,6 +105,28 @@ export class PiExecutorAdapter implements SwarmExecutorAdapter {
     try {
       const binding = this.ensureBinding(claim);
       if (!binding) return { kind: "start_failed", reason: "resource binding failed", retryable: false };
+      // #1638: acquire the shared canonical-workspace claim BEFORE launch.
+      // Capacity/workspace contention maps to the generic deferred outcome —
+      // the attempt returns to pending and no process is started.
+      const ws = this.resolveCanonicalPath(binding.runId);
+      if (!ws) return { kind: "start_failed", reason: "workspace alias unresolvable", retryable: false };
+      const wsClaim = this.executor.piStore.claimSupervisedGeneration({
+        runId: binding.runId,
+        expectedGeneration: binding.resourceGeneration,
+        canonicalPath: ws.canonicalPath,
+      });
+      if (wsClaim.kind === "busy") {
+        return { kind: "deferred", reason: "resource_busy", provesNoStart: true };
+      }
+      if (wsClaim.kind === "stale") {
+        return { kind: "start_failed", reason: `workspace claim stale: ${wsClaim.reason}`, retryable: false };
+      }
+      if (this.executor.activeCount >= this.executor.maxConcurrent) {
+        this.executor.piStore.releaseWorkspaceClaim({
+          canonicalPath: ws.canonicalPath, runId: binding.runId, generation: binding.resourceGeneration,
+        });
+        return { kind: "deferred", reason: "capacity", provesNoStart: true };
+      }
       const run = this.executor.piStore.get(binding.runId);
       const sessionId = run?.currentSessionId ?? `${Date.now()}_C_pi_${binding.runId}`;
       const result = await this.executor.startWithClaim(binding.runId, binding.resourceGeneration, sessionId);
@@ -102,6 +134,9 @@ export class PiExecutorAdapter implements SwarmExecutorAdapter {
         case "started":
           return { kind: "started", attemptId: claim.attemptId, generation: claim.generation, executorId: claim.executorId };
         default:
+          this.executor.piStore.releaseWorkspaceClaim({
+            canonicalPath: ws.canonicalPath, runId: binding.runId, generation: binding.resourceGeneration,
+          });
           return { kind: "start_failed", reason: String(result), retryable: false };
       }
     } catch (err) {

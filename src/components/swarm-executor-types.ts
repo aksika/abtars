@@ -21,6 +21,9 @@ export interface ExecutorCapacity {
 export type StartObservation =
   | { kind: "started"; attemptId: string; generation: number; executorId: string }
   | { kind: "already_started"; attemptId: string; generation: number; executorId: string }
+  // #1638: proven-no-start contention. The adapter proves no process was
+  // started; the Reconciler returns the attempt to pending without settling.
+  | { kind: "deferred"; reason: "capacity" | "resource_busy"; provesNoStart: true }
   | { kind: "start_failed"; reason: string; retryable: boolean };
 
 export type CancelReason = "operator" | "deadline" | "project_abort" | "shutdown" | "superseded" | "session_end";

@@ -27,7 +27,7 @@ interface OwnedProcess {
 }
 
 export class PiExecutor {
-  private readonly config: PiExecutorConfig;
+  private readonly config_: PiExecutorConfig;
   private readonly store: PiRunStore;
   private readonly live = new Map<string, OwnedProcess>();
   private _stopped = false;
@@ -38,14 +38,15 @@ export class PiExecutor {
   private _progressSubs = new Set<(runId: string, payload: string, progressType?: string) => void>();
 
   constructor(config: PiExecutorConfig, store: PiRunStore) {
-    this.config = config;
+    this.config_ = config;
     this.store = store;
   }
 
   get activeCount(): number { return this.live.size; }
-  get maxConcurrent(): number { return this.config.maxConcurrent; }
+  get maxConcurrent(): number { return this.config_.maxConcurrent; }
   get isStopped(): boolean { return this._stopped; }
   get piStore(): PiRunStore { return this.store; }
+  get config(): PiExecutorConfig { return this.config_; }
 
   /** Register a callback fired when a Pi slot is released. */
   onCapacityReleased(cb: () => void): void {
@@ -154,7 +155,7 @@ export class PiExecutor {
       await this._settleAndCleanup(owned, "failed", { error: "No saved session file for resume" });
       return false;
     }
-    const validated = validateSessionFile(this.config.sessionStorageRoot, run.piSessionFile);
+    const validated = validateSessionFile(this.config_.sessionStorageRoot, run.piSessionFile);
     if (validated.error) {
       await this._settleAndCleanup(owned, "failed", { error: `Session file validation failed: ${validated.error}` });
       return false;
@@ -166,7 +167,7 @@ export class PiExecutor {
         await this._settleAndCleanup(owned, "failed", { error: "Switched session identity mismatch" });
         return false;
       }
-      const newFile = validateSessionFile(this.config.sessionStorageRoot, state.sessionFile ?? "");
+      const newFile = validateSessionFile(this.config_.sessionStorageRoot, state.sessionFile ?? "");
       if (newFile.error) {
         await this._settleAndCleanup(owned, "failed", { error: `Resumed session file invalid: ${newFile.error}` });
         return false;
@@ -193,7 +194,7 @@ export class PiExecutor {
     const client = new SupervisedPiRpcClient();
 
     const args = [
-      ...this.config.fixedArgs,
+      ...this.config_.fixedArgs,
       "--mode", "rpc",
       ...buildTrustArgs(this.config),
     ];
@@ -201,7 +202,7 @@ export class PiExecutor {
     const env = buildChildEnv(this.config, run);
 
     try {
-      await client.launch(this.config.command, args, ws.canonicalPath, env);
+      await client.launch(this.config_.command, args, ws.canonicalPath, env);
     } catch (err) {
       await client.close().catch(() => {});
       const msg = err instanceof Error ? err.message : String(err);
@@ -448,8 +449,8 @@ export class PiExecutor {
   async checkWallClock(runId: string): Promise<boolean> {
     const owned = this.live.get(runId);
     if (!owned) return false;
-    if (Date.now() - owned.wallClockStart > this.config.maxWallClockMs) {
-      logWarn(TAG, `Run ${runId} exceeded max wall clock (${this.config.maxWallClockMs}ms) — aborting`);
+    if (Date.now() - owned.wallClockStart > this.config_.maxWallClockMs) {
+      logWarn(TAG, `Run ${runId} exceeded max wall clock (${this.config_.maxWallClockMs}ms) — aborting`);
       this._cancelProcess(runId, owned, "Cancelled: maximum wall clock exceeded");
       return true;
     }
@@ -529,7 +530,7 @@ export class PiExecutor {
 
     owned.client.abort().catch(() => {});
 
-    const graceMs = this.config.abortGraceMs;
+    const graceMs = this.config_.abortGraceMs;
     owned.abortTimer = setTimeout(async () => {
       if (this.live.get(runId) !== owned) return;
       await owned.client.close();

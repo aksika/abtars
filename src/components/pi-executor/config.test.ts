@@ -290,4 +290,15 @@ describe("loadPiConfig", () => {
     expect(cfg!.command).toBe("pi");
     expect(cfg!.workspaceAliases).toHaveProperty("work");
   });
+
+  it("#1638: defaults maxConcurrent to 3 and preserves an explicit operator value", () => {
+    writeFileSync(configPath, JSON.stringify({
+      enabled: true, command: "pi", workspaceAliases: { work: { path: "/tmp" } },
+    }), "utf-8");
+    expect(loadPiConfig()!.maxConcurrent).toBe(3);
+    writeFileSync(configPath, JSON.stringify({
+      enabled: true, command: "pi", workspaceAliases: { work: { path: "/tmp" } }, maxConcurrent: 1,
+    }), "utf-8");
+    expect(loadPiConfig()!.maxConcurrent).toBe(1);
+  });
 });

@@ -167,8 +167,23 @@ export async function phasePiExecutor(ctx: BootCtx): Promise<void> {
   const { setPiService: setCmdService } = await import("../components/commands/handlers-pi.js");
   setCmdService(service);
 
-  const { setPiService: setReconcilerService, requestReconcile } = await import("../components/reconciler.js");
+  const { setPiService: setReconcilerService, requestReconcile, requestWorkerDispatch } = await import("../components/reconciler.js");
   setReconcilerService(service);
+
+  // #1638: shared post-release wake — every Pi capacity/workspace release
+  // fans out to supervised Worker dispatch AND queued standalone Pi cards.
+  // Advisory + idempotent; runs only after the release transaction (and
+  // owned-process cleanup). Periodic/boot reconciliation is the floor.
+  executor.onCapacityReleased(() => {
+    try {
+      requestWorkerDispatch();
+      for (const cardId of store.findQueuedPiCardIds()) {
+        requestReconcile(cardId);
+      }
+    } catch (err) {
+      logWarn(TAG, `Post-release wake failed: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  });
 
   // #1405: Boot recovery — preserve queued, interrupt active, collect queued card IDs
   const recovery = store.recoverNonterminal();

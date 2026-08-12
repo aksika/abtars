@@ -276,6 +276,10 @@ export function createExecutionSupervisor(options: ExecutionSupervisorOptions): 
       // supervised project root — scheduled, peer, CLI) go through the
       // Reconciler/Orc coordinator — skip them here
       if (cardHasSupervision(card.id) || isSupervisedRootIdentity(card)) continue;
+      // #1638/#1648: Pi cards are Reconciler-owned — never dispatch or fail
+      // them from the Spin legacy drain. Standalone Pi cards start only via
+      // the Reconciler Pi lane after shared admission.
+      if (card.type === "pi") continue;
       // #677: respect DAG dependencies
       if (!isUnblocked(card)) continue;
       // #1327: validate card.type is a real SessionType BEFORE dispatching.

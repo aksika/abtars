@@ -1073,4 +1073,62 @@ describe("WorkerSupervisionStore", () => {
       expect(s.getAttemptForExecutorResource("pi", "pirun_sup_1", 5)).toBeUndefined();
     });
   });
+
+  describe("proven-no-start deferral (#1638)", () => {
+    function setupStartingAttempt(s: InstanceType<typeof Store>, reservedTokens = 100): string {
+      const now = new Date().toISOString();
+      s.db.prepare(`INSERT OR IGNORE INTO kanban_board (id, title, source, status, type, created_at, updated_at) VALUES (?, ?, ?, 'running', 'O', ?, ?)`).run(800, "proj", "t", now, now);
+      s.db.prepare(`INSERT OR IGNORE INTO kanban_board (id, title, source, status, type, parent_id, created_at, updated_at) VALUES (?, ?, ?, 'queued', 'W', ?, ?, ?)`).run(801, "child", "t", 800, now, now);
+      s.insertContract({ schema_version: 1, id: "c_def", digest: "d", goal: "test", criteria: [], expected_artifacts: [], verification_commands: [], required_capabilities: [], limits: {}, provenance: { root_card_id: 800, card_id: 801, authored_by: "test", created_at: now } }, 801);
+      s.insertAttempt({ id: "a_def", card_id: 801, contract_id: "c_def", ordinal: 1, executor_kind: "pi", executor_id: "pi-coding", status: "pending", started_at: now });
+      s.lifecycleTransition("a_def", ["pending"], "claimed");
+      s.lifecycleTransition("a_def", ["claimed"], "starting");
+      if (reservedTokens > 0) s.db.prepare("UPDATE worker_attempts SET reserved_tokens = ? WHERE id = ?").run(reservedTokens, "a_def");
+      s.db.prepare("UPDATE worker_attempts SET hard_deadline_at = ? WHERE id = ?").run(new Date(Date.now() + 60000).toISOString(), "a_def");
+      return "a_def";
+    }
+
+    it("returns a starting attempt to pending without settling or charging", () => {
+      const s = new Store();
+      const aid = setupStartingAttempt(s);
+      const outcome = s.deferClaimAfterProvenNoStart({ attemptId: aid, expectedGeneration: 1, reason: "resource_busy" });
+      expect(outcome).toBe("deferred");
+      const attempt = s.getAttempt(aid);
+      expect(attempt?.lifecycle).toBe("pending");
+      expect(attempt?.status).toBe("pending");
+      expect(attempt?.claimed_at).toBeNull();
+      expect(attempt?.hard_deadline_at).toBeNull();
+      expect(attempt?.reserved_tokens).toBe(0);
+      expect(s.getResultByAttempt(aid)).toBeUndefined();
+    });
+
+    it("restores a claimed retry reservation to active", () => {
+      const s = new Store();
+      s.insertContract(TEST_CONTRACT, 101);
+      s.insertAttempt({
+        id: "a_src", card_id: 101, contract_id: TEST_CONTRACT.id, ordinal: 1,
+        executor_kind: "pi", executor_id: "pi-coding", status: "failed", started_at: "2026-01-01T00:00:00.000Z",
+      });
+      s.db.prepare(`
+        INSERT INTO worker_attempts (id, card_id, contract_id, ordinal, executor_kind, executor_id, status, lifecycle, started_at, source_attempt_id, earliest_claim_at)
+        VALUES ('a_retry_def', 101, ?, 2, 'pi', 'pi-coding', 'pending', 'pending', ?, 'a_src', ?)
+      `).run(TEST_CONTRACT.id, "2026-01-01T00:01:00.000Z", "2026-01-01T00:01:00.000Z");
+      s.db.prepare(`
+        INSERT INTO retry_budget_reservations (source_attempt_id, target_attempt_id, reserved_attempts, reserved_tokens, reserved_cost, reserved_switches, status, created_at, updated_at)
+        VALUES ('a_src', 'a_retry_def', 1, 100, 0, 0, 'claimed', ?, ?)
+      `).run("2026-01-01T00:01:00.000Z", "2026-01-01T00:01:00.000Z");
+      s.lifecycleTransition("a_retry_def", ["pending"], "claimed");
+      s.lifecycleTransition("a_retry_def", ["claimed"], "starting");
+      expect(s.deferClaimAfterProvenNoStart({ attemptId: "a_retry_def", expectedGeneration: 1, reason: "capacity" })).toBe("deferred");
+      expect(s.getReservation("a_src")?.status).toBe("active");
+    });
+
+    it("rejects deferral for a stale generation or a running attempt", () => {
+      const s = new Store();
+      const aid = setupStartingAttempt(s);
+      expect(s.deferClaimAfterProvenNoStart({ attemptId: aid, expectedGeneration: 99, reason: "capacity" })).toBe("stale");
+      expect(s.deferClaimAfterProvenNoStart({ attemptId: aid, expectedGeneration: 1, reason: "capacity" })).toBe("deferred");
+      expect(s.deferClaimAfterProvenNoStart({ attemptId: aid, expectedGeneration: 1, reason: "capacity" })).toBe("stale");
+    });
+  });
 });
