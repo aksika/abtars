@@ -200,12 +200,12 @@ const spawnWorkerTool: ToolDefinition = {
         ? {
           projectCardId: context.orcContext.projectCardId,
           projectGeneration: context.orcContext.projectGeneration,
-          ...(projectCard?.source === "task"
+          ...(projectCard?.source === "task" && projectCard.source_id
             // `OrcInvocationContextV1.runId` identifies the durable Orc
             // ownership row. Scheduled-project authority instead carries the
             // task-run correlation stored on the root card; using the Orc run
             // ID here would reject every valid scheduled child as run-stale.
-            ? { scheduledRunId: projectCard.source_id ?? "" }
+            ? { scheduledRunId: projectCard.source_id }
             : {}),
         }
         : undefined;
@@ -413,7 +413,7 @@ const cancelWorkerTool: ToolDefinition = {
     const authority = {
       projectCardId,
       projectGeneration: context?.orcContext?.projectGeneration ?? 0,
-      ...(project?.source === "task" ? { scheduledRunId: project.source_id ?? "" } : {}),
+      ...(project?.source === "task" && project.source_id ? { scheduledRunId: project.source_id } : {}),
     };
     const cancelled = new WorkerSupervisionStore().cancelProjectChild(cardId, authority, "cancelled by Orc");
     if (!cancelled) return "[err] project mutation rejected: worker cancellation is stale or no longer live";
@@ -478,7 +478,7 @@ const reviewWorkerFailureTool: ToolDefinition = {
       const authority = {
         projectCardId: bound.projectCardId,
         projectGeneration: bound.projectGeneration,
-        ...(projectCard?.source === "task" ? { scheduledRunId: projectCard.source_id ?? "" } : {}),
+        ...(projectCard?.source === "task" && projectCard.source_id ? { scheduledRunId: projectCard.source_id } : {}),
       };
       const packet = service.getReviewPacket(attemptId, attempt.card_id);
       if ("error" in packet) return `[err] ${packet.error}`;
@@ -580,7 +580,7 @@ const defineProjectContractTool: ToolDefinition = {
       const authority = {
         projectCardId: cardId,
         projectGeneration: bound.projectGeneration,
-        ...(card?.source === "task" ? { scheduledRunId: card.source_id ?? "" } : {}),
+        ...(card?.source === "task" && card.source_id ? { scheduledRunId: card.source_id } : {}),
       };
       const raw: Record<string, unknown> = {
         schema_version: 2,
@@ -796,7 +796,7 @@ const reviewProjectTool: ToolDefinition = {
       const authority = {
         projectCardId: bound.projectCardId,
         projectGeneration: bound.projectGeneration,
-        ...(rootCard?.source === "task" ? { scheduledRunId: rootCard.source_id ?? "" } : {}),
+        ...(rootCard?.source === "task" && rootCard.source_id ? { scheduledRunId: rootCard.source_id } : {}),
       };
 
       // Transition from review_requested to reviewing only when ready to

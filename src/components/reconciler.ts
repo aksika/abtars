@@ -41,7 +41,9 @@ function projectMutationAuthority(projectCardId: number, projectGeneration: numb
   return {
     projectCardId,
     projectGeneration,
-    ...(root?.source === "task" ? { scheduledRunId: root.source_id ?? "" } : {}),
+    // Scheduled identity requires a durable source_id (isScheduledRootIdentity);
+    // a 'task' source string alone is not scheduled and carries no run fence.
+    ...(root?.source === "task" && root.source_id ? { scheduledRunId: root.source_id } : {}),
   };
 }
 
@@ -610,8 +612,14 @@ export function settleProjectLastResort(projectId: number): void {
     .then(() => {
     if (!matched) {
       // There is no run row to settle, but the root still needs terminal
-      // evidence. Without this mutation the supervision row is blocked while
-      // the Kanban root remains queued/running forever.
+      // evidence. Freeze the supervision row WITHOUT the run-correlated
+      // authority: an orphaned scheduled root (source_id with no task_runs
+      // row) has no live run to protect, so the gate would reject the block
+      // with run_mismatch and leave the row stuck in 'executing' forever.
+      const reviewStore = new ProjectReviewStore();
+      if (reviewStore.getSupervision(projectId)) {
+        reviewStore.blockProject(projectId, `aborted: ${reason}`, undefined, { failCard: false });
+      }
       kanbanFail(projectId, reason);
       return;
     }

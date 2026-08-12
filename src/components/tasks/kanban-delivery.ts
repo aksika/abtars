@@ -64,7 +64,7 @@ export async function deliverCard(card: KanbanCard, deps: DeliverDeps): Promise<
     // CAS and is never sent.
     if (!kanbanClaimProjectDelivery(fresh.id, {
       projectGeneration: sup.generation,
-      scheduledRunId: fresh.source === "task" ? (fresh.source_id ?? "") : undefined,
+      scheduledRunId: fresh.source === "task" && fresh.source_id ? fresh.source_id : undefined,
     })) {
       logSwarmTrace({ event: "delivery_claim_lost", card: fresh.id, reason: "project_authority_lost_or_claimed" });
       return;

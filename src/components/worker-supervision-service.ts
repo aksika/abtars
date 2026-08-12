@@ -191,7 +191,7 @@ export class WorkerSupervisionService {
         // creation time.
         const scheduledRunId = opts?.authority !== undefined
           ? opts.authority.scheduledRunId
-          : (rootCard?.source === "task" ? (rootCard.source_id ?? "") : undefined);
+          : (rootCard?.source === "task" && rootCard.source_id ? rootCard.source_id : undefined);
         // #1644: the root card ID comes from the parent chain, never from a
         // caller-chosen value; only the bound generation (Orc context) and the
         // durable run identity are admitted into the tuple.

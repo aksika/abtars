@@ -252,6 +252,9 @@ async function setupChildContract(store: import("../../components/worker-supervi
     executor_id: "spin-local",
     status: "pending",
     started_at: new Date().toISOString(),
+    root_project_card_id: rootCardId,
+    root_project_generation: 1,
+    scheduled_run_id: null,
   });
   return contract.id;
 }
@@ -763,6 +766,9 @@ describe("Swarm acceptance — production contract shape (#1605)", () => {
       executor_id: "spin-local",
       status: "pending",
       started_at: new Date().toISOString(),
+      root_project_card_id: rootCardId,
+      root_project_generation: 1,
+      scheduled_run_id: null,
     });
     await completeChild(store, childId, contract.id, criterionId);
     return contract.id;
@@ -780,6 +786,9 @@ describe("Swarm acceptance — production contract shape (#1605)", () => {
       executor_id: "spin-local",
       status: "failed",
       started_at: new Date().toISOString(),
+      root_project_card_id: rootCardId,
+      root_project_generation: 1,
+      scheduled_run_id: null,
     });
     const card = cards.get(childId);
     if (card) card.status = "failed";
@@ -1168,7 +1177,7 @@ describe("Swarm acceptance — escaped Orc review journeys (#1620)", () => {
 
   const reviewProjectTool = () => getOrcTools().find(t => t.name === "review_project")!;
   const reviewCaseTool = () => getOrcTools().find(t => t.name === "get_project_review_case")!;
-  const orcCtx = (pid: number) => ({ userId: "test", orcContext: { projectCardId: pid } } as any);
+  const orcCtx = (pid: number) => ({ userId: "test", orcContext: { projectCardId: pid, projectGeneration: 1 } } as any);
 
   function insertRoot(projectId: number, title: string, contract: Record<string, unknown>): void {
     const now = new Date().toISOString().replace(/Z$/, "");
@@ -1208,6 +1217,9 @@ describe("Swarm acceptance — escaped Orc review journeys (#1620)", () => {
       executor_id: "spin-local",
       status: "pending",
       started_at: new Date().toISOString(),
+      root_project_card_id: rootCardId,
+      root_project_generation: 1,
+      scheduled_run_id: null,
     });
     return contract.id;
   }

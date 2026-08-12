@@ -86,12 +86,14 @@ function runAuthorityCheck(
   authority: ProjectMutationAuthority,
   requireTerminalSuccess: boolean,
 ): ProjectAuthorityRejection | null {
-  // `source === 'task'` is the scheduled-root marker. A missing source_id is
-  // malformed scheduled identity, not permission to fall back to the
-  // non-scheduled path; it must fail closed as a run mismatch.
-  const isScheduled = card.source === "task";
+  // `source === 'task'` is the scheduled-root marker ONLY together with a
+  // durable source_id — the same identity rule as isScheduledRootIdentity
+  // (reconciler). A plain supervised project whose source string is 'task'
+  // but which carries no scheduled run identity is not scheduled and must not
+  // be fenced as one.
+  const isScheduled = card.source === "task" && card.source_id != null && card.source_id.length > 0;
   if (isScheduled) {
-    if (card.source_id == null || authority.scheduledRunId === undefined || authority.scheduledRunId !== card.source_id) return "run_mismatch";
+    if (authority.scheduledRunId === undefined || authority.scheduledRunId !== card.source_id) return "run_mismatch";
     const run = db.prepare(`SELECT finished_at, outcome FROM task_runs WHERE run_id = ?`)
       .get(authority.scheduledRunId) as { finished_at: number | null; outcome: string | null } | undefined;
     if (!run) return "run_mismatch";

@@ -96,7 +96,7 @@ async function setupCase(pid: number, snapshot: ReviewCaseSnapshot, contract: Re
   return { pid, caseId: id };
 }
 
-const orcContext = (pid: number) => ({ userId: "test", orcContext: { projectCardId: pid } } as never);
+const orcContext = (pid: number) => ({ userId: "test", orcContext: { projectCardId: pid, projectGeneration: 1 } } as never);
 
 function reviewTool(): ReturnType<typeof getOrcTools>[number] {
   return getOrcTools().find(t => t.name === "review_project")!;
