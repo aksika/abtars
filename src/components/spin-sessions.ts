@@ -72,6 +72,10 @@ export interface SpinSessionRegistry {
   getById(sessionId: string): ManagedSession | undefined;
   /** #1336: look up a session by global shortIndex across all platforms. Returns undefined if not found or ended. */
   getByGlobalIndex(index: number): ManagedSession | undefined;
+  /** #1635: resolve the session an indexed lifecycle command will target,
+   * WITHOUT ending it. Mirrors `findAddressableSession` so callers can run a
+   * pre-teardown (e.g. coding-session resource release) before finalizing. */
+  resolveAddressable(userId: string, platform: string, index?: number): ManagedSession | undefined;
   switch(userId: string, platform: string, index: number): ManagedSession | SessionRejection;
   /** End an addressable session; reconciles the local active/Main after termination. */
   end(userId: string, platform: string, index?: number): ManagedSession | SessionRejection;
@@ -148,6 +152,14 @@ export function createSpinSessionRegistry(options: { maxTotalSessions: number })
     );
   }
 
+  /** #1635 — resolve the indexed target without ending it (active session when
+   * no index given), exactly as end/pause/resume would. */
+  function resolveAddressable(userId: string, platform: string, index?: number): ManagedSession | undefined {
+    const targetIdx = index ?? getActiveSession(userId, platform)?.shortIndex;
+    if (!targetIdx) return undefined;
+    return findAddressableSession(userId, platform, targetIdx);
+  }
+
   /**
    * Post-termination reconciliation — shared by end and kill.
    * Scope is the target's (userId, platform) only. Maintains exactly one local
@@ -221,6 +233,10 @@ export function createSpinSessionRegistry(options: { maxTotalSessions: number })
         if (s.shortIndex === index && s.status !== "ended") return s;
       }
       return undefined;
+    },
+
+    resolveAddressable(userId, platform, index) {
+      return resolveAddressable(userId, platform, index);
     },
 
     switch(userId, platform, index) {

@@ -107,6 +107,7 @@ export class PiCodingSessionService {
   createCodingSession(input: {
     ownerPrincipal: string;
     workspaceAlias: string;
+    chatId?: string;
     modelProvider?: string;
     modelId?: string;
     thinking?: string;
@@ -131,6 +132,7 @@ export class PiCodingSessionService {
       ownerPrincipal: input.ownerPrincipal,
       workspaceAlias: input.workspaceAlias,
       canonicalPath: ws.canonicalPath,
+      chatId: input.chatId,
       modelProvider: input.modelProvider,
       modelId: input.modelId,
       thinking: input.thinking,

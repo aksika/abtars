@@ -30,6 +30,7 @@ export interface PiCodingSessionRecord {
   ownerPrincipal: string;
   workspaceAlias: string;
   canonicalPath: string;
+  chatId?: string;
   piSessionId?: string;
   piSessionFile?: string;
   modelProvider?: string;
@@ -85,6 +86,7 @@ export interface CreatePiCodingSessionInput {
   ownerPrincipal: string;
   workspaceAlias: string;
   canonicalPath: string;
+  chatId?: string;
   modelProvider?: string;
   modelId?: string;
   thinking?: string;
@@ -104,6 +106,7 @@ export class PiCodingSessionStore {
       owner_principal TEXT NOT NULL,
       workspace_alias TEXT NOT NULL,
       canonical_path TEXT NOT NULL,
+      chat_id TEXT,
       pi_session_id TEXT,
       pi_session_file TEXT,
       model_provider TEXT,
@@ -129,6 +132,9 @@ export class PiCodingSessionStore {
       updated_at TEXT NOT NULL DEFAULT (datetime('now'))
     )`);
     this.db.exec(`CREATE INDEX IF NOT EXISTS idx_coding_sessions_owner ON pi_coding_sessions(owner_principal, updated_at DESC)`);
+    // #1635 — delivery target for the bounded Telegram projection (operational
+    // metadata only; the chat id never carries conversation content).
+    try { this.db.exec(`ALTER TABLE pi_coding_sessions ADD COLUMN chat_id TEXT`); } catch { /* column already exists */ }
   }
 
   /**
@@ -142,11 +148,12 @@ export class PiCodingSessionStore {
     const existing = this.db.prepare(`SELECT session_id FROM pi_coding_sessions WHERE session_id = ?`).get(input.sessionId);
     if (existing) return this.get(input.sessionId)!;
     this.db.prepare(`INSERT INTO pi_coding_sessions (
-      session_id, owner_principal, workspace_alias, canonical_path,
+      session_id, owner_principal, workspace_alias, canonical_path, chat_id,
       model_provider, model_id, thinking,
       memory_mode, state, runtime_generation, generation_intent, resume_capability
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, 'none', 'creating', 1, 'initial', 'never_started')`).run(
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'none', 'creating', 1, 'initial', 'never_started')`).run(
       input.sessionId, input.ownerPrincipal, input.workspaceAlias, input.canonicalPath,
+      input.chatId ?? null,
       input.modelProvider ?? null, input.modelId ?? null, input.thinking ?? null,
     );
     return this.get(input.sessionId)!;
@@ -334,6 +341,7 @@ export class PiCodingSessionStore {
       ownerPrincipal: row.owner_principal as string,
       workspaceAlias: row.workspace_alias as string,
       canonicalPath: row.canonical_path as string,
+      chatId: opt<string>(row.chat_id),
       piSessionId: opt<string>(row.pi_session_id),
       piSessionFile: opt<string>(row.pi_session_file),
       modelProvider: opt<string>(row.model_provider),

@@ -200,7 +200,37 @@ export class Spin {
     return this.sessions.switch(userId, platform, index);
   }
 
+  /**
+   * #1635 — coding-session teardown hook (wired at boot). /session end|kill
+   * on a coding C envelope must release the Pi turn's slot/claim/lease and
+   * preserve the transcript BEFORE the envelope is finalized.
+   */
+  private _codingTeardown: ((sessionId: string) => boolean) | null = null;
+
+  setCodingSessionTeardown(cb: ((sessionId: string) => boolean) | null): void {
+    this._codingTeardown = cb;
+  }
+
+  private isCodingEnvelope(session: ManagedSession | undefined): session is ManagedSession {
+    if (!session) return false;
+    const meta = (session as unknown as Record<string, unknown>).externalMetadata as { kind?: string } | undefined;
+    return meta?.kind === "coding";
+  }
+
+  /** #1635 — resolve the coding teardown target and run the owner's
+   * generation-fenced teardown before the envelope is finalized. */
+  private preEndCodingTeardown(userId: string, platform: string, index?: number): void {
+    const target = this.sessions.resolveAddressable(userId, platform, index);
+    if (!this.isCodingEnvelope(target)) return;
+    try {
+      this._codingTeardown?.(target.id);
+    } catch (err) {
+      logWarn("spin", `Coding teardown failed for ${target.id}: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
+
   endSession(userId: string, platform: string, index?: number): ManagedSession | string {
+    this.preEndCodingTeardown(userId, platform, index);
     const r = this.sessions.end(userId, platform, index);
     if (typeof r === "string") return r;
     this.finalizeSession(r, "ended");
@@ -208,6 +238,7 @@ export class Spin {
   }
 
   killSession(userId: string, platform: string, index: number): ManagedSession | string {
+    this.preEndCodingTeardown(userId, platform, index);
     const r = this.sessions.kill(userId, platform, index);
     if (typeof r === "string") {
       const bg = this.sessions.getByGlobalIndex(index);

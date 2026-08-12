@@ -49,6 +49,7 @@ import type { RunningJob } from "./tasks/task-queue.js";
 import type { InboundMessage, PlatformAdapter, DeliveryCorrelation } from "../types/platform.js";
 import { updateBridgeLockField } from "./transport/bridge-lock-transport.js";
 import { createMessageContext, runPipeline, voiceMiddleware, sessionSelectionMiddleware, commandMiddleware, pausedGuardMiddleware, busyGuardMiddleware } from "./pipeline/index.js";
+import { codingRouteMiddleware } from "./pipeline/coding-route.js";
 import { releaseBusy } from "./pipeline/busy-guard.js";
 import { hasHooks, fire as fireHook } from "./hooks/hook-system.js";
 import { buildPrompt } from "./pipeline/prompt-builder.js";
@@ -183,9 +184,12 @@ export async function handleInboundMessage(
   adapter: PlatformAdapter,
   deps: PipelineDeps,
 ): Promise<void> {
-  // Run early middleware (voice → select → commands → paused → busy guard)
+  // Run early middleware (voice → select → coding-route → commands → paused → busy guard)
+  // #1635: codingRouteMiddleware sits between session selection and commands so
+  // coding-owned controls are claimed before the generic handlers, busy guards,
+  // and BeforeMessage see them.
   const ctx = createMessageContext(msg, adapter, deps);
-  await runPipeline(ctx, [voiceMiddleware, sessionSelectionMiddleware, commandMiddleware, pausedGuardMiddleware, busyGuardMiddleware]);
+  await runPipeline(ctx, [voiceMiddleware, sessionSelectionMiddleware, codingRouteMiddleware, commandMiddleware, pausedGuardMiddleware, busyGuardMiddleware]);
   if (ctx.handled) return;
 
   // --- BeforeMessage hook ---
