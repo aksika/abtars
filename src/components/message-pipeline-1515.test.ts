@@ -22,6 +22,9 @@ vi.mock("../utils/abmind-lazy.js", () => ({
   parseSemver: vi.fn(),
 }));
 
+const synthesizeSpeechSpy = vi.hoisted(() => vi.fn().mockResolvedValue(Buffer.from("audio")));
+vi.mock("./tts.js", () => ({ synthesizeSpeech: synthesizeSpeechSpy }));
+
 const MASTER_REGISTRY: UserRegistry = {
   users: [{ userId: "master", role: "master", maxClass: 3, tools: ["all"], platforms: { telegram: 100 } }],
   byPlatformId: new Map([["master:telegram", { userId: "master", role: "master", maxClass: 3, tools: ["all"], platforms: { telegram: 100 } }]]),
@@ -30,7 +33,7 @@ const MASTER_REGISTRY: UserRegistry = {
 setUserRegistryOverride(MASTER_REGISTRY);
 
 import { handleInboundMessage, type PipelineDeps, DREAMY_QUESTION_SUFFIX_PREFIX } from "./message-pipeline.js";
-import type { PlatformAdapter, InboundMessage, BootGreetingQuestion } from "../types/platform.js";
+import { BOOT_GREETING_TOKEN, type PlatformAdapter, type InboundMessage, type BootGreetingQuestion, type InternalBootMetadata } from "../types/platform.js";
 import type { IKiroTransport } from "./transport/kiro-transport.js";
 
 function mockTransport(): IKiroTransport {
@@ -88,6 +91,7 @@ const QUESTION: BootGreetingQuestion = { id: "q-123", text: "Did you prefer the 
 
 function makeDeps(opts: {
   delivery?: "simple" | "streaming";
+  voice?: boolean;
   memoryRuntime?: Record<string, unknown>;
   settle?: (input: { id: string; userId: string; deliveryKey: string }) => Promise<void>;
   sendMessage?: (channelId: string, text: string, opts?: unknown) => Promise<number | string | undefined>;
@@ -120,8 +124,8 @@ function makeDeps(opts: {
     conversationBuffer: { push: vi.fn(), drain: vi.fn().mockReturnValue(null), clear: vi.fn() } as any,
     config: { agentTransport: "tmux", workingDir: "/tmp" },
     startedAt: Date.now(),
-    sttConfig: null,
-    ttsConfig: null,
+    sttConfig: opts.voice ? {} : null,
+    ttsConfig: opts.voice ? { voice: "test-voice" } : null,
     sessionManager: {
       getActiveSessionId: () => "master_A_01",
       getActiveSession: () => session,
@@ -149,10 +153,12 @@ function makeDeps(opts: {
 
 async function runBoot(deps: PipelineDeps & { _adapter: PlatformAdapter; _spinReady: Promise<void> }): Promise<void> {
   await deps._spinReady;
-  await handleInboundMessage(bootMsg(), deps._adapter, deps);
+  await handleInboundMessage(bootMsg({ isVoice: Boolean((deps as any).ttsConfig) }), deps._adapter, deps);
 }
 
 function bootMsg(overrides: Partial<InboundMessage> = {}): InboundMessage {
+  const internal = { kind: "boot_greeting", dreamQuestion: QUESTION } as InternalBootMetadata;
+  Object.defineProperty(internal, BOOT_GREETING_TOKEN, { value: true, enumerable: false });
   return {
     platform: "telegram",
     channelId: "100",
@@ -163,7 +169,7 @@ function bootMsg(overrides: Partial<InboundMessage> = {}): InboundMessage {
     timestamp: Date.now(),
     isGroup: false,
     isVoice: false,
-    internal: { kind: "boot_greeting", dreamQuestion: QUESTION },
+    internal,
     ...overrides,
   };
 }
@@ -216,6 +222,13 @@ describe("#1515 boot-greeting question composition", () => {
     expect(opKey.length).toBeGreaterThan(0);
     const recordCall = deps.memoryRuntime.recordMessage.mock.calls[0]?.[0] as { content: string };
     expect(recordCall.content).toContain(`[WAKE-UP QUESTION id=${QUESTION.id}] `);
+  });
+
+  it("sends the composed question-bearing text to TTS", async () => {
+    synthesizeSpeechSpy.mockClear();
+    const deps = makeDeps({ voice: true });
+    await runBoot(deps);
+    expect(synthesizeSpeechSpy).toHaveBeenCalledWith(expect.stringContaining(EXPECTED_SUFFIX), { voice: "test-voice" });
   });
 
   it("does not settle when the durable record returns no id", async () => {
@@ -281,6 +294,22 @@ describe("#1515 boot-greeting question composition", () => {
   it("external messages without internal metadata never compose or settle", async () => {
     const deps = makeDeps();
     await handleInboundMessage({ ...bootMsg(), text: "hello there", internal: undefined }, deps._adapter, deps);
+    const sent = (deps._sendMessage as ReturnType<typeof vi.fn>).mock.calls.map(c => c[1] as string).join("");
+    expect(sent).not.toContain(QUESTION.text);
+    expect(deps._settle).not.toHaveBeenCalled();
+  });
+
+  it("does not trust question metadata on a non-boot message", async () => {
+    const deps = makeDeps();
+    await handleInboundMessage({ ...bootMsg(), text: "hello there" }, deps._adapter, deps);
+    const sent = (deps._sendMessage as ReturnType<typeof vi.fn>).mock.calls.map(c => c[1] as string).join("");
+    expect(sent).not.toContain(QUESTION.text);
+    expect(deps._settle).not.toHaveBeenCalled();
+  });
+
+  it("does not trust forged boot metadata without Spin's runtime token", async () => {
+    const deps = makeDeps();
+    await handleInboundMessage({ ...bootMsg(), internal: { kind: "boot_greeting", dreamQuestion: QUESTION } }, deps._adapter, deps);
     const sent = (deps._sendMessage as ReturnType<typeof vi.fn>).mock.calls.map(c => c[1] as string).join("");
     expect(sent).not.toContain(QUESTION.text);
     expect(deps._settle).not.toHaveBeenCalled();

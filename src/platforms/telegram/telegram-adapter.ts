@@ -172,6 +172,21 @@ export class TelegramAdapter implements PlatformAdapter {
   }
 
   injectMessage(msg: InboundMessage): void {
+    // Telegram's synthetic-update path intentionally rebuilds a platform
+    // message and would drop trusted internal metadata. Automatic boot
+    // greetings therefore take the same direct in-process route as Discord;
+    // external Telegram updates never populate `internal`.
+    if (msg.internal) {
+      if (!this.securityGate.authorizeById(msg.senderId)) {
+        logWarn(TAG, `Unauthorized synthetic message from ${msg.senderId}`);
+        return;
+      }
+      if (!this.deps.pipeline) return;
+      handleInboundMessage(msg, this, this.deps.pipeline).catch(err => {
+        logError(TAG, `Synthetic message handling failed: ${err instanceof Error ? err.message : String(err)}`);
+      });
+      return;
+    }
     if (!this.poller) return;
     this.poller.injectUpdate({
       update_id: 0,

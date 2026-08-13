@@ -29,6 +29,7 @@ import type { SessionOutputFeed } from "./session-output-feed.js";
 import { createOutputObserver, type OutputObserver } from "./session-output-feed.js";
 import { ExecutorProgressEmitter } from "./executor-progress-emitter.js";
 import { normalizeContract, acceptancePassed } from "./worker-contract.js";
+import { BOOT_GREETING_TOKEN, type InternalBootMetadata } from "../types/platform.js";
 
 export type { ManagedSession, SpinRequest, SessionType } from "./spin-types.js";
 export { sessionType, sessionCreatedAt, typeLabel, typeAgent, parseSessionType } from "./spin-types.js";
@@ -394,6 +395,9 @@ export class Spin {
     const dreamQuestion = this._bootGreetingQuestion
       ? { id: this._bootGreetingQuestion.id, text: this._bootGreetingQuestion.text }
       : undefined;
+    // The closure created by greetSession owns the immutable retry copy. Do
+    // not retain the pending question on Spin after the first boot injection.
+    this._bootGreetingQuestion = null;
     this.greetSession(session, chatId, userId, undefined, dreamQuestion);
   }
 
@@ -418,6 +422,12 @@ export class Spin {
     let attempt = 0;
     const inject = (): void => {
       attempt++;
+      const internal = bootQuestion
+        ? ({ kind: "boot_greeting", dreamQuestion: bootQuestion } as InternalBootMetadata)
+        : undefined;
+      if (internal) {
+        Object.defineProperty(internal, BOOT_GREETING_TOKEN, { value: true, enumerable: false });
+      }
       a.injectMessage({
         platform: session.platform,
         channelId: String(chatId),
@@ -428,7 +438,7 @@ export class Spin {
         timestamp: Date.now(),
         isGroup: false,
         isVoice: false,
-        internal: bootQuestion ? { kind: "boot_greeting", dreamQuestion: bootQuestion } : undefined,
+        internal,
       });
       setTimeout(() => {
         if (session.messageCount > 0) return;

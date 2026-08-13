@@ -19,7 +19,10 @@ export interface BootGreetingQuestion {
 /** #1515: trusted internal boot metadata. Only Spin's automatic master boot
  *  injection may construct it; external platform/TUI/API adapters never read
  *  an inbound `internal` property and never populate it. */
+export const BOOT_GREETING_TOKEN: unique symbol = Symbol("abtars.boot-greeting");
 export interface InternalBootMetadata {
+  /** Runtime-only provenance marker; never serialized to an adapter. */
+  readonly [BOOT_GREETING_TOKEN]?: true;
   kind: "boot_greeting";
   dreamQuestion?: BootGreetingQuestion;
 }

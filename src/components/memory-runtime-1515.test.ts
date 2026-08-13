@@ -69,6 +69,15 @@ describe("dreamQuestions runtime methods", () => {
     expect(await rt.dreamQuestions.nextPending("master")).toBeNull();
   });
 
+  it("nextPending rejects a terminal or already-asked row", async () => {
+    const client = mockClient({ dreamQuestions: { nextPending: vi.fn().mockResolvedValue({
+      id: "q-1", memoryAId: 10, memoryBId: 20, question: "test question?", status: "asked",
+      createdAt: 1000, expiresAt: 605800000, askedAt: 2000,
+    }) } });
+    const rt = createClientRuntime(client);
+    await expect(rt.dreamQuestions.nextPending("master")).rejects.toThrow("non-pending");
+  });
+
   it("markAsked derives a stable idempotency key from question id and delivery key", async () => {
     const client = mockClient();
     const rt = createClientRuntime(client);

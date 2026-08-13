@@ -4,6 +4,7 @@ import { TelegramAdapter, type TelegramAdapterConfig, type TelegramAdapterDeps }
 import type { PipelineDeps } from "../../components/message-pipeline.js";
 import type { IKiroTransport } from "../../components/transport/kiro-transport.js";
 import type { InboundMessage } from "../../types/platform.js";
+import { BOOT_GREETING_TOKEN, type InternalBootMetadata } from "../../types/platform.js";
 import type { ManagedSession } from "../../components/spin-types.js";
 
 // Mock TelegramApi
@@ -35,10 +36,11 @@ vi.mock("../../components/user-registry.js", () => ({
 vi.mock("./telegram-poller.js", () => ({
   TelegramPoller: vi.fn(function (this: unknown, _api: unknown, _timeout: number, handler: Function) {
     (TelegramPollerMock as any)._handler = handler;
+    (TelegramPollerMock as any).injectUpdate = vi.fn((update: unknown) => handler(update));
     return {
       start: vi.fn(),
       stop: vi.fn(),
-      injectUpdate: vi.fn((update: unknown) => handler(update)),
+      injectUpdate: (TelegramPollerMock as any).injectUpdate,
     };
   }),
 }));
@@ -119,6 +121,7 @@ describe("TelegramAdapter", () => {
 
   beforeEach(async () => {
     vi.clearAllMocks();
+    TelegramPollerMock.injectUpdate = undefined;
     transport = mockTransport();
     deps = makeDeps(transport);
     adapter = new TelegramAdapter(makeConfig(), deps);
@@ -186,6 +189,19 @@ describe("TelegramAdapter", () => {
       senderId: "42", senderName: "Test", text: "queued msg",
       timestamp: Date.now(), isGroup: false, isVoice: false,
     });
+  });
+
+  it("routes boot metadata directly so Telegram does not discard the question", async () => {
+    await adapter.start();
+    const internal = { kind: "boot_greeting", dreamQuestion: { id: "q-1", text: "Which city do you prefer?" } } as InternalBootMetadata;
+    Object.defineProperty(internal, BOOT_GREETING_TOKEN, { value: true, enumerable: false });
+    adapter.injectMessage({
+      platform: "telegram", channelId: "42", senderId: "42", senderName: "Test",
+      userId: "master", text: "[SESSION START] You just came online. Greet the user.",
+      timestamp: Date.now(), isGroup: false, isVoice: false, internal,
+    });
+    await new Promise(resolve => setTimeout(resolve, 0));
+    expect((TelegramPollerMock as any).injectUpdate).not.toHaveBeenCalled();
   });
 
   describe("handleUpdate — text messages", () => {

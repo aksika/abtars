@@ -64,14 +64,11 @@ export async function handleMemoryQuestionsDismiss(id: string, ctx: CommandConte
 
 export async function handleMemory(text: string, ctx: CommandContext): Promise<boolean> {
   const args = text.slice("/memory".length).trim();
-  if (args === "questions" || args.startsWith("questions")) {
-    const rest = args.slice("questions".length).trim();
-    if (rest.startsWith("dismiss")) {
-      const id = rest.slice("dismiss".length).trim();
-      return handleMemoryQuestionsDismiss(id, ctx);
-    }
+  if (args === "questions") {
     return handleMemoryQuestions(ctx);
   }
+  const dismissMatch = /^questions\s+dismiss(?:\s+(\S+))?$/.exec(args);
+  if (dismissMatch) return handleMemoryQuestionsDismiss(dismissMatch[1] ?? "", ctx);
   if (args.length > 0) {
     // Unknown subcommand — keep the bare command's exact output for /memory
     // itself; any unknown suffix behaves like the bare command.

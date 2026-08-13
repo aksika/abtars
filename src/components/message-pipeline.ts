@@ -47,6 +47,7 @@ import type { IdleSave } from "./idle-save.js";
 import type { ConversationBuffer } from "./conversation-buffer.js";
 import type { RunningJob } from "./tasks/task-queue.js";
 import type { InboundMessage, PlatformAdapter, DeliveryCorrelation } from "../types/platform.js";
+import { BOOT_GREETING_TOKEN } from "../types/platform.js";
 import { updateBridgeLockField } from "./transport/bridge-lock-transport.js";
 import { createMessageContext, runPipeline, voiceMiddleware, sessionSelectionMiddleware, commandMiddleware, pausedGuardMiddleware, busyGuardMiddleware } from "./pipeline/index.js";
 import { codingRouteMiddleware } from "./pipeline/coding-route.js";
@@ -62,6 +63,7 @@ import type { ResolvedHailMary } from "./transport-config.js";
 
 const TAG = "pipeline";
 const PRIMING_MAX = 8;
+const BOOT_GREETING_TEXT = "[SESSION START] You just came online. Greet the user.";
 
 /** #1515: code-owned, deterministic user-visible suffix prefix for boot
  *  questions. Never model-authored; question text itself is validated by the
@@ -620,7 +622,9 @@ export async function handleInboundMessage(
     // after response normalization/redaction and before chunking, send, TTS,
     // or assistant-memory write. Empty, reaction-only, no-reply, think-only,
     // or failed-generation outcomes bypass composition AND settlement.
-    const bootQuestion = msg.internal?.kind === "boot_greeting" ? msg.internal.dreamQuestion : undefined;
+    const bootQuestion = msg.text === BOOT_GREETING_TEXT && msg.internal?.[BOOT_GREETING_TOKEN] === true && msg.internal.kind === "boot_greeting"
+      ? msg.internal.dreamQuestion
+      : undefined;
     const bootQuestionDelivered = Boolean(bootQuestion?.id && bootQuestion.text && userResponse.trim().length > 0);
     if (bootQuestionDelivered) {
       userResponse = `${userResponse}\n\n${DREAMY_QUESTION_SUFFIX_PREFIX}${bootQuestion!.text}`;
@@ -670,7 +674,7 @@ export async function handleInboundMessage(
       }
       if (isVoice && ttsConfig && adapter.sendVoice) {
         try {
-          const audio = await synthesizeSpeech(cleanAnswer || response, ttsConfig);
+          const audio = await synthesizeSpeech(bootQuestionDelivered ? userResponse : cleanAnswer || response, ttsConfig);
           if (audio) await adapter.sendVoice(channelId, audio, { threadId: msg.threadId });
         } catch (err) { logAndSwallow(TAG, "TTS", err); }
       }
@@ -776,7 +780,7 @@ export async function handleInboundMessage(
     if (isVoice && ttsConfig && !pSession.fullMode && adapter.sendVoice) {
       try {
         await adapter.sendTyping?.(channelId, msg.threadId);
-        const audio = await synthesizeSpeech(cleanAnswer || response, ttsConfig);
+        const audio = await synthesizeSpeech(bootQuestionDelivered ? userResponse : cleanAnswer || response, ttsConfig);
         if (audio) {
           await adapter.sendVoice(channelId, audio, { threadId: msg.threadId });
           logInfo(TAG, `🔊 Voice reply sent (${audio.length} bytes)`);

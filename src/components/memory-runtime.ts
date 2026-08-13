@@ -642,7 +642,10 @@ export function createClientRuntime(client: AbmindClientLike): AbtarsMemoryRunti
       async nextPending(userId: string): Promise<DreamQuestionWireLike | null> {
         requireClientCapability(capabilities, "dreamQuestions");
         const result = await pm.dreamQuestions.nextPending(userId) as unknown;
-        return result === null || result === undefined ? null : normalizeDreamQuestion(result);
+        if (result === null || result === undefined) return null;
+        const pending = normalizeDreamQuestion(result);
+        if (pending.status !== "pending") throw new Error("Dream question nextPending returned a non-pending row");
+        return pending;
       },
       async list(userId: string, status?: DreamQuestionStatusLike, limit?: number): Promise<{ questions: DreamQuestionWireLike[] }> {
         requireClientCapability(capabilities, "dreamQuestions");
