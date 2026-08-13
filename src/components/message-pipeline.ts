@@ -342,11 +342,18 @@ export async function handleInboundMessage(
       prompt = `${lines.join("\n")}\n\n${prompt}`;
     }
 
-    // --- Auto-notify: inject buffered system events (#844) ---
-    const { drainSystemEvents } = await import("./system-event-buffer.js");
-    const events = drainSystemEvents();
-    if (events.length > 0) {
-      prompt = `${events.map(e => `[SYSTEM] ${e}`).join("\n")}\n\n${prompt}`;
+    // --- Auto-notify: inject buffered system events (#844, #1652) ---
+    // Agent notices are for Main only. Keep the shared buffer intact when a
+    // guest, specialist, or skill session receives a turn so a later Main
+    // turn can still surface the fault to the master.
+    const isMainMasterTurn = sessionType(effectiveSession) === "A"
+      && registry.byUserId.get(userId)?.role === "master";
+    if (isMainMasterTurn) {
+      const { drainSystemEvents } = await import("./system-event-buffer.js");
+      const events = drainSystemEvents();
+      if (events.length > 0) {
+        prompt = `${events.map(e => `[SYSTEM] ${e}`).join("\n")}\n\n${prompt}`;
+      }
     }
 
     // --- Send to transport ---

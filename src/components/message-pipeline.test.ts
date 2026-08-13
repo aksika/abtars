@@ -21,10 +21,16 @@ const MASTER_REGISTRY: UserRegistry = {
   byPlatformId: new Map([["master:telegram", { userId: "test", role: "master", maxClass: 3, tools: ["all"], platforms: { telegram: 100 } }]]),
   byUserId: new Map([["test", { userId: "test", role: "master", maxClass: 3, tools: ["all"], platforms: { telegram: 100 } }]]),
 };
+const MAIN_NOTICE_REGISTRY: UserRegistry = {
+  users: [{ userId: "master", role: "master", maxClass: 3, tools: ["all"], platforms: { telegram: 100 } }],
+  byPlatformId: new Map([["master:telegram", { userId: "master", role: "master", maxClass: 3, tools: ["all"], platforms: { telegram: 100 } }]]),
+  byUserId: new Map([["master", { userId: "master", role: "master", maxClass: 3, tools: ["all"], platforms: { telegram: 100 } }]]),
+};
 import { handleInboundMessage, type PipelineDeps } from "./message-pipeline.js";
 import type { PlatformAdapter, InboundMessage } from "../types/platform.js";
 import type { IKiroTransport } from "./transport/kiro-transport.js";
 import { Spin } from "./spin.js";
+import { bufferAgentNotice, drainSystemEvents } from "./system-event-buffer.js";
 const SessionManager = Spin;
 
 function mockTransport(): IKiroTransport {
@@ -157,8 +163,49 @@ describe("handleInboundMessage", () => {
   });
 
   afterEach(() => {
+    drainSystemEvents();
     setUserRegistryOverride(null);
     vi.restoreAllMocks();
+  });
+
+  it("delivers agent notices to the master Main prompt", async () => {
+    setUserRegistryOverride(MAIN_NOTICE_REGISTRY);
+    bufferAgentNotice("dreamy", "sleep cycle degraded");
+    const adapter = mockAdapter();
+    const deps = mockDeps(transport);
+
+    await handleInboundMessage(makeMsg(), adapter, deps);
+
+    expect(transport.sendPrompt).toHaveBeenCalledWith(
+      expect.any(String),
+      expect.stringContaining("[SYSTEM] [DREAMY SAYS] sleep cycle degraded"),
+      undefined,
+      "master",
+    );
+    expect(drainSystemEvents()).toEqual([]);
+  });
+
+  it("does not drain agent notices for a non-Main session", async () => {
+    setUserRegistryOverride(MAIN_NOTICE_REGISTRY);
+    const spinMod = await import("./spin.js");
+    const active = spinMod.spin.getActiveSession("master", "telegram");
+    vi.mocked(spinMod.spin.getActiveSession).mockReturnValue({
+      ...active,
+      id: "test_C_01",
+    });
+    bufferAgentNotice("dreamy", "sleep cycle degraded");
+    const adapter = mockAdapter();
+    const deps = mockDeps(transport);
+
+    await handleInboundMessage(makeMsg(), adapter, deps);
+
+    expect(transport.sendPrompt).toHaveBeenCalledWith(
+      expect.any(String),
+      expect.not.stringContaining("[DREAMY SAYS] sleep cycle degraded"),
+      undefined,
+      "master",
+    );
+    expect(drainSystemEvents()).toEqual(["[DREAMY SAYS] sleep cycle degraded"]);
   });
 
   it("sends prompt to transport and delivers response via adapter", async () => {
