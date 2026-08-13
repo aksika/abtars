@@ -618,10 +618,10 @@ export async function handleInboundMessage(
     // automatic boot message (trusted internal metadata set by Spin) carries
     // a question. The provider never sees it — it is appended here, once,
     // after response normalization/redaction and before chunking, send, TTS,
-    // or assistant-memory write. Empty, reaction-only, no-reply, or
-    // failed-generation outcomes bypass composition AND settlement.
+    // or assistant-memory write. Empty, reaction-only, no-reply, think-only,
+    // or failed-generation outcomes bypass composition AND settlement.
     const bootQuestion = msg.internal?.kind === "boot_greeting" ? msg.internal.dreamQuestion : undefined;
-    const bootQuestionDelivered = Boolean(bootQuestion?.id && bootQuestion.text && cleanedText.trim().length > 0);
+    const bootQuestionDelivered = Boolean(bootQuestion?.id && bootQuestion.text && userResponse.trim().length > 0);
     if (bootQuestionDelivered) {
       userResponse = `${userResponse}\n\n${DREAMY_QUESTION_SUFFIX_PREFIX}${bootQuestion!.text}`;
     }
