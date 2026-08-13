@@ -72,6 +72,12 @@ export async function phaseSleep(ctx: BootCtx): Promise<PhaseResult> {
       const { bufferSystemEvent } = await import("../components/system-event-buffer.js");
       bufferSystemEvent(report);
     },
+    // #1653: degraded sleep reports reach Main as a Dreamy agent notice —
+    // buffered exactly once, never duplicated through the plain system path.
+    bufferAgentNotice: async (from: string, text: string) => {
+      const { bufferAgentNotice } = await import("../components/system-event-buffer.js");
+      bufferAgentNotice(from, text);
+    },
   });
   ctx.sleepHandle = handle;
 

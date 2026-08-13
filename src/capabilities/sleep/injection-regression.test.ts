@@ -41,7 +41,7 @@ describe("client-backed sleep handle lifetime (#1381)", () => {
 
     const handle = createSleepHandle({
       client, memoryEnabled: false, onComplete: () => {},
-      sessionManager: { spin: vi.fn() }, bufferSystemEvent: vi.fn(),
+      sessionManager: { spin: vi.fn() }, bufferSystemEvent: vi.fn(), bufferAgentNotice: vi.fn(),
     });
 
     const result = handle.startManual({ fresh: true, resume: false });
@@ -56,7 +56,7 @@ describe("client-backed sleep handle lifetime (#1381)", () => {
 
     const handle = createSleepHandle({
       client, memoryEnabled: false, onComplete: () => {},
-      sessionManager: { spin: vi.fn() }, bufferSystemEvent: vi.fn(),
+      sessionManager: { spin: vi.fn() }, bufferSystemEvent: vi.fn(), bufferAgentNotice: vi.fn(),
     });
 
     const result = handle.startScheduled();
@@ -74,7 +74,7 @@ describe("client-backed sleep handle lifetime (#1381)", () => {
 
     const handle = createSleepHandle({
       client, memoryEnabled: false, onComplete: () => {},
-      sessionManager: { spin: vi.fn() }, bufferSystemEvent: vi.fn(),
+      sessionManager: { spin: vi.fn() }, bufferSystemEvent: vi.fn(), bufferAgentNotice: vi.fn(),
     });
 
     handle.startManual({ fresh: true, resume: false });

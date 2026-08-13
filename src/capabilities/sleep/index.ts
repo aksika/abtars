@@ -44,7 +44,18 @@ export interface SleepOpts {
    * "provider_failed" / "cycle_end").
    */
   quarantineSession?: (sessionId: string, reason: string) => void | Promise<void>;
+  /**
+   * #1653: ordinary report delivery — every non-degraded report is enqueued
+   * exactly once through this path.
+   */
   bufferSystemEvent: (report: string) => void | Promise<void>;
+  /**
+   * #1653: degraded-report delivery — `partial` and `failed` reports are
+   * routed through the agent-notice channel exactly once and NEVER through
+   * bufferSystemEvent. Required in production types on purpose: a missing
+   * wiring must not silently fall back to the plain path.
+   */
+  bufferAgentNotice: (from: string, text: string) => void | Promise<void>;
 }
 
 /**
@@ -476,8 +487,19 @@ export function createSleepHandle(opts: SleepOpts): SleepHandle {
           // completion resolves, so the scheduled run settles only after its
           // side channels are drained. Host callbacks are wrapped so a
           // throwing host cannot change the outcome.
+          // #1653: exactly-once delivery — degraded outcomes (partial/failed)
+          // go to the Dreamy agent-notice channel, every other report uses the
+          // plain system-event path. The branches are mutually exclusive; the
+          // two APIs share one buffer, so routing a report through both would
+          // duplicate Main context.
           try {
-            if (outcome.report) await opts.bufferSystemEvent(outcome.report);
+            if (outcome.report) {
+              if (outcome.status === "partial" || outcome.status === "failed") {
+                await opts.bufferAgentNotice("dreamy", outcome.report);
+              } else {
+                await opts.bufferSystemEvent(outcome.report);
+              }
+            }
           } catch (err) { logWarn("sleep", `Report delivery failed: ${(err as Error).message}`); }
           try {
             if (outcome.status === "completed" || outcome.status === "partial" || outcome.status === "no_work") opts.onComplete();

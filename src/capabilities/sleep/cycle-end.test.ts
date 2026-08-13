@@ -53,6 +53,7 @@ describe("createSleepHandle — client-backed lifecycle (#1381)", () => {
       onComplete: vi.fn(),
       sessionManager: { spin: vi.fn() },
       bufferSystemEvent: vi.fn(),
+      bufferAgentNotice: vi.fn(),
     });
 
     const r1 = handle.startScheduled();
@@ -70,6 +71,7 @@ describe("createSleepHandle — client-backed lifecycle (#1381)", () => {
       client, memoryEnabled: true, onComplete: vi.fn(),
       sessionManager: { spin: vi.fn() },
       bufferSystemEvent: vi.fn(),
+      bufferAgentNotice: vi.fn(),
     });
 
     handle.startScheduled();
@@ -86,6 +88,7 @@ describe("createSleepHandle — client-backed lifecycle (#1381)", () => {
       client, memoryEnabled: true, onComplete: vi.fn(),
       sessionManager: { spin: vi.fn() },
       bufferSystemEvent: vi.fn(),
+      bufferAgentNotice: vi.fn(),
     });
 
     handle.startManual({ fresh: true, resume: false });
@@ -102,6 +105,7 @@ describe("createSleepHandle — client-backed lifecycle (#1381)", () => {
       client, memoryEnabled: true, onComplete: vi.fn(),
       sessionManager: { spin: vi.fn() },
       bufferSystemEvent: vi.fn(),
+      bufferAgentNotice: vi.fn(),
     });
 
     handle.startManual({ fresh: false, resume: true });
@@ -143,6 +147,7 @@ describe("createSleepHandle — cycle outcome resolution (#1603)", () => {
       client, memoryEnabled: true, onComplete: vi.fn(),
       sessionManager: { spin: vi.fn() },
       bufferSystemEvent: vi.fn(),
+      bufferAgentNotice: vi.fn(),
     });
 
     const started = handle.startScheduled();
@@ -152,21 +157,78 @@ describe("createSleepHandle — cycle outcome resolution (#1603)", () => {
     expect(outcome.status).toBe("partial");
   });
 
-  it("delivers the report via bufferSystemEvent before resolving", async () => {
+  it("delivers a partial report via bufferAgentNotice (dreamy), never via bufferSystemEvent (#1653)", async () => {
     const client = runningCycle({ terminalDetail: "partial", statusLast: { status: "partial", report: "Sleep partial — 6 completed, 1 failed" } });
     const bufferSystemEvent = vi.fn();
-    const onComplete = vi.fn();
+    const bufferAgentNotice = vi.fn();
     const handle = createSleepHandle({
-      client, memoryEnabled: true, onComplete,
+      client, memoryEnabled: true, onComplete: vi.fn(),
       sessionManager: { spin: vi.fn() },
       bufferSystemEvent,
+      bufferAgentNotice,
     });
 
     const started = handle.startScheduled();
     const outcome = await (started as { completion: Promise<any> }).completion;
 
     expect(outcome.report).toBe("Sleep partial — 6 completed, 1 failed");
-    expect(bufferSystemEvent).toHaveBeenCalledWith("Sleep partial — 6 completed, 1 failed");
+    expect(bufferAgentNotice, "the degraded report goes to the agent notice exactly once").toHaveBeenCalledTimes(1);
+    expect(bufferAgentNotice).toHaveBeenCalledWith("dreamy", "Sleep partial — 6 completed, 1 failed");
+    expect(bufferSystemEvent, "the plain system path must NOT see a degraded report").not.toHaveBeenCalled();
+  });
+
+  it("delivers a completed report via bufferSystemEvent, never via bufferAgentNotice (#1653)", async () => {
+    const client = runningCycle({ terminalDetail: "completed", statusLast: { status: "completed", report: "Sleep completed — 6 completed, 0 failed, 0 skipped (of 6)." } });
+    const bufferSystemEvent = vi.fn();
+    const bufferAgentNotice = vi.fn();
+    const handle = createSleepHandle({
+      client, memoryEnabled: true, onComplete: vi.fn(),
+      sessionManager: { spin: vi.fn() },
+      bufferSystemEvent,
+      bufferAgentNotice,
+    });
+
+    const started = handle.startScheduled();
+    await (started as { completion: Promise<any> }).completion;
+
+    expect(bufferSystemEvent, "the ordinary report goes to the system path exactly once").toHaveBeenCalledTimes(1);
+    expect(bufferSystemEvent).toHaveBeenCalledWith("Sleep completed — 6 completed, 0 failed, 0 skipped (of 6).");
+    expect(bufferAgentNotice, "a healthy report never reaches the agent notice").not.toHaveBeenCalled();
+  });
+
+  it("delivers a failed report via bufferAgentNotice exactly once (#1653)", async () => {
+    const client = runningCycle({ terminalDetail: "failed", statusLast: { status: "failed", report: "Sleep failed — 2 completed, 1 failed, 3 skipped (of 6). Essential failures: extract-memories. Review degraded — extract-memories: no extraction writes." } });
+    const bufferSystemEvent = vi.fn();
+    const bufferAgentNotice = vi.fn();
+    const handle = createSleepHandle({
+      client, memoryEnabled: true, onComplete: vi.fn(),
+      sessionManager: { spin: vi.fn() },
+      bufferSystemEvent,
+      bufferAgentNotice,
+    });
+
+    const started = handle.startScheduled();
+    await (started as { completion: Promise<any> }).completion;
+
+    expect(bufferAgentNotice).toHaveBeenCalledTimes(1);
+    expect(bufferAgentNotice).toHaveBeenCalledWith("dreamy", expect.stringContaining("Review degraded"));
+    expect(bufferSystemEvent).not.toHaveBeenCalled();
+  });
+
+  it("a throwing delivery callback cannot change the settled sleep outcome (#1653)", async () => {
+    const client = runningCycle({ terminalDetail: "failed", statusLast: { status: "failed", report: "Sleep failed — 0 completed, 1 failed" } });
+    const handle = createSleepHandle({
+      client, memoryEnabled: true, onComplete: vi.fn(),
+      sessionManager: { spin: vi.fn() },
+      bufferSystemEvent: vi.fn(),
+      bufferAgentNotice: () => { throw new Error("buffer down"); },
+    });
+
+    const started = handle.startScheduled();
+    const outcome = await (started as { completion: Promise<any> }).completion;
+
+    expect(outcome.status).toBe("failed");
+    expect(outcome.report).toBe("Sleep failed — 0 completed, 1 failed");
   });
 
   it("fires onComplete for partial (essentials succeeded) but not for failed", async () => {
@@ -176,6 +238,7 @@ describe("createSleepHandle — cycle outcome resolution (#1603)", () => {
       client: partialClient, memoryEnabled: true, onComplete: partialOnComplete,
       sessionManager: { spin: vi.fn() },
       bufferSystemEvent: vi.fn(),
+      bufferAgentNotice: vi.fn(),
     });
     const startedPartial = partialHandle.startScheduled();
     await (startedPartial as { completion: Promise<any> }).completion;
@@ -187,6 +250,7 @@ describe("createSleepHandle — cycle outcome resolution (#1603)", () => {
       client: failedClient, memoryEnabled: true, onComplete: failedOnComplete,
       sessionManager: { spin: vi.fn() },
       bufferSystemEvent: vi.fn(),
+      bufferAgentNotice: vi.fn(),
     });
     const startedFailed = failedHandle.startScheduled();
     await (startedFailed as { completion: Promise<any> }).completion;
@@ -213,6 +277,7 @@ describe("createSleepHandle — cycle outcome resolution (#1603)", () => {
       client, memoryEnabled: true, onComplete: vi.fn(),
       sessionManager: { spin: vi.fn() },
       bufferSystemEvent: vi.fn(),
+      bufferAgentNotice: vi.fn(),
     });
 
     const started = handle.startScheduled();
@@ -246,6 +311,7 @@ describe("createSleepHandle — cycle outcome resolution (#1603)", () => {
       client, memoryEnabled: true, onComplete: vi.fn(),
       sessionManager: { spin: vi.fn() },
       bufferSystemEvent: vi.fn(),
+      bufferAgentNotice: vi.fn(),
     });
 
     handle.startScheduled({ onProgress });

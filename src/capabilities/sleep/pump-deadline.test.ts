@@ -88,6 +88,7 @@ describe("createSleepHandle provider pump terminal settlement (#1517)", () => {
       onCycleEnd: vi.fn(),
       sessionManager: { spin },
       bufferSystemEvent: vi.fn(),
+      bufferAgentNotice: vi.fn(),
     });
     handle.startScheduled();
     await settleTicks();
@@ -119,6 +120,7 @@ describe("createSleepHandle provider pump terminal settlement (#1517)", () => {
       onCycleEnd: vi.fn(),
       sessionManager: { spin },
       bufferSystemEvent: vi.fn(),
+      bufferAgentNotice: vi.fn(),
       quarantineSession,
     });
     handle.startScheduled();
@@ -157,6 +159,7 @@ describe("createSleepHandle provider pump terminal settlement (#1517)", () => {
         onCycleEnd: vi.fn(),
         sessionManager: { spin },
         bufferSystemEvent: vi.fn(),
+        bufferAgentNotice: vi.fn(),
         quarantineSession,
         allocateSleepSession: () => "d-night-1",
       });
@@ -197,6 +200,7 @@ describe("createSleepHandle provider pump terminal settlement (#1517)", () => {
       onCycleEnd: vi.fn(),
       sessionManager: { spin },
       bufferSystemEvent: vi.fn(),
+      bufferAgentNotice: vi.fn(),
       quarantineSession,
       allocateSleepSession: () => "d-night-1",
     });
@@ -227,6 +231,7 @@ describe("createSleepHandle provider pump terminal settlement (#1517)", () => {
       onCycleEnd: vi.fn(),
       sessionManager: { spin },
       bufferSystemEvent: vi.fn(),
+      bufferAgentNotice: vi.fn(),
       quarantineSession,
       allocateSleepSession: () => "d-night-1",
     });
@@ -263,6 +268,7 @@ describe("createSleepHandle provider pump terminal settlement (#1517)", () => {
       onCycleEnd: vi.fn(),
       sessionManager: { spin },
       bufferSystemEvent: vi.fn(),
+      bufferAgentNotice: vi.fn(),
       quarantineSession,
       allocateSleepSession: () => "d-night-1",
     });
@@ -290,6 +296,7 @@ describe("createSleepHandle provider pump terminal settlement (#1517)", () => {
       onCycleEnd: vi.fn(),
       sessionManager: { spin },
       bufferSystemEvent: vi.fn(),
+      bufferAgentNotice: vi.fn(),
       allocateSleepSession: () => "d-night-1",
     });
     handle.startScheduled();
@@ -313,6 +320,7 @@ describe("createSleepHandle provider pump terminal settlement (#1517)", () => {
       onCycleEnd: vi.fn(),
       sessionManager: { spin },
       bufferSystemEvent: vi.fn(),
+      bufferAgentNotice: vi.fn(),
       allocateSleepSession: () => "d-night-1",
     });
     handle.startScheduled();
@@ -337,6 +345,7 @@ describe("createSleepHandle provider pump terminal settlement (#1517)", () => {
       onCycleEnd: vi.fn(),
       sessionManager: { spin },
       bufferSystemEvent: vi.fn(),
+      bufferAgentNotice: vi.fn(),
     });
     handle.startScheduled();
     await settleTicks();
@@ -364,6 +373,7 @@ describe("createSleepHandle provider pump terminal settlement (#1517)", () => {
       onCycleEnd: vi.fn(),
       sessionManager: { spin },
       bufferSystemEvent: vi.fn(),
+      bufferAgentNotice: vi.fn(),
       quarantineSession,
       allocateSleepSession: () => "d-night-1",
     });
@@ -394,6 +404,7 @@ describe("createSleepHandle provider pump terminal settlement (#1517)", () => {
         onCycleEnd: vi.fn(),
         sessionManager: { spin },
         bufferSystemEvent: vi.fn(),
+        bufferAgentNotice: vi.fn(),
         quarantineSession,
         allocateSleepSession: () => "d-night-1",
       });
@@ -430,6 +441,7 @@ describe("createSleepHandle provider pump terminal settlement (#1517)", () => {
       onCycleEnd: vi.fn(),
       sessionManager: { spin },
       bufferSystemEvent: vi.fn(),
+      bufferAgentNotice: vi.fn(),
     });
     handle.startScheduled();
     await settleTicks();
@@ -459,6 +471,7 @@ describe("createSleepHandle provider pump terminal settlement (#1517)", () => {
       onCycleEnd: vi.fn(),
       sessionManager: { spin },
       bufferSystemEvent: vi.fn(),
+      bufferAgentNotice: vi.fn(),
       quarantineSession,
       allocateSleepSession: () => "d-night-1",
     });
@@ -488,6 +501,7 @@ describe("createSleepHandle provider pump terminal settlement (#1517)", () => {
       onCycleEnd: vi.fn(),
       sessionManager: { spin },
       bufferSystemEvent: vi.fn(),
+      bufferAgentNotice: vi.fn(),
       quarantineSession,
       allocateSleepSession: () => "d-night-1",
     });
@@ -521,6 +535,7 @@ describe("createSleepHandle provider pump terminal settlement (#1517)", () => {
         onCycleEnd: vi.fn(),
         sessionManager: { spin },
         bufferSystemEvent: vi.fn(),
+        bufferAgentNotice: vi.fn(),
       });
       handle.startScheduled();
       await vi.advanceTimersByTimeAsync(0);
@@ -553,6 +568,7 @@ describe("createSleepHandle provider pump terminal settlement (#1517)", () => {
         onCycleEnd: vi.fn(),
         sessionManager: { spin },
         bufferSystemEvent: vi.fn(),
+        bufferAgentNotice: vi.fn(),
       });
       handle.startScheduled();
       await vi.advanceTimersByTimeAsync(0);
@@ -591,6 +607,7 @@ describe("createSleepHandle provider pump terminal settlement (#1517)", () => {
       onCycleEnd: vi.fn(),
       sessionManager: { spin },
       bufferSystemEvent: vi.fn(),
+      bufferAgentNotice: vi.fn(),
       quarantineSession,
       allocateSleepSession: () => "d-night-1",
     });
@@ -645,6 +662,7 @@ describe("createSleepHandle provider pump terminal settlement (#1517)", () => {
       onCycleEnd: vi.fn(),
       sessionManager: { spin },
       bufferSystemEvent: vi.fn(),
+      bufferAgentNotice: vi.fn(),
       allocateSleepSession,
     });
     handle.startScheduled();
@@ -695,6 +713,7 @@ describe("createSleepHandle provider pump terminal settlement (#1517)", () => {
       onCycleEnd: vi.fn(),
       sessionManager: { spin },
       bufferSystemEvent: vi.fn(),
+      bufferAgentNotice: vi.fn(),
     });
     handle.startScheduled();
     await settleTicks();
@@ -771,6 +790,7 @@ describe("createSleepHandle provider pump terminal settlement (#1517)", () => {
         quarantineSession: (sid, reason) => { spin.finalizeExactSession(sid, "aksika", reason); },
         allocateSleepSession: (name) => { allocatedId = spin.allocateDreamySession(name).id; return allocatedId; },
         bufferSystemEvent: vi.fn(),
+        bufferAgentNotice: vi.fn(),
       });
       handle.startScheduled();
       await vi.advanceTimersByTimeAsync(0);
