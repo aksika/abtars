@@ -786,17 +786,22 @@ function normalizeCommitResult(value: unknown): CommitConversationCompactionResu
 // than becoming a fabricated question or a fake asked/dismissed success.
 
 const DREAM_QUESTION_STATUSES = new Set(["pending", "asked", "resolved", "expired", "dismissed"]);
+const DREAM_QUESTION_ID_MAX = 128;
+const DREAM_QUESTION_TEXT_MAX = 300;
+const DREAM_QUESTION_LIST_MAX = 50;
 
 function normalizeDreamQuestion(value: unknown): DreamQuestionWireLike {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
     throw new Error("Dream question response is malformed");
   }
   const record = value as Record<string, unknown>;
-  if (typeof record["id"] !== "string" || record["id"].length === 0) throw new Error("Dream question response has no id");
-  if (!Number.isSafeInteger(record["memoryAId"]) || !Number.isSafeInteger(record["memoryBId"])) throw new Error("Dream question evidence ids are malformed");
-  if (typeof record["question"] !== "string" || record["question"].length === 0) throw new Error("Dream question response has no question text");
+  if (typeof record["id"] !== "string" || record["id"].length === 0 || record["id"].length > DREAM_QUESTION_ID_MAX) throw new Error("Dream question response has no bounded id");
+  if (!Number.isSafeInteger(record["memoryAId"]) || (record["memoryAId"] as number) < 1
+    || !Number.isSafeInteger(record["memoryBId"]) || (record["memoryBId"] as number) < 1) throw new Error("Dream question evidence ids are malformed");
+  if (typeof record["question"] !== "string" || record["question"].length === 0 || record["question"].length > DREAM_QUESTION_TEXT_MAX) throw new Error("Dream question response has no bounded question text");
   if (typeof record["status"] !== "string" || !DREAM_QUESTION_STATUSES.has(record["status"])) throw new Error("Dream question status is malformed");
-  if (!Number.isSafeInteger(record["createdAt"]) || !Number.isSafeInteger(record["expiresAt"])) throw new Error("Dream question timestamps are malformed");
+  if (!Number.isSafeInteger(record["createdAt"]) || (record["createdAt"] as number) < 0
+    || !Number.isSafeInteger(record["expiresAt"]) || (record["expiresAt"] as number) < 0) throw new Error("Dream question timestamps are malformed");
   const wire: DreamQuestionWireLike = {
     id: record["id"],
     memoryAId: record["memoryAId"] as number,
@@ -806,6 +811,9 @@ function normalizeDreamQuestion(value: unknown): DreamQuestionWireLike {
     createdAt: record["createdAt"] as number,
     expiresAt: record["expiresAt"] as number,
   };
+  if (record["askedAt"] !== undefined && (!Number.isSafeInteger(record["askedAt"]) || (record["askedAt"] as number) < 0)) {
+    throw new Error("Dream question askedAt is malformed");
+  }
   if (typeof record["askedAt"] === "number" && Number.isSafeInteger(record["askedAt"])) {
     wire.askedAt = record["askedAt"] as number;
   }
@@ -819,6 +827,9 @@ function normalizeDreamQuestionList(value: unknown): { questions: DreamQuestionW
   const record = value as Record<string, unknown>;
   if (!Array.isArray(record["questions"])) {
     throw new Error("Dream question list response has no questions array");
+  }
+  if (record["questions"].length > DREAM_QUESTION_LIST_MAX) {
+    throw new Error("Dream question list response exceeds its bound");
   }
   const questions: DreamQuestionWireLike[] = [];
   for (const raw of record["questions"] as unknown[]) {

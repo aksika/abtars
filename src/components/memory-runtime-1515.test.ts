@@ -141,4 +141,22 @@ describe("dreamQuestions runtime methods", () => {
     const badStatus = createClientRuntime(mockClient({ dreamQuestions: { markAsked: vi.fn().mockResolvedValue({ status: "bogus" }) } }));
     await expect(badStatus.dreamQuestions.markAsked("master", "q-1", "d")).rejects.toThrow();
   });
+
+  it("rejects oversized or otherwise unbounded wire projections", async () => {
+    const oversized = createClientRuntime(mockClient({ dreamQuestions: {
+      nextPending: vi.fn().mockResolvedValue({
+        id: "q".repeat(129), memoryAId: 10, memoryBId: 20, question: "bounded question?",
+        status: "pending", createdAt: 1000, expiresAt: 2000,
+      }),
+    } }));
+    await expect(oversized.dreamQuestions.nextPending("master")).rejects.toThrow();
+
+    const tooMany = createClientRuntime(mockClient({ dreamQuestions: {
+      list: vi.fn().mockResolvedValue({ questions: Array.from({ length: 51 }, () => ({
+        id: "q-1", memoryAId: 10, memoryBId: 20, question: "bounded question?",
+        status: "pending", createdAt: 1000, expiresAt: 2000,
+      })) }),
+    } }));
+    await expect(tooMany.dreamQuestions.list("master")).rejects.toThrow();
+  });
 });
