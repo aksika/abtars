@@ -405,6 +405,22 @@ function requireClientCapability(capabilities: ReadonlySet<MemoryRuntimeCapabili
   }
 }
 
+const DREAM_QUESTION_IDEMPOTENCY_KEY_MAX = 128;
+
+/** Keep normal keys readable, but never let caller-controlled bounded fields
+ * exceed abmind's idempotency-key limit. The hash retains the full tuple so
+ * oversized IDs cannot collide merely because they share a prefix. */
+function dreamQuestionIdempotencyKey(kind: "ask" | "dismiss", questionId: string, deliveryKey?: string): string {
+  const raw = deliveryKey === undefined
+    ? `dream-question-${kind}-${questionId}`
+    : `dream-question-${kind}-${questionId}-${deliveryKey}`;
+  if (raw.length <= DREAM_QUESTION_IDEMPOTENCY_KEY_MAX) return raw;
+  const digest = createHash("sha256")
+    .update(JSON.stringify([kind, questionId, deliveryKey ?? ""]), "utf-8")
+    .digest("hex");
+  return `dream-question-${kind}-v1-${digest}`;
+}
+
 // ── Client-backed implementation ──────────────────────────────────────────
 
 export function createClientRuntime(client: AbmindClientLike): AbtarsMemoryRuntime {
@@ -658,13 +674,13 @@ export function createClientRuntime(client: AbmindClientLike): AbtarsMemoryRunti
         // retry after a crash replays the same CAS instead of double-marking.
         const result = await pm.dreamQuestions.markAsked(
           { userId, questionId, deliveryKey },
-          `dream-question-ask-${questionId}-${deliveryKey}`,
+          dreamQuestionIdempotencyKey("ask", questionId, deliveryKey),
         ) as unknown;
         return normalizeMarkAskedResult(result);
       },
       async dismiss(userId: string, questionId: string): Promise<{ status: "dismissed" | "not_found" | "already_terminal" }> {
         requireClientCapability(capabilities, "dreamQuestions");
-        const result = await pm.dreamQuestions.dismiss({ userId, questionId }, `dream-question-dismiss-${questionId}`) as unknown;
+        const result = await pm.dreamQuestions.dismiss({ userId, questionId }, dreamQuestionIdempotencyKey("dismiss", questionId)) as unknown;
         return normalizeDismissResult(result);
       },
     },

@@ -89,6 +89,23 @@ describe("dreamQuestions runtime methods", () => {
     );
   });
 
+  it("bounds derived idempotency keys for maximum-sized identifiers", async () => {
+    const markAsked = vi.fn().mockResolvedValue({ status: "asked" });
+    const dismiss = vi.fn().mockResolvedValue({ status: "dismissed" });
+    const client = mockClient({ dreamQuestions: { markAsked, dismiss } });
+    const rt = createClientRuntime(client);
+    const questionId = "q".repeat(128);
+    const deliveryKey = "d".repeat(128);
+    await rt.dreamQuestions.markAsked("master", questionId, deliveryKey);
+    await rt.dreamQuestions.dismiss("master", questionId);
+    const askKey = markAsked.mock.calls[0]?.[1] as string;
+    const dismissKey = dismiss.mock.calls[0]?.[1] as string;
+    expect(askKey.length).toBeLessThanOrEqual(128);
+    expect(dismissKey.length).toBeLessThanOrEqual(128);
+    expect(askKey).toMatch(/^dream-question-ask-v1-/);
+    expect(dismissKey).toMatch(/^dream-question-dismiss-v1-/);
+  });
+
   it("markAsked returns conflict and not_found as data", async () => {
     const conflict = createClientRuntime(mockClient({ dreamQuestions: { markAsked: vi.fn().mockResolvedValue({ status: "conflict" }) } }));
     expect((await conflict.dreamQuestions.markAsked("master", "q-1", "d")).status).toBe("conflict");
