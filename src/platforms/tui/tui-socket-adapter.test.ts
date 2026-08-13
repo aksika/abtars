@@ -2177,9 +2177,13 @@ describe("TuiSocketAdapter — native coding handoff", () => {
     conn.write(encodeFrame({ t: "coding-handoff-started", sessionId: "spin-c-1", pid: 4242 }));
     conn.write(encodeFrame({ t: "coding-handoff-exit", sessionId: "spin-c-1", code: 0 }));
     await waitFor(() => frames.some((f) => f.t === "coding-handoff-released"), 2000);
+    await waitFor(() => frames.some((f) => f.t === "coding-handoff-started-accepted"), 2000);
 
     expect(coding.recordNativeHandoffPid).toHaveBeenCalledWith(expect.objectContaining({ sessionId: "spin-c-1", pid: 4242 }));
     expect(coding.endNativeHandoff).toHaveBeenCalledWith(expect.objectContaining({ sessionId: "spin-c-1", code: 0 }));
+    expect(frames.find((f) => f.t === "coding-handoff-started-accepted")).toMatchObject({
+      t: "coding-handoff-started-accepted", sessionId: "spin-c-1", pid: 4242,
+    });
     expect(frames.find((f) => f.t === "coding-handoff-released")).toMatchObject({
       t: "coding-handoff-released",
     });

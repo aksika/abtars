@@ -1118,11 +1118,16 @@ export class TuiSocketAdapter implements PlatformAdapter {
 
   /** Record the client's spawned Pi pid as the exclusive-writer fence. */
   private async _handleCodingHandoffStarted(sessionId: string, pid: number): Promise<void> {
+    const capturedConnGen = this._connGen;
     const coding = this.deps.codingService;
     if (!coding) return;
+    let accepted = false;
     try {
-      coding.recordNativeHandoffPid({ sessionId, leaseOwner: `tui:${this._connGen}`, pid });
-    } catch { /* best effort — the accept-time writer check still fences */ }
+      accepted = coding.recordNativeHandoffPid({ sessionId, leaseOwner: `tui:${this._connGen}`, pid }) !== false;
+    } catch { /* rejected below; the client must not leave an unfenced writer */ }
+    if (accepted) {
+      this._pushHandoffDirect({ t: "coding-handoff-started-accepted", sessionId, pid }, capturedConnGen);
+    }
   }
 
   /** Pi exited — reconcile and release the generation-owned resources. */
@@ -1131,12 +1136,29 @@ export class TuiSocketAdapter implements PlatformAdapter {
     const coding = this.deps.codingService;
     if (!coding) return;
     let message: string;
+    let ok = false;
     try {
-      message = coding.endNativeHandoff({ sessionId, leaseOwner: `tui:${this._connGen}`, code }).message;
+      const result = coding.endNativeHandoff({ sessionId, leaseOwner: `tui:${this._connGen}`, code });
+      ok = result.ok;
+      message = result.message;
     } catch (err) {
       message = err instanceof Error ? err.message : String(err);
     }
-    this._pushHandoffDirect({ t: "coding-handoff-released", message }, capturedConnGen);
+    const attached = this.attachedSessionId
+      ? this.deps.spin.getSessionById(this.attachedSessionId)
+      : null;
+    const reattached = Boolean(ok && attached && attached.status !== "ended");
+    this._pushHandoffDirect({ t: "coding-handoff-released", message, reattached }, capturedConnGen);
+    if (reattached) {
+      // Let the client consume the release frame and clear its handoff gate
+      // before the ready/status/snapshot frames are emitted.  The adapter has
+      // deliberately kept the previous attachment alive, so this restores
+      // the exact prior pipeline/Orc view instead of blindly selecting Main.
+      setImmediate(() => {
+        if (!this._isConnCurrent(capturedConnGen) || !this.attachedSessionId) return;
+        try { this.commitAttachment(this.attachedSessionId, this.mode, this.deps.spin); } catch { /* best effort */ }
+      });
+    }
   }
 
   /** Direct write for critical handoff frames — bypasses the overflow-dropping writer. */

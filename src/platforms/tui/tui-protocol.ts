@@ -94,7 +94,8 @@ export type TuiServerFrame =
   // #1635 Phase 2 — native TUI handoff
   | { t: "coding-handoff-accepted"; handoff: NativeCodingHandoffInfo }
   | { t: "coding-handoff-rejected"; message: string }
-  | { t: "coding-handoff-released"; message: string };
+  | { t: "coding-handoff-started-accepted"; sessionId: string; pid: number }
+  | { t: "coding-handoff-released"; message: string; reattached?: boolean };
 
 export function encodeFrame(f: TuiServerFrame | TuiClientFrame): string {
   return JSON.stringify(f) + "\n";
@@ -340,7 +341,7 @@ export function isServerFrame(x: unknown): x is TuiServerFrame {
          t === "activity-snapshot" || t === "activity" || t === "activity-gap"
          || t === "status"
          || t === "coding-handoff-accepted" || t === "coding-handoff-rejected"
-         || t === "coding-handoff-released";
+         || t === "coding-handoff-started-accepted" || t === "coding-handoff-released";
 }
 
 /** True if the parsed frame looks like a TuiClientFrame (narrowing helper). */

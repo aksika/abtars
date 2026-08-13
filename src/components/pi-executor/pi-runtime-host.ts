@@ -62,6 +62,17 @@ export class PiRuntimeHost {
     return true;
   }
 
+  /**
+   * Re-adopt a process that survived a bridge restart.  The in-memory counter
+   * starts at zero on boot, but a live native-TUI child still consumes a
+   * process slot.  Counting it even when the configured cap was lowered keeps
+   * the recovered process visible and prevents a new launch from exceeding
+   * the real process pool.
+   */
+  adoptRecoveredSlot(): void {
+    this.reserved += 1;
+  }
+
   /** Release one reserved slot and notify waiters (advisory, idempotent). */
   releaseSlot(): void {
     if (this.reserved <= 0) return;

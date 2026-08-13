@@ -488,6 +488,7 @@ function classify(frame: TuiServerFrame): {
     case "error":
     case "coding-handoff-accepted":
     case "coding-handoff-rejected":
+    case "coding-handoff-started-accepted":
     case "coding-handoff-released":
       // #1635 Phase 2: handoff control frames are critical — control priority.
       return { cls: "control" };
@@ -564,8 +565,10 @@ function boundFrame(frame: TuiServerFrame, maxFrameBytes: number, _maxChunkBytes
         return { t: "coding-handoff-accepted", handoff: truncateStringsDeep(frame.handoff, budget) };
       case "coding-handoff-rejected":
         return { t: "coding-handoff-rejected", message: truncateUtf8(frame.message, budget) };
+      case "coding-handoff-started-accepted":
+        return { t: "coding-handoff-started-accepted", sessionId: frame.sessionId, pid: frame.pid };
       case "coding-handoff-released":
-        return { t: "coding-handoff-released", message: truncateUtf8(frame.message, budget) };
+        return { t: "coding-handoff-released", message: truncateUtf8(frame.message, budget), reattached: frame.reattached };
     }
   };
   let budget = maxFrameBytes;

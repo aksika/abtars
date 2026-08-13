@@ -33,6 +33,7 @@ import { logInfo, logWarn, logDebug } from "../logger.js";
 import type { NativeCodingHandoffInfo } from "../../platforms/tui/tui-protocol.js";
 
 const TAG = "pi-coding";
+const NATIVE_RECOVERY_POLL_MS = 250;
 
 /** Internal sentinel: roll back the turn-start transaction. */
 const TURN_START_ROLLBACK = Symbol("pi_coding_turn_start_rollback");
@@ -105,6 +106,8 @@ interface NativeHandoffState {
   newPiSessionId?: string;
   /** True once the client reported its spawned Pi pid. */
   started: boolean;
+  /** An owner requested `/coding end` or `/session end|kill`. */
+  endRequested: boolean;
 }
 
 export type NativeHandoffResult =
@@ -116,6 +119,15 @@ export class PiCodingSessionService {
   private readonly live = new Map<string, OwnedTurn>();
   /** #1635 Phase 2 — live native TUI handoffs keyed by session id. */
   private readonly nativeHandoffs = new Map<string, NativeHandoffState>();
+  /**
+   * Native writers that outlived their socket/bridge connection.  Their
+   * process slot remains reserved until a later reconciliation proves the
+   * writer gone; the set prevents a boot/retry path from double-counting or
+   * releasing the recovered slot belonging to another generation.
+   */
+  private readonly recoveredNativeSlots = new Set<string>();
+  /** Bounded cleanup watches for client-owned writers that outlived a socket. */
+  private readonly nativeRecoveryWatches = new Map<string, ReturnType<typeof setTimeout>>();
 
   constructor(deps: PiCodingServiceDeps) {
     this.deps = deps;
@@ -460,6 +472,12 @@ export class PiCodingSessionService {
       logInfo(TAG, `Coding session ${sessionId} end requested; waiting for Pi teardown`);
       return true;
     }
+    const native = this.nativeHandoffs.get(sessionId);
+    if (native) {
+      this.requestNativeHandoffEnd(native);
+      logInfo(TAG, `Native coding session ${sessionId} end requested; waiting for Pi teardown`);
+      return true;
+    }
     this.deps.store.markEnded(sessionId);
     try {
       this.deps.spin.endCodingExternalSession(sessionId, sessionId);
@@ -483,6 +501,11 @@ export class PiCodingSessionService {
       if (!owned.settling) this.cancelTurn(owned, "Session ended by user");
       return false;
     }
+    const native = this.nativeHandoffs.get(sessionId);
+    if (native) {
+      this.requestNativeHandoffEnd(native);
+      return false;
+    }
     this.deps.store.markEnded(sessionId);
     return true;
   }
@@ -490,7 +513,7 @@ export class PiCodingSessionService {
   // ── #1635 Phase 2 — native TUI handoff ────────────────────────────────────
 
   /**
-   * Resolve an `idle|interrupted` session for a native TUI handoff and hold
+   * Resolve an `idle|suspended|interrupted` session for a native TUI handoff and hold
    * the generation-owned resources for its whole lifetime. Sequence (design
    * §8): prove no prior writer process -> synchronously reserve a shared Pi
    * slot -> atomically (advance generation + CAS idle|interrupted -> starting
@@ -508,7 +531,7 @@ export class PiCodingSessionService {
   }): NativeHandoffResult {
     const resolved = this.resolveHandoffTarget(input.command, input.ownerPrincipal);
     if (!resolved.ok) return { ok: false, reason: resolved.reason };
-    let rec = resolved.rec!;
+    let rec = this.discoverPendingSessionFile(resolved.rec!);
 
     // R2.4 — prove no prior writer process before acquiring the lease. A live
     // pid (previous crashed handoff / unreaped writer) must never be written
@@ -523,22 +546,27 @@ export class PiCodingSessionService {
     // so the stale fence can be released and the accept proceeds.
     if (rec.leaseFrontend === "native-tui" && rec.leaseGeneration !== undefined) {
       const stale = this.nativeHandoffs.get(rec.sessionId);
+      let staleSlotHeld = false;
       if (stale) {
         this.nativeHandoffs.delete(rec.sessionId);
-        this.deps.host.releaseSlot();
+        staleSlotHeld = true;
       }
       this.deps.store.casTransition(rec.sessionId, ["starting", "interrupted"], "interrupted", {
         resumeCapability: this.capabilityForRow(rec),
+        observedPid: null,
       }, rec.runtimeGeneration);
       this.deps.store.clearLease(rec.sessionId, rec.leaseGeneration);
+      this.deps.store.clearObservedPid(rec.sessionId, rec.runtimeGeneration);
       this.deps.claims.releaseForGeneration({ ownerId: rec.sessionId, generation: rec.runtimeGeneration });
+      if (staleSlotHeld) this.deps.host.releaseSlot();
+      this.releaseRecoveredNativeSlot(rec.sessionId, rec.runtimeGeneration);
       logWarn(TAG, `Coding session ${rec.sessionId}: cleared stale native handoff fence`);
-      rec = this.deps.store.get(rec.sessionId)!;
+      rec = this.discoverPendingSessionFile(this.deps.store.get(rec.sessionId)!);
     }
 
     // R2.4 — fail closed from live states.
-    if (rec.state !== "idle" && rec.state !== "interrupted") {
-      return { ok: false, reason: `Native handoff requires an idle session (state is ${rec.state})` };
+    if (rec.state !== "idle" && rec.state !== "suspended" && rec.state !== "interrupted") {
+      return { ok: false, reason: `Native handoff requires an idle or suspended session (state is ${rec.state})` };
     }
 
     // Resume requires a proven target, never an inferred one (R4.4).
@@ -559,6 +587,12 @@ export class PiCodingSessionService {
     const ws = resolveAndValidateWorkspace(rec.workspaceAlias, this.deps.config);
     if (ws.error) return { ok: false, reason: ws.error };
 
+    // The id is generated before the transaction so an initial handoff keeps
+    // a durable target even if the bridge dies before the client can report
+    // its pid.  Presence of this id alone never grants resumability; the
+    // session file still has to be found and proven.
+    const newPiSessionId = isResume ? undefined : randomUUID();
+
     // R4.6 — synchronously reserve the shared Pi slot before anything else.
     if (!this.deps.host.tryReserveSlot()) {
       return { ok: false, reason: "Pi capacity is full — retry when a slot frees up" };
@@ -567,7 +601,7 @@ export class PiCodingSessionService {
     const intent: "initial" | "resume" = isResume ? "resume" : "initial";
     let generation: number;
     try {
-      const tx = this.txTurnStart(rec, rec.runtimeGeneration, intent, input.leaseOwner, ws.canonicalPath, "native-tui");
+      const tx = this.txTurnStart(rec, rec.runtimeGeneration, intent, input.leaseOwner, ws.canonicalPath, "native-tui", newPiSessionId);
       if (!tx.ok) {
         this.deps.host.releaseSlot();
         return { ok: false, reason: tx.busy
@@ -580,13 +614,13 @@ export class PiCodingSessionService {
       return { ok: false, reason: "Failed to start the native handoff" };
     }
 
-    const newPiSessionId = isResume ? undefined : randomUUID();
     this.nativeHandoffs.set(rec.sessionId, {
       sessionId: rec.sessionId,
       generation,
       leaseOwner: input.leaseOwner,
       newPiSessionId,
       started: false,
+      endRequested: false,
     });
 
     const handoff: NativeCodingHandoffInfo = {
@@ -611,16 +645,25 @@ export class PiCodingSessionService {
    * exclusive-writer fence (`observedPid`). Generation- and lease-fenced: a
    * stale connection can never write a newer handoff's row.
    */
-  recordNativeHandoffPid(input: { sessionId: string; leaseOwner: string; pid: number }): void {
+  recordNativeHandoffPid(input: { sessionId: string; leaseOwner: string; pid: number }): boolean {
     const h = this.nativeHandoffs.get(input.sessionId);
-    if (!h || h.leaseOwner !== input.leaseOwner) return;
-    const cas = this.deps.store.casTransition(input.sessionId, "starting", "starting", {
+    if (!h || h.leaseOwner !== input.leaseOwner) return false;
+    const cas = this.deps.store.casTransition(input.sessionId, h.endRequested ? ["starting", "ended"] : "starting", h.endRequested ? "ended" : "starting", {
       observedPid: input.pid,
+      ...(h.newPiSessionId ? { piSessionId: h.newPiSessionId } : {}),
     }, h.generation);
     if (cas.applied) {
       h.started = true;
       logDebug(TAG, `Native handoff ${input.sessionId}: writer pid ${input.pid} recorded`);
+      if (h.endRequested) {
+        this.requestNativeHandoffEnd(h);
+        // The client must not continue treating a remotely-ended handoff as
+        // owned. It still reports exit so the bridge can perform the final
+        // proof/release path.
+        return false;
+      }
     }
+    return cas.applied;
   }
 
   /**
@@ -640,10 +683,12 @@ export class PiCodingSessionService {
       this.releaseNativeHandoff(h);
       return { ok: false, message: "Session not found" };
     }
+    const forceEnded = h.endRequested || rec.state === "ended";
 
     const updates: PiCodingTransitionUpdates = {
       pendingRequestId: null,
       pendingRequestType: null,
+      observedPid: null,
     };
     let state: PiCodingState;
     let provedIdentity: { sessionId: string; canonicalFile: string } | null = null;
@@ -656,7 +701,7 @@ export class PiCodingSessionService {
       });
       updates.resumeCapability = proof.ok ? "available" : proof.capability;
       if (proof.ok) provedIdentity = { sessionId: proof.sessionId, canonicalFile: proof.canonicalFile };
-      state = input.code === 0 && proof.ok ? "idle" : "interrupted";
+      state = forceEnded ? "ended" : input.code === 0 && proof.ok ? "idle" : "interrupted";
     } else if (h.newPiSessionId) {
       // Initial handoff: the client launched Pi with `--session-id`; discover
       // the file it created under the configured storage root, then prove it.
@@ -671,24 +716,24 @@ export class PiCodingSessionService {
       if (proof.ok) {
         provedIdentity = { sessionId: proof.sessionId, canonicalFile: proof.canonicalFile };
         updates.resumeCapability = "available";
-        state = input.code === 0 ? "idle" : "interrupted";
+        state = forceEnded ? "ended" : input.code === 0 ? "idle" : "interrupted";
       } else {
         updates.resumeCapability = proof.capability;
-        state = "interrupted";
+        state = forceEnded ? "ended" : "interrupted";
       }
     } else {
       updates.resumeCapability = "never_started";
-      state = "interrupted";
+      state = forceEnded ? "ended" : "interrupted";
     }
 
     if (provedIdentity) {
       updates.piSessionId = provedIdentity.sessionId;
       updates.piSessionFile = provedIdentity.canonicalFile;
     }
-    this.deps.store.casTransition(input.sessionId, "starting", state, updates, h.generation);
+    this.deps.store.casTransition(input.sessionId, ["starting", "ended"], state, updates, h.generation);
     this.releaseNativeHandoff(h);
     logInfo(TAG, `Native handoff ${input.sessionId} ended (code ${input.code}) -> ${state}`);
-    return { ok: true, message: state === "idle" ? "Pi session returned to idle" : `Pi session ended abnormally (${state})` };
+    return { ok: true, message: state === "idle" ? "Pi session returned to idle" : state === "ended" ? "Coding session ended" : `Pi session ended abnormally (${state})` };
   }
 
   /**
@@ -696,37 +741,47 @@ export class PiCodingSessionService {
    * alive and writing the session file: if its recorded pid is live, keep the
    * workspace claim and writer lease (the next handoff's prior-writer check
    * blocks until the process actually exits); otherwise release everything.
-   * The shared slot is always released — the daemon cannot supervise an
-   * orphaned client process.
+   * A live orphan keeps the shared slot reserved as well, because releasing
+   * it would let a second Pi writer start while the first still writes.
    */
   abortNativeHandoff(leaseOwner: string): void {
     for (const [sessionId, h] of this.nativeHandoffs) {
       if (h.leaseOwner !== leaseOwner) continue;
       this.nativeHandoffs.delete(sessionId);
-      this.deps.host.releaseSlot();
       const rec = this.deps.store.get(sessionId);
-      if (!rec) return;
+      if (!rec) {
+        // The generation row may have been removed concurrently, but the
+        // native handoff still owns the slot represented by `h`.
+        this.deps.host.releaseSlot();
+        continue;
+      }
       const capability = this.capabilityForRow(rec);
       const orphanWrites = h.started && rec.observedPid !== undefined && isProcessAlive(rec.observedPid);
       if (orphanWrites) {
-        // Keep the claim + lease as the exclusive-writer fence; state is
-        // interrupted. The next handoff accept self-heals once the process
-        // is proven gone.
-        this.deps.store.casTransition(sessionId, "starting", "interrupted", {
+        // Keep the claim + lease as the exclusive-writer fence. An explicit
+        // end remains terminal, but resources stay held until the writer is
+        // proven gone.
+        this.deps.store.casTransition(sessionId, ["starting", "interrupted", "ended"], h.endRequested ? "ended" : "interrupted", {
           resumeCapability: capability,
         }, h.generation);
+        this.recoveredNativeSlots.add(this.nativeSlotKey(sessionId, h.generation));
+        this.watchRecoveredNativeWriter(sessionId, h.generation);
         logWarn(TAG, `Native handoff ${sessionId} connection died; writer pid ${rec.observedPid} still alive — claim kept`);
-        return;
+        continue;
       }
-      this.deps.store.casTransition(sessionId, "starting", "interrupted", {
+      const finalState = h.endRequested ? "ended" : "interrupted";
+      this.deps.store.casTransition(sessionId, ["starting", "interrupted", "ended"], finalState, {
         resumeCapability: capability,
+        observedPid: null,
       }, h.generation);
       if (rec.leaseGeneration !== undefined) {
         this.deps.store.clearLease(sessionId, rec.leaseGeneration);
       }
       this.deps.claims.releaseForGeneration({ ownerId: sessionId, generation: h.generation });
+      this.deps.host.releaseSlot();
+      if (finalState === "ended") this.finalizeEndedCodingEnvelope(sessionId);
       logWarn(TAG, `Native handoff ${sessionId} aborted (connection lost) — resources released`);
-      return;
+      continue;
     }
   }
 
@@ -756,17 +811,150 @@ export class PiCodingSessionService {
       if (!rec) return { ok: false, reason: "Coding session not found" };
       return { ok: true, rec };
     }
-    const rec = this.deps.store.getMostRecentForOwner(ownerPrincipal);
+    const candidates = this.deps.store.listForOwner(ownerPrincipal);
+    if (candidates.length > 1) {
+      const choices = candidates.slice(0, 5).map((candidate, index) =>
+        `${index + 1}. ${candidate.sessionId} (${candidate.workspaceAlias}, ${candidate.state})`
+      ).join("; ");
+      return { ok: false, reason: `Multiple coding sessions — choose one with /coding resume <sessionId>: ${choices}` };
+    }
+    const rec = candidates[0] ?? null;
     if (!rec) return { ok: false, reason: "No coding sessions. Start one with /coding new <workspace-alias>." };
     return { ok: true, rec };
   }
 
   /** Release the generation-owned slot/claim/lease of a finished handoff. */
   private releaseNativeHandoff(h: NativeHandoffState): void {
+    const ended = this.deps.store.get(h.sessionId)?.state === "ended";
+    const recovered = this.recoveredNativeSlots.has(this.nativeSlotKey(h.sessionId, h.generation));
     this.nativeHandoffs.delete(h.sessionId);
+    this.deps.store.clearObservedPid(h.sessionId, h.generation);
     this.deps.store.clearLease(h.sessionId, h.generation);
     this.deps.claims.releaseForGeneration({ ownerId: h.sessionId, generation: h.generation });
+    if (recovered) this.releaseRecoveredNativeSlot(h.sessionId, h.generation);
+    else this.deps.host.releaseSlot();
+    if (ended) this.finalizeEndedCodingEnvelope(h.sessionId);
+  }
+
+  /** Request native Pi termination without releasing its exclusive resources. */
+  private requestNativeHandoffEnd(h: NativeHandoffState): void {
+    h.endRequested = true;
+    this.deps.store.casTransition(h.sessionId, ["starting", "interrupted", "ended"], "ended", {
+      pendingRequestId: null,
+      pendingRequestType: null,
+    }, h.generation);
+    const rec = this.deps.store.get(h.sessionId);
+    if (rec?.observedPid === undefined || !isProcessAlive(rec.observedPid)) return;
+    try {
+      process.kill(rec.observedPid, "SIGTERM");
+      logInfo(TAG, `Requested native Pi termination for ${h.sessionId} (pid ${rec.observedPid})`);
+    } catch (err) {
+      logWarn(TAG, `Could not terminate native Pi for ${h.sessionId}: ${boundedError(err)}`);
+    }
+  }
+
+  /** Finalize the durable Spin envelope after an explicitly ended handoff. */
+  private finalizeEndedCodingEnvelope(sessionId: string): void {
+    try {
+      this.deps.spin.endCodingExternalSession(sessionId, sessionId);
+    } catch { /* best effort; the durable row is already terminal */ }
+  }
+
+  private nativeSlotKey(sessionId: string, generation: number): string {
+    return `${sessionId}:${generation}`;
+  }
+
+  private adoptRecoveredNativeSlot(sessionId: string, generation: number): void {
+    const key = this.nativeSlotKey(sessionId, generation);
+    if (this.recoveredNativeSlots.has(key)) return;
+    this.recoveredNativeSlots.add(key);
+    this.deps.host.adoptRecoveredSlot();
+    this.watchRecoveredNativeWriter(sessionId, generation);
+  }
+
+  private releaseRecoveredNativeSlot(sessionId: string, generation: number): void {
+    const key = this.nativeSlotKey(sessionId, generation);
+    if (!this.recoveredNativeSlots.delete(key)) return;
+    const timer = this.nativeRecoveryWatches.get(key);
+    if (timer) clearTimeout(timer);
+    this.nativeRecoveryWatches.delete(key);
     this.deps.host.releaseSlot();
+  }
+
+  /**
+   * Poll a recovered client-owned PID until it exits. The bridge cannot reap
+   * the child itself, but it can safely release the durable fence once the
+   * exact recorded writer is gone. Timers are unref'ed so shutdown is never
+   * held open by recovery bookkeeping.
+   */
+  private watchRecoveredNativeWriter(sessionId: string, generation: number): void {
+    const key = this.nativeSlotKey(sessionId, generation);
+    if (!this.recoveredNativeSlots.has(key) || this.nativeRecoveryWatches.has(key)) return;
+    const poll = (): void => {
+      this.nativeRecoveryWatches.delete(key);
+      if (!this.recoveredNativeSlots.has(key)) return;
+      const rec = this.deps.store.get(sessionId);
+      if (!rec || rec.runtimeGeneration !== generation || rec.observedPid === undefined || !isProcessAlive(rec.observedPid)) {
+        this.reapRecoveredNativeWriter(sessionId, generation);
+        return;
+      }
+      this.watchRecoveredNativeWriter(sessionId, generation);
+    };
+    const timer = setTimeout(poll, NATIVE_RECOVERY_POLL_MS);
+    if (typeof timer.unref === "function") timer.unref();
+    this.nativeRecoveryWatches.set(key, timer);
+  }
+
+  /** Release a recovered writer's claim/lease only after its PID is gone. */
+  private reapRecoveredNativeWriter(sessionId: string, generation: number): void {
+    const key = this.nativeSlotKey(sessionId, generation);
+    if (!this.recoveredNativeSlots.has(key)) return;
+    const rec = this.deps.store.get(sessionId);
+    if (!rec || rec.runtimeGeneration !== generation) {
+      this.releaseRecoveredNativeSlot(sessionId, generation);
+      return;
+    }
+    if (rec.observedPid !== undefined && isProcessAlive(rec.observedPid)) {
+      this.watchRecoveredNativeWriter(sessionId, generation);
+      return;
+    }
+
+    const reconciled = this.discoverPendingSessionFile(rec);
+    const capability = this.capabilityForRow(reconciled);
+    const leaseGeneration = reconciled.leaseGeneration ?? generation;
+    this.deps.store.casTransition(sessionId, ["starting", "interrupted", "ended"], reconciled.state, {
+      resumeCapability: capability,
+      observedPid: null,
+    }, generation);
+    this.deps.store.clearLease(sessionId, leaseGeneration);
+    this.deps.claims.releaseForGeneration({ ownerId: sessionId, generation });
+    this.releaseRecoveredNativeSlot(sessionId, generation);
+    if (reconciled.state === "ended") this.finalizeEndedCodingEnvelope(sessionId);
+    logInfo(TAG, `Recovered native writer ${sessionId} exited; resources released`);
+  }
+
+  /**
+   * An initial native launch publishes its expected session id before the
+   * client has a chance to report a file.  After a bridge restart, recover a
+   * file that Pi created from that durable id; never mark it resumable unless
+   * the normal bounded header/containment proof succeeds.
+   */
+  private discoverPendingSessionFile(rec: PiCodingSessionRecord): PiCodingSessionRecord {
+    if (!rec.piSessionId || rec.piSessionFile) return rec;
+    const found = findSessionFileBySuffix(this.deps.config.sessionStorageRoot, rec.piSessionId);
+    if (!found) return rec;
+    const proof = validatePersistedSession({
+      sessionStorageRoot: this.deps.config.sessionStorageRoot,
+      expectedSessionId: rec.piSessionId,
+      sessionFile: found,
+    });
+    if (!proof.ok) return rec;
+    this.deps.store.casTransition(rec.sessionId, rec.state, rec.state, {
+      piSessionId: proof.sessionId,
+      piSessionFile: proof.canonicalFile,
+      resumeCapability: "available",
+    }, rec.runtimeGeneration);
+    return this.deps.store.get(rec.sessionId) ?? rec;
   }
 
   /**
@@ -796,32 +984,54 @@ export class PiCodingSessionService {
    */
   reconcileOnBoot(): void {
     for (const rec of this.deps.store.listLive()) {
-      const capability = this.capabilityForRow(rec);
+      const reconciled = this.discoverPendingSessionFile(rec);
+      const capability = this.capabilityForRow(reconciled);
+      const nativeWriterAlive = reconciled.leaseFrontend === "native-tui"
+        && reconciled.observedPid !== undefined
+        && isProcessAlive(reconciled.observedPid);
       this.deps.store.casTransition(rec.sessionId, ["starting", "running", "awaiting_input", "resuming"], "interrupted", {
         resumeCapability: capability,
         pendingRequestId: null,
         pendingRequestType: null,
+        observedPid: nativeWriterAlive ? reconciled.observedPid : null,
       }, rec.runtimeGeneration);
-      if (rec.leaseFrontend === "native-tui" && rec.observedPid !== undefined && isProcessAlive(rec.observedPid)) {
+      if (nativeWriterAlive) {
         // #1635 Phase 2 — a native handoff's Pi process is CLIENT-owned and
         // survives the bridge restart. It may still be writing the session
         // file: keep the claim + lease as the exclusive-writer fence; the
         // next handoff accept self-heals them once the pid is proven gone.
-        logWarn(TAG, `Coding session ${rec.sessionId}: native writer pid ${rec.observedPid} alive at boot — claim kept`);
+        if (!this.nativeHandoffs.has(reconciled.sessionId)) {
+          this.adoptRecoveredNativeSlot(reconciled.sessionId, reconciled.runtimeGeneration);
+        }
+        logWarn(TAG, `Coding session ${rec.sessionId}: native writer pid ${reconciled.observedPid} alive at boot — claim kept`);
         continue;
       }
       this.deps.claims.releaseForGeneration({ ownerId: rec.sessionId, generation: rec.runtimeGeneration });
       this.deps.store.clearLease(rec.sessionId, rec.runtimeGeneration);
+      this.releaseRecoveredNativeSlot(reconciled.sessionId, reconciled.runtimeGeneration);
       logInfo(TAG, `Coding session ${rec.sessionId} interrupted at boot (capability ${capability})`);
     }
     for (const rec of this.deps.store.listStaleLeases()) {
       if (rec.leaseGeneration === undefined) continue;
-      if (rec.leaseFrontend === "native-tui" && rec.observedPid !== undefined && isProcessAlive(rec.observedPid)) {
+      const reconciled = this.discoverPendingSessionFile(rec);
+      const nativeWriterAlive = reconciled.leaseFrontend === "native-tui"
+        && reconciled.observedPid !== undefined
+        && isProcessAlive(reconciled.observedPid);
+      if (nativeWriterAlive) {
         // same fence for rows that crashed outside the live states
-        logWarn(TAG, `Coding session ${rec.sessionId}: native writer pid ${rec.observedPid} alive at boot — lease kept`);
+        if (!this.nativeHandoffs.has(reconciled.sessionId)) {
+          this.adoptRecoveredNativeSlot(reconciled.sessionId, reconciled.runtimeGeneration);
+        }
+        logWarn(TAG, `Coding session ${rec.sessionId}: native writer pid ${reconciled.observedPid} alive at boot — lease kept`);
         continue;
       }
-      this.deps.store.clearLease(rec.sessionId, rec.leaseGeneration);
+      this.deps.store.casTransition(reconciled.sessionId, reconciled.state, reconciled.state, {
+        observedPid: null,
+      }, reconciled.runtimeGeneration);
+      this.deps.claims.releaseForGeneration({ ownerId: reconciled.sessionId, generation: reconciled.runtimeGeneration });
+      this.deps.store.clearLease(reconciled.sessionId, rec.leaseGeneration);
+      this.releaseRecoveredNativeSlot(reconciled.sessionId, reconciled.runtimeGeneration);
+      if (reconciled.state === "ended") this.finalizeEndedCodingEnvelope(reconciled.sessionId);
       logInfo(TAG, `Coding session ${rec.sessionId}: cleared stale lease (gen ${rec.leaseGeneration})`);
     }
   }
@@ -856,6 +1066,7 @@ export class PiCodingSessionService {
     leaseOwner: string,
     canonicalPath: string,
     frontend: PiCodingLeaseFrontend = "telegram-rpc",
+    initialPiSessionId?: string,
   ): { ok: true; generation: number } | { ok: false; busy: boolean } {
     let outcome: { ok: true; generation: number } | { ok: false; busy: boolean } = { ok: false, busy: false };
     const run = (): void => {
@@ -865,7 +1076,11 @@ export class PiCodingSessionService {
       }
       const generation = currentGen + 1;
       const cas = this.deps.store.casTransition(
-        rec.sessionId, ["idle", "interrupted"], "starting", {}, generation,
+        rec.sessionId, ["idle", "suspended", "interrupted"], "starting",
+        initialPiSessionId
+          ? { piSessionId: initialPiSessionId, piSessionFile: null, resumeCapability: "never_started" }
+          : {},
+        generation,
       );
       if (!cas.applied) {
         outcome = { ok: false, busy: false };
@@ -1113,6 +1328,7 @@ export class PiCodingSessionService {
     if (owned.unsubEvents) { owned.unsubEvents(); owned.unsubEvents = null; }
     if (owned.unsubUi) { owned.unsubUi(); owned.unsubUi = null; }
     try { await owned.client.closeAndWait(); } catch { /* ignore */ }
+    this.deps.store.clearObservedPid(owned.sessionId, owned.generation);
     this.deps.store.clearLease(owned.sessionId, owned.generation);
     this.deps.claims.releaseForGeneration({ ownerId: owned.sessionId, generation: owned.generation });
     this.deps.host.releaseSlot();

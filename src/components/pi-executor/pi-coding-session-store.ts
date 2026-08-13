@@ -328,6 +328,16 @@ export class PiCodingSessionStore {
     return result.changes === 1;
   }
 
+  /** Clear the process fence after the generation-owned child has been reaped. */
+  clearObservedPid(sessionId: string, expectedGeneration: number): boolean {
+    const result = this.db.prepare(
+      `UPDATE pi_coding_sessions
+       SET observed_pid = NULL, updated_at = datetime('now')
+       WHERE session_id = ? AND runtime_generation = ?`
+    ).run(sessionId, expectedGeneration);
+    return result.changes === 1;
+  }
+
   /** #1635 — Terminal transition: the owner explicitly ended the session. The
    * row stays as the durable record; the Pi transcript is never touched. */
   markEnded(sessionId: string): boolean {

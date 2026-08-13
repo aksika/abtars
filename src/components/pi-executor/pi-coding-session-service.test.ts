@@ -11,7 +11,7 @@ import { createRequire } from "node:module";
 import { join } from "node:path";
 import { tmpdir, homedir } from "node:os";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { PiCodingSessionStore } from "./pi-coding-session-store.js";
 import { PiWorkspaceClaimStore } from "./pi-workspace-claim-store.js";
 import { PiRuntimeHost } from "./pi-runtime-host.js";
@@ -529,10 +529,12 @@ describe("PiCodingSessionService #1635 — turn lifecycle", () => {
       const h = harness;
       const sessionId = createSession(h);
       h.store.setLease(sessionId, { frontend: "telegram-rpc", owner: "tg:1", generation: 1, acquiredAt: "2026-08-12" }, 1);
+      h.claims.tryAcquireInTx({ canonicalPath: h.wsPath, ownerId: sessionId, generation: 1, ownerKind: "interactive" });
       h.service.reconcileOnBoot();
       const rec = h.store.get(sessionId)!;
       expect(rec.state).toBe("idle");
       expect(rec.leaseGeneration).toBeUndefined();
+      expect(h.claims.list()).toHaveLength(0);
     });
 
     it("an interrupted session resumes the same transcript after reconciliation", async () => {
@@ -638,6 +640,25 @@ describe("PiCodingSessionService #1635 — turn lifecycle", () => {
       h.claims.releaseForGeneration({ ownerId: "run-worker-2", generation: 1 });
     });
 
+    it("native end waits for Pi exit before releasing resources or the envelope", async () => {
+      const h = harness;
+      const { sessionId } = await sessionWithIdentity(h);
+      const started = h.service.beginNativeHandoff({ ownerPrincipal: "usr-1", leaseOwner: "tui:1", command: "/coding" });
+      expect(started.ok).toBe(true);
+
+      expect(h.service.endSession(sessionId, "usr-1")).toBe(true);
+      expect(h.store.get(sessionId)!.state).toBe("ended");
+      expect(h.spin.ended).not.toContain(sessionId);
+      expect(h.claims.list()).toHaveLength(1);
+      expect(h.host.reservedCount).toBe(1);
+
+      const exited = h.service.endNativeHandoff({ sessionId, leaseOwner: "tui:1", code: 0 });
+      expect(exited.ok).toBe(true);
+      expect(h.claims.list()).toHaveLength(0);
+      expect(h.host.reservedCount).toBe(0);
+      expect(h.spin.ended).toContain(sessionId);
+    });
+
     it("records the client-spawned pid as the exclusive-writer fence", async () => {
       const h = harness;
       const { sessionId } = await sessionWithIdentity(h);
@@ -690,7 +711,7 @@ describe("PiCodingSessionService #1635 — turn lifecycle", () => {
       const result = h.service.beginNativeHandoff({ ownerPrincipal: "usr-1", leaseOwner: "tui:1", command: "/coding" });
       expect(result.ok).toBe(false);
       if (result.ok) return;
-      expect(result.reason).toContain("requires an idle session");
+      expect(result.reason).toContain("requires an idle or suspended session");
       expect(h.claims.list()).toHaveLength(0);
       expect(h.host.reservedCount).toBe(0);
     });
@@ -732,6 +753,19 @@ describe("PiCodingSessionService #1635 — turn lifecycle", () => {
       expect(rec.state).toBe("interrupted");
       expect(rec.resumeCapability).toBe("session_missing");
       expect(h.claims.list()).toHaveLength(0);
+    });
+
+    it("allows a suspended coding session to take the native handoff", () => {
+      const h = harness;
+      const sessionId = createSession(h);
+      h.store.casTransition(sessionId, "idle", "suspended");
+
+      const result = h.service.beginNativeHandoff({ ownerPrincipal: "usr-1", leaseOwner: "tui:1", command: "/coding" });
+      expect(result.ok).toBe(true);
+      if (result.ok) h.service.endNativeHandoff({ sessionId, leaseOwner: "tui:1", code: null });
+      expect(h.store.get(sessionId)!.state).toBe("interrupted");
+      expect(h.claims.list()).toHaveLength(0);
+      expect(h.host.reservedCount).toBe(0);
     });
 
     it("a busy workspace claim reports busy and leaks nothing", async () => {
@@ -794,7 +828,7 @@ describe("PiCodingSessionService #1635 — turn lifecycle", () => {
       h.service.abortNativeHandoff("tui:1");
       let rec = h.store.get(sessionId)!;
       expect(rec.state).toBe("interrupted");
-      expect(h.host.reservedCount).toBe(0);      // slot always released
+      expect(h.host.reservedCount).toBe(1);      // orphan still owns capacity
       expect(h.claims.list()).toHaveLength(1);   // claim kept — orphan still writes
       expect(rec.leaseGeneration).not.toBeUndefined();
 
@@ -812,6 +846,28 @@ describe("PiCodingSessionService #1635 — turn lifecycle", () => {
       rec = h.store.get(sessionId)!;
       expect(rec.leaseGeneration).toBeUndefined();
       expect(h.claims.list()).toHaveLength(0);
+    });
+
+    it("releases recovered capacity automatically when an orphaned writer exits", async () => {
+      const h = harness;
+      const { sessionId } = await sessionWithIdentity(h);
+      h.service.beginNativeHandoff({ ownerPrincipal: "usr-1", leaseOwner: "tui:1", command: "/coding" });
+      const child = spawn(process.execPath, ["-e", "setTimeout(() => process.exit(0), 400)"], { stdio: "ignore" });
+      const childExit = new Promise<void>((resolve) => {
+        if (child.exitCode !== null) resolve();
+        else child.once("exit", () => resolve());
+      });
+      expect(child.pid).toBeGreaterThan(0);
+      h.service.recordNativeHandoffPid({ sessionId, leaseOwner: "tui:1", pid: child.pid! });
+      h.service.abortNativeHandoff("tui:1");
+      expect(h.host.reservedCount).toBe(1);
+      expect(h.claims.list()).toHaveLength(1);
+
+      await vi.waitFor(() => {
+        expect(h.host.reservedCount).toBe(0);
+        expect(h.claims.list()).toHaveLength(0);
+      }, { timeout: 2_000, interval: 50 });
+      await childExit;
     });
 
     it("endNativeHandoff refuses a mismatched lease owner", async () => {
@@ -860,6 +916,7 @@ describe("PiCodingSessionService #1635 — turn lifecycle", () => {
       // the claim and lease stay as the exclusive-writer fence
       expect(rec.leaseGeneration).toBe(2);
       expect(h.claims.list()).toHaveLength(1);
+      expect(h.host.reservedCount).toBe(1);
 
       // once the writer pid is gone, the next handoff accept self-heals
       h.store.casTransition(sessionId, "interrupted", "interrupted", { observedPid: deadPid() });
@@ -867,6 +924,40 @@ describe("PiCodingSessionService #1635 — turn lifecycle", () => {
       expect(result.ok).toBe(true);
       expect(h.claims.list()).toHaveLength(1);
       expect(h.claims.list()[0]!.generation).toBe(3);
+    });
+
+    it("releases a stale non-live claim and recovers an initial session file after restart", () => {
+      const h = harness;
+      const sessionId = createSession(h);
+      const first = h.service.beginNativeHandoff({ ownerPrincipal: "usr-1", leaseOwner: "tui:1", command: "/coding" });
+      expect(first.ok).toBe(true);
+      if (!first.ok) return;
+      const targetId = first.handoff.newPiSessionId!;
+      const targetFile = writeSession(h.root, `created_${targetId}.jsonl`, targetId);
+      h.service.recordNativeHandoffPid({ sessionId, leaseOwner: "tui:1", pid: deadPid() });
+
+      // A new service/host models a bridge restart: the durable target is
+      // recovered from the Pi file even though the old in-memory handoff map
+      // no longer exists.
+      const recoveredHost = new PiRuntimeHost(h.config);
+      const recovered = new PiCodingSessionService({
+        store: h.store,
+        claims: h.claims,
+        host: recoveredHost,
+        config: h.config,
+        spin: h.spin as never,
+        sink: h.sink,
+      });
+      recovered.reconcileOnBoot();
+      expect(h.claims.list()).toHaveLength(0);
+      expect(h.store.get(sessionId)!.piSessionFile).toBe(targetFile);
+      expect(h.store.get(sessionId)!.resumeCapability).toBe("available");
+
+      const resumed = recovered.beginNativeHandoff({ ownerPrincipal: "usr-1", leaseOwner: "tui:2", command: "/coding" });
+      expect(resumed.ok).toBe(true);
+      if (resumed.ok) expect(resumed.handoff.piSessionFile).toBe(targetFile);
+      recovered.endNativeHandoff({ sessionId, leaseOwner: "tui:2", code: 0 });
+      expect(recoveredHost.reservedCount).toBe(0);
     });
 
     it("unknown alias and unknown resume id are rejected before any process starts", () => {
