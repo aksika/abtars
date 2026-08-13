@@ -178,6 +178,45 @@ describe("ProjectReviewStore", () => {
     });
   });
 
+  describe("#1656 workspace binding", () => {
+    it("binds a canonical cwd once and reconstructs the narrow execution scope", () => {
+      const { store: s, contract: c } = setupProject();
+      const cid = c.project_card_id;
+      expect(s.bindWorkspace(cid, "/tmp/ws/daily-ai")).toEqual({ ok: true });
+      const scope = s.getWorkspaceScope(cid);
+      expect(scope).toEqual({ cwd: "/tmp/ws/daily-ai", env: { WORKSPACE: "/tmp/ws/daily-ai" } });
+      expect(Object.isFrozen(scope!.env)).toBe(true);
+      expect(s.getSupervision(cid)!.workspace_cwd).toBe("/tmp/ws/daily-ai");
+    });
+
+    it("is idempotent for the same canonical cwd on reattach", () => {
+      const { store: s, contract: c } = setupProject();
+      const cid = c.project_card_id;
+      expect(s.bindWorkspace(cid, "/tmp/ws/daily-ai")).toEqual({ ok: true });
+      expect(s.bindWorkspace(cid, "/tmp/ws/daily-ai")).toEqual({ ok: true });
+      expect(s.getSupervision(cid)!.workspace_cwd).toBe("/tmp/ws/daily-ai");
+    });
+
+    it("fails closed on a different cwd and never mutates the bound workspace", () => {
+      const { store: s, contract: c } = setupProject();
+      const cid = c.project_card_id;
+      expect(s.bindWorkspace(cid, "/tmp/ws/daily-ai")).toEqual({ ok: true });
+      expect(s.bindWorkspace(cid, "/tmp/ws/other")).toEqual({ ok: false, reason: "workspace_mismatch" });
+      expect(s.getSupervision(cid)!.workspace_cwd).toBe("/tmp/ws/daily-ai");
+      expect(s.getWorkspaceScope(cid)!.cwd).toBe("/tmp/ws/daily-ai");
+    });
+
+    it("fails closed when the supervision row is missing", () => {
+      expect(store.bindWorkspace(424242, "/tmp/ws/daily-ai")).toEqual({ ok: false, reason: "missing_project" });
+      expect(store.getWorkspaceScope(424242)).toBeUndefined();
+    });
+
+    it("returns no scope for an unbound project", () => {
+      const { store: s, contract: c } = setupProject();
+      expect(s.getWorkspaceScope(c.project_card_id)).toBeUndefined();
+    });
+  });
+
   describe("#1604 coverage rounds", () => {
     it("round-trips the coverage columns (writer + reader)", () => {
       const { store: s, contract: c } = setupProject();

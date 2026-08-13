@@ -15,7 +15,8 @@
 import type { PiRunStore, PiTerminalMetadata, PiTerminalOutcome } from "./pi-run-store.js";
 import type { PiRunStatus } from "./types.js";
 import type { WorkerSupervisionStore } from "../worker-supervision-store.js";
-import type { WorkerResultEnvelopeV1 } from "../worker-contract.js";
+import type { WorkerResultEnvelopeV1, WorkerAcceptanceContractV1 } from "../worker-contract.js";
+import { evaluateWorkerEvidence, type WorkerEvidenceEvaluation } from "../worker-evidence-verifier.js";
 import { logWarn } from "../logger.js";
 import { validatePersistedSession, resolveAndValidateWorkspace, type PiExecutorConfig, type SessionProof } from "./config.js";
 
@@ -90,7 +91,28 @@ export class SupervisedPiSettlement {
     attemptGeneration: number,
     contractId: string,
     input: PiTerminalObservation,
-  ): PiSettlementObservation {    try {
+  ): PiSettlementObservation {
+    // #1656: evaluate a completed Pi run against its canonical workspace
+    // BEFORE the settlement transaction. The evaluation is read-only
+    // filesystem work; the transaction still atomically owns run settlement,
+    // attempt settlement, and workspace-claim release. A missing/unreadable
+    // workspace produces failed bounded evidence — never process.cwd().
+    let evaluation: WorkerEvidenceEvaluation | undefined;
+    if (input.outcome === "completed") {
+      const preAttempt = this.workerStore.getAttemptForExecutorResource("pi", input.runId, input.generation);
+      const preRow = preAttempt && preAttempt.card_id === attemptCardId
+        && preAttempt.generation === attemptGeneration && preAttempt.contract_id === contractId
+        ? this.workerStore.getContract(contractId)
+        : undefined;
+      if (preRow) {
+        try {
+          evaluation = evaluateWorkerEvidence(JSON.parse(preRow.contract_json) as WorkerAcceptanceContractV1, input.canonicalPath);
+        } catch (err) {
+          logWarn(TAG, `evidence evaluation failed for ${input.runId}: ${err instanceof Error ? err.message : String(err)}`);
+        }
+      }
+    }
+    try {
       return this.workerStore.db.transaction(() => {
         // Re-read + validate the latest attempt inside the transaction.
         const attempt = this.workerStore.getAttemptForExecutorResource("pi", input.runId, input.generation);
@@ -128,6 +150,8 @@ export class SupervisedPiSettlement {
         // #1638: a completed supervised Pi run always carries a Worker
         // envelope with Pi provenance — the canonical body only persists a
         // supplied envelope for completed outcomes.
+        // #1656: the completed envelope carries the shared evaluator's
+        // criteria/checks/artifacts observed against the canonical workspace.
         const completedEnvelope: WorkerResultEnvelopeV1 | undefined = input.outcome === "completed"
           ? {
               schema_version: 1,
@@ -142,9 +166,9 @@ export class SupervisedPiSettlement {
                 finished_at: new Date().toISOString(),
               },
               outcome: "completed",
-              criteria: [],
-              checks: [],
-              artifacts: [],
+              criteria: evaluation?.criteria ?? [],
+              checks: evaluation?.checks ?? [],
+              artifacts: evaluation?.artifacts ?? [],
               worker_report: {
                 summary: (input.metadata.resultSummary ?? "Pi execution completed").slice(0, 500),
                 claims: [],

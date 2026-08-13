@@ -141,6 +141,63 @@ describe("SupervisedPiSettlement (#1638)", () => {
     expect(second.kind).toBe("replayed");
   });
 
+  // ── #1656: completed Pi runs carry shared-evaluator evidence ────────────
+
+  it("evaluates a completed supervised Pi run against the canonical workspace and passes a real artifact", () => {
+    const { mkdirSync, writeFileSync, rmSync } = require("node:fs") as typeof import("node:fs");
+    mkdirSync("/tmp/repo-a", { recursive: true });
+    const artifactPath = "/tmp/repo-a/out.md";
+    writeFileSync(artifactPath, "done\n", "utf-8");
+    try {
+      const db = createTestDb();
+      const piStore = new PiRunStore({ db, sessionStorageRoot: "/tmp/sessions" });
+      const workerStore = new WorkerSupervisionStore(db);
+      const { attemptId, runId } = setupSupervisedAttempt(workerStore, piStore);
+      const coordinator = new SupervisedPiSettlement(piStore, workerStore, { enabled: true, command: "pi", fixedArgs: [], workspaceAliases: { "repo-a": { path: "/tmp/repo-a" } }, allowedEnv: [], maxConcurrent: 1, maxWallClockMs: 60000, abortGraceMs: 5000, projectTrust: "never", sessionStorageRoot: "/tmp/sessions" } as any);
+
+      const observation = coordinator.settlePiExecution({ runId, generation: 1, outcome: "completed", metadata: { resultSummary: "done" } });
+      expect(observation.kind).toBe("settled");
+
+      const result = workerStore.getResultByAttempt(attemptId)!;
+      expect(result.envelope.outcome).toBe("completed");
+      expect(result.envelope.artifacts[0]).toMatchObject({ artifact_id: "a1", exists: true });
+      expect(result.envelope.criteria.find(c => c.criterion_id === "c1")!.status).toBe("passed");
+      const attempt = workerStore.getAttempt(attemptId);
+      expect(attempt?.lifecycle).toBe("completed");
+      // exactly-once workspace release — no claims remain
+      expect(piStore.listWorkspaceClaims()).toHaveLength(0);
+    } finally {
+      rmSync(artifactPath, { force: true });
+    }
+  });
+
+  it("evaluates a completed supervised Pi run whose required artifact failed against the envelope", () => {
+    const { mkdirSync, rmSync } = require("node:fs") as typeof import("node:fs");
+    mkdirSync("/tmp/repo-a", { recursive: true });
+    const artifactPath = "/tmp/repo-a/out.md";
+    rmSync(artifactPath, { force: true });
+    try {
+      const db = createTestDb();
+      const piStore = new PiRunStore({ db, sessionStorageRoot: "/tmp/sessions" });
+      const workerStore = new WorkerSupervisionStore(db);
+      const { attemptId, runId } = setupSupervisedAttempt(workerStore, piStore);
+      const coordinator = new SupervisedPiSettlement(piStore, workerStore, { enabled: true, command: "pi", fixedArgs: [], workspaceAliases: { "repo-a": { path: "/tmp/repo-a" } }, allowedEnv: [], maxConcurrent: 1, maxWallClockMs: 60000, abortGraceMs: 5000, projectTrust: "never", sessionStorageRoot: "/tmp/sessions" } as any);
+
+      const observation = coordinator.settlePiExecution({ runId, generation: 1, outcome: "completed", metadata: { resultSummary: "done" } });
+      expect(observation.kind).toBe("settled");
+
+      const result = workerStore.getResultByAttempt(attemptId)!;
+      expect(result.envelope.outcome).toBe("completed");
+      expect(result.envelope.artifacts[0]).toMatchObject({ artifact_id: "a1", exists: false, error: "not found" });
+      expect(result.envelope.criteria.find(c => c.criterion_id === "c1")!.status).toBe("failed");
+      // execution completed even though acceptance failed — lifecycle stays completed
+      expect(workerStore.getAttempt(attemptId)?.lifecycle).toBe("completed");
+      expect(piStore.listWorkspaceClaims()).toHaveLength(0);
+    } finally {
+      rmSync(artifactPath, { force: true });
+    }
+  });
+
   it("a stale Pi generation cannot settle the latest attempt", () => {
     const db = createTestDb();
     const piStore = new PiRunStore({ db, sessionStorageRoot: "/tmp/sessions" });

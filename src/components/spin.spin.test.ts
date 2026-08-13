@@ -55,10 +55,11 @@ vi.mock("./peer-transport/index.js", () => ({
 // spin.ts instantiates WorkerSupervisionService directly in finishSpin; the
 // mock supplies a per-test collectAndSettle outcome without touching the DB.
 const collectAndSettleOutcome = { value: undefined as unknown };
+let settledContract: unknown = undefined;
 vi.mock("./worker-supervision-service.js", () => ({
   WorkerSupervisionService: class {
     collectAndSettle() { return collectAndSettleOutcome.value as any; }
-    getContract() { return undefined; }
+    getContract() { return settledContract; }
     cardHasContract() { return false; }
     renderContractForPrompt() { return ""; }
   },
@@ -559,6 +560,50 @@ describe("spin(spec) — unified session API (#1271)", () => {
         settled: true,
         summary: "✓ 2/2 criteria passed",
         envelope: makeEnvelope([{ criterion_id: "c1", status: "passed", evidence_ids: ["v1"] }, { criterion_id: "c2", status: "passed", evidence_ids: ["v2"] }]),
+      };
+      const cardId = kanbanEnqueue("worker lane", "peer");
+      const ctrl = { generation: 1, markTerminal: () => {}, requestCancel: () => Promise.resolve("cancelled" as const), setCardId: () => {}, bind: () => {}, cancelled: false, terminal: false, terminalOutcome: undefined } as never;
+      spin.setRuntime(makeRuntime({ completeResponse: "worker finished" }) as any);
+
+      await spin.spin({ type: "W", cardId, contractId: "c_1", attemptId: "a_1", executionControl: ctrl, goal: "run lane", await: true });
+      await new Promise(resolve => setTimeout(resolve, 0));
+
+      const card = (await import("./tasks/kanban-board.js") as any)._kanbanGetCardRaw(cardId);
+      expect(card.status).toBe("done");
+    });
+
+    it("#1656 fails the card when the envelope names a different contract even though every criterion passed", async () => {
+      // exact-contract acceptance: the settled envelope must match the named
+      // contract's id AND digest — a completed execution is never acceptance.
+      settledContract = { id: "c_1", digest: "d", criteria: [{ id: "c1" }, { id: "c2" }] };
+      collectAndSettleOutcome.value = {
+        settled: true,
+        summary: "✓ 2/2 criteria passed",
+        envelope: {
+          ...makeEnvelope([{ criterion_id: "c1", status: "passed", evidence_ids: ["v1"] }, { criterion_id: "c2", status: "passed", evidence_ids: ["v2"] }]),
+          attempt: { id: "a_1", ordinal: 1, contract_id: "c_1", contract_digest: "other-digest", executor_kind: "agent", executor_id: "e", started_at: "", finished_at: "" },
+        },
+      };
+      const cardId = kanbanEnqueue("worker lane", "peer");
+      const ctrl = { generation: 1, markTerminal: () => {}, requestCancel: () => Promise.resolve("cancelled" as const), setCardId: () => {}, bind: () => {}, cancelled: false, terminal: false, terminalOutcome: undefined } as never;
+      spin.setRuntime(makeRuntime({ completeResponse: "worker finished" }) as any);
+
+      await spin.spin({ type: "W", cardId, contractId: "c_1", attemptId: "a_1", executionControl: ctrl, goal: "run lane", await: true });
+      await new Promise(resolve => setTimeout(resolve, 0));
+
+      const card = (await import("./tasks/kanban-board.js") as any)._kanbanGetCardRaw(cardId);
+      expect(card.status).toBe("failed");
+    });
+
+    it("#1656 completes the card when the envelope matches the exact contract and all criteria pass", async () => {
+      settledContract = { id: "c_1", digest: "d", criteria: [{ id: "c1" }, { id: "c2" }] };
+      collectAndSettleOutcome.value = {
+        settled: true,
+        summary: "✓ 2/2 criteria passed",
+        envelope: {
+          ...makeEnvelope([{ criterion_id: "c1", status: "passed", evidence_ids: ["v1"] }, { criterion_id: "c2", status: "passed", evidence_ids: ["v2"] }]),
+          attempt: { id: "a_1", ordinal: 1, contract_id: "c_1", contract_digest: "d", executor_kind: "agent", executor_id: "e", started_at: "", finished_at: "" },
+        },
       };
       const cardId = kanbanEnqueue("worker lane", "peer");
       const ctrl = { generation: 1, markTerminal: () => {}, requestCancel: () => Promise.resolve("cancelled" as const), setCardId: () => {}, bind: () => {}, cancelled: false, terminal: false, terminalOutcome: undefined } as never;

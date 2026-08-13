@@ -33,6 +33,8 @@ import type { TaskFailureDiagnosticV1 } from "./tasks/task-failure.js";
 import type { PiRunService } from "./pi-executor/pi-run-service.js";
 import type { AttemptLifecycle, AttemptRow } from "./worker-supervision-store.js";
 import type { WorkerAcceptanceContractV1 } from "./worker-contract.js";
+import { acceptancePassed } from "./worker-contract.js";
+import type { ToolExecutionScope } from "./tasks/task-package.js";
 
 const TAG = "reconciler";
 
@@ -124,6 +126,21 @@ export function getOrCreateOrcCoordinator(): OrcProjectCoordinator | null {
     _orcCoordinator = new OrcProjectCoordinator({
       ownerPeer: peerName,
       startPort: async (context, goal) => {
+        // #1656: every scheduled Orc turn reconstructs the bound execution
+        // scope from project supervision. A scheduled root missing its binding
+        // fails closed — no model turn begins with a lost workspace.
+        const project = kanbanGetCard(context.projectCardId);
+        const isScheduledRoot = project?.source === "task" && project.source_id != null && project.source_id.length > 0;
+        let executionScope: ToolExecutionScope | undefined;
+        if (isScheduledRoot) {
+          executionScope = new ProjectReviewStore().getWorkspaceScope(context.projectCardId);
+          if (!executionScope) {
+            throw new Error(`scheduled project #${context.projectCardId} has no bound workspace — refusing to start Orc turn`);
+          }
+        } else {
+          // Non-scheduled roots keep their explicitly supplied/session scope.
+          executionScope = new ProjectReviewStore().getWorkspaceScope(context.projectCardId) ?? undefined;
+        }
         await spin.spin({
           type: "O",
           goal,
@@ -132,6 +149,7 @@ export function getOrCreateOrcCoordinator(): OrcProjectCoordinator | null {
           settlementOwner: "spin",
           source: "agent",
           orcContext: context,
+          executionScope,
         });
       },
     });
@@ -1359,11 +1377,20 @@ async function dispatchOnePass(): Promise<void> {
     // settled lanes such as Pi settle the attempt but never touch the W card)
     // is completed/failed here from the durable attempt state. The card must
     // never lag the attempt — a project cannot reach review otherwise.
+    // #1656: a `completed` lifecycle means the executor finished, not that
+    // acceptance passed. The exact-contract predicate decides the W card:
+    // a completed envelope whose criteria did not all pass fails the card.
     if (!latestAttempt) continue;
     if (store.isAttemptTerminal(latestAttempt.lifecycle)) {
       if (card.status === "queued" || card.status === "running") {
         if (latestAttempt.lifecycle === "completed") {
-          kanbanComplete(card.id, null, "worker completed");
+          const resultData = store.getResultByAttempt(latestAttempt.id);
+          const completedContract = resultData ? supSvc.getContractForCard(card.id) : undefined;
+          if (completedContract && resultData && acceptancePassed(completedContract, resultData.envelope)) {
+            kanbanComplete(card.id, null, "worker completed");
+          } else {
+            kanbanFail(card.id, "worker completed without passing acceptance");
+          }
         } else {
           kanbanFail(card.id, `worker ${latestAttempt.lifecycle}`);
         }
@@ -1516,10 +1543,21 @@ async function dispatchOnePass(): Promise<void> {
       // #1644: an executor that settles the attempt synchronously inside start
       // (Pi lanes) leaves the W card untransitioned — complete it from the
       // durable attempt state and re-run the pump.
+      // #1656: a `completed` lifecycle means the executor finished, not that
+      // acceptance passed — the exact-contract envelope predicate decides.
       const afterStart = store.getLatestAttempt(card.id);
       if (afterStart && store.isAttemptTerminal(afterStart.lifecycle) && (card.status === "queued" || card.status === "running")) {
-        if (afterStart.lifecycle === "completed") kanbanComplete(card.id, null, "worker completed");
-        else kanbanFail(card.id, `worker ${afterStart.lifecycle}`);
+        if (afterStart.lifecycle === "completed") {
+          const afterResult = store.getResultByAttempt(afterStart.id);
+          const afterContract = afterResult ? supSvc.getContractForCard(card.id) : undefined;
+          if (afterContract && afterResult && acceptancePassed(afterContract, afterResult.envelope)) {
+            kanbanComplete(card.id, null, "worker completed");
+          } else {
+            kanbanFail(card.id, "worker completed without passing acceptance");
+          }
+        } else {
+          kanbanFail(card.id, `worker ${afterStart.lifecycle}`);
+        }
         dispatchPumpState.dirty = true;
       }
     } else if (observation.kind === "deferred" && observation.provesNoStart === true) {

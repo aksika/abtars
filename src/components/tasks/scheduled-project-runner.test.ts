@@ -723,6 +723,45 @@ describe("scheduled-project-runner #1546 reattach routing", () => {
     await expect(pending).resolves.toEqual(expect.objectContaining({ cardId: root }));
   });
 
+  it("#1656 binds the canonical workspace before the first Orc claim", async () => {
+    await seedReservation();
+    const claims = fakeCoordinator();
+    const pending = mod.scheduledProjectRunner(makeRequest());
+
+    expect(claims).toHaveLength(1);
+    const store = new reviewStoreMod.ProjectReviewStore();
+    const scope = store.getWorkspaceScope(claims[0]!.projectCardId);
+    expect(scope?.cwd).toBe(join(TEST_HOME, "workspace", "daily-ai"));
+    expect(scope?.env).toEqual({ WORKSPACE: join(TEST_HOME, "workspace", "daily-ai") });
+    expect(store.getSupervision(claims[0]!.projectCardId)!.workspace_cwd).toBe(join(TEST_HOME, "workspace", "daily-ai"));
+
+    store.settleAcceptance(claims[0]!.projectCardId, "case-b", { synthesis: "ok" }, "ok", undefined, "rd_b");
+    nerveBus.fire("card:done", claims[0]!.projectCardId);
+    await expect(pending).resolves.toEqual(expect.objectContaining({ cardId: claims[0]!.projectCardId }));
+  });
+
+  it("#1656 a reattach with a different cwd fails closed and never rebinds", async () => {
+    await seedReservation();
+    const { root } = seedReattach({ state: "executing", claims: fakeCoordinator() });
+    const store = new reviewStoreMod.ProjectReviewStore();
+    const first = join(TEST_HOME, "workspace", "daily-ai");
+    const second = join(TEST_HOME, "workspace", "other");
+
+    // first admission binds the canonical workspace
+    const req1 = makeRequest();
+    const pending1 = mod.scheduledProjectRunner(req1);
+    expect(store.getWorkspaceScope(root)?.cwd).toBe(first);
+
+    // a second admission with a different cwd is a mismatch — never a rebind
+    const req2 = makeRequest({ executionScope: { cwd: second, env: { WORKSPACE: second } } });
+    await expect(mod.scheduledProjectRunner(req2)).rejects.toThrow(/workspace mismatch/);
+    expect(store.getWorkspaceScope(root)?.cwd).toBe(first);
+
+    store.settleAcceptance(root, "case-c", { synthesis: "ok" }, "ok", undefined, "rd_c");
+    nerveBus.fire("card:done", root);
+    await expect(pending1).resolves.toEqual(expect.objectContaining({ cardId: root }));
+  });
+
   it("reattach in a non-terminal non-awaiting state never authors and wakes the shared driver", async () => {
     await seedReservation();
     const { root, store, claims } = seedExecutingReattach();

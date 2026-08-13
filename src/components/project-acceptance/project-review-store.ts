@@ -3,6 +3,7 @@ import type { ProjectAcceptanceContract } from "./project-contract.js";
 import { logSwarmTrace } from "../swarm-trace.js";
 import { logDebug } from "../logger.js";
 import { buildPeerTerminalEvent } from "./peer-terminal-event.js";
+import type { ToolExecutionScope } from "../tasks/task-package.js";
 
 // ── Project supervision states ────────────────────────────────────────────────
 
@@ -231,6 +232,8 @@ export interface ProjectSupervisionRow {
   coverage_rounds: number;
   coverage_signature: string | null;
   coverage_uncovered_ids: string | null;
+  /** #1656: canonical scheduled-project execution cwd, immutable per generation. */
+  workspace_cwd: string | null;
   updated_at: string;
 }
 
@@ -313,9 +316,14 @@ export function projectStateToKanban(state: ProjectState): KanbanProjection {
 }
 
 export function initializeProjectSupervision(store: ProjectReviewStore, projectCardId: number, contractId: string): void {
+  // #1656: UPSERT (never INSERT OR REPLACE) so an existing row keeps its
+  // durable workspace binding and counters.
   store.db.prepare(`
-    INSERT OR REPLACE INTO project_supervision (project_card_id, contract_id, state, updated_at)
+    INSERT INTO project_supervision (project_card_id, contract_id, state, updated_at)
     VALUES (?, ?, 'awaiting_contract', ?)
+    ON CONFLICT(project_card_id) DO UPDATE SET
+      contract_id = excluded.contract_id,
+      updated_at = excluded.updated_at
   `).run(projectCardId, contractId, new Date().toISOString());
 }
 
@@ -423,6 +431,8 @@ export class ProjectReviewStore {
     try { db.exec(`ALTER TABLE project_supervision ADD COLUMN coverage_rounds INTEGER NOT NULL DEFAULT 0`); } catch { /* column already present */ }
     try { db.exec(`ALTER TABLE project_supervision ADD COLUMN coverage_signature TEXT`); } catch { /* column already present */ }
     try { db.exec(`ALTER TABLE project_supervision ADD COLUMN coverage_uncovered_ids TEXT`); } catch { /* column already present */ }
+    // #1656: canonical scheduled-project execution cwd, bound once at admission.
+    try { db.exec(`ALTER TABLE project_supervision ADD COLUMN workspace_cwd TEXT`); } catch { /* column already present */ }
   }
 
   // ── Root contracts ────────────────────────────────────────────────────
@@ -450,9 +460,17 @@ export class ProjectReviewStore {
   // ── Supervision state ─────────────────────────────────────────────────
 
   initializeSupervision(projectCardId: number, contractId: string, initialState: ProjectState = "executing"): void {
+    // #1656: an UPSERT, not INSERT OR REPLACE — REPLACE deletes the row and
+    // would wipe the durable workspace binding (workspace_cwd), coverage
+    // counters, and generation on contract initialization. Only the contract
+    // identity and state are set.
     this.db.prepare(`
-      INSERT OR REPLACE INTO project_supervision (project_card_id, contract_id, state, updated_at)
+      INSERT INTO project_supervision (project_card_id, contract_id, state, updated_at)
       VALUES (?, ?, ?, ?)
+      ON CONFLICT(project_card_id) DO UPDATE SET
+        contract_id = excluded.contract_id,
+        state = excluded.state,
+        updated_at = excluded.updated_at
     `).run(projectCardId, contractId, initialState, new Date().toISOString());
   }
 
@@ -469,6 +487,42 @@ export class ProjectReviewStore {
 
   getSupervision(projectCardId: number): ProjectSupervisionRow | undefined {
     return this.db.prepare(`SELECT * FROM project_supervision WHERE project_card_id = ?`).get(projectCardId) as ProjectSupervisionRow | undefined;
+  }
+
+  /**
+   * #1656: bind the canonical scheduled-project execution cwd. Immutable per
+   * project generation: a row with no binding accepts the first canonical
+   * value; a row already bound to a different value is a mismatch, never an
+   * overwrite. A missing row fails closed. Runs on the caller's connection.
+   */
+  bindWorkspace(
+    projectCardId: number,
+    canonicalCwd: string,
+  ): { ok: true } | { ok: false; reason: "missing_project" | "workspace_mismatch" } {
+    const result = this.db.prepare(`
+      UPDATE project_supervision
+         SET workspace_cwd = ?, updated_at = ?
+       WHERE project_card_id = ?
+         AND (workspace_cwd IS NULL OR workspace_cwd = ?)
+    `).run(canonicalCwd, new Date().toISOString(), projectCardId, canonicalCwd);
+    if (result.changes === 1) return { ok: true };
+    const row = this.db.prepare(`SELECT workspace_cwd FROM project_supervision WHERE project_card_id = ?`)
+      .get(projectCardId) as { workspace_cwd: string | null } | undefined;
+    if (!row) return { ok: false, reason: "missing_project" };
+    return { ok: false, reason: "workspace_mismatch" };
+  }
+
+  /**
+   * #1656: reconstruct the narrow scheduled-project execution scope. Returns
+   * only `{ cwd, env: { WORKSPACE: cwd } }` — no general environment map and
+   * no secret-bearing process environment is ever stored or reconstructed.
+   */
+  getWorkspaceScope(projectCardId: number): ToolExecutionScope | undefined {
+    const row = this.db.prepare(`SELECT workspace_cwd FROM project_supervision WHERE project_card_id = ?`)
+      .get(projectCardId) as { workspace_cwd: string | null } | undefined;
+    if (!row || !row.workspace_cwd) return undefined;
+    const cwd = row.workspace_cwd;
+    return { cwd, env: Object.freeze({ WORKSPACE: cwd }) };
   }
 
   stateTransition(

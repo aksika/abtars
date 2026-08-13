@@ -5,13 +5,14 @@ import { readProjectCriterionCoverage } from "./project-criterion-coverage.js";
 import { WorkerSupervisionService } from "../worker-supervision-service.js";
 import { WorkerSupervisionStore } from "../worker-supervision-store.js";
 import type { WorkerResultEnvelopeV1 } from "../worker-contract.js";
-import { redactEnvelope } from "../worker-contract.js";
+import { redactEnvelope, acceptancePassed } from "../worker-contract.js";
+import type { WorkerAcceptanceContractV1 } from "../worker-contract.js";
 import type { ExecutorKind } from "../worker-executor-identity.js";
 import { REVIEW_ACTIONS, CRITERION_VERDICTS, OUTPUT_DISPOSITIONS, CONTRADICTION_DISPOSITIONS } from "./project-review-contract.js";
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
-export type CriterionCoverageHint = "supported" | "conflicting" | "gap" | "orc_owned";
+export type CriterionCoverageHint = "supported" | "conflicting" | "gap" | "orc_owned" | "failed";
 
 export interface CriterionReviewInput {
   criterion_id: string;
@@ -21,6 +22,12 @@ export interface CriterionReviewInput {
   execution_owner: "delegated" | "orc";
   evidence_expectation: "observed" | "artifact" | "synthesis";
   mapped_child_contract_ids: string[];
+  /** #1656: contract ids of mapped children whose latest attempt/card/envelope
+   * is terminal-successful. Only these produce positive evidence. */
+  successful_mapped_child_contract_ids: string[];
+  /** #1656: contract ids of mapped children that are missing, failed,
+   * incomplete, or stale. These produce negative evidence only. */
+  unsuccessful_mapped_child_contract_ids: string[];
   observed_evidence_ids: string[];
   worker_claim_ids: string[];
   failed_or_inconclusive_check_ids: string[];
@@ -107,6 +114,28 @@ export interface ReviewCaseSnapshot {
 }
 
 // ── Assembler ─────────────────────────────────────────────────────────────────
+
+interface MappedChildSummary {
+  card_status: string;
+  outcome: string;
+  result?: WorkerResultEnvelopeV1;
+  contract?: WorkerAcceptanceContractV1;
+}
+
+/**
+ * #1656: a mapped child is successful evidence only when its latest attempt
+ * lifecycle AND card are terminal-successful, its envelope outcome is
+ * `completed`, and every criterion declared by that exact contract is present
+ * once and passed (`acceptancePassed`). Child criterion ids are never compared
+ * to root criterion ids.
+ */
+function isSuccessfulChild(summary: MappedChildSummary): boolean {
+  if (summary.card_status !== "done" && summary.card_status !== "delivered") return false;
+  if (summary.outcome !== "completed") return false;
+  if (!summary.result || summary.result.outcome !== "completed") return false;
+  if (!summary.contract) return false;
+  return acceptancePassed(summary.contract, summary.result);
+}
 
 export class ReviewCaseAssembler {
   private reviewStore: ProjectReviewStore;
@@ -210,7 +239,10 @@ export class ReviewCaseAssembler {
       criterion_statuses: Array<{ criterion_id: string; status: string }>;
       attempts: number;
       executor_kind: ExecutorKind | "unknown";
+      card_status: string;
       result?: WorkerResultEnvelopeV1;
+      /** #1656: the parsed exact contract — never compared to root criterion ids. */
+      contract?: import("../worker-contract.js").WorkerAcceptanceContractV1;
     }> = [];
 
     for (const child of children) {
@@ -239,7 +271,9 @@ export class ReviewCaseAssembler {
         criterion_statuses: criterionStatuses,
         attempts: attempts.length,
         executor_kind: latestAttempt?.executor_kind ?? "unknown",
+        card_status: child.status,
         result: envelope ? redactEnvelope(envelope) : undefined,
+        contract,
       });
     }
 
@@ -249,54 +283,97 @@ export class ReviewCaseAssembler {
     // Build per-criterion review input with evidence from attempt results.
     // #1605: policy (required/execution_owner) and coverage state come from
     // the read-model rows, never inferred here.
+    // #1656: evidence is contract-level — a mapped child contract supports
+    // the root criterion as a whole; child criterion ids are NEVER compared
+    // to root criterion ids.
     const criterionInputs: CriterionReviewInput[] = coverageCriteria.map(cov => {
       const policy = rootPolicy.find(p => p.id === cov.criterionId)!;
-      const mappedChildren = cov.mappedContractIds;
+      const mappedContractIds = cov.mappedContractIds;
 
-      const coverageHint: CriterionCoverageHint = cov.state === "orc_owned"
-        ? "orc_owned"
-        : cov.state === "mapped"
-          ? "supported"
-          : "gap";
-
+      const successfulContractIds: string[] = [];
+      const unsuccessfulContractIds: string[] = [];
       const observedEvidence: string[] = [];
       const workerClaimIds: string[] = [];
       const failedOrInconclusiveChecks: string[] = [];
       const artifactObs: string[] = [];
       const retryLineageIds: string[] = [];
 
-      for (const summary of childSummaries) {
-        if (!summary.result) continue;
-
-        // Collect evidence from attempt result criteria
-        for (const cr of summary.result.criteria) {
-          if (cr.criterion_id === policy.id) {
-            if (cr.status === "passed") {
-              observedEvidence.push(...cr.evidence_ids);
-            } else if (cr.status === "failed" || cr.status === "inconclusive") {
-              failedOrInconclusiveChecks.push(...cr.evidence_ids);
-            }
-          }
-        }
-
-        // Worker claims
-        for (const claim of summary.result.worker_report.claims) {
-          if (!claim.criterion_id || claim.criterion_id === policy.id) {
-            workerClaimIds.push(`claim_${summary.result.attempt.id}_${claim.text.slice(0, 20)}`);
-          }
-        }
-
-        // Artifact observations
-        for (const art of summary.result.artifacts) {
-          artifactObs.push(art.artifact_id);
-        }
+      for (const mappedContractId of mappedContractIds) {
+        // Peer mappings are claims, never child evidence — they do not
+        // classify as successful/unsuccessful child contracts.
+        if (mappedContractId.startsWith("peer:")) continue;
+        const matched = childSummaries.filter(s => s.contract_id === mappedContractId);
+        const successes = matched.filter(s => isSuccessfulChild(s));
+        if (successes.length > 0) successfulContractIds.push(mappedContractId);
+        if (matched.length === 0 || successes.length < matched.length) unsuccessfulContractIds.push(mappedContractId);
       }
 
-      // Retry lineage: count attempts across all children mapping to this criterion
       for (const summary of childSummaries) {
+        if (!summary.contract) continue;
+        if (!mappedContractIds.includes(summary.contract.id)) continue;
+        if (summary.contract.id.startsWith("peer:")) continue;
+
         if (summary.attempts > 1) {
           retryLineageIds.push(`card_${summary.card_id}_${summary.attempts}_attempts`);
         }
+
+        if (!summary.result) continue;
+
+        const attemptId = summary.result.attempt.id;
+        const checkIds = new Set(summary.result.checks.map(c => c.check_id));
+        const qualify = (id: string): string => checkIds.has(id)
+          ? `attempt:${attemptId}:check:${id}`
+          : `attempt:${attemptId}:artifact:${id}`;
+
+        // Worker claims are claims — they never enter compatible evidence.
+        for (const claim of summary.result.worker_report.claims) {
+          workerClaimIds.push(`claim_${attemptId}_${claim.text.slice(0, 20)}`);
+        }
+
+        if (isSuccessfulChild(summary)) {
+          // Positive evidence: passed-check ids and existing-artifact ids
+          // from a successful mapped child only.
+          for (const cr of summary.result.criteria) {
+            if (cr.status !== "passed") continue;
+            for (const eid of cr.evidence_ids) {
+              if (checkIds.has(eid)) observedEvidence.push(`attempt:${attemptId}:check:${eid}`);
+            }
+          }
+          for (const art of summary.result.artifacts) {
+            if (art.exists) artifactObs.push(`attempt:${attemptId}:artifact:${art.artifact_id}`);
+          }
+        } else {
+          // Negative evidence: failed/inconclusive checks and missing
+          // artifacts from an unsuccessful mapped child. The same qualified
+          // id may be cited by criterion evidence and the artifact observation
+          // — dedupe so each piece of evidence appears once.
+          const negative = new Set<string>();
+          for (const cr of summary.result.criteria) {
+            if (cr.status !== "passed" && cr.status !== "not_run") {
+              for (const eid of cr.evidence_ids) negative.add(qualify(eid));
+            }
+          }
+          for (const art of summary.result.artifacts) {
+            if (!art.exists) negative.add(`attempt:${attemptId}:artifact:${art.artifact_id}`);
+          }
+          failedOrInconclusiveChecks.push(...negative);
+        }
+      }
+
+      // #1656: semantic hint from the mapped-child classification. The
+      // structural `mapped`/`gap` state remains the pre-review gate; this
+      // hint is the review-time semantic truth.
+      let coverageHint: CriterionCoverageHint;
+      if (cov.state === "orc_owned") {
+        coverageHint = "orc_owned";
+      } else if (cov.state === "gap") {
+        coverageHint = "gap";
+      } else if (successfulContractIds.length > 0 && unsuccessfulContractIds.length > 0) {
+        coverageHint = "conflicting";
+      } else if (successfulContractIds.length > 0) {
+        coverageHint = "supported";
+      } else {
+        coverageHint = "failed";
       }
 
       return {
@@ -305,7 +382,9 @@ export class ReviewCaseAssembler {
         required: policy.required,
         execution_owner: policy.execution_owner,
         evidence_expectation: policy.evidence_expectation,
-        mapped_child_contract_ids: [...mappedChildren],
+        mapped_child_contract_ids: [...mappedContractIds],
+        successful_mapped_child_contract_ids: successfulContractIds,
+        unsuccessful_mapped_child_contract_ids: unsuccessfulContractIds,
         observed_evidence_ids: observedEvidence,
         worker_claim_ids: workerClaimIds,
         failed_or_inconclusive_check_ids: failedOrInconclusiveChecks,
@@ -315,34 +394,36 @@ export class ReviewCaseAssembler {
       };
     });
 
-    // Conservative contradiction candidates
+    // #1656: contradiction candidates use the same envelope-based semantic
+    // classification — one successful mapped child plus one unsuccessful
+    // mapped child is conflicting. Sources name card and contract ids.
     const contradictionCandidates: ContradictionCandidate[] = [];
-    // Detect mutually exclusive outcomes for criteria mapped by multiple children
-    const criteriaOutcomes = new Map<string, Map<string, Set<string>>>();
-    for (const child of children) {
-      const contract = this.supService.getContractForCard(child.id);
-      if (!contract?.supports_root_criteria) continue;
-      for (const rcId of contract.supports_root_criteria) {
-        if (!criteriaOutcomes.has(rcId)) criteriaOutcomes.set(rcId, new Map());
-        const childMap = criteriaOutcomes.get(rcId)!;
-        const outcome = child.status;
-        if (!childMap.has(outcome)) childMap.set(outcome, new Set());
-        childMap.get(outcome)!.add(`card_${child.id}`);
+    for (const input of criterionInputs) {
+      if (input.coverage_hint !== "conflicting") continue;
+      const sources: string[] = [];
+      const evidenceIds: string[] = [];
+      for (const summary of childSummaries) {
+        if (!summary.contract || !input.mapped_child_contract_ids.includes(summary.contract.id)) continue;
+        if (summary.contract.id.startsWith("peer:")) continue;
+        sources.push(`card:${summary.card_id}:${summary.contract.id}`);
+        if (isSuccessfulChild(summary) && summary.result) {
+          const attemptId = summary.result.attempt.id;
+          const checkIds = new Set(summary.result.checks.map(c => c.check_id));
+          for (const cr of summary.result.criteria) {
+            if (cr.status !== "passed") continue;
+            for (const eid of cr.evidence_ids) {
+              if (checkIds.has(eid)) evidenceIds.push(`attempt:${attemptId}:check:${eid}`);
+            }
+          }
+        }
       }
-    }
-    for (const [critId, outcomeMap] of criteriaOutcomes) {
-      const hasPass = outcomeMap.has("done") || outcomeMap.has("delivered");
-      const hasFail = outcomeMap.has("failed");
-      if (hasPass && hasFail) {
-        const allSources = [...outcomeMap.values()].flatMap(s => [...s]);
-        contradictionCandidates.push({
-          id: `cc_${critId}_${round}`,
-          affected_criterion_ids: [critId],
-          description: `Conflicting outcomes for criterion "${critId}": some children passed, others failed`,
-          evidence_ids: [],
-          sources: allSources,
-        });
-      }
+      contradictionCandidates.push({
+        id: `cc_${input.criterion_id}_${round}`,
+        affected_criterion_ids: [input.criterion_id],
+        description: `Conflicting outcomes for criterion "${input.criterion_id}": some mapped children passed, others failed`,
+        evidence_ids: evidenceIds,
+        sources,
+      });
     }
 
     const now = Date.now();
@@ -416,6 +497,8 @@ export interface ProjectReviewBriefV1 {
     execution_owner: "delegated" | "orc";
     evidence_expectation: "observed" | "artifact" | "synthesis";
     coverage_hint: CriterionCoverageHint;
+    successful_mapped_child_contract_ids: string[];
+    unsuccessful_mapped_child_contract_ids: string[];
     compatible_evidence: {
       observed: string[];
       failed_or_inconclusive: string[];
@@ -481,6 +564,8 @@ export function projectReviewBrief(
       execution_owner: c.execution_owner,
       evidence_expectation: c.evidence_expectation,
       coverage_hint: input?.coverage_hint ?? (c.execution_owner === "orc" ? "orc_owned" : "gap"),
+      successful_mapped_child_contract_ids: [...(input?.successful_mapped_child_contract_ids ?? [])],
+      unsuccessful_mapped_child_contract_ids: [...(input?.unsuccessful_mapped_child_contract_ids ?? [])],
       compatible_evidence: {
         observed: [...(input?.observed_evidence_ids ?? [])],
         failed_or_inconclusive: [...(input?.failed_or_inconclusive_check_ids ?? [])],

@@ -224,6 +224,18 @@ export class ProjectReviewValidator {
     // execution ownership, not a set that implies everything is required.
     const policyByCriterionId = new Map(caseSnapshot.criterion_inputs.map(ci => [ci.criterion_id, ci]));
 
+    // #1656: positive evidence is ONLY what the assembler projected from
+    // successful mapped children — observed checks and existing artifacts.
+    // Negative evidence, worker claims, failed-child artifact ids, retry
+    // markers, and contradiction-only ids can never satisfy a criterion.
+    const positiveEvidenceByCriterion = new Map<string, Set<string>>();
+    for (const ci of caseSnapshot.criterion_inputs) {
+      const positive = new Set<string>();
+      for (const eid of ci.observed_evidence_ids) positive.add(eid);
+      for (const eid of ci.artifact_observation_ids) positive.add(eid);
+      positiveEvidenceByCriterion.set(ci.criterion_id, positive);
+    }
+
     for (const c of decision.criteria) {
       const policy = policyByCriterionId.get(c.criterion_id);
       const required = policy?.required ?? true;
@@ -240,9 +252,28 @@ export class ProjectReviewValidator {
         continue;
       }
       if (c.verdict === "satisfied") {
-        // Delegated satisfaction requires durable evidence from the case
-        if (owner === "delegated" && c.evidence_ids.length === 0) {
-          errors.push(error("invalid_proposal", `$.criteria[${c.criterion_id}].evidence_ids`, `satisfied delegated criterion "${c.criterion_id}" has no evidence`));
+        if (owner === "delegated") {
+          // #1656: delegated satisfaction requires proven provenance — at
+          // least one successful mapped child, a supported/conflicting hint,
+          // and cited evidence drawn ONLY from that criterion's positive set.
+          const input = policyByCriterionId.get(c.criterion_id);
+          const successContracts = input?.successful_mapped_child_contract_ids ?? [];
+          const hint = input?.coverage_hint;
+          if (successContracts.length === 0) {
+            errors.push(error("invalid_proposal", `$.criteria[${c.criterion_id}]`, `satisfied delegated criterion "${c.criterion_id}" has no successful mapped child — failed, missing, or inconclusive lanes cannot satisfy it`));
+          }
+          if (hint !== "supported" && hint !== "conflicting") {
+            errors.push(error("invalid_proposal", `$.criteria[${c.criterion_id}]`, `satisfied delegated criterion "${c.criterion_id}" is not supported by mapped children (hint: ${hint ?? "gap"})`));
+          }
+          if (c.evidence_ids.length === 0) {
+            errors.push(error("invalid_proposal", `$.criteria[${c.criterion_id}].evidence_ids`, `satisfied delegated criterion "${c.criterion_id}" has no evidence`));
+          }
+          const positive = positiveEvidenceByCriterion.get(c.criterion_id) ?? new Set<string>();
+          for (const eid of c.evidence_ids) {
+            if (!positive.has(eid)) {
+              errors.push(error("invalid_proposal", `$.criteria[${c.criterion_id}].evidence_ids`, `evidence id "${eid}" is not positive evidence from a successful mapped child for criterion "${c.criterion_id}"`));
+            }
+          }
         }
         // #1605: Orc-owned criteria are satisfied by the Orc's own evaluation —
         // a non-empty rationale plus the immutable case is their evidence; no

@@ -14,6 +14,23 @@ if (!abtarsHome || !abtarsHome.includes("/tmp/")) {
 }
 
 /**
+ * #1656: give a non-scheduled E2E project a real canonical workspace. Worker
+ * verification executes against this root; without it, verification fails
+ * closed (never the bridge cwd) and no lane can pass.
+ */
+function bindProjectWorkspace(projectCardId: number): void {
+  const ws = join(abtarsHome, "workspace", `swarm-${projectCardId}`);
+  mkdirSync(ws, { recursive: true });
+  const { ProjectReviewStore } = require("../../components/project-acceptance/project-review-store.js") as typeof import("../../components/project-acceptance/project-review-store.js");
+  const store = new ProjectReviewStore();
+  // Same admission shape as the scheduled runner: durable supervision row
+  // first, then the immutable workspace binding.
+  store.ensureAwaitingContract(projectCardId);
+  const bound = store.bindWorkspace(projectCardId, ws);
+  if (!bound.ok) throw new Error(`workspace bind failed for project ${projectCardId}: ${bound.reason}`);
+}
+
+/**
  * #1644: the bound Orc invocation authority for scripted tool calls. Reads the
  * durable supervision generation so every spawn/authoring call carries the
  * exact project generation the fence checks against.
@@ -308,6 +325,7 @@ async function runHappyPath(): Promise<LocalSwarmResult> {
   });
   activeProjectCardId = projectCardId;
   kanbanRunning(projectCardId);
+  bindProjectWorkspace(projectCardId);
   startReconciler();
 
   const { getOrcTools } = await import("../../components/transport/orc-tools.js");
@@ -526,6 +544,7 @@ async function runCapacityDeadline(): Promise<LocalSwarmResult> {
   });
   activeProjectCardId = projectCardId;
   kanbanRunning(projectCardId);
+  bindProjectWorkspace(projectCardId);
   startReconciler();
 
   const { getOrcTools } = await import("../../components/transport/orc-tools.js");
@@ -640,6 +659,7 @@ async function runPriorityAge(): Promise<LocalSwarmResult> {
   });
   activeProjectCardId = projectCardId;
   kanbanRunning(projectCardId);
+  bindProjectWorkspace(projectCardId);
   startReconciler();
 
   const { getOrcTools } = await import("../../components/transport/orc-tools.js");
@@ -730,6 +750,7 @@ async function runTokenBudget(): Promise<LocalSwarmResult> {
   });
   activeProjectCardId = projectCardId;
   kanbanRunning(projectCardId);
+  bindProjectWorkspace(projectCardId);
 
   const db = new WorkerSupervisionStore().db;
   db.prepare("UPDATE kanban_board SET max_tokens = 20000 WHERE id = ?").run(projectCardId);

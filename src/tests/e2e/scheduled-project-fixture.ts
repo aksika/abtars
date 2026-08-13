@@ -79,6 +79,9 @@ export interface ScheduledProjectFixtureOptions {
   reviewMode?: "accept" | "needs_input" | "blocked" | "repair" | "die";
   /** Limits carried into every authored worker contract. */
   workerLimits?: { max_duration_ms?: number; max_tokens?: number };
+  /** #1656: author a v2 root contract with an optional second delegated
+   *  criterion (c2). Worker 0 maps to c1; every later worker maps to c2. */
+  v2RootContract?: boolean;
 }
 
 const DEFAULT_OPTIONS = {
@@ -87,6 +90,7 @@ const DEFAULT_OPTIONS = {
   holdAcceptance: false,
   reviewMode: "accept" as "accept" | "needs_input" | "blocked" | "repair" | "die",
   workerLimits: undefined as { max_duration_ms?: number; max_tokens?: number } | undefined,
+  v2RootContract: false,
 };
 
 export function makeScheduledProjectFixture(
@@ -261,7 +265,7 @@ export function makeScheduledProjectFixture(
           finish("failed");
           return; // the Orc dies before producing the contract
         }
-        const contract = buildContract(projectId, goal);
+        const contract = buildContract(projectId, goal, options.v2RootContract ?? false);
         store.insertContract(contract);
         store.initializeSupervision(projectId, contract.id);
         for (let i = 0; i < options.workerCount; i++) {
@@ -281,7 +285,7 @@ export function makeScheduledProjectFixture(
                 cardId: workerId,
                 criteria: [{ id: `w${i}`, description: "lane done" }],
                 expectedArtifacts: [{ id: `a${i}`, kind: "file", ref: `out/lane-${i}.md`, required: true, criterion_ids: [`w${i}`] }],
-                supportsRootCriteria: ["c1"],
+                supportsRootCriteria: [options.v2RootContract ? (i === 0 ? "c1" : "c2") : "c1"],
                 limits: options.workerLimits,
                 attemptId: `att_fixture_${workerId}`,
               });
@@ -381,7 +385,24 @@ export function makeScheduledProjectFixture(
   return { fixture: script, orc };
 }
 
-function buildContract(projectCardId: number, goal: string): ProjectAcceptanceContractV1 {
+function buildContract(projectCardId: number, goal: string, v2RootContract = false): ProjectAcceptanceContractV1 {
+  if (v2RootContract) {
+    return {
+      schema_version: 2,
+      id: `fixture_contract_${projectCardId}_${Date.now()}`,
+      digest: `fixture_digest_${projectCardId}`,
+      project_card_id: projectCardId,
+      goal: goal.slice(0, 500),
+      criteria: [
+        { id: "c1", description: "Task goal met", required: true, execution_owner: "delegated", evidence_expectation: "synthesis" },
+        { id: "c2", description: "Optional extra lane", required: false, execution_owner: "delegated", evidence_expectation: "synthesis" },
+      ],
+      required_outputs: [],
+      constraints: [],
+      limits: { max_review_rounds: 1, max_repair_rounds: 1 },
+      provenance: { requested_by: "scheduler", authored_by: "fixture-orc", created_at: new Date().toISOString() },
+    } as unknown as ProjectAcceptanceContractV1;
+  }
   const id = `fixture_contract_${projectCardId}_${Date.now()}`;
   return {
     schema_version: 1,

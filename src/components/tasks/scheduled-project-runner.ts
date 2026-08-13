@@ -12,6 +12,7 @@
 
 import { nerve } from "../nerve.js";
 import { logInfo } from "../logger.js";
+import { mkdirSync, realpathSync } from "node:fs";
 import { kanbanEnqueue, kanbanRunning, kanbanGetCard, kanbanGetChildren } from "./kanban-board.js";
 import { readState, advanceRun } from "./task-state-store.js";
 import { ProjectReviewStore } from "../project-acceptance/project-review-store.js";
@@ -47,6 +48,31 @@ export interface ScheduledProjectRequest {
 export type ScheduledProjectRunner = (
   request: ScheduledProjectRequest,
 ) => Promise<{ cardId: number; result: string; factAt?: number }>;
+
+/**
+ * #1656: canonicalize the request execution cwd and bind it immutably to the
+ * project supervision row. The workspace is created by createExecutionScope
+ * before admission; the recursive mkdir here restores the same contract
+ * (#1544: a missing directory makes every bash spawn fail with ENOENT) so a
+ * canonicalized value is persisted and Orc continuations, Worker tools, and
+ * settlement all resolve the same root across restart. A mismatch fails
+ * closed — the bound workspace is never mutated.
+ */
+function bindRequestWorkspace(reviewStore: ProjectReviewStore, rootCardId: number, cwd: string): void {
+  let canonical: string;
+  try {
+    mkdirSync(cwd, { recursive: true });
+    canonical = realpathSync(cwd);
+  } catch (err) {
+    throw new Error(`scheduled project admission failed: workspace ${cwd} is not resolvable: ${err instanceof Error ? err.message : String(err)}`);
+  }
+  const bound = reviewStore.bindWorkspace(rootCardId, canonical);
+  if (!bound.ok) {
+    throw new Error(
+      `scheduled project admission failed: ${bound.reason === "missing_project" ? "project supervision missing" : "workspace mismatch — the bound project workspace is immutable and cannot be re-pointed"}`,
+    );
+  }
+}
 
 /**
  * #1516: Admit a scheduled agent task as a supervised Orc project.
@@ -90,11 +116,15 @@ export async function scheduledProjectRunner(request: ScheduledProjectRequest): 
       return waitForProjectTerminal(request, rootCardId, cancellationState);
     }
 
+    // #1656: bind the canonical workspace before any continuation can
+    // execute. Idempotent on reattach; a different cwd fails closed.
+    reviewStore.ensureAwaitingContract(rootCardId);
+    bindRequestWorkspace(reviewStore, rootCardId, request.executionScope.cwd);
+
     if (!supervision || supervision.state === "awaiting_contract") {
       // #1546 R5: a reattached project without a contract keeps the
       // synchronous goal-bearing claim so the machine-derived task goal wins
       // over a generic Reconciler authoring wake for the same card.
-      reviewStore.ensureAwaitingContract(rootCardId);
       const coordinator = getOrCreateOrcCoordinator();
       if (!coordinator) throw new Error("scheduled project admission failed: Orc coordinator unavailable");
       const claim = coordinator.scheduleScheduledProject(rootCardId, goal);
@@ -137,6 +167,9 @@ export async function scheduledProjectRunner(request: ScheduledProjectRequest): 
 
   const reviewStore = new ProjectReviewStore();
   reviewStore.ensureAwaitingContract(rootCardId);
+  // #1656: canonicalize and bind the execution workspace before the first Orc
+  // authoring turn — every later Orc/Worker turn reconstructs this scope.
+  bindRequestWorkspace(reviewStore, rootCardId, request.executionScope.cwd);
 
   const coordinator = getOrCreateOrcCoordinator();
   if (!coordinator) throw new Error("scheduled project admission failed: Orc coordinator unavailable");

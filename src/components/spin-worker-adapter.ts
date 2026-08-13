@@ -5,6 +5,8 @@ import { WorkerSupervisionStore } from "./worker-supervision-store.js";
 import { ExecutorProgressEmitter } from "./executor-progress-emitter.js";
 import type { ExecutionSupervisor } from "./execution-control.js";
 import { logSwarmTrace } from "./swarm-trace.js";
+import { ProjectReviewStore } from "./project-acceptance/project-review-store.js";
+import type { ToolExecutionScope } from "./tasks/task-package.js";
 import type { SwarmExecutorAdapter, ExecutionClaim, ExecutorCapacity, StartObservation, CancelObservation, ExecutionObservation, CancelReason } from "./swarm-executor-types.js";
 
 const TAG = "spin-worker-adapter";
@@ -55,6 +57,22 @@ export class SpinWorkerAdapter implements SwarmExecutorAdapter {
     const contract = sup.getContract(claim.contractId);
     if (!contract) return { kind: "start_failed", reason: "attempt contract not found", retryable: false };
 
+    // #1656: resolve the root project scope and thread it into the Worker
+    // dispatch. A scheduled root missing its durable binding fails closed
+    // before any model turn begins; non-scheduled roots keep their existing
+    // explicitly supplied/session workspace behavior.
+    const supStore = new WorkerSupervisionStore();
+    const attempt = supStore.getAttempt(claim.attemptId);
+    const rootCardId = attempt?.root_project_card_id ?? card.parent_id;
+    let executionScope: ToolExecutionScope | undefined;
+    if (rootCardId !== undefined && rootCardId !== null) {
+      const rootCard = await import("./tasks/kanban-board.js").then(m => m.kanbanGetCard(rootCardId));
+      const isScheduledRoot = rootCard?.source === "task" && rootCard.source_id != null && rootCard.source_id.length > 0;
+      const scope = new ProjectReviewStore().getWorkspaceScope(rootCardId);
+      if (isScheduledRoot && !scope) return { kind: "start_failed", reason: "scheduled project workspace not bound", retryable: false };
+      executionScope = scope;
+    }
+
     logInfo(TAG, `Starting Worker ${claim.cardId} attempt=${claim.attemptId} gen=${claim.generation}`);
     logSwarmTrace({ event: "adapter_start", card: claim.cardId, attempt: claim.attemptId, generation: claim.generation, executor: claim.executorId });
 
@@ -72,6 +90,7 @@ export class SpinWorkerAdapter implements SwarmExecutorAdapter {
         executionControl: ctrl,
         settlementOwner: "spin",
         deadlineAt: claim.hardDeadlineAt ? new Date(claim.hardDeadlineAt).getTime() : undefined,
+        executionScope,
       });
     } catch (err) {
       this.executions.remove(`${claim.attemptId}:${claim.generation}`);

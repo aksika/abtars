@@ -212,8 +212,39 @@ function isShellString(s: string): boolean {
   return /[;&|`$(){}<>]/.test(s);
 }
 
-function hasTraversal(p: string): boolean {
-  return p.includes("..") || p.startsWith("/");
+/** #1656: one workspace-relative path language for contract refs and cwds. */
+
+function isAbsolutePath(p: string): boolean {
+  return p.startsWith("/") || /^[a-zA-Z]:[\\/]/.test(p) || p.startsWith("\\\\");
+}
+
+function hasTraversalComponent(p: string): boolean {
+  const parts = p.replace(/\\/g, "/").split("/");
+  return parts.includes("..");
+}
+
+/** Leading-home forms that execFileSync/`path.resolve` never expand. */
+function hasHomeForm(p: string): boolean {
+  return p === "~" || p.startsWith("~/") || p.startsWith("~\\");
+}
+
+function hasControlChars(p: string): boolean {
+  return /[\x00-\x1f\x7f]/.test(p);
+}
+
+/**
+ * #1656: validate a workspace-relative path (artifact ref or command cwd).
+ * Rejects absolute POSIX/Windows paths, `..` components (not innocent
+ * filename substrings), leading-home forms, and NUL/control characters.
+ * The caller receives exactly one message naming the offending form.
+ */
+function workspacePathIssues(p: string): string[] {
+  const issues: string[] = [];
+  if (isAbsolutePath(p)) issues.push("absolute paths are not allowed — use a workspace-relative path");
+  if (hasTraversalComponent(p)) issues.push("path traversal is not allowed — use a workspace-relative path");
+  if (hasHomeForm(p)) issues.push("home paths are not expanded in verification — use a workspace-relative path");
+  if (hasControlChars(p)) issues.push("control characters are not allowed in paths");
+  return issues;
 }
 
 function sortedKeys(obj: Record<string, unknown>): Record<string, unknown> {
@@ -254,6 +285,35 @@ export function computeDigest(contract: Record<string, unknown>): string {
 export function computeEnvelopeDigest(envelope: Record<string, unknown>): string {
   const canonical = canonicalJson(sortedKeys(envelope));
   return createHash("sha256").update(canonical, "utf-8").digest("hex");
+}
+
+/**
+ * #1656: exact-contract acceptance predicate — the single W-card projection.
+ * True only when the envelope is completed, names the exact contract
+ * (id + digest), represents every contract criterion exactly once with no
+ * unknown criterion, and every criterion is `passed`. A completed execution
+ * never implies acceptance; this predicate decides the W card's terminal
+ * projection for both Spin and supervised Pi.
+ */
+export function acceptancePassed(
+  contract: WorkerAcceptanceContractV1,
+  envelope: WorkerResultEnvelopeV1 | undefined,
+): boolean {
+  if (!envelope) return false;
+  if (envelope.outcome !== "completed") return false;
+  if (envelope.attempt.contract_id !== contract.id || envelope.attempt.contract_digest !== contract.digest) return false;
+
+  const contractIds = new Set(contract.criteria.map(c => c.id));
+  if (envelope.criteria.length !== contract.criteria.length) return false;
+
+  const seen = new Set<string>();
+  for (const c of envelope.criteria) {
+    if (!contractIds.has(c.criterion_id)) return false;
+    if (seen.has(c.criterion_id)) return false;
+    seen.add(c.criterion_id);
+    if (c.status !== "passed") return false;
+  }
+  return true;
 }
 
 function isNonEmptyString(v: unknown): v is string {
@@ -367,8 +427,8 @@ export function validateContract(raw: unknown): ValidationResult {
           if ((aObj["ref"] as string).length > MAX_ARTIFACT_REF_LENGTH) {
             e.push(error("too_long", `${path}.ref`, `ref exceeds ${MAX_ARTIFACT_REF_LENGTH} characters`));
           }
-          if (hasTraversal(aObj["ref"] as string)) {
-            e.push(error("traversal", `${path}.ref`, "path traversal detected"));
+          for (const issue of workspacePathIssues(aObj["ref"] as string)) {
+            e.push(error("traversal", `${path}.ref`, `artifact ref rejected: ${issue}`));
           }
         }
         if (typeof aObj["required"] !== "boolean") {
@@ -438,6 +498,8 @@ export function validateContract(raw: unknown): ValidationResult {
               e.push(error("too_long", `${path}.argv[${j}]`, `argv element exceeds ${MAX_ARGV_LENGTH} characters`));
             } else if (isShellString(arg)) {
               e.push(error("shell_string", `${path}.argv[${j}]`, "shell metacharacters are not allowed in argv"));
+            } else if (hasHomeForm(arg)) {
+              e.push(error("bad_format", `${path}.argv[${j}]`, "home paths are not expanded in argv — use a workspace-relative path"));
             }
           }
         }
@@ -445,12 +507,8 @@ export function validateContract(raw: unknown): ValidationResult {
           if (!isNonEmptyString(cmdObj["cwd"] as string)) {
             e.push(error("type_error", `${path}.cwd`, "cwd must be a non-empty string"));
           } else {
-            const cwd = cmdObj["cwd"] as string;
-            if (hasTraversal(cwd)) {
-              e.push(error("traversal", `${path}.cwd`, "cwd must be a relative path without traversal"));
-            }
-            if (cwd.startsWith("/")) {
-              e.push(error("bad_format", `${path}.cwd`, "cwd must be a relative path, not absolute"));
+            for (const issue of workspacePathIssues(cmdObj["cwd"] as string)) {
+              e.push(error("traversal", `${path}.cwd`, `cwd rejected: ${issue}`));
             }
           }
         }

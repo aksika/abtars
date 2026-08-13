@@ -14,8 +14,8 @@
  * K lifecycle/continuity stays in #1432; cross-session memory is outside.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { mkdirSync, rmSync, writeFileSync, mkdtempSync } from "node:fs";
-import { join } from "node:path";
+import { mkdirSync, rmSync, writeFileSync, mkdtempSync, existsSync } from "node:fs";
+import { join, dirname } from "node:path";
 import { tmpdir } from "node:os";
 import { EventEmitter } from "node:events";
 
@@ -71,6 +71,7 @@ let reviewStoreMod: typeof import("../../components/project-acceptance/project-r
 let leaseStoreMod: typeof import("../../components/executor-lease-store.js");
 let nerveMod: typeof import("../../components/nerve.js");
 let WorkerSupervisionStoreClass: typeof import("../../components/worker-supervision-store.js").WorkerSupervisionStore;
+let WorkerSupervisionServiceClass: typeof import("../../components/worker-supervision-service.js").WorkerSupervisionService;
 let orcRunStoreMod: typeof import("../../components/orc-project/orc-project-run-store.js");
 let taskTypesMod: typeof import("../../components/tasks/task-types.js");
 
@@ -224,6 +225,7 @@ async function loadModules(): Promise<void> {
   leaseStoreMod = await import("../../components/executor-lease-store.js");
   nerveMod = await import("../../components/nerve.js");
   WorkerSupervisionStoreClass = (await import("../../components/worker-supervision-store.js")).WorkerSupervisionStore;
+  WorkerSupervisionServiceClass = (await import("../../components/worker-supervision-service.js")).WorkerSupervisionService;
   orcRunStoreMod = await import("../../components/orc-project/orc-project-run-store.js");
   taskTypesMod = await import("../../components/tasks/task-types.js");
 }
@@ -1757,6 +1759,213 @@ describe("#1644 E2E — scheduled-project terminal authority (incident shape)", 
     expect(rejections.every(l => l.msg.includes("project_terminal"))).toBe(true);
     // No content leak: bounded trace carries no prompts or results.
     expect(rejections.every(l => !l.msg.includes("<summary>"))).toBe(true);
+  });
+});
+
+describe("#1656 E2E — truthful worker evidence and fail-closed parent acceptance", () => {
+  const workspaceOf = (rootCardId: number): string => {
+    const scope = new reviewStoreMod.ProjectReviewStore().getWorkspaceScope(rootCardId);
+    if (!scope) throw new Error("scheduled project workspace was never bound");
+    return scope.cwd;
+  };
+
+  /** Settle the lane through the REAL collectAndSettle path in the bound
+   *  workspace; write the artifact first when the lane should pass. */
+  function settleLane(rootCardId: number, cardId: number, artifactExists: boolean): { attemptId: string; summary: string } {
+    const svc = new WorkerSupervisionServiceClass();
+    const supStore = new WorkerSupervisionStoreClass();
+    const attempt = supStore.getLatestAttempt(cardId)!;
+    const cwd = workspaceOf(rootCardId);
+    if (artifactExists) {
+      const artifact = join(cwd, "out", `lane-${attempt.ordinal - 1}.md`);
+      mkdirSync(dirname(artifact), { recursive: true });
+      writeFileSync(artifact, "lane delivered\n", "utf-8");
+    }
+    const outcome = svc.collectAndSettle(cardId, "<summary>lane finished</summary>", cwd, attempt.id, attempt.generation);
+    if (!outcome.settled) throw new Error(`lane settlement failed: ${outcome.summary}`);
+    return { attemptId: attempt.id, summary: outcome.summary };
+  }
+
+  /** Build the immutable review case through the real assembler. */
+  async function assembleAndInsertReview(rootCardId: number): Promise<string> {
+    const store = new reviewStoreMod.ProjectReviewStore();
+    const supervision = store.getSupervision(rootCardId)!;
+    const { ReviewCaseAssembler } = await import("../../components/project-acceptance/project-review-case.js");
+    const snapshot = await new ReviewCaseAssembler().assembleCase(rootCardId, supervision.generation, supervision.review_round + 1);
+    if ("error" in snapshot) throw new Error(`review assembly failed: ${snapshot.error}`);
+    const { id } = store.insertReviewCase(rootCardId, supervision.generation, supervision.review_round + 1, snapshot, `digest_${rootCardId}_${Date.now()}`);
+    store.insertReviewRequest(rootCardId, id, supervision.generation);
+    return id;
+  }
+
+  it("Scenario A: all required lanes fail — accept is rejected and the parent is never delivered", async () => {
+    const queue = await makeQueue();
+    const { fixture } = await makeFixture({ workerCount: 1, holdAcceptance: true });
+    forceDue("project-task");
+    await tick.runTaskTick(makeTickCtx(queue));
+    const { runId, rootCardId } = await waitForReach(fixture, "executing");
+
+    // The bound workspace is durable before the first Orc turn could start.
+    const cwd = workspaceOf(rootCardId);
+    expect(existsSync(cwd)).toBe(true);
+
+    // The lane completes but its required artifact is missing → failed evidence.
+    const worker = board.kanbanGetChildren(rootCardId).find(c => c.type === "W")!;
+    settleLane(rootCardId, worker.id, false);
+    const supStore = new WorkerSupervisionStoreClass();
+    const attempt = supStore.getLatestAttempt(worker.id)!;
+    const result = supStore.getResultByAttempt(attempt.id)!;
+    expect(result.envelope.outcome).toBe("completed");
+    expect(result.envelope.criteria.every(c => c.status === "failed")).toBe(true);
+    // The pump projection fails the W card — execution completed ≠ accepted.
+    board.kanbanFail(worker.id, "worker completed without passing acceptance");
+
+    const caseId = await assembleAndInsertReview(rootCardId);
+    const store = new reviewStoreMod.ProjectReviewStore();
+    const supervision = store.getSupervision(rootCardId)!;
+    const { ProjectReviewService } = await import("../../components/project-acceptance/project-review-service.js");
+    const service = new ProjectReviewService();
+
+    // The Orc submits the #1656 shape: satisfied c1 citing the failed child's
+    // artifact evidence. The validator must reject it.
+    const decision = {
+      schema_version: 1,
+      id: `rd_e2e_a_${Date.now()}`,
+      project_card_id: rootCardId,
+      review_case_id: caseId,
+      project_generation: supervision.generation,
+      action: "accept",
+      criteria: [{
+        criterion_id: "c1",
+        verdict: "satisfied",
+        evidence_ids: [`attempt:${attempt.id}:artifact:a0`],
+        rationale: "handoff exists",
+      }],
+      outputs: [],
+      contradictions: [],
+      residual_risks: [],
+      synthesis: "all lanes delivered",
+      authored_at: new Date().toISOString(),
+    };
+    const outcome = service.processDecision(decision);
+    expect(outcome.kind).toBe("invalid");
+    expect(outcome.errors.some(e => /no successful mapped child/.test(e))).toBe(true);
+
+    // Fail-closed parent: not accepted, not done, not delivery-ready, no
+    // delivery record, no acceptance outbox.
+    const root = board.kanbanGetCard(rootCardId)!;
+    expect(store.getSupervision(rootCardId)!.state).not.toBe("accepted");
+    expect(root.status).not.toBe("done");
+    expect(root.delivery_ready).toBe(0);
+    const outbox = store.db.prepare(`SELECT COUNT(*) AS cnt FROM project_acceptance_outbox WHERE project_card_id = ?`).get(rootCardId) as { cnt: number };
+    expect(outbox.cnt).toBe(0);
+    await delivery.pollPendingDeliveries(makeDeliveryDeps());
+    await delivery.pollPendingDeliveries(makeDeliveryDeps());
+    expect(doubles.sentDocuments).toHaveLength(0);
+    expect(doubles.sentMessages).toHaveLength(0);
+  });
+
+  it("Scenario B: required lanes pass with relative artifacts — qualified evidence, accepted root, delivery eligible", async () => {
+    const queue = await makeQueue();
+    const { fixture } = await makeFixture({ workerCount: 1, holdAcceptance: true });
+    forceDue("project-task");
+    await tick.runTaskTick(makeTickCtx(queue));
+    const { runId, rootCardId } = await waitForReach(fixture, "executing");
+
+    const worker = board.kanbanGetChildren(rootCardId).find(c => c.type === "W")!;
+    const { attemptId } = settleLane(rootCardId, worker.id, true);
+    board.kanbanComplete(worker.id, null, "worker completed");
+
+    const caseId = await assembleAndInsertReview(rootCardId);
+    const store = new reviewStoreMod.ProjectReviewStore();
+    const supervision = store.getSupervision(rootCardId)!;
+    const { ProjectReviewService } = await import("../../components/project-acceptance/project-review-service.js");
+    const service = new ProjectReviewService();
+
+    const decision = {
+      schema_version: 1,
+      id: `rd_e2e_b_${Date.now()}`,
+      project_card_id: rootCardId,
+      review_case_id: caseId,
+      project_generation: supervision.generation,
+      action: "accept",
+      criteria: [{
+        criterion_id: "c1",
+        verdict: "satisfied",
+        evidence_ids: [`attempt:${attemptId}:artifact:a0`],
+        rationale: "lane handoff verified",
+      }],
+      outputs: [],
+      contradictions: [],
+      residual_risks: [],
+      synthesis: "lane delivered",
+      authored_at: new Date().toISOString(),
+    };
+    const outcome = service.processDecision(decision);
+    expect(outcome.kind).toBe("accepted");
+
+    // Let the scheduled runner observe the terminal acceptance and settle the
+    // run row (task_runs success) — the delivery release CAS depends on it.
+    nerveMod.nerve.fire("card:done", rootCardId);
+    await waitFor(() => !stateStore.readState("project-task")?.activeRun);
+
+    const root = board.kanbanGetCard(rootCardId)!;
+    expect(root.status).toBe("done");
+    expect(store.getSupervision(rootCardId)!.state).toBe("accepted");
+    // Delivery release CAS: exact run/generation authority → ready → poll sends.
+    board.kanbanSetProjectDeliveryReady(rootCardId, { projectGeneration: supervision.generation, scheduledRunId: runId });
+    const released = board.kanbanGetCard(rootCardId)!;
+    expect(released.delivery_ready).toBe(1);
+    await delivery.pollPendingDeliveries(makeDeliveryDeps());
+    await delivery.pollPendingDeliveries(makeDeliveryDeps());
+    expect(doubles.sentDocuments.length + doubles.sentMessages.length).toBeGreaterThan(0);
+  });
+
+  it("Scenario C: an optional failed lane is disclosed and accepted while required lanes pass", async () => {
+    const queue = await makeQueue();
+    const { fixture } = await makeFixture({ workerCount: 2, holdAcceptance: true, v2RootContract: true });
+    forceDue("project-task");
+    await tick.runTaskTick(makeTickCtx(queue));
+    const { runId, rootCardId } = await waitForReach(fixture, "executing");
+
+    const children = board.kanbanGetChildren(rootCardId).filter(c => c.type === "W");
+    expect(children).toHaveLength(2);
+    const [requiredLane, optionalLane] = children as [typeof children[number], typeof children[number]];
+    const required = settleLane(rootCardId, requiredLane.id, true);
+    const optional = settleLane(rootCardId, optionalLane.id, false);
+    board.kanbanComplete(requiredLane.id, null, "worker completed");
+    board.kanbanFail(optionalLane.id, "worker completed without passing acceptance");
+
+    const caseId = await assembleAndInsertReview(rootCardId);
+    const store = new reviewStoreMod.ProjectReviewStore();
+    const supervision = store.getSupervision(rootCardId)!;
+    const { ProjectReviewService } = await import("../../components/project-acceptance/project-review-service.js");
+    const service = new ProjectReviewService();
+
+    const decision = {
+      schema_version: 1,
+      id: `rd_e2e_c_${Date.now()}`,
+      project_card_id: rootCardId,
+      review_case_id: caseId,
+      project_generation: supervision.generation,
+      action: "accept",
+      criteria: [
+        { criterion_id: "c1", verdict: "satisfied", evidence_ids: [`attempt:${required.attemptId}:artifact:a0`], rationale: "required lane verified" },
+        { criterion_id: "c2", verdict: "unsatisfied", evidence_ids: [], rationale: "optional source lane failed; the report remains useful without it" },
+      ],
+      outputs: [],
+      contradictions: [],
+      residual_risks: [],
+      synthesis: "required lane delivered; optional lane disclosed as omitted",
+      authored_at: new Date().toISOString(),
+    };
+    const outcome = service.processDecision(decision);
+    expect(outcome.kind).toBe("accepted");
+
+    const root = board.kanbanGetCard(rootCardId)!;
+    expect(root.status).toBe("done");
+    // The disclosed optional failure is visible in the rendered synthesis.
+    expect((root.result_summary ?? "")).toContain("c2");
   });
 });
 

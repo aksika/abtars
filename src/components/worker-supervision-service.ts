@@ -1,14 +1,12 @@
-import { existsSync, statSync, readFileSync, realpathSync } from "node:fs";
-import { createHash } from "node:crypto";
-import { isAbsolute, relative, resolve, sep } from "node:path";
 import { WorkerSupervisionStore } from "./worker-supervision-store.js";
 import { normalizeContract, createContractId, createAttemptId, validateEnvelope, isValidWorkspaceAlias } from "./worker-contract.js";
+import { evaluateWorkerEvidence } from "./worker-evidence-verifier.js";
 import { resolveWorkerExecutorIntent } from "./worker-executor-routing.js";
 import { logWarn } from "./logger.js";
 import { logSwarmTrace } from "./swarm-trace.js";
 import { nerve } from "./nerve.js";
 import { authorizeActiveProjectWork, emitProjectAuthorityRejection, type ProjectMutationAuthority } from "./project-acceptance/project-review-store.js";
-import type { WorkerAcceptanceContractV1, WorkerResultEnvelopeV1, CriterionStatus, VerificationObservation, ArtifactObservation, RetryContext } from "./worker-contract.js";
+import type { WorkerAcceptanceContractV1, WorkerResultEnvelopeV1, RetryContext } from "./worker-contract.js";
 import type { TaskDatabase } from "./tasks/kanban-board.js";
 import type { ContractRow } from "./worker-supervision-store.js";
 import { ProjectReviewStore } from "./project-acceptance/project-review-store.js";
@@ -18,7 +16,6 @@ import { loadPiConfig } from "./pi-executor/config.js";
 
 const TAG = "worker-supervision-service";
 const MAX_RESULT_LENGTH = 500;
-const MAX_CHECK_OUTPUT_LENGTH = 10_000;
 
 /**
  * Return a stable admission error when a child claims root criteria it cannot
@@ -64,19 +61,6 @@ export function validateWorkerRootCriteria(
     return `root-criterion mapping rejected: ${mappingErrors.map(e => e.message).join("; ")}`;
   }
   return undefined;
-}
-
-function isWithinWorkspace(workingDir: string, candidate: string): boolean {
-  try {
-    const base = resolve(workingDir);
-    const target = resolve(candidate);
-    const baseReal = realpathSync(base);
-    const targetReal = realpathSync(target);
-    const rel = relative(baseReal, targetReal);
-    return rel === "" || (!rel.startsWith(`..${sep}`) && rel !== ".." && !isAbsolute(rel));
-  } catch {
-    return false;
-  }
 }
 
 /** Map internal executor names to the stable Worker result-contract vocabulary. */
@@ -391,9 +375,13 @@ export class WorkerSupervisionService {
     }
 
     const workerReport = this.parseWorkerReport(workerResult);
-    const checks = this.runChecks(contract, workingDir);
-    const artifacts = this.observeArtifacts(contract, workingDir);
-    const criteria = this.deriveCriteria(contract, checks, artifacts);
+    // #1656: one shared evaluator owns command execution, artifact
+    // observation, and criterion derivation. No explicit workspace yields
+    // failed bounded evidence — never process.cwd() verification.
+    const evaluation = evaluateWorkerEvidence(contract, workingDir);
+    const checks = evaluation.checks;
+    const artifacts = evaluation.artifacts;
+    const criteria = evaluation.criteria;
     const allPassed = criteria.every(c => c.status === "passed");
 
     // Execution outcome is always "completed" when the Worker ran and checks
@@ -495,144 +483,6 @@ export class WorkerSupervisionService {
       unresolved_risks,
     };
   }
-
-  private runChecks(contract: WorkerAcceptanceContractV1, workingDir?: string): VerificationObservation[] {
-    return contract.verification_commands.map(cmd => {
-      const startedAt = new Date().toISOString();
-      let exitCode: number | null = null;
-      let signal: string | null = null;
-      let stdout = "";
-      let stderr = "";
-      let timedOut = false;
-
-      try {
-        const resolvedDir = cmd.cwd ? (workingDir ? resolve(workingDir, cmd.cwd) : cmd.cwd) : (workingDir ?? process.cwd());
-        if (workingDir && !isWithinWorkspace(workingDir, resolvedDir)) {
-          stderr = `rejected: cwd escapes workspace (${resolvedDir})`;
-          return {
-            check_id: cmd.id, argv: cmd.argv, cwd: cmd.cwd,
-            started_at: startedAt, finished_at: new Date().toISOString(),
-            timed_out: false, exit_code: null, signal: null,
-            stdout_excerpt: "", stderr_excerpt: stderr.slice(0, MAX_CHECK_OUTPUT_LENGTH),
-          };
-        }
-        const cwd = resolvedDir;
-        const result = execFileSync(cmd.argv[0]!, cmd.argv.slice(1), {
-          cwd,
-          timeout: cmd.timeout_ms,
-          maxBuffer: MAX_CHECK_OUTPUT_LENGTH,
-          stdio: ["ignore", "pipe", "pipe"] as const,
-        });
-        exitCode = 0;
-        stdout = result.stdout.toString("utf-8").slice(0, MAX_CHECK_OUTPUT_LENGTH);
-        stderr = result.stderr.toString("utf-8").slice(0, MAX_CHECK_OUTPUT_LENGTH);
-      } catch (err: unknown) {
-        const e = err as ExecError;
-        if (e.code === "ERR_CHILD_PROCESS_STDIO_MAXBUFFER" || e.code === "ETIMEDOUT") {
-          timedOut = true;
-        } else if (e.killed) {
-          timedOut = true;
-          signal = e.signal ?? null;
-        } else {
-          exitCode = e.status ?? null;
-          signal = e.signal ?? null;
-        }
-        if (e.stdout) stdout = e.stdout.toString("utf-8").slice(0, MAX_CHECK_OUTPUT_LENGTH);
-        if (e.stderr) stderr = e.stderr.toString("utf-8").slice(0, MAX_CHECK_OUTPUT_LENGTH);
-      }
-
-      const finishedAt = new Date().toISOString();
-
-      return {
-        check_id: cmd.id,
-        argv: cmd.argv,
-        cwd: cmd.cwd,
-        started_at: startedAt,
-        finished_at: finishedAt,
-        timed_out: timedOut,
-        exit_code: exitCode,
-        signal,
-        stdout_excerpt: stdout.slice(0, MAX_CHECK_OUTPUT_LENGTH),
-        stderr_excerpt: stderr.slice(0, MAX_CHECK_OUTPUT_LENGTH),
-      };
-    });
-  }
-
-  private observeArtifacts(contract: WorkerAcceptanceContractV1, workingDir?: string): ArtifactObservation[] {
-    return contract.expected_artifacts.map(a => {
-      const ref = a.ref;
-      const absPath = workingDir ? resolve(workingDir, ref) : ref;
-      if (workingDir && !isWithinWorkspace(workingDir, absPath)) {
-        return { artifact_id: a.id, exists: false, kind: a.kind, ref, error: "path escapes workspace" };
-      }
-      try {
-        if (!existsSync(absPath)) {
-          return { artifact_id: a.id, exists: false, kind: a.kind, ref, error: "not found" };
-        }
-        const st = statSync(absPath);
-        const digest = a.kind === "file"
-          ? createHash("sha256").update(readFileSync(absPath)).digest("hex").slice(0, 16)
-          : undefined;
-        return {
-          artifact_id: a.id,
-          exists: true,
-          kind: a.kind,
-          ref,
-          size: st.size,
-          digest: digest ? `sha256-${digest}` : undefined,
-        };
-      } catch (err) {
-        return { artifact_id: a.id, exists: false, kind: a.kind, ref, error: String(err) };
-      }
-    });
-  }
-
-  private deriveCriteria(
-    contract: WorkerAcceptanceContractV1,
-    checks: VerificationObservation[],
-    artifacts: ArtifactObservation[],
-  ): Array<{ criterion_id: string; status: CriterionStatus; evidence_ids: string[] }> {
-    return contract.criteria.map(c => {
-      const evidenceIds: string[] = [];
-      let status: CriterionStatus = "not_run";
-
-      const relevantChecks = checks.filter(ch => {
-        const cmd = contract.verification_commands.find(vc => vc.id === ch.check_id);
-        return cmd?.criterion_ids.includes(c.id);
-      });
-
-      const requiredArtifacts = artifacts.filter(a => {
-        const ea = contract.expected_artifacts.find(ea => ea.id === a.artifact_id);
-        return ea?.criterion_ids.includes(c.id) && ea.required;
-      });
-
-      if (relevantChecks.length > 0) {
-        evidenceIds.push(...relevantChecks.map(ch => ch.check_id));
-        const allChecksPassed = relevantChecks.every(ch => ch.exit_code === 0 && !ch.timed_out);
-        if (allChecksPassed) {
-          status = "passed";
-        } else {
-          status = "failed";
-        }
-      }
-
-      if (requiredArtifacts.length > 0) {
-        evidenceIds.push(...requiredArtifacts.map(a => a.artifact_id));
-        const allArtifactsExist = requiredArtifacts.every(a => a.exists);
-        if (status === "not_run") {
-          status = allArtifactsExist ? "passed" : "failed";
-        } else if (!allArtifactsExist) {
-          status = "failed";
-        }
-      }
-
-      if (relevantChecks.length === 0 && requiredArtifacts.length === 0) {
-        status = "inconclusive";
-      }
-
-      return { criterion_id: c.id, status, evidence_ids: evidenceIds };
-    });
-  }
 }
 
 /**
@@ -660,34 +510,4 @@ export function validateConfiguredWorkspaceAlias(alias: string): string[] {
     errors.push(`Pi configuration unreadable: ${err instanceof Error ? err.message : String(err)}`);
   }
   return errors;
-}
-
-interface ExecError {
-  code?: string | number;
-  signal?: NodeJS.Signals | null;
-  status?: number | null;
-  killed?: boolean;
-  stdout?: Buffer;
-  stderr?: Buffer;
-}
-
-function execFileSync(cmd: string, args: string[], opts: { cwd: string; timeout: number; maxBuffer: number; stdio: readonly ["ignore", "pipe", "pipe"] }): { stdout: Buffer; stderr: Buffer } {
-  const { spawnSync } = require("node:child_process") as typeof import("node:child_process");
-  const result = spawnSync(cmd, args, {
-    cwd: opts.cwd,
-    timeout: opts.timeout,
-    maxBuffer: opts.maxBuffer,
-    stdio: opts.stdio as ["ignore", "pipe", "pipe"],
-  });
-  if (result.error) throw result.error;
-  if (result.status !== 0) {
-    const err: ExecError = {};
-    err.code = result.status ?? undefined;
-    err.status = result.status;
-    err.signal = result.signal;
-    err.stdout = result.stdout ?? undefined;
-    err.stderr = result.stderr ?? undefined;
-    throw err;
-  }
-  return { stdout: result.stdout ?? Buffer.alloc(0), stderr: result.stderr ?? Buffer.alloc(0) };
 }

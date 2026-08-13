@@ -172,9 +172,37 @@ describe("ReviewCaseAssembler coverage read-model (#1604)", () => {
 
     const supStore = new supStoreMod.WorkerSupervisionStore();
     const lane1 = kanban.kanbanEnqueue("lane A", "agent", undefined, { type: "W", parent_id: rootCardId });
-    supStore.insertContract(makeChildContract(lane1, rootCardId, ["lane1-feeds"]), lane1);
+    const lane1Contract = makeChildContract(lane1, rootCardId, ["lane1-feeds"]);
+    supStore.insertContract(lane1Contract, lane1);
+    // #1656: lane 1 is a SUCCESSFUL mapped child — terminal card + completed
+    // attempt + exact-contract envelope with every criterion passed.
+    const lane1Attempt = {
+      id: `att_lane1_ok`,
+      card_id: lane1,
+      contract_id: lane1Contract.id,
+      ordinal: 1,
+      executor_kind: "agent",
+      executor_id: "spin",
+      status: "settled",
+      started_at: new Date().toISOString(),
+    };
+    supStore.insertAttempt(lane1Attempt);
+    supStore.lifecycleTransition(lane1Attempt.id, ["pending"], "completed", { status: "settled", settled_at: new Date().toISOString() });
+    supStore.insertResult(lane1Attempt.id, {
+      schema_version: 1,
+      attempt: { id: lane1Attempt.id, ordinal: 1, contract_id: lane1Contract.id, contract_digest: lane1Contract.digest, executor_kind: "agent", executor_id: "spin", started_at: lane1Attempt.started_at, finished_at: new Date().toISOString() },
+      outcome: "completed",
+      criteria: [{ criterion_id: `l${lane1}c1`, status: "passed", evidence_ids: ["a1"] }],
+      checks: [],
+      artifacts: [{ artifact_id: "a1", exists: true, kind: "file", ref: "handoff.md", size: 10 }],
+      worker_report: { summary: "done", claims: [], unresolved_risks: [] },
+    });
+    kanban.kanbanRunning(lane1);
+    kanban.kanbanComplete(lane1, null, "worker completed");
     const lane2 = kanban.kanbanEnqueue("lane B", "agent", undefined, { type: "W", parent_id: rootCardId });
-    supStore.insertContract(makeChildContract(lane2, rootCardId, ["lane2-newsletters"]), lane2);
+    const lane2Contract = makeChildContract(lane2, rootCardId, ["lane2-newsletters"]);
+    supStore.insertContract(lane2Contract, lane2);
+    // lane 2 is mapped but never produced a successful child — semantic failed
     const lane3 = kanban.kanbanEnqueue("lane C", "agent", undefined, { type: "W", parent_id: rootCardId });
     const lane3Contract = makeChildContract(lane3, rootCardId, ["lane3-web"]);
     supStore.insertContract(lane3Contract, lane3);
@@ -202,14 +230,24 @@ describe("ReviewCaseAssembler coverage read-model (#1604)", () => {
     const lane3Policy = snap.root_contract.criteria.find(c => c.id === "lane3-web")!;
     expect(lane3Policy.required).toBe(false);
 
-    // Coverage hints: orc_owned for the four Orc duties, supported for lanes
+    // Coverage hints: orc_owned for the four Orc duties, semantic hints for lanes
     const inputs = new Map(snap.criterion_inputs.map(ci => [ci.criterion_id, ci]));
     expect(inputs.get("synthesis")?.coverage_hint).toBe("orc_owned");
     expect(inputs.get("synthesis")?.execution_owner).toBe("orc");
     expect(inputs.get("synthesis")?.mapped_child_contract_ids).toEqual([]);
+    // #1656: successful mapped children carry provenance and qualified evidence
     expect(inputs.get("lane1-feeds")?.coverage_hint).toBe("supported");
     expect(inputs.get("lane1-feeds")?.execution_owner).toBe("delegated");
+    expect(inputs.get("lane1-feeds")?.successful_mapped_child_contract_ids).toEqual([lane1Contract.id]);
+    expect(inputs.get("lane1-feeds")?.unsuccessful_mapped_child_contract_ids).toEqual([]);
+    expect(inputs.get("lane1-feeds")?.artifact_observation_ids).toEqual([`attempt:${lane1Attempt.id}:artifact:a1`]);
+    expect(inputs.get("lane1-feeds")?.observed_evidence_ids).toEqual([]);
+    // mapped children without any successful outcome are semantically failed
+    expect(inputs.get("lane2-newsletters")?.coverage_hint).toBe("failed");
+    expect(inputs.get("lane2-newsletters")?.unsuccessful_mapped_child_contract_ids).toEqual([lane2Contract.id]);
+    expect(inputs.get("lane3-web")?.coverage_hint).toBe("failed");
     expect(inputs.get("lane3-web")?.required).toBe(false);
+    expect(inputs.get("lane3-web")?.unsuccessful_mapped_child_contract_ids).toEqual([lane3Contract.id]);
 
     // Failed optional lane is durable evidence, not a coverage gap
     expect(snap.uncovered_criteria).toEqual([]);
@@ -421,5 +459,172 @@ describe("projectReviewBrief decision-ready projection (#1620)", () => {
     expect(result.brief.children[0]).not.toHaveProperty("result");
     expect(JSON.stringify(result.brief)).not.toContain("/private/path");
     expect(JSON.stringify(result.brief)).not.toContain("raw Worker prose");
+  });
+});
+
+describe("ReviewCaseAssembler #1656 contract-level evidence", () => {
+  async function setupProject(criteria: Array<{ id: string; required: boolean; execution_owner: "delegated" | "orc" }>): Promise<{ rootCardId: number; kanban: typeof import("../tasks/kanban-board.js"); reviewStoreMod: typeof import("./project-review-store.js"); supStoreMod: typeof import("../worker-supervision-store.js"); reviewStore: import("./project-review-store.js").ProjectReviewStore; supStore: import("../worker-supervision-store.js").WorkerSupervisionStore }> {
+    const kanban = await import("../tasks/kanban-board.js");
+    const reviewStoreMod = await import("./project-review-store.js");
+    const supStoreMod = await import("../worker-supervision-store.js");
+    const rootCardId = kanban.kanbanEnqueue("root", "task", `run-${Date.now()}`, { type: "O" });
+    const reviewStore = new reviewStoreMod.ProjectReviewStore();
+    reviewStore.insertContract(makeRootContractV2(rootCardId, criteria));
+    reviewStore.initializeSupervision(rootCardId, `pc_rca_${rootCardId}`, "executing");
+    return { rootCardId, kanban, reviewStoreMod, supStoreMod, reviewStore, supStore: new supStoreMod.WorkerSupervisionStore() };
+  }
+
+  async function seedChild(
+    ctx: { rootCardId: number; supStore: import("../worker-supervision-store.js").WorkerSupervisionStore; kanban: typeof import("../tasks/kanban-board.js") },
+    opts: {
+      supports: string[];
+      outcome: "success" | "failed" | "missing_result" | "no_attempt";
+      checkId?: string;
+    },
+  ): Promise<{ cardId: number; contractId: string; attemptId?: string }> {
+    const { supStore, kanban, rootCardId } = ctx;
+    const cardId = kanban.kanbanEnqueue("lane", "agent", undefined, { type: "W", parent_id: rootCardId });
+    const contract = makeChildContract(cardId, rootCardId, opts.supports);
+    supStore.insertContract(contract, cardId);
+
+    if (opts.outcome === "no_attempt") return { cardId, contractId: contract.id };
+
+    const attemptId = `att_${cardId}_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+    supStore.insertAttempt({
+      id: attemptId, card_id: cardId, contract_id: contract.id, ordinal: 1,
+      executor_kind: "agent", executor_id: "spin", status: "settled",
+      started_at: new Date().toISOString(),
+    });
+
+    if (opts.outcome === "success") {
+      supStore.lifecycleTransition(attemptId, ["pending"], "completed", { status: "settled", settled_at: new Date().toISOString() });
+      supStore.insertResult(attemptId, {
+        schema_version: 1,
+        attempt: { id: attemptId, ordinal: 1, contract_id: contract.id, contract_digest: contract.digest, executor_kind: "agent", executor_id: "spin", started_at: new Date().toISOString(), finished_at: new Date().toISOString() },
+        outcome: "completed",
+        criteria: [{ criterion_id: `l${cardId}c1`, status: "passed", evidence_ids: [opts.checkId ?? "a1"] }],
+        checks: opts.checkId ? [{ check_id: opts.checkId, argv: ["true"], started_at: "", finished_at: "", timed_out: false, exit_code: 0, signal: null, stdout_excerpt: "", stderr_excerpt: "" }] : [],
+        artifacts: [{ artifact_id: "a1", exists: true, kind: "file", ref: "handoff.md", size: 10 }],
+        worker_report: { summary: "ok", claims: [], unresolved_risks: [] },
+      });
+      kanban.kanbanRunning(cardId);
+      kanban.kanbanComplete(cardId, null, "worker completed");
+    } else if (opts.outcome === "failed") {
+      supStore.lifecycleTransition(attemptId, ["pending"], "failed", { status: "failed", settled_at: new Date().toISOString() });
+      supStore.insertResult(attemptId, {
+        schema_version: 1,
+        attempt: { id: attemptId, ordinal: 1, contract_id: contract.id, contract_digest: contract.digest, executor_kind: "agent", executor_id: "spin", started_at: new Date().toISOString(), finished_at: new Date().toISOString() },
+        outcome: "completed",
+        criteria: [{ criterion_id: `l${cardId}c1`, status: "failed", evidence_ids: ["a1"] }],
+        checks: [],
+        artifacts: [{ artifact_id: "a1", exists: false, kind: "file", ref: "handoff.md", error: "not found" }],
+        worker_report: { summary: "nope", claims: [], unresolved_risks: [] },
+      });
+      kanban.kanbanRunning(cardId);
+      kanban.kanbanFail(cardId, "worker completed without passing acceptance");
+    } else {
+      // missing_result — a completed attempt lifecycle with no persisted envelope
+      supStore.lifecycleTransition(attemptId, ["pending"], "completed", { status: "settled", settled_at: new Date().toISOString() });
+      kanban.kanbanRunning(cardId);
+      kanban.kanbanComplete(cardId, null, "worker completed");
+    }
+    return { cardId, contractId: contract.id, attemptId };
+  }
+
+  it("all failed mapped children: hint failed, negative evidence only, no positive arrays", async () => {
+    const ctx = await setupProject([{ id: "r1", required: true, execution_owner: "delegated" }]);
+    const a = await seedChild(ctx, { supports: ["r1"], outcome: "failed" });
+    const b = await seedChild(ctx, { supports: ["r1"], outcome: "failed" });
+
+    const { ReviewCaseAssembler } = await import("./project-review-case.js");
+    const snap = await new ReviewCaseAssembler().assembleCase(ctx.rootCardId, 1, 1);
+    expect("error" in snap).toBe(false);
+    const input = (snap as ReviewCaseSnapshot).criterion_inputs.find(c => c.criterion_id === "r1")!;
+    expect(input.coverage_hint).toBe("failed");
+    expect(input.successful_mapped_child_contract_ids).toEqual([]);
+    expect([...input.unsuccessful_mapped_child_contract_ids].sort()).toEqual([a.contractId, b.contractId].sort());
+    expect(input.observed_evidence_ids).toEqual([]);
+    expect(input.artifact_observation_ids).toEqual([]);
+    // each failed child contributes one qualified negative id (criterion
+    // evidence and the missing-artifact observation dedupe to the same id)
+    expect(input.failed_or_inconclusive_check_ids).toHaveLength(2);
+    expect(input.failed_or_inconclusive_check_ids.every(id => id.startsWith("attempt:"))).toBe(true);
+    expect(new Set(input.failed_or_inconclusive_check_ids).size).toBe(2);  });
+
+  it("one successful mapped child: hint supported, qualified positive evidence", async () => {
+    const ctx = await setupProject([{ id: "r1", required: true, execution_owner: "delegated" }]);
+    const a = await seedChild(ctx, { supports: ["r1"], outcome: "success" });
+
+    const { ReviewCaseAssembler } = await import("./project-review-case.js");
+    const snap = await new ReviewCaseAssembler().assembleCase(ctx.rootCardId, 1, 1);
+    expect("error" in snap).toBe(false);
+    const input = (snap as ReviewCaseSnapshot).criterion_inputs.find(c => c.criterion_id === "r1")!;
+    expect(input.coverage_hint).toBe("supported");
+    expect(input.successful_mapped_child_contract_ids).toEqual([a.contractId]);
+    expect(input.unsuccessful_mapped_child_contract_ids).toEqual([]);
+    expect(input.artifact_observation_ids).toEqual([`attempt:${a.attemptId}:artifact:a1`]);
+    expect(input.failed_or_inconclusive_check_ids).toEqual([]);
+  });
+
+  it("mixed outcomes: hint conflicting, one contradiction candidate naming card and contract", async () => {
+    const ctx = await setupProject([{ id: "r1", required: true, execution_owner: "delegated" }]);
+    await seedChild(ctx, { supports: ["r1"], outcome: "success" });
+    await seedChild(ctx, { supports: ["r1"], outcome: "failed" });
+
+    const { ReviewCaseAssembler } = await import("./project-review-case.js");
+    const snap = await new ReviewCaseAssembler().assembleCase(ctx.rootCardId, 1, 1);
+    expect("error" in snap).toBe(false);
+    const snapshot = snap as ReviewCaseSnapshot;
+    const input = snapshot.criterion_inputs.find(c => c.criterion_id === "r1")!;
+    expect(input.coverage_hint).toBe("conflicting");
+    expect(input.successful_mapped_child_contract_ids).toHaveLength(1);
+    expect(input.unsuccessful_mapped_child_contract_ids).toHaveLength(1);
+    const contradiction = snapshot.contradiction_candidates.find(c => c.affected_criterion_ids.includes("r1"));
+    expect(contradiction).toBeDefined();
+    expect(contradiction!.sources.every(s => /^card:\d+:.+$/.test(s))).toBe(true);
+  });
+
+  it("reused local evidence ids from different children stay distinct via attempt qualification", async () => {
+    const ctx = await setupProject([{ id: "r1", required: true, execution_owner: "delegated" }]);
+    const a = await seedChild(ctx, { supports: ["r1"], outcome: "success", checkId: "v1" });
+    const b = await seedChild(ctx, { supports: ["r1"], outcome: "success", checkId: "v1" });
+
+    const { ReviewCaseAssembler } = await import("./project-review-case.js");
+    const snap = await new ReviewCaseAssembler().assembleCase(ctx.rootCardId, 1, 1);
+    expect("error" in snap).toBe(false);
+    const input = (snap as ReviewCaseSnapshot).criterion_inputs.find(c => c.criterion_id === "r1")!;
+    expect(input.observed_evidence_ids).toEqual([
+      `attempt:${a.attemptId}:check:v1`,
+      `attempt:${b.attemptId}:check:v1`,
+    ]);
+    expect(new Set(input.observed_evidence_ids).size).toBe(2);
+  });
+
+  it("a completed attempt with no persisted envelope is not successful evidence", async () => {
+    const ctx = await setupProject([{ id: "r1", required: true, execution_owner: "delegated" }]);
+    await seedChild(ctx, { supports: ["r1"], outcome: "missing_result" });
+
+    const { ReviewCaseAssembler } = await import("./project-review-case.js");
+    const snap = await new ReviewCaseAssembler().assembleCase(ctx.rootCardId, 1, 1);
+    expect("error" in snap).toBe(false);
+    const input = (snap as ReviewCaseSnapshot).criterion_inputs.find(c => c.criterion_id === "r1")!;
+    expect(input.coverage_hint).toBe("failed");
+    expect(input.successful_mapped_child_contract_ids).toEqual([]);
+    expect(input.observed_evidence_ids).toEqual([]);
+  });
+
+  it("child criterion ids are never compared to root criterion ids", async () => {
+    // the child's own criteria are l<card>c1 — completely unrelated names to
+    // the root criterion r1; classification is contract-level
+    const ctx = await setupProject([{ id: "r1", required: true, execution_owner: "delegated" }]);
+    const a = await seedChild(ctx, { supports: ["r1"], outcome: "success" });
+
+    const { ReviewCaseAssembler } = await import("./project-review-case.js");
+    const snap = await new ReviewCaseAssembler().assembleCase(ctx.rootCardId, 1, 1);
+    expect("error" in snap).toBe(false);
+    const input = (snap as ReviewCaseSnapshot).criterion_inputs.find(c => c.criterion_id === "r1")!;
+    expect(input.coverage_hint).toBe("supported");
+    expect(input.successful_mapped_child_contract_ids).toEqual([a.contractId]);
+    expect(input.artifact_observation_ids).toEqual([`attempt:${a.attemptId}:artifact:a1`]);
   });
 });

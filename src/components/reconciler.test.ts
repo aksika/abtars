@@ -66,6 +66,9 @@ vi.mock("./worker-supervision-service.js", () => {
 });
 
 const getLatestAttemptMock = vi.fn().mockReturnValue(null);
+const getResultByAttemptMock = vi.fn().mockReturnValue(undefined);
+/** #1656: lifecycle the adapter mock reports after a synchronous start settle. */
+let attemptLifecycleOverride: string | null = null;
 const workerContractExistsMock = vi.fn().mockReturnValue(true);
 const claimAttemptMock = vi.fn().mockImplementation((cardId: number, contractId: string, executorKind: string, executorId: string, generation: number) => ({
   attemptId: "a_1", cardId, contractId, executorKind, executorId, generation, claimedAt: new Date().toISOString(),
@@ -88,6 +91,7 @@ vi.mock("./worker-supervision-store.js", () => {
     WorkerSupervisionStore: class {
       contractExists = workerContractExistsMock;
       getLatestAttempt = getLatestAttemptMock;
+      getResultByAttempt = getResultByAttemptMock;
       claimAttempt = claimAttemptMock;
       markAttemptStartObservable = markAttemptStartObservableMock;
       markAttemptRunning = markAttemptRunningMock;
@@ -107,9 +111,12 @@ vi.mock("./worker-supervision-store.js", () => {
 vi.mock("./spin-worker-adapter.js", () => ({
   SpinWorkerAdapter: class {
     capacity = vi.fn().mockResolvedValue({ available: 3, max: 3 });
-    start = vi.fn().mockImplementation((claim: { cardId: number }) => {
+    start = vi.fn().mockImplementation(async (claim: { cardId: number }) => {
       dispatchMock({ type: "W", cardId: claim.cardId });
-      return Promise.resolve({ kind: "started", attemptId: "a_1", generation: 1, executorId: "spin-local" });
+      // #1656: an executor-settled lane (Pi) settles the attempt synchronously
+      // inside start and leaves the W card untransitioned.
+      attemptLifecycleOverride = "completed";
+      return { kind: "started", attemptId: "a_1", generation: 1, executorId: "spin-local" };
     });
     cancel = vi.fn().mockResolvedValue({ kind: "cancelled", attemptId: "a_1" });
   },
@@ -388,6 +395,83 @@ describe("Reconciler — #1411 domain guard", () => {
       await new Promise(r => setTimeout(r, 10));
       await flush();
       expect(dispatchMock).toHaveBeenCalledTimes(2);
+    });
+
+    // #1656: executor-settled lanes (Pi) settle the attempt synchronously
+    // inside adapter.start and never touch the W card; the pump projects the
+    // card from the durable envelope via the exact-contract predicate.
+    const completedContract = { id: "c_1", digest: "d", criteria: [{ id: "c1" }] };
+
+    function envelopeWith(overrides: Record<string, unknown>): { envelope: unknown } {
+      return {
+        envelope: {
+          schema_version: 1,
+          outcome: "completed",
+          attempt: { id: "a_1", ordinal: 1, contract_id: "c_1", contract_digest: "d", executor_kind: "pi", executor_id: "pi-coding", started_at: "", finished_at: "" },
+          criteria: [{ criterion_id: "c1", status: "passed", evidence_ids: ["a1"] }],
+          checks: [],
+          artifacts: [],
+          worker_report: { summary: "x", claims: [], unresolved_risks: [] },
+          ...overrides,
+        },
+      };
+    }
+
+    function runPiStartProjection(cardId: number, envelope: unknown): Promise<void> {
+      return (async () => {
+        attemptLifecycleOverride = null;
+        cardHasContractMock.mockReturnValue(true);
+        getContractForCardMock.mockReturnValue(completedContract);
+        getResultByAttemptMock.mockReturnValue(envelope);
+        getLatestAttemptMock.mockImplementation(() => ({
+          id: "a_1", lifecycle: attemptLifecycleOverride ?? "pending", executor_kind: "agent", executor_id: "spin-local", generation: 1,
+        }));
+        const card = { id: cardId, parent_id: 100, status: "queued", type: "W", title: "lane", priority: "MEDIUM", created_at: new Date().toISOString() } as any;
+        // the projection must terminate the card like the real store does,
+        // or the pump's dirty flag loops forever on the mock board
+        kanbanFailMock.mockImplementation((id: number) => { if (id === cardId) card.status = "failed"; });
+        kanbanCompleteMock.mockImplementation((id: number) => { if (id === cardId) card.status = "done"; });
+        kanbanQueuedDispatchOrderMock.mockReturnValue([card]);
+        kanbanGetCardMock.mockImplementation((id: number) => {
+          if (id === cardId) return card;
+          if (id === 100) return { id: 100, status: "running", max_tokens: null, tokens_used: 0, type: "O" } as any;
+          return null;
+        });
+        mod.requestReconcile(cardId);
+        await flush();
+        await new Promise(r => setTimeout(r, 10));
+        await flush();
+      })();
+    }
+
+    it("#1656 fails the W card when a completed Pi attempt's envelope criteria did not pass", async () => {
+      await runPiStartProjection(1, envelopeWith({ criteria: [{ criterion_id: "c1", status: "failed", evidence_ids: [] }] }));
+
+      expect(kanbanFailMock).toHaveBeenCalledWith(1, "worker completed without passing acceptance");
+      expect(kanbanCompleteMock).not.toHaveBeenCalled();
+    });
+
+    it("#1656 completes the W card when a completed Pi attempt's envelope passes exact acceptance", async () => {
+      await runPiStartProjection(1, envelopeWith({}));
+
+      expect(kanbanCompleteMock).toHaveBeenCalledWith(1, null, "worker completed");
+      expect(kanbanFailMock).not.toHaveBeenCalled();
+    });
+
+    it("#1656 fails the W card when the envelope names a different contract than the attempt", async () => {
+      await runPiStartProjection(1, envelopeWith({
+        attempt: { id: "a_1", ordinal: 1, contract_id: "c_1", contract_digest: "other", executor_kind: "pi", executor_id: "pi-coding", started_at: "", finished_at: "" },
+      }));
+
+      expect(kanbanFailMock).toHaveBeenCalledWith(1, "worker completed without passing acceptance");
+      expect(kanbanCompleteMock).not.toHaveBeenCalled();
+    });
+
+    it("#1656 fails the W card when a completed attempt has no persisted envelope", async () => {
+      await runPiStartProjection(1, undefined);
+
+      expect(kanbanFailMock).toHaveBeenCalledWith(1, "worker completed without passing acceptance");
+      expect(kanbanCompleteMock).not.toHaveBeenCalled();
     });
   });
 
