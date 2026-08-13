@@ -728,6 +728,7 @@ describe("#1619 incremental block delivery wiring", () => {
       delivery: "streaming", active: true, status: "ready",
       idleTimeoutMs: 0, lastActiveAt: Date.now(), messageCount: 0, tokenCount: 0, toolCallCount: 0,
       log: [], shortIndex: 1,
+      showThinking: true, // #1654: wiring evidence tests need the feed enabled
       busy: false, queue: [], fullMode: false, pendingStart: false, seen: true,
       compacting: false, ctxWarned: false, compactFailures: 0, primingTerms: [], completions: [],
     };
@@ -789,6 +790,39 @@ describe("#1619 incremental block delivery wiring", () => {
       .map((c: unknown[]) => String(c[1]));
     expect(sent.some((t) => t.startsWith("💭 "))).toBe(false);
     expect(sent).toContain("answer");
+  });
+
+  it("#1654: default session (showThinking false) never delivers 💭 blocks but still answers", async () => {
+    const spinMod = await import("./spin.js");
+    const hiddenSession = (id: string): ManagedSession => ({
+      id, userId: "master", platform: "telegram", chatId: 100,
+      delivery: "streaming", active: true, status: "ready",
+      idleTimeoutMs: 0, lastActiveAt: Date.now(), messageCount: 0, tokenCount: 0, toolCallCount: 0,
+      log: [], shortIndex: 1,
+      showThinking: false, // #1654: default-hidden
+      busy: false, queue: [], fullMode: false, pendingStart: false, seen: true,
+      compacting: false, ctxWarned: false, compactFailures: 0, primingTerms: [], completions: [],
+    });
+    vi.spyOn(spinMod.spin, "getSessionById").mockImplementation((id: string): ManagedSession => hiddenSession(id));
+    vi.spyOn(spinMod.spin, "getActiveSession").mockImplementation((): ManagedSession => hiddenSession("test_A_01"));
+    vi.spyOn(spinMod.spin, "resolveSession").mockImplementation(
+      async (_userId: string, _platform: string, _chatId: number): Promise<ManagedSession> => hiddenSession("test_A_01"),
+    );
+
+    const fake = transport as any;
+    fake.sendPrompt = vi.fn(async () => {
+      fake.onOutputDelta?.({ kind: "thinking", text: "pondering quietly" });
+      return "Final answer.";
+    });
+    const adapter = mockAdapter();
+    const deps = mockDeps(transport, {});
+    await handleInboundMessage(makeMsg(), adapter, deps);
+    await new Promise((r) => setTimeout(r, 20));
+    const sent = (adapter.sendMessage as ReturnType<typeof vi.fn>).mock.calls
+      .map((c: unknown[]) => String(c[1]));
+    // Gating the feed must not swallow the terminal answer.
+    expect(sent).toContain("Final answer.");
+    expect(sent.some((t) => t.startsWith("💭 "))).toBe(false);
   });
 
   it("an interim segment send failure keeps the complete final response (never lost)", async () => {

@@ -453,7 +453,7 @@ export async function handleInboundMessage(
         chunkBound: (text: string) => adapter.chunkResponse(text),
       });
     }
-    if (isIncrementalEligible({ role: registry.byUserId.get(userId)?.role, isGroup: msg.isGroup, platform: msg.platform })) {
+    if (isIncrementalEligible({ role: registry.byUserId.get(userId)?.role, isGroup: msg.isGroup, platform: msg.platform, showThinking: effectiveSession.showThinking })) {
       transport.onOutputDelta = (event) => { incremental?.accept(event); };
     } else {
       transport.onOutputDelta = undefined;

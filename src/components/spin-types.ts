@@ -171,6 +171,9 @@ export interface ManagedSession {
 
   // Display
   shortIndex: number;
+  /** #1654: master-chat reasoning display. Default false; /thinking show|hide
+   *  flips it. Gates only the 💭 progress feed, never reasoning effort. */
+  showThinking: boolean;
 
   // Pipeline state (#1040 — merged from SessionRegistry)
   busy: boolean;

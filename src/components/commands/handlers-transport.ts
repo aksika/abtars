@@ -412,8 +412,11 @@ export async function handleModels(text: string, ctx: CommandContext): Promise<b
 // reasoning level, never a display toggle. show/hide were removed — display
 // visibility is no longer coupled to effort. A transport without runtime
 // effort support returns an explicit unsupported response.
+//
+// #1654: /thinking is no longer an alias — it is a display-only toggle, see
+// handleThinking below.
 export async function handleEffort(text: string, ctx: CommandContext): Promise<boolean> {
-  const arg = text.replace(/^\/(?:effort|thinking)\s*/i, "").trim().toLowerCase();
+  const arg = text.replace(/^\/effort\s*/i, "").trim().toLowerCase();
   const transport = resolveAttachedTransport(ctx);
 
   if (["off", "low", "medium", "high", "xhigh"].includes(arg)) {
@@ -448,6 +451,34 @@ export async function handleEffort(text: string, ctx: CommandContext): Promise<b
     return true;
   }
   await ctx.reply("Runtime reasoning effort is not supported by this transport.");
+  return true;
+}
+
+/**
+ * #1654: /thinking is a display toggle only — it never touches reasoning
+ * effort (that is /effort). Session-scoped, default hidden.
+ */
+export async function handleThinking(text: string, ctx: CommandContext): Promise<boolean> {
+  const arg = text.replace(/^\/thinking\s*/i, "").trim().toLowerCase();
+  const session = ctx.sessionManager?.getSessionById?.(ctx.sessionKey);
+
+  if (arg === "show" || arg === "on") {
+    if (!session) { await ctx.reply("No active session."); return true; }
+    session.showThinking = true;
+    await ctx.reply("Thinking display: shown");
+    return true;
+  }
+  if (arg === "hide" || arg === "off") {
+    if (!session) { await ctx.reply("No active session."); return true; }
+    session.showThinking = false;
+    await ctx.reply("Thinking display: hidden");
+    return true;
+  }
+  if (arg) {
+    await ctx.reply("Usage: /thinking show|hide (reasoning effort is /effort)");
+    return true;
+  }
+  await ctx.reply(`Thinking display: ${session?.showThinking ? "shown" : "hidden"}`);
   return true;
 }
 

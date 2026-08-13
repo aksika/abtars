@@ -234,11 +234,13 @@ export class IncrementalBlockDeliveryController {
   }
 }
 
-/** #1619: exact eligibility for master-chat progress blocks. */
+/** #1619: exact eligibility for master-chat progress blocks.
+ *  #1654: gated additionally on the session's display toggle. */
 export function isIncrementalEligible(opts: {
   role: string | undefined;
   isGroup: boolean;
   platform: string;
+  showThinking: boolean;
 }): boolean {
-  return opts.role === "master" && !opts.isGroup && opts.platform !== "tui";
+  return opts.role === "master" && !opts.isGroup && opts.platform !== "tui" && opts.showThinking;
 }

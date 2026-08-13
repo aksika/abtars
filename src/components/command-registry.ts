@@ -38,6 +38,7 @@ export const BOT_COMMANDS: readonly BotCommand[] = [
   { name: "sleep", description: "Sleep status / resume / now" },
   { name: "whoami", description: "Your user info & clearance" },
   { name: "effort", description: "Reasoning effort (off/low/medium/high/xhigh)" },
+  { name: "thinking", description: "Show/hide model reasoning (show/hide)" },
   { name: "usage", description: "Token usage & cost this session" },
   { name: "continue", description: "Nudge model to continue after failure" },
   { name: "kanban", description: "Kanban board" },

@@ -1,9 +1,10 @@
 /**
- * #1619 — handleEffort: /effort (primary) + /thinking (alias) mutates the
- * ATTACHED session transport's session-scoped reasoning level and reports the
- * requested/effective pair. `off` is a real reasoning level, never a display
- * toggle; show/hide were removed. Transports without runtime effort support
- * return an explicit unsupported response.
+ * #1619 — handleEffort: /effort mutates the ATTACHED session transport's
+ * session-scoped reasoning level and reports the requested/effective pair.
+ * `off` is a real reasoning level, never a display toggle; show/hide were
+ * removed. Transports without runtime effort support return an explicit
+ * unsupported response. (#1654: /thinking is no longer an alias — it is the
+ * display toggle tested in handlers-thinking.test.ts.)
  */
 import { describe, it, expect, vi } from "vitest";
 
@@ -63,16 +64,6 @@ describe("handleEffort — attached Pi transport", () => {
       const { ctx, reply } = makeCtx({ attached });
       await handleEffort("/effort xhigh", ctx);
       expect(reply).toHaveBeenCalledWith("Reasoning effort: xhigh (effective: high)");
-    });
-  });
-
-  describe("alias", () => {
-    it("/thinking routes to the same handler with identical semantics", async () => {
-      const attached = makeSetEffortTransport((l) => ({ requested: l as never, effective: l as never }));
-      const { ctx, reply } = makeCtx({ attached });
-      await handleEffort("/thinking medium", ctx);
-      expect(attached.setReasoningEffort).toHaveBeenCalledWith("medium");
-      expect(reply).toHaveBeenCalledWith("Reasoning effort: medium");
     });
   });
 

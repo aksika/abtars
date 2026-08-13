@@ -115,6 +115,8 @@ export function createSpinSessionRegistry(options: { maxTotalSessions: number })
       messageCount: 0, tokenCount: 0, toolCallCount: 0,
       log: [],
       shortIndex: idx,
+      // #1654: reasoning display off by default — quiet unless /thinking show.
+      showThinking: false,
       // Pipeline state defaults (#1040)
       busy: false, queue: [], fullMode: false, pendingStart: false,
       seen: false, compacting: false, ctxWarned: false, compactFailures: 0,
