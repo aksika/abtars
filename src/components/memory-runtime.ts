@@ -23,7 +23,8 @@ export type MemoryRuntimeCapability =
   | "coreKnowledge"
   | "status"
   | "durableContext"
-  | "compaction";
+  | "compaction"
+  | "dreamQuestions";
 
 export interface InstantStoreInput {
   userId: string;
@@ -255,6 +256,21 @@ export type CommitConversationCompactionResult =
   | { status: "stale" }
   | { status: "rejected" };
 
+// ── #1515: durable Dreamy clarification questions ─────────────────────────────
+
+export interface DreamQuestionWireLike {
+  id: string;
+  memoryAId: number;
+  memoryBId: number;
+  question: string;
+  status: "pending" | "asked" | "resolved" | "expired" | "dismissed";
+  createdAt: number;
+  expiresAt: number;
+  askedAt?: number;
+}
+
+export type DreamQuestionStatusLike = "pending" | "asked" | "resolved" | "expired" | "dismissed";
+
 const PROJECTION_ROLES: ReadonlySet<string> = new Set(["user", "assistant", "tool"]);
 
 function normalizeProjectionResult(value: unknown): DurableContextProjectionResult {
@@ -329,6 +345,14 @@ export interface AbtarsMemoryRuntime {
   prepareConversationCompaction(input: PrepareConversationCompactionInput): Promise<PrepareConversationCompactionResult>;
   /** #1406: daemon-owned durable compaction commit (generation CAS). */
   commitConversationCompaction(input: CommitConversationCompactionInput, operationKey: string): Promise<CommitConversationCompactionResult>;
+  /** #1515: optional owner-scoped dream-question lifecycle. Presence of the
+   *  `dreamQuestions` capability is checked independently of core recall. */
+  dreamQuestions: {
+    nextPending(userId: string): Promise<DreamQuestionWireLike | null>;
+    list(userId: string, status?: DreamQuestionStatusLike, limit?: number): Promise<{ questions: DreamQuestionWireLike[] }>;
+    markAsked(userId: string, questionId: string, deliveryKey: string): Promise<{ status: "asked" | "not_found" | "conflict" }>;
+    dismiss(userId: string, questionId: string): Promise<{ status: "dismissed" | "not_found" | "already_terminal" }>;
+  };
   close(): Promise<void>;
 }
 
@@ -367,6 +391,10 @@ function projectCapabilities(client: AbmindClientLike): Set<MemoryRuntimeCapabil
   if (methods.has("private.prepareConversationCompaction")
     && methods.has("private.commitConversationCompaction")
     && features["private_write"] === "true") result.add("compaction");
+  if (methods.has("private.dreamQuestions.nextPending")
+    && methods.has("private.dreamQuestions.list")
+    && methods.has("private.dreamQuestions.markAsked")
+    && methods.has("private.dreamQuestions.dismiss")) result.add("dreamQuestions");
 
   return result;
 }
@@ -610,6 +638,34 @@ export function createClientRuntime(client: AbmindClientLike): AbtarsMemoryRunti
       return normalizeCommitResult(result);
     },
 
+    dreamQuestions: {
+      async nextPending(userId: string): Promise<DreamQuestionWireLike | null> {
+        requireClientCapability(capabilities, "dreamQuestions");
+        const result = await pm.dreamQuestions.nextPending(userId) as unknown;
+        return result === null || result === undefined ? null : normalizeDreamQuestion(result);
+      },
+      async list(userId: string, status?: DreamQuestionStatusLike, limit?: number): Promise<{ questions: DreamQuestionWireLike[] }> {
+        requireClientCapability(capabilities, "dreamQuestions");
+        const result = await pm.dreamQuestions.list(userId, status, limit) as unknown;
+        return normalizeDreamQuestionList(result);
+      },
+      async markAsked(userId: string, questionId: string, deliveryKey: string): Promise<{ status: "asked" | "not_found" | "conflict" }> {
+        requireClientCapability(capabilities, "dreamQuestions");
+        // Stable idempotency key derived from question id + delivery key — a
+        // retry after a crash replays the same CAS instead of double-marking.
+        const result = await pm.dreamQuestions.markAsked(
+          { userId, questionId, deliveryKey },
+          `dream-question-ask-${questionId}-${deliveryKey}`,
+        ) as unknown;
+        return normalizeMarkAskedResult(result);
+      },
+      async dismiss(userId: string, questionId: string): Promise<{ status: "dismissed" | "not_found" | "already_terminal" }> {
+        requireClientCapability(capabilities, "dreamQuestions");
+        const result = await pm.dreamQuestions.dismiss({ userId, questionId }, `dream-question-dismiss-${questionId}`) as unknown;
+        return normalizeDismissResult(result);
+      },
+    },
+
     async close(): Promise<void> {
       await client.close();
     },
@@ -704,6 +760,74 @@ function normalizeCommitResult(value: unknown): CommitConversationCompactionResu
   throw new Error(`Compaction commit returned unknown status: ${String(status)}`);
 }
 
+// ── #1515: dream-question response normalization ────────────────────────────
+// Every field is bounded and validated; malformed responses fail closed rather
+// than becoming a fabricated question or a fake asked/dismissed success.
+
+const DREAM_QUESTION_STATUSES = new Set(["pending", "asked", "resolved", "expired", "dismissed"]);
+
+function normalizeDreamQuestion(value: unknown): DreamQuestionWireLike {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error("Dream question response is malformed");
+  }
+  const record = value as Record<string, unknown>;
+  if (typeof record["id"] !== "string" || record["id"].length === 0) throw new Error("Dream question response has no id");
+  if (!Number.isSafeInteger(record["memoryAId"]) || !Number.isSafeInteger(record["memoryBId"])) throw new Error("Dream question evidence ids are malformed");
+  if (typeof record["question"] !== "string" || record["question"].length === 0) throw new Error("Dream question response has no question text");
+  if (typeof record["status"] !== "string" || !DREAM_QUESTION_STATUSES.has(record["status"])) throw new Error("Dream question status is malformed");
+  if (!Number.isSafeInteger(record["createdAt"]) || !Number.isSafeInteger(record["expiresAt"])) throw new Error("Dream question timestamps are malformed");
+  const wire: DreamQuestionWireLike = {
+    id: record["id"],
+    memoryAId: record["memoryAId"] as number,
+    memoryBId: record["memoryBId"] as number,
+    question: record["question"],
+    status: record["status"] as DreamQuestionWireLike["status"],
+    createdAt: record["createdAt"] as number,
+    expiresAt: record["expiresAt"] as number,
+  };
+  if (typeof record["askedAt"] === "number" && Number.isSafeInteger(record["askedAt"])) {
+    wire.askedAt = record["askedAt"] as number;
+  }
+  return wire;
+}
+
+function normalizeDreamQuestionList(value: unknown): { questions: DreamQuestionWireLike[] } {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error("Dream question list response is malformed");
+  }
+  const record = value as Record<string, unknown>;
+  if (!Array.isArray(record["questions"])) {
+    throw new Error("Dream question list response has no questions array");
+  }
+  const questions: DreamQuestionWireLike[] = [];
+  for (const raw of record["questions"] as unknown[]) {
+    questions.push(normalizeDreamQuestion(raw));
+  }
+  return { questions };
+}
+
+function normalizeMarkAskedResult(value: unknown): { status: "asked" | "not_found" | "conflict" } {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error("Dream question markAsked response is malformed");
+  }
+  const status = (value as Record<string, unknown>)["status"];
+  if (status === "asked" || status === "not_found" || status === "conflict") {
+    return { status };
+  }
+  throw new Error(`Dream question markAsked returned unknown status: ${String(status)}`);
+}
+
+function normalizeDismissResult(value: unknown): { status: "dismissed" | "not_found" | "already_terminal" } {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error("Dream question dismiss response is malformed");
+  }
+  const status = (value as Record<string, unknown>)["status"];
+  if (status === "dismissed" || status === "not_found" || status === "already_terminal") {
+    return { status };
+  }
+  throw new Error(`Dream question dismiss returned unknown status: ${String(status)}`);
+}
+
 // ── Disabled implementation ───────────────────────────────────────────────
 
 export function createDisabledRuntime(): AbtarsMemoryRuntime {
@@ -729,6 +853,12 @@ export function createDisabledRuntime(): AbtarsMemoryRuntime {
     projectDurableContext: async () => { unavailable("projectDurableContext"); throw new Error("Memory is disabled: projectDurableContext not available"); },
     prepareConversationCompaction: async () => { unavailable("prepareConversationCompaction"); throw new Error("Memory is disabled: prepareConversationCompaction not available"); },
     commitConversationCompaction: async () => { unavailable("commitConversationCompaction"); throw new Error("Memory is disabled: commitConversationCompaction not available"); },
+    dreamQuestions: {
+      nextPending: async () => { unavailable("dreamQuestions.nextPending"); return null; },
+      list: async () => { unavailable("dreamQuestions.list"); return { questions: [] }; },
+      markAsked: async () => { unavailable("dreamQuestions.markAsked"); return { status: "not_found" as const }; },
+      dismiss: async () => { unavailable("dreamQuestions.dismiss"); return { status: "not_found" as const }; },
+    },
     close: async () => {},
   };
 }
@@ -758,6 +888,12 @@ export function createUnavailableRuntime(): AbtarsMemoryRuntime {
     projectDurableContext: async () => { unavailable("projectDurableContext"); throw new Error("Memory unavailable: projectDurableContext not available"); },
     prepareConversationCompaction: async () => { unavailable("prepareConversationCompaction"); throw new Error("Memory unavailable: prepareConversationCompaction not available"); },
     commitConversationCompaction: async () => { unavailable("commitConversationCompaction"); throw new Error("Memory unavailable: commitConversationCompaction not available"); },
+    dreamQuestions: {
+      nextPending: async () => { unavailable("dreamQuestions.nextPending"); return null; },
+      list: async () => { unavailable("dreamQuestions.list"); return { questions: [] }; },
+      markAsked: async () => { unavailable("dreamQuestions.markAsked"); return { status: "not_found" as const }; },
+      dismiss: async () => { unavailable("dreamQuestions.dismiss"); return { status: "not_found" as const }; },
+    },
     close: async () => {},
   };
 }

@@ -63,6 +63,35 @@ import type { ResolvedHailMary } from "./transport-config.js";
 const TAG = "pipeline";
 const PRIMING_MAX = 8;
 
+/** #1515: code-owned, deterministic user-visible suffix prefix for boot
+ *  questions. Never model-authored; question text itself is validated by the
+ *  server before persistence. */
+export const DREAMY_QUESTION_SUFFIX_PREFIX = "Dreamy needs your help with one memory: ";
+
+/**
+ * #1515: owner-scoped `pending -> asked` settlement after a durable assistant
+ * record. Never throws through the message pipeline: a failure logs one
+ * bounded diagnostic and leaves the server row pending — the server CAS makes
+ * a later retry safe and preserves the first delivery key.
+ */
+export async function settleDreamQuestion(
+  deps: PipelineDeps,
+  question: { id: string },
+  userId: string,
+  deliveryKey: string,
+): Promise<void> {
+  const settle = deps.settleDreamQuestion;
+  if (!settle) return;
+  try {
+    await settle({ id: question.id, userId, deliveryKey });
+  } catch (err) {
+    const code = err && typeof err === "object" && "code" in err
+      ? String((err as { code: unknown }).code)
+      : "unknown";
+    logWarn(TAG, `dream question settlement failed (id=${question.id} code=${code}) — row stays pending`);
+  }
+}
+
 // #824: Track which recalled memory IDs were active per agent message (for emoji feedback)
 // Map<platform_message_id_string, recalled_memory_ids[]> with 1h TTL
 // Keys are lossless string representations of platform message IDs (Discord snowflakes,
@@ -172,6 +201,10 @@ export interface PipelineDeps extends TransportDeps, MemoryDeps, VoiceDeps {
   registry?: { getStates(): Record<string, import("./service-registry.js").ServiceState> };
   /** bridge.lock path for heartbeat liveness check. */
   bridgeLockPath?: string;
+  /** #1515: optional owner-scoped asked-CAS settlement after a durable
+   *  assistant record for a boot-greeting question. Must never throw through
+   *  the pipeline; failure leaves the server row pending. */
+  settleDreamQuestion?: (input: { id: string; userId: string; deliveryKey: string }) => Promise<void>;
 }
 
 /**
@@ -581,6 +614,18 @@ export async function handleInboundMessage(
       }
     }
 
+    // #1515: deterministic boot-greeting question composition. Only the
+    // automatic boot message (trusted internal metadata set by Spin) carries
+    // a question. The provider never sees it — it is appended here, once,
+    // after response normalization/redaction and before chunking, send, TTS,
+    // or assistant-memory write. Empty, reaction-only, no-reply, or
+    // failed-generation outcomes bypass composition AND settlement.
+    const bootQuestion = msg.internal?.kind === "boot_greeting" ? msg.internal.dreamQuestion : undefined;
+    const bootQuestionDelivered = Boolean(bootQuestion?.id && bootQuestion.text && cleanedText.trim().length > 0);
+    if (bootQuestionDelivered) {
+      userResponse = `${userResponse}\n\n${DREAMY_QUESTION_SUFFIX_PREFIX}${bootQuestion!.text}`;
+    }
+
     // --- #936: Simple delivery (non-master sessions) ---
     // #1651 v2: a reaction-only response IS a deliverable chat reply in simple
     // delivery too — apply it before the no-reply/empty handling, matching the
@@ -598,8 +643,11 @@ export async function handleInboundMessage(
           if (clean) await retrySend(() => adapter.sendMessage(channelId, clean, { threadId: msg.threadId, deliveryCorrelation }));
         }
       }
-      // Record assistant response to memory (skipped for K — skill-isolated)
-      if (deps.memoryRuntime?.state === "ready" && !isSkillSession && registry.byUserId.get(userId)?.role !== "guest" && !text.startsWith("[SESSION START]")) {
+      // Record assistant response to memory (skipped for K — skill-isolated).
+      // #1515: generic synthetic greetings stay excluded; a question-bearing
+      // boot greeting is recorded with a storage-only marker so the user's
+      // reply appears beside the question in the next sleep transcript.
+      if (deps.memoryRuntime?.state === "ready" && !isSkillSession && registry.byUserId.get(userId)?.role !== "guest" && (!text.startsWith("[SESSION START]") || bootQuestionDelivered)) {
         const timestamp = Date.now();
         const deliveryId = deliveryCorrelation?.executionId ?? `${activeSessionId}-${timestamp}`;
         const operationKey = assistantMessageKey(msg.platform, msg.channelId, msg.threadId ?? undefined, userId, deliveryId);
@@ -607,9 +655,14 @@ export async function handleInboundMessage(
           phase: "after_delivery",
           family: "assistant",
           operationKey,
-          run: () => deps.memoryRuntime!.recordMessage({ role: "assistant", content: userResponse, timestamp, userId, sessionId: activeSessionId }, operationKey),
+          run: () => deps.memoryRuntime!.recordMessage({ role: "assistant", content: bootQuestionDelivered ? `[WAKE-UP QUESTION id=${bootQuestion!.id}] ${userResponse}` : userResponse, timestamp, userId, sessionId: activeSessionId }, operationKey),
         });
         assistantDurablyRecorded = hasDurableMessageId(writeResult);
+        // #1515: settle the asked CAS only after a durable assistant record;
+        // the operation key is the delivery key (server CAS keeps the first).
+        if (assistantDurablyRecorded && bootQuestionDelivered) {
+          await settleDreamQuestion(deps, bootQuestion!, userId, operationKey);
+        }
       }
       // #1406: automatic durable compaction also applies to simple delivery.
       if (assistantDurablyRecorded) {
@@ -685,9 +738,11 @@ export async function handleInboundMessage(
       pSession.primingTerms = [...new Set([...modelTopics, ...regexKw, ...existing])].slice(0, PRIMING_MAX);
     }
 
-    // --- Record to memory (skipped for K — skill-isolated; guests and greeting injects) ---
+    // --- Record to memory (skipped for K — skill-isolated; guests and generic
+    // greeting injects). #1515: a question-bearing boot greeting is recorded
+    // with a storage-only marker; settlement follows only a durable ID. ---
     const isGuest = registry.byUserId.get(userId)?.role === "guest";
-    if (deps.memoryRuntime?.state === "ready" && !isSkillSession && !isGuest && !text.startsWith("[SESSION START]")) {
+    if (deps.memoryRuntime?.state === "ready" && !isSkillSession && !isGuest && (!text.startsWith("[SESSION START]") || bootQuestionDelivered)) {
       const timestamp = Date.now();
       const deliveryId = lastSentMsgId != null ? String(lastSentMsgId) : (deliveryCorrelation?.executionId ?? `${activeSessionId}-${timestamp}`);
       const operationKey = assistantMessageKey(msg.platform, msg.channelId, msg.threadId ?? undefined, userId, deliveryId);
@@ -696,12 +751,16 @@ export async function handleInboundMessage(
         family: "assistant",
         operationKey,
         run: () => deps.memoryRuntime!.recordMessage({
-          role: "assistant", content: userResponse,
+          role: "assistant", content: bootQuestionDelivered ? `[WAKE-UP QUESTION id=${bootQuestion!.id}] ${userResponse}` : userResponse,
           timestamp, userId, sessionId: activeSessionId,
           platformMessageId: lastSentMsgId != null ? String(lastSentMsgId) : undefined,
         }, operationKey),
       });
       assistantDurablyRecorded = hasDurableMessageId(writeResult);
+      // #1515: settle the asked CAS only after a durable assistant record.
+      if (assistantDurablyRecorded && bootQuestionDelivered) {
+        await settleDreamQuestion(deps, bootQuestion!, userId, operationKey);
+      }
     }
 
     // --- #1406: automatic durable compaction, scheduled once after the

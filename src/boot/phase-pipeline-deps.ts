@@ -263,6 +263,22 @@ export async function phasePipelineDeps(ctx: BootCtx): Promise<PhaseResult> {
   if (masterUser && transport) {
     const masterChatId = masterUser.platforms.telegram ?? masterUser.platforms.discord;
     if (masterChatId) {
+      // #1515: preload at most one pending dream question BEFORE
+      // registerMasterSession() — either registration or the later
+      // setGreetingAdapter() may fire the automatic greeting, so the question
+      // must be installed first. Absent support, unavailable memory, or any
+      // failure produces an ordinary greeting and leaves the row pending.
+      if (ctx.memoryRuntime.state === "ready" && ctx.memoryRuntime.supports("dreamQuestions")) {
+        try {
+          const pending = await ctx.memoryRuntime.dreamQuestions.nextPending(masterUser.userId);
+          if (pending) {
+            spin.setBootGreetingQuestion({ id: pending.id, text: pending.question });
+            logInfo("boot", `Dream question preloaded for automatic boot greeting (${pending.id})`);
+          }
+        } catch (err) {
+          logWarn("boot", `Dream question preload skipped: ${err instanceof Error ? err.message : String(err)}`);
+        }
+      }
       spin.registerMasterSession({
         userId: masterUser.userId,
         chatId: typeof masterChatId === "number" ? masterChatId : parseInt(String(masterChatId), 10),
@@ -344,6 +360,14 @@ export async function phasePipelineDeps(ctx: BootCtx): Promise<PhaseResult> {
     loadedCapabilities: [],
     selfHealerTask: null,
     hailMary: ctx.hailMary,
+    // #1515: optional question settlement after durable assistant recording.
+    // Must never throw through the pipeline; failure leaves the row pending
+    // and the server CAS makes a later retry safe.
+    settleDreamQuestion: async ({ id, userId, deliveryKey }) => {
+      if (ctx.memoryRuntime.state === "ready" && ctx.memoryRuntime.supports("dreamQuestions")) {
+        await ctx.memoryRuntime.dreamQuestions.markAsked(userId, id, deliveryKey);
+      }
+    },
     rebuildTransport: async () => {
       const { rebuildTransport } = await import("./phase-transport.js");
       await rebuildTransport(ctx);

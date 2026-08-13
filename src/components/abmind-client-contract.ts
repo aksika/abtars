@@ -38,6 +38,13 @@ export interface AbmindPrivateMemoryLike {
   prepareConversationCompaction(input: unknown): Promise<unknown>;
   /** #1406: daemon-owned durable compaction commit (private mutate). */
   commitConversationCompaction(input: unknown, idempotencyKey?: string): Promise<unknown>;
+  /** #1515: owner-scoped durable Dreamy clarification questions. */
+  dreamQuestions: {
+    nextPending(userId: string): Promise<unknown>;
+    list(userId: string, status?: string, limit?: number): Promise<unknown>;
+    markAsked(input: { userId: string; questionId: string; deliveryKey: string }, idempotencyKey?: string): Promise<unknown>;
+    dismiss(input: { userId: string; questionId: string }, idempotencyKey?: string): Promise<unknown>;
+  };
 }
 
 export interface SleepStartResultLike {

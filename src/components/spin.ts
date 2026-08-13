@@ -28,7 +28,7 @@ import type { OrcActivityFeed } from "./orc-activity-feed.js";
 import type { SessionOutputFeed } from "./session-output-feed.js";
 import { createOutputObserver, type OutputObserver } from "./session-output-feed.js";
 import { ExecutorProgressEmitter } from "./executor-progress-emitter.js";
-import { normalizeContract } from "./worker-contract.js";
+import { normalizeContract, acceptancePassed } from "./worker-contract.js";
 
 export type { ManagedSession, SpinRequest, SessionType } from "./spin-types.js";
 export { sessionType, sessionCreatedAt, typeLabel, typeAgent, parseSessionType } from "./spin-types.js";
@@ -339,6 +339,22 @@ export class Spin {
 
   private _greetingSent = false;
   private _greetingAdapter: { injectMessage: (msg: any) => void } | null = null;
+  /** #1515: bounded immutable question attached to the automatic boot
+   *  greeting only. Set before registerMasterSession(); never touched by
+   *  /session new, transport resets, or generic greetSession calls. */
+  private _bootGreetingQuestion: import("../types/platform.js").BootGreetingQuestion | null = null;
+
+  /**
+   * #1515: install at most one question for the automatic boot greeting.
+   * Preloaded in phase-pipeline-deps BEFORE registerMasterSession() so either
+   * registration or the later setGreetingAdapter() can fire the greeting with
+   * the question attached. Null clears the pending question.
+   */
+  setBootGreetingQuestion(question: import("../types/platform.js").BootGreetingQuestion | null): void {
+    this._bootGreetingQuestion = question
+      ? { id: question.id, text: question.text }
+      : null;
+  }
 
   registerMasterSession(opts: { userId: string; chatId: number; platform: string; transport: IKiroTransport }): void {
     const session = this.getActiveSession(opts.userId, opts.platform);
@@ -372,16 +388,32 @@ export class Spin {
     this._greetingSent = true;
     const { userId, chatId, platform } = this._masterOpts;
     const session = this.getActiveSession(userId, platform);
-    this.greetSession(session, chatId, userId);
+    // #1515: ONLY the automatic boot path passes the preloaded question.
+    // Direct greetSession calls (/session new, transport resets) never carry
+    // it, so they neither attach nor consume one.
+    const dreamQuestion = this._bootGreetingQuestion
+      ? { id: this._bootGreetingQuestion.id, text: this._bootGreetingQuestion.text }
+      : undefined;
+    this.greetSession(session, chatId, userId, undefined, dreamQuestion);
   }
 
   /** Inject a greeting into an interactive session (A/C only). */
-  greetSession(session: ManagedSession, chatId: number, userId: string, adapter?: { injectMessage: (msg: any) => void }): void {
+  greetSession(
+    session: ManagedSession,
+    chatId: number,
+    userId: string,
+    adapter?: { injectMessage: (msg: any) => void },
+    dreamQuestion?: { id: string; text: string },
+  ): void {
     const type = sessionType(session);
     if (type !== "A" && type !== "C") return;
     if (session.messageCount > 0) return;
     const a = adapter ?? this._greetingAdapter;
     if (!a) return;
+
+    // #1515: the automatic boot greeting carries the trusted question
+    // metadata; retries reuse the same bounded immutable copy.
+    const bootQuestion = dreamQuestion ? { id: dreamQuestion.id, text: dreamQuestion.text } : undefined;
 
     let attempt = 0;
     const inject = (): void => {
@@ -396,6 +428,7 @@ export class Spin {
         timestamp: Date.now(),
         isGroup: false,
         isVoice: false,
+        internal: bootQuestion ? { kind: "boot_greeting", dreamQuestion: bootQuestion } : undefined,
       });
       setTimeout(() => {
         if (session.messageCount > 0) return;
@@ -1263,14 +1296,25 @@ export class Spin {
               logWarn(TAG, `Card ${cardId}: supervised Worker result without attempt identity (attemptId=${spec.attemptId ?? "none"}, generation=${generation ?? "none"}) — rejected`);
             }
           } else {
-            const outcome = svc.collectAndSettle(cardId, result, session.workingDir, spec.attemptId, generation, usage ?? undefined);
+            // #1656: the request execution-scope cwd is authoritative for
+            // scheduled Workers; an explicitly allocated session working
+            // directory serves non-scheduled callers. A supervised attempt
+            // with neither verifies fail-closed — never process.cwd().
+            const verificationCwd = spec.executionScope?.cwd ?? session.workingDir;
+            const outcome = svc.collectAndSettle(cardId, result, verificationCwd, spec.attemptId, generation, usage ?? undefined);
             if (outcome.settled) {
               workerSummary = outcome.summary;
               if (outcome.envelope) {
-                const criteria = outcome.envelope.criteria;
-                criteriaVerdict = criteria.length > 0
-                  ? criteria.every(c => c.status === "passed") ? "passed" : "failed"
-                  : "unreadable";
+                // #1656: exact-contract acceptance decides the W-card
+                // projection. When the contract is unavailable (never for a
+                // settled supervised attempt), fall back to the envelope's own
+                // criteria rather than inventing a verdict.
+                const settledContract = spec.contractId ? svc.getContract(spec.contractId) : undefined;
+                criteriaVerdict = settledContract
+                  ? acceptancePassed(settledContract, outcome.envelope) ? "passed" : "failed"
+                  : outcome.envelope.criteria.length > 0
+                    ? outcome.envelope.criteria.every(c => c.status === "passed") ? "passed" : "failed"
+                    : "unreadable";
               }
               if (spec.executionControl) {
                 spec.executionControl.markTerminal(outcome.envelope ? "completed" : "failed");

@@ -9,6 +9,21 @@ export interface DeliveryCorrelation {
   kind: "final_assistant" | "system" | "tool_status" | "error";
 }
 
+/** #1515: bounded question attached to the automatic boot greeting. Never
+ *  enters provider input; only Spin's automatic boot injection creates it. */
+export interface BootGreetingQuestion {
+  id: string;
+  text: string;
+}
+
+/** #1515: trusted internal boot metadata. Only Spin's automatic master boot
+ *  injection may construct it; external platform/TUI/API adapters never read
+ *  an inbound `internal` property and never populate it. */
+export interface InternalBootMetadata {
+  kind: "boot_greeting";
+  dreamQuestion?: BootGreetingQuestion;
+}
+
 export interface SendOpts {
   threadId?: string;
   parseMode?: string;
@@ -36,6 +51,9 @@ export interface InboundMessage {
   rawPlatformData?: unknown;
   /** #1336: Internal routing hint — only TuiSocketAdapter sets it. Untrusted routing request. */
   targetSessionId?: string;
+  /** #1515: trusted internal boot metadata — set ONLY by Spin's automatic boot
+   *  injection. External adapters never construct it. */
+  internal?: InternalBootMetadata;
 }
 
 /** What a platform adapter can do — pipeline checks these. */
