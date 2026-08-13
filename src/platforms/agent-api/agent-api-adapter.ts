@@ -43,7 +43,7 @@ export class AgentApiAdapter implements PlatformAdapter {
 
     logDebug(TAG, `-> ${peerId}/${sessionId}: ${text.slice(0, 100)}`);
 
-    const { result } = await spin.dispatchAwait({
+    const { result, outcome } = await spin.dispatchAwait({
       type: "O",
       goal: `[PEER REQUEST from ${peerId}] ${text}`,
       title: `peer:${peerId}`,
@@ -52,8 +52,19 @@ export class AgentApiAdapter implements PlatformAdapter {
       settlementOwner: "spin",
     });
 
-    const response = result || "No response";
-    logDebug(TAG, `<- ${peerId}/${sessionId}: ${response.slice(0, 100)}`);
-    return response;
+    // #1651 v2: a peer request succeeds only for real text content. Never
+    // fabricate a success payload for a silent turn — the error reaches the
+    // existing HTTP error boundary with a stable code.
+    if (outcome !== "text") {
+      const reason = outcome === "no_reply"
+        ? "model signalled no reply"
+        : outcome === "reaction"
+          ? "model returned only a reaction"
+          : "model returned no output";
+      throw new Error(`empty_model_response: ${reason}`);
+    }
+
+    logDebug(TAG, `<- ${peerId}/${sessionId}: ${result.slice(0, 100)}`);
+    return result;
   }
 }

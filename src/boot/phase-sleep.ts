@@ -54,9 +54,11 @@ export async function phaseSleep(ctx: BootCtx): Promise<PhaseResult> {
       return sessionManager.allocateDreamySession(name).id;
     },
     sessionManager: {
-      spin: async (opts: { type: string; prompt: string; sessionId?: string; timeoutMs: number; deadlineAt: number; providerInactivityTimeoutMs: number; candidatePolicy: "configured-only"; await: boolean }) => {
+      spin: async (opts: { type: string; prompt: string; sessionId?: string; timeoutMs: number; deadlineAt: number; providerInactivityTimeoutMs: number; candidatePolicy: "configured-only"; await: true }) => {
         // #1611: the pump's absolute provider deadline and configured-only
         // candidate policy flow through to the transport construction.
+        // #1651 v2: the awaited contract (result + outcome) passes through
+        // unchanged — the pump consumes Spin's classification, never its own.
         return sessionManager.spin({ type: opts.type as any, prompt: opts.prompt, sessionId: opts.sessionId, timeoutMs: opts.timeoutMs, deadlineAt: opts.deadlineAt, providerInactivityTimeoutMs: opts.providerInactivityTimeoutMs, candidatePolicy: opts.candidatePolicy, settlementOwner: "spin", await: true });
       },
     },

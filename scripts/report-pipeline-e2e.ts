@@ -141,7 +141,7 @@ async function main(): Promise<void> {
       kanbanBoard.kanbanRunning(cardId);
       const content = `${sections.join("\n\n")}\n\n${("deterministic acceptance artifact for " + taskId + "\n").repeat(80)}`;
       writeFileSync(artifactPath, content, "utf-8");
-      return { cardId, result: `provider completed ${taskId}` };
+      return { cardId, result: `provider completed ${taskId}`, outcome: "text" as const };
     };
     const { ScheduledRunCoordinator } = await import("../src/components/tasks/scheduled-run-coordinator.js");
     const coordinator = new ScheduledRunCoordinator({ agentRunner });
@@ -391,7 +391,7 @@ async function main(): Promise<void> {
       observedRequest = request;
       const cardId = kanbanBoard.kanbanEnqueue(id, "task", id, { delivery: "silent", type: request.type });
       kanbanBoard.kanbanRunning(cardId);
-      return { cardId, result: "settlement owner probe" };
+      return { cardId, result: "settlement owner probe", outcome: "text" as const };
     } });
     const outcome = await probe.run(entry, reservation.run);
     if (outcome.status !== "success") return `runner outcome=${outcome.status}: ${outcome.safeDetail}`;

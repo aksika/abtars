@@ -226,7 +226,14 @@ Do NOT attempt to fix code you don't understand.`;
   (async () => {
     try {
       const { spin } = await import("./spin.js");
-      const { result } = await spin.dispatchAwait({ type: "H", goal: prompt, title: `SHA: ${errorKey.slice(0, 20)}`, source: "agent", settlementOwner: "spin" });
+      const { result, outcome } = await spin.dispatchAwait({ type: "H", goal: prompt, title: `SHA: ${errorKey.slice(0, 20)}`, source: "agent", settlementOwner: "spin" });
+      // #1651 v2: a healing attempt succeeds only for real text content. A
+      // fulfilled promise with no text (reaction/no-reply/empty) is not
+      // evidence of a fix — it routes through the existing failure path and
+      // never records AGENT OK.
+      if (outcome !== "text") {
+        throw new Error(`healer agent produced no text content (${outcome}) — not recorded as fixed`);
+      }
       recordResult("autofix-unknown", errorKey, true);
       logAutoFix(`AGENT OK: ${errorKey} → ${result.slice(0, 200)}`);
       notify(adapter, chatId, `🧠 SHA agent fixed: ${errorKey.slice(0, 40)}\n${result.slice(0, 300)}`);

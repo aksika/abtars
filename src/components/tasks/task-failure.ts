@@ -83,7 +83,7 @@ const KNOWN_CODES: Readonly<Record<TaskFailureCategory, ReadonlySet<string>>> = 
   routing: new Set(["local_session_not_peer", "peer_not_enrolled", "target_unavailable"]),
   admission: new Set(["session_capacity", "type_busy", "model_cooldown", "executor_unavailable"]),
   dependency: new Set(["executable_missing", "probe_failed", "adapter_unavailable"]),
-  execution: new Set(["process_exit", "model_error", "tool_error", "credits_exhausted"]),
+  execution: new Set(["process_exit", "model_error", "tool_error", "credits_exhausted", "empty_model_response"]),
   validation: new Set([
     "artifact_not_found",
     "artifact_not_regular_file",

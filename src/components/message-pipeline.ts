@@ -497,7 +497,7 @@ export async function handleInboundMessage(
       directContextTurn,
       settlementOwner: "spin",
       await: true,
-    }).then(r => r.result ?? "");
+    }).then(r => r.result);
     // #1292: the model call is started early to overlap with the setReaction/sendTyping
     // round-trips below, but is not awaited until later in this try block. Without this
     // guard, a fast provider-down rejection (403 / all models exhausted) floats as an
@@ -575,7 +575,14 @@ export async function handleInboundMessage(
     }
 
     // --- #936: Simple delivery (non-master sessions) ---
+    // #1651 v2: a reaction-only response IS a deliverable chat reply in simple
+    // delivery too — apply it before the no-reply/empty handling, matching the
+    // main branch below. The reaction payload comes from the parsed emoji,
+    // never the raw [REACT:…] marker.
     if (ctx.delivery === "simple") {
+      if (!userResponse && reactionEmoji) {
+        userResponse = reactionEmoji;
+      }
       if (!userResponse && noReply) return;
       if (userResponse) {
         const chunks = adapter.chunkResponse(userResponse);

@@ -3,7 +3,6 @@ import { getEnv } from "../../components/env-schema.js";
 import { logInfo, logWarn, logError } from "../../components/logger.js";
 import { writeSleepStatus } from "../../components/transport/bridge-lock-transport.js";
 import { startSleepCard, type SleepCard } from "./sleep-card.js";
-import { classifyContent } from "../../components/clean-response.js";
 import type { CapabilityApi } from "../capability.js";
 
 export type SleepUnavailableCode =
@@ -30,7 +29,13 @@ export interface SleepOpts {
    * first provider generation allocate a second, unnamed sibling session.
    */
   allocateSleepSession?: (name: string) => string | undefined;
-  sessionManager: { spin: (opts: { type: string; prompt: string; sessionId?: string; timeoutMs: number; deadlineAt: number; providerInactivityTimeoutMs: number; candidatePolicy: "configured-only"; settlementOwner: "spin" | "caller"; await: boolean }) => Promise<{ result?: string; sessionId?: string }> };
+  /**
+   * #1651 v2: the awaited spin contract is preserved through the facade —
+   * `result` and `outcome` are required on every settled turn. The pump
+   * consumes Spin's classification; it never recomputes one from the raw
+   * string.
+   */
+  sessionManager: { spin: (opts: { type: string; prompt: string; sessionId?: string; timeoutMs: number; deadlineAt: number; providerInactivityTimeoutMs: number; candidatePolicy: "configured-only"; settlementOwner: "spin" | "caller"; await: true }) => Promise<import("../../components/spin-types.js").AwaitedSpinResult> };
   /**
    * #1611: narrow exact-session quarantine callback. Fences the session by
    * exact id, cancels the active execution, releases the persistent
@@ -273,7 +278,7 @@ export function createSleepHandle(opts: SleepOpts): SleepHandle {
           break;
         }
 
-        let spinResult: DeadlineRaceResult<{ result?: string; sessionId?: string }>;
+        let spinResult: DeadlineRaceResult<import("../../components/spin-types.js").AwaitedSpinResult>;
         try {
           spinResult = await runWithAbsoluteDeadline(
             opts.sessionManager.spin({
@@ -304,25 +309,26 @@ export function createSleepHandle(opts: SleepOpts): SleepHandle {
           break;
         }
         if (spinResult.value.sessionId && !nightSessionId) nightSessionId = spinResult.value.sessionId;
+        // #1611: a transport terminal error with no valid semantic result
+        // must reject the completion — never complete(""), which would look
+        // like a domain retry and hide the provider failure. Kept as a
+        // defensive check at this external boundary even though the typed
+        // facade requires the field.
         if (spinResult.value.result === undefined) {
-          // #1611: a transport terminal error with no valid semantic result
-          // must reject the completion — never complete(""), which would look
-          // like a domain retry and hide the provider failure.
           await terminateOnFailure(ownedLeaseId, req, "provider_failed", "spin settled without a semantic result");
           break;
         }
-        // #1651 narrows #1611: rejection, timeout and a missing result field are
-        // still terminal (handled above). A turn that SETTLED carrying no
-        // semantic content is a domain fact, so it settles as an empty
+        // #1651 v2 narrows #1611: rejection, timeout and a missing result field
+        // are still terminal (handled above). A turn that SETTLED with no
+        // textual content is a domain fact, so it settles as an empty
         // completion and abmind's sendToRuntime applies its own bounded empty
-        // retry (MAX_DOMAIN_RETRIES → terminal invalid_response). Spin no longer
-        // fabricates "(no output)", so this is now observable at all; never
-        // synthesise content here and never launder a transport failure through
-        // this path.
-        const outcome = classifyContent(spinResult.value.result);
-        const completion = outcome === "content" ? spinResult.value.result : "";
-        if (outcome !== "content") {
-          logWarn("sleep", `Step ${req.stepId} produced no content (${outcome}) — settling as an empty completion for abmind's domain retry`);
+        // retry (MAX_DOMAIN_RETRIES → terminal invalid_response). Only text is
+        // curation content; a reaction is a chat control signal, never sleep
+        // domain output. The outcome is Spin's own classification — the pump
+        // never recomputes one from the raw string.
+        const completion = spinResult.value.outcome === "text" ? spinResult.value.result : "";
+        if (spinResult.value.outcome !== "text") {
+          logWarn("sleep", `Step ${req.stepId} produced no text content (${spinResult.value.outcome}) — settling as an empty completion for abmind's domain retry`);
         }
 
         const completeResult = await runUntilDeadline(

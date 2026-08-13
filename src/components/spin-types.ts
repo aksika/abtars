@@ -340,31 +340,58 @@ export interface SpinSessionSpec {
   onStepComplete?: (event: StepEvent) => void | Promise<void>;
 }
 
-export interface StepEvent {
+/** #1651 v2: truthful step event — success carries the settled result and its
+ *  outcome; failure carries the error. Never both. */
+export type StepEvent =
+  | {
+      sessionId: string;
+      cardId?: number;
+      stepIndex: number;
+      result: string;
+      outcome: ContentOutcome;
+      error?: undefined;
+      durationMs: number;
+      inputTokens?: number;
+      outputTokens?: number;
+    }
+  | {
+      sessionId: string;
+      cardId?: number;
+      stepIndex: number;
+      result?: undefined;
+      outcome?: undefined;
+      error: Error;
+      durationMs: number;
+      inputTokens?: number;
+      outputTokens?: number;
+    };
+
+/** #1651 v2: dispatch identity for a non-awaited `spin()` call. */
+export interface SpinDispatchResult {
   sessionId: string;
   cardId?: number;
-  stepIndex: number;        // 1-based call count within this session
-  result?: string;          // undefined on failure; MAY be "" (#1651)
-  /** #1651: whether the settled turn carried semantic content. */
-  outcome?: ContentOutcome;
-  error?: Error;
-  durationMs: number;
-  inputTokens?: number;     // per-call absolute (usage.input), not a delta
-  outputTokens?: number;    // per-call absolute (usage.output)
 }
 
-export interface SpinResult {
-  sessionId: string;
-  cardId?: number;
-  /** Present when `await: true`. The provider's own string — never fabricated,
-   *  so it MAY be empty (#1651). Consult `outcome` instead of truthiness when
-   *  the distinction between deliberate silence and provider failure matters. */
-  result?: string;
-  /** #1651: present when `await: true`. */
-  outcome?: ContentOutcome;
+/**
+ * #1651 v2: the settled result of a successfully awaited `spin()` call.
+ * `result` is the provider's own string — never fabricated, so it MAY be
+ * empty. `outcome` is Spin's single classification of the turn. Both are
+ * required: no consumer may reconstruct the outcome from result truthiness.
+ */
+export interface AwaitedSpinResult extends SpinDispatchResult {
+  result: string;
+  outcome: ContentOutcome;
 }
 
-/** #1361: Per-execution continuation-capable driver for Spin's execution loop.
+/** #1651 v2: `dispatchAwait()` preserves the awaited contract. */
+export interface DispatchAwaitedResult {
+  cardId: number;
+  result: string;
+  outcome: ContentOutcome;
+}
+
+/**
+ * #1361: Per-execution continuation-capable driver for Spin's execution loop.
  *  #1531: `steer` is a per-lease acknowledgement operation (`Promise<void>`).
  *  It acknowledges only the supplied lease; it never produces the execution's
  *  final response — the initial `send` promise remains the sole source of the

@@ -53,6 +53,7 @@ import type { PlatformAdapter, InboundMessage, PlatformCapabilities, SendOpts, D
 import type { Spin } from "../../components/spin.js";
 import type { SessionType } from "../../components/spin-types.js";
 import { typeLabel, sessionTypeOf } from "../../components/spin-types.js";
+import { cleanResponse } from "../../components/clean-response.js";
 import { getMasterUserId } from "../../components/master-user.js";
 import { queueInstruction, subscribeSteerEvents } from "../../components/session-instruction-queue.js";
 import type { OrcActivityFeed } from "../../components/orc-activity-feed.js";
@@ -1173,9 +1174,11 @@ export class TuiSocketAdapter implements PlatformAdapter {
       });
       // #1398: Guard against replacement during the async spin call.
       if (!this._isConnCurrent(capturedGen)) return;
-      // #1651: the placeholder belongs here, at the display boundary — Spin
-      // reports what happened and never invents a result string.
-      const markdown = outcome === "content" ? result!
+      // #1651 v2: the placeholder lives here, at the display boundary — Spin
+      // reports what happened and never invents a result string. A reaction
+      // outcome renders the parsed emoji, never the raw [REACT:…] marker.
+      const markdown = outcome === "text" ? result
+        : outcome === "reaction" ? cleanResponse(result).reactionEmoji ?? result
         : outcome === "no_reply" ? "(no reply)"
         : "(model returned no output)";
       this._push({ t: "message", role: "assistant", markdown });

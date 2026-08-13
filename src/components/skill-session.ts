@@ -76,21 +76,21 @@ export interface SkillBindingView {
   expiresAt: number;
 }
 
-/** Narrow Spin facade the manager needs (dynamic import to avoid cycles). */
-export interface SkillSpinFacade {
-  getSessionById(id: string): ManagedSession | undefined;
-  createSubSession(userId: string, platform: string, type: SessionType): ManagedSession | string;
-  ensureSessionTransport(session: ManagedSession): Promise<void>;
-  spin(spec: {
-    type: SessionType;
-    sessionId: string;
-    prompt: string;
-    userId?: string;
-    settlementOwner: "spin";
-    await: true;
-  }): Promise<{ sessionId: string; result?: string; outcome?: ContentOutcome }>;
-  finalizeExactSession(sessionId: string, expectedUserId: string): boolean;
-}
+  /** Narrow Spin facade the manager needs (dynamic import to avoid cycles). */
+  export interface SkillSpinFacade {
+    getSessionById(id: string): ManagedSession | undefined;
+    createSubSession(userId: string, platform: string, type: SessionType): ManagedSession | string;
+    ensureSessionTransport(session: ManagedSession): Promise<void>;
+    spin(spec: {
+      type: SessionType;
+      sessionId: string;
+      prompt: string;
+      userId?: string;
+      settlementOwner: "spin";
+      await: true;
+    }): Promise<{ sessionId: string; result: string; outcome: ContentOutcome }>;
+    finalizeExactSession(sessionId: string, expectedUserId: string): boolean;
+  }
 
 export interface SkillSessionManagerOptions {
   store?: SkillSessionStore;
@@ -261,9 +261,10 @@ export class SkillSessionManager {
         settlementOwner: "spin",
         await: true,
       });
-      // #1651: a bootstrap turn that carried no semantic content is a failure —
-      // an emoji-only reply counts as content, a fabricated placeholder never did.
-      if (result.outcome !== "content") throw new Error(`empty model response (${result.outcome ?? "unknown"})`);
+      // #1651 v2: bootstrap succeeds only for real text content. A reaction is
+      // a chat control signal, not skill context; no-reply and empty are
+      // failures. The awaited contract guarantees outcome is always present.
+      if (result.outcome !== "text") throw new Error(`empty model response (${result.outcome})`);
       if (replacing && existing) {
         if (existing.sessionId && existing.sessionId !== session.id) await this.endTransport(existing, "replaced");
         candidate.sessionId = session.id;

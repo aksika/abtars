@@ -14,7 +14,7 @@ import type { IKiroTransport, RuntimeUsageSnapshot } from "./transport/kiro-tran
 import type { CancelReason } from "./swarm-executor-types.js";
 import { loadUsers } from "./user-registry.js";
 import { getMasterUserId } from "./master-user.js";
-import type { ManagedSession, SpinRequest, SessionType, SpinSessionSpec, SpinResult, StepEvent, DispatchBackgroundOptions, SpinExecutionDriver, QueuedSessionInstruction } from "./spin-types.js";
+import type { ManagedSession, SpinRequest, SessionType, SpinSessionSpec, SpinDispatchResult, AwaitedSpinResult, DispatchAwaitedResult, StepEvent, DispatchBackgroundOptions, SpinExecutionDriver, QueuedSessionInstruction } from "./spin-types.js";
 import { sessionType } from "./spin-types.js";
 import { profileFor, type SessionProfile } from "./spin-profiles.js";
 import { WorkerSupervisionService, validateWorkerRootCriteria } from "./worker-supervision-service.js";
@@ -574,7 +574,11 @@ export class Spin {
   // branches here. Continuation (pipeline main turn, sleep step N) is just
   // spin() with a sessionId.
 
-  async spin(spec: SpinSessionSpec): Promise<SpinResult> {
+  /** #1651 v2: awaited calls return the settled result contract. */
+  async spin(spec: SpinSessionSpec & { await: true }): Promise<AwaitedSpinResult>;
+  /** #1651 v2: fire-and-forget calls return only dispatch identity. */
+  async spin(spec: SpinSessionSpec): Promise<SpinDispatchResult>;
+  async spin(spec: SpinSessionSpec): Promise<AwaitedSpinResult | SpinDispatchResult> {
     if (!this.runtime) throw new Error("Spin: runtime not set");
     if (spec.signal?.aborted) throw new Error("Execution cancelled");
     const profile = profileFor(spec.type);
@@ -591,11 +595,12 @@ export class Spin {
       if (spec.cardId !== undefined) {
         try { kanbanFail(spec.cardId, note); } catch { /* best effort */ }
       }
-      return {
-        sessionId: spec.sessionId ?? "",
-        cardId: spec.cardId,
-        result: `[SYSTEM BUG] ${note}`,
-      };
+      // #1651 v2: the awaited contract still holds on the fail-soft path — the
+      // diagnostic text IS the content the caller receives.
+      if (spec.await) {
+        return { sessionId: spec.sessionId ?? "", cardId: spec.cardId, result: `[SYSTEM BUG] ${note}`, outcome: "text" };
+      }
+      return { sessionId: spec.sessionId ?? "", cardId: spec.cardId };
     }
 
     // 1. Defaults
@@ -1212,15 +1217,16 @@ export class Spin {
     pushLog(session, "complete");
 
     if (this.memory) {
-      // #1651: a turn that produced nothing must not enter durable memory as a
-      // real assistant message. Before the sentinel was removed this recorded
-      // the literal "(no output)" as if the model had answered.
-      if (outcome === "content") {
+      // #1651 v2: only real text content enters durable memory. A turn that
+      // produced nothing — or only a chat control marker — must not be recorded
+      // as a real assistant message. Before the sentinel was removed this
+      // recorded the literal "(no output)" as if the model had answered.
+      if (outcome === "text") {
         const sid = cardId !== undefined ? `${spec.type}_card${cardId}` : `${spec.type}_${session.id}`;
         this.memory.recordMessage({ role: "user", content: spec.goal ?? spec.prompt ?? "", timestamp: Date.now(), userId: "system", sessionId: sid });
         this.memory.recordMessage({ role: "assistant", content: result, timestamp: Date.now(), userId: "system", sessionId: sid });
       } else {
-        logInfo(TAG, `Session ${session.id}: turn produced no content (${outcome}) — not recorded to memory`);
+        logInfo(TAG, `Session ${session.id}: turn produced no text content (${outcome}) — not recorded to memory`);
       }
     }
     if (cardId !== undefined) {
@@ -1310,19 +1316,22 @@ export class Spin {
       // #1599: a supervised worker card settles by its criteria verdict, not by
       // the execution turn returning. Criteria failed → settle failed (never
       // delivered); criteria unreadable → defer terminal settlement.
-      // #1651: an unsupervised card whose turn carried no semantic content
+      // #1651 v2: an unsupervised card whose turn carried no textual content
       // settles failed — a card reporting `done` with nothing in it is the same
-      // lie the "(no output)" sentinel used to tell one layer up. Supervised
-      // Workers are unaffected: their evidence outranks the text outcome.
+      // lie the "(no output)" sentinel used to tell one layer up. A reaction is
+      // a chat control signal, not card content. Supervised Workers are
+      // unaffected: their evidence outranks the text outcome.
       const noContentReason = outcome === "no_reply"
         ? "model signalled no reply"
-        : "model returned no output";
+        : outcome === "reaction"
+          ? "model returned only a reaction"
+          : "model returned no output";
       if (shouldKanbanComplete && !staleWorkerResult && spec.settlementOwner !== "caller") {
         if (criteriaVerdict === "failed") {
           kanbanFail(cardId, workerSummary);
         } else if (criteriaVerdict === "unreadable") {
           logWarn(TAG, `Card ${cardId}: supervised worker criteria unreadable — deferring terminal settlement`);
-        } else if (criteriaVerdict === null && outcome !== "content") {
+        } else if (criteriaVerdict === null && outcome !== "text") {
           logWarn(TAG, `Card ${cardId}: ${noContentReason} — settling failed instead of done`);
           kanbanFail(cardId, noContentReason);
         } else {
@@ -1335,8 +1344,8 @@ export class Spin {
       if (spec.callbackPeer && !supervisedProject) {
         if (criteriaVerdict === "failed") {
           fireCallback(spec.callbackPeer, cardId, "failed", undefined, workerSummary);
-        } else if (criteriaVerdict === null && outcome !== "content") {
-          // #1651: never report done to a peer for a turn with no content.
+        } else if (criteriaVerdict === null && outcome !== "text") {
+          // #1651 v2: never report done to a peer for a turn without text.
           fireCallback(spec.callbackPeer, cardId, "failed", undefined, noContentReason);
         } else if (criteriaVerdict !== "unreadable") {
           const card = kanbanGetCard(cardId);
@@ -1603,7 +1612,7 @@ export class Spin {
    * @deprecated Use `spin({ type, goal, …, await: true })` instead.
    * Backward-compat wrapper: synchronously dispatches and returns the result.
    */
-  async dispatchAwait(request: SpinRequest): Promise<{ cardId: number; result: string }> {
+  async dispatchAwait(request: SpinRequest): Promise<DispatchAwaitedResult> {
     // #987: enforce concurrency + cooldown gates
     // #1274: also enforce session cap (await:true — throw is safe, caller awaits)
     // #1520: typed admission rejection so the scheduler can defer the same
@@ -1619,7 +1628,7 @@ export class Spin {
       }
       throw new SpinDispatchAdmissionError("type_busy", `${request.type} session busy — try again shortly.`);
     }
-    const { cardId, result } = await this.spin({
+    const { cardId, result, outcome } = await this.spin({
       type: request.type,
       goal: request.goal,
       title: request.title,
@@ -1639,7 +1648,9 @@ export class Spin {
       deadlineAt: request.deadlineAt,
       deliveryReady: request.deliveryReady,
     });
-    return { cardId: cardId!, result: result! };
+    // #1651 v2: the awaited contract is preserved end to end — `outcome` is
+    // never reconstructed from result truthiness by the caller.
+    return { cardId: cardId!, result: result!, outcome: outcome! };
   }
 
   spawnChild(parentCardId: number, request: Omit<SpinRequest, "type"> & { type?: SessionType }): number {

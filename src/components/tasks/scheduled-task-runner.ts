@@ -32,7 +32,7 @@ export interface ScheduledTaskRunOutcome {
   cardId?: number;
 }
 
-export type AgentTaskRunner = (request: import("../spin-types.js").SpinRequest) => Promise<{ cardId: number; result: string }>;
+export type AgentTaskRunner = (request: import("../spin-types.js").SpinRequest) => Promise<{ cardId: number; result: string; outcome: import("../clean-response.js").ContentOutcome }>;
 export type TaskPausedCallback = (chatId: number, title: string, reason: string, notice: import("./task-run-settler.js").PauseNotice) => void;
 export type TaskFailureCallback = (entryId: string, diagnostic: TaskFailureDiagnosticV1) => void;
 export type { ScheduledProjectRequest, ScheduledProjectRunner } from "./scheduled-project-runner.js";
@@ -345,7 +345,7 @@ export class ScheduledTaskRunner {
         });
         return { status: "failed", safeDetail: detail, ...(cardId !== undefined ? { cardId } : {}) };
       }
-      const { cardId: boardId, result: response } = raceResult.value;
+      const { cardId: boardId, result: response, outcome } = raceResult.value;
       const childFactAt = raceResult.value.factAt ?? factNow();
 
       // #1539: only a durable OPERATOR cancellation settles as cancelled here.
@@ -412,7 +412,30 @@ export class ScheduledTaskRunner {
         // #1610: the one-shot announce final response is the user-facing
         // payload. deliveryText feeds the card's result_summary and delivery;
         // the short response prefix remains the operational detail.
-        const settlementDetail = response?.slice(0, 200);
+        // #1651 v2: a single-agent announce succeeds only for real text
+        // content. A reaction is a chat control signal, not a deliverable
+        // payload; no-reply and empty are silent turns. Caller-owned
+        // settlement fails closed with a structured empty_model_response
+        // diagnostic — never `"completed"`, never a delivery release. A
+        // report task never reaches this branch: its validated artifact owns
+        // settlement above the text outcome. Multi-agent project lanes carry
+        // no synthetic Spin outcome (accepted evidence owns them), so the
+        // gate applies only when the single-agent contract provided one.
+        if (outcome !== undefined && outcome !== "text") {
+          const detail = outcome === "no_reply"
+            ? "model signalled no reply"
+            : outcome === "reaction"
+              ? "model returned only a reaction"
+              : "model returned no output";
+          logWarn(TAG, `Task ${entry.id}: announce turn produced no text (${outcome}) — settling failed without delivery`);
+          settleRunOnce({
+            entry, run: reservation, outcome: "failed",
+            diagnostic: makeTaskFailure("execution", "empty_model_response", "executing", detail, "none"),
+            detail, cardId: boardId, executionRef: runId, onPaused: this.onPaused, onFailure: this.onFailure, factAt: childFactAt,
+          });
+          return { status: "failed", safeDetail: detail, cardId: boardId };
+        }
+        const settlementDetail = response.slice(0, 200);
         // The shared settler is the exclusive delivery release point.
         settleRunOnce({
           entry, run: reservation, outcome: "success", detail: settlementDetail,
@@ -468,12 +491,12 @@ function isTransientProviderError(error: unknown): boolean {
 }
 
 type ExecutionRaceResult =
-  | { kind: "completed"; value: { cardId: number; result: string; factAt?: number } }
+  | { kind: "completed"; value: { cardId: number; result: string; outcome?: import("../clean-response.js").ContentOutcome; factAt?: number } }
   | { kind: "failed"; error: Error & { cardId?: number } }
   | { kind: "timed_out"; reason: string };
 
 async function runWithDeadline(
-  promise: Promise<{ cardId: number; result: string; factAt?: number }>,
+  promise: Promise<{ cardId: number; result: string; outcome?: import("../clean-response.js").ContentOutcome; factAt?: number }>,
   timeoutMs: number,
   execControl: ExecutionControl,
   taskId: string,
