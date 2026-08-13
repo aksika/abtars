@@ -17,7 +17,7 @@
 import { existsSync, statSync, readFileSync, realpathSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { resolve, dirname } from "node:path";
-import { isPathWithinRoot } from "./pi-executor/config.js";
+import { isPathWithinRoot } from "./workspace-paths.js";
 import { MAX_CHECK_OUTPUT_LENGTH } from "./worker-contract.js";
 import type { WorkerAcceptanceContractV1, VerificationObservation, ArtifactObservation, CriterionStatus } from "./worker-contract.js";
 

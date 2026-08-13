@@ -12,6 +12,9 @@ if (!abtarsHome || !abtarsHome.includes("/tmp/")) {
   }));
   process.exit(1);
 }
+// Keep the validated value narrowed inside helper closures for the script
+// compiler; process.env values are otherwise treated as possibly undefined.
+const validatedAbtarsHome = abtarsHome;
 
 /**
  * #1656: give a non-scheduled E2E project a real canonical workspace. Worker
@@ -19,7 +22,7 @@ if (!abtarsHome || !abtarsHome.includes("/tmp/")) {
  * closed (never the bridge cwd) and no lane can pass.
  */
 function bindProjectWorkspace(projectCardId: number): void {
-  const ws = join(abtarsHome, "workspace", `swarm-${projectCardId}`);
+  const ws = join(validatedAbtarsHome, "workspace", `swarm-${projectCardId}`);
   mkdirSync(ws, { recursive: true });
   const { ProjectReviewStore } = require("../../components/project-acceptance/project-review-store.js") as typeof import("../../components/project-acceptance/project-review-store.js");
   const store = new ProjectReviewStore();

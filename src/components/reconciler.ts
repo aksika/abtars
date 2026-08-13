@@ -636,7 +636,11 @@ export function settleProjectLastResort(projectId: number): void {
       // with run_mismatch and leave the row stuck in 'executing' forever.
       const reviewStore = new ProjectReviewStore();
       if (reviewStore.getSupervision(projectId)) {
-        reviewStore.blockProject(projectId, `aborted: ${reason}`, undefined, { failCard: false });
+        // Use the same compatibility boundary as the coverage gate. Besides
+        // keeping the terminalization shape identical, this lets injected
+        // recovery stores that predate blockProject still fail closed through
+        // their state-transition implementation.
+        blockProjectWithInvalidation(reviewStore, projectId, `aborted: ${reason}`, undefined, { failCard: false });
       }
       kanbanFail(projectId, reason);
       return;

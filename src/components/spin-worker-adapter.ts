@@ -45,40 +45,47 @@ export class SpinWorkerAdapter implements SwarmExecutorAdapter {
     const card = await import("./tasks/kanban-board.js").then(m => m.kanbanGetCard(claim.cardId));
     if (!card) return { kind: "start_failed", reason: "card not found", retryable: false };
 
+    const executionRef = `${claim.attemptId}:${claim.generation}`;
     const ctrl = this.executions.open({
-      executionRef: `${claim.attemptId}:${claim.generation}`,
+      executionRef,
       attemptId: claim.attemptId,
       generation: claim.generation,
       cardId: claim.cardId,
       type: "W",
     });
 
-    const sup = new WorkerSupervisionService();
-    const contract = sup.getContract(claim.contractId);
-    if (!contract) return { kind: "start_failed", reason: "attempt contract not found", retryable: false };
-
-    // #1656: resolve the root project scope and thread it into the Worker
-    // dispatch. A scheduled root missing its durable binding fails closed
-    // before any model turn begins; non-scheduled roots keep their existing
-    // explicitly supplied/session workspace behavior.
-    const supStore = new WorkerSupervisionStore();
-    const attempt = supStore.getAttempt(claim.attemptId);
-    const rootCardId = attempt?.root_project_card_id ?? card.parent_id;
-    let executionScope: ToolExecutionScope | undefined;
-    if (rootCardId !== undefined && rootCardId !== null) {
-      const rootCard = await import("./tasks/kanban-board.js").then(m => m.kanbanGetCard(rootCardId));
-      const isScheduledRoot = rootCard?.source === "task" && rootCard.source_id != null && rootCard.source_id.length > 0;
-      const scope = new ProjectReviewStore().getWorkspaceScope(rootCardId);
-      if (isScheduledRoot && !scope) return { kind: "start_failed", reason: "scheduled project workspace not bound", retryable: false };
-      executionScope = scope;
-    }
-
-    logInfo(TAG, `Starting Worker ${claim.cardId} attempt=${claim.attemptId} gen=${claim.generation}`);
-    logSwarmTrace({ event: "adapter_start", card: claim.cardId, attempt: claim.attemptId, generation: claim.generation, executor: claim.executorId });
-
-    this._emitter().emitAlive(claim.attemptId, claim.generation, claim.executorId);
-
     try {
+      const sup = new WorkerSupervisionService();
+      const contract = sup.getContract(claim.contractId);
+      if (!contract) {
+        this.executions.remove(executionRef);
+        return { kind: "start_failed", reason: "attempt contract not found", retryable: false };
+      }
+
+      // #1656: resolve the root project scope and thread it into the Worker
+      // dispatch. A scheduled root missing its durable binding fails closed
+      // before any model turn begins; non-scheduled roots keep their existing
+      // explicitly supplied/session workspace behavior.
+      const supStore = new WorkerSupervisionStore();
+      const attempt = supStore.getAttempt(claim.attemptId);
+      const rootCardId = attempt?.root_project_card_id ?? card.parent_id;
+      let executionScope: ToolExecutionScope | undefined;
+      if (rootCardId !== undefined && rootCardId !== null) {
+        const rootCard = await import("./tasks/kanban-board.js").then(m => m.kanbanGetCard(rootCardId));
+        const isScheduledRoot = rootCard?.source === "task" && rootCard.source_id != null && rootCard.source_id.length > 0;
+        const scope = new ProjectReviewStore().getWorkspaceScope(rootCardId);
+        if (isScheduledRoot && !scope) {
+          this.executions.remove(executionRef);
+          return { kind: "start_failed", reason: "scheduled project workspace not bound", retryable: false };
+        }
+        executionScope = scope;
+      }
+
+      logInfo(TAG, `Starting Worker ${claim.cardId} attempt=${claim.attemptId} gen=${claim.generation}`);
+      logSwarmTrace({ event: "adapter_start", card: claim.cardId, attempt: claim.attemptId, generation: claim.generation, executor: claim.executorId });
+
+      this._emitter().emitAlive(claim.attemptId, claim.generation, claim.executorId);
+
       spin.dispatch({
         type: "W",
         goal: contract.goal,
@@ -93,7 +100,7 @@ export class SpinWorkerAdapter implements SwarmExecutorAdapter {
         executionScope,
       });
     } catch (err) {
-      this.executions.remove(`${claim.attemptId}:${claim.generation}`);
+      this.executions.remove(executionRef);
       return { kind: "start_failed", reason: String(err), retryable: true };
     }
 

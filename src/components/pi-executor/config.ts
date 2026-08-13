@@ -1,9 +1,12 @@
 import { configDir } from "../transport-config.js";
 import { existsSync, readFileSync, realpathSync, statSync, openSync, readSync, closeSync, mkdirSync } from "node:fs";
-import { resolve, isAbsolute, relative, sep, join } from "node:path";
+import { resolve, isAbsolute, join } from "node:path";
 import { abtarsHome } from "../../paths.js";
 import { logInfo, logWarn, logDebug } from "../logger.js";
 import type { ResumeCapability } from "./types.js";
+import { isPathWithinRoot } from "../workspace-paths.js";
+export { isPathWithinRoot } from "../workspace-paths.js";
+export type { PathOps } from "../workspace-paths.js";
 
 const TAG = "pi-config";
 
@@ -18,32 +21,6 @@ export interface PiExecutorConfig {
   abortGraceMs: number;
   projectTrust: "always" | "never";
   sessionStorageRoot: string;
-}
-
-// ── #1394: Component-aware path containment ─────────────────────────────────
-
-export interface PathOps {
-  relative(from: string, to: string): string;
-  isAbsolute(path: string): boolean;
-  sep: string;
-}
-
-/**
- * Pure containment check. Both paths must be already-canonical absolute paths.
- * Accepts when candidate equals root or is a proper descendant by path
- * components (not by string prefix).
- */
-export function isPathWithinRoot(
-  canonicalRoot: string,
-  canonicalCandidate: string,
-  pathOps: PathOps = { relative, isAbsolute, sep },
-): boolean {
-  const rel = pathOps.relative(canonicalRoot, canonicalCandidate);
-  if (rel === "") return true;          // exact equality
-  if (pathOps.isAbsolute(rel)) return false;  // different drives/roots
-  if (rel === "..") return false;
-  if (rel.startsWith(`..${pathOps.sep}`)) return false;
-  return true;
 }
 
 /** #1394: Validate all workspace aliases at boot. Returns error map keyed by alias. */
