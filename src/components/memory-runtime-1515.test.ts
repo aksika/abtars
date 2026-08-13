@@ -31,23 +31,28 @@ describe("dreamQuestions capability projection", () => {
   it("adds the dreamQuestions capability only when all four methods are negotiated", () => {
     const full = createClientRuntime(mockClient());
     expect(full.supports("dreamQuestions")).toBe(true);
+    expect(full.supports("dreamQuestionsNextPending")).toBe(true);
 
     const partial = createClientRuntime(mockClient({
       capabilities: {
         version: 1,
-        methods: ["private.dreamQuestions.nextPending", "private.dreamQuestions.list"],
+        methods: ["private.dreamQuestions.nextPending"],
         features: {},
       },
     }));
     expect(partial.supports("dreamQuestions")).toBe(false);
+    expect(partial.supports("dreamQuestionsNextPending")).toBe(true);
 
     const none = createClientRuntime(mockClient({ capabilities: { version: 1, methods: [], features: {} } }));
     expect(none.supports("dreamQuestions")).toBe(false);
+    expect(none.supports("dreamQuestionsNextPending")).toBe(false);
   });
 
   it("disabled and unavailable runtimes never support dream questions", () => {
     expect(createDisabledRuntime().supports("dreamQuestions")).toBe(false);
+    expect(createDisabledRuntime().supports("dreamQuestionsNextPending")).toBe(false);
     expect(createUnavailableRuntime().supports("dreamQuestions")).toBe(false);
+    expect(createUnavailableRuntime().supports("dreamQuestionsNextPending")).toBe(false);
   });
 });
 

@@ -268,7 +268,7 @@ export async function phasePipelineDeps(ctx: BootCtx): Promise<PhaseResult> {
       // setGreetingAdapter() may fire the automatic greeting, so the question
       // must be installed first. Absent support, unavailable memory, or any
       // failure produces an ordinary greeting and leaves the row pending.
-      if (ctx.memoryRuntime.state === "ready" && ctx.memoryRuntime.supports("dreamQuestions")) {
+      if (ctx.memoryRuntime.state === "ready" && ctx.memoryRuntime.supports("dreamQuestionsNextPending")) {
         try {
           const pending = await ctx.memoryRuntime.dreamQuestions.nextPending(masterUser.userId);
           if (pending) {

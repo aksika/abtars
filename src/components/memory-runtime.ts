@@ -24,7 +24,8 @@ export type MemoryRuntimeCapability =
   | "status"
   | "durableContext"
   | "compaction"
-  | "dreamQuestions";
+  | "dreamQuestions"
+  | "dreamQuestionsNextPending";
 
 export interface InstantStoreInput {
   userId: string;
@@ -391,6 +392,7 @@ function projectCapabilities(client: AbmindClientLike): Set<MemoryRuntimeCapabil
   if (methods.has("private.prepareConversationCompaction")
     && methods.has("private.commitConversationCompaction")
     && features["private_write"] === "true") result.add("compaction");
+  if (methods.has("private.dreamQuestions.nextPending")) result.add("dreamQuestionsNextPending");
   if (methods.has("private.dreamQuestions.nextPending")
     && methods.has("private.dreamQuestions.list")
     && methods.has("private.dreamQuestions.markAsked")
@@ -656,7 +658,7 @@ export function createClientRuntime(client: AbmindClientLike): AbtarsMemoryRunti
 
     dreamQuestions: {
       async nextPending(userId: string): Promise<DreamQuestionWireLike | null> {
-        requireClientCapability(capabilities, "dreamQuestions");
+        requireClientCapability(capabilities, "dreamQuestionsNextPending");
         const result = await pm.dreamQuestions.nextPending(userId) as unknown;
         if (result === null || result === undefined) return null;
         const pending = normalizeDreamQuestion(result);
