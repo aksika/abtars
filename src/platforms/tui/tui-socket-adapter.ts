@@ -1083,7 +1083,7 @@ export class TuiSocketAdapter implements PlatformAdapter {
       });
     }
     try {
-      const { result } = await spin.spin({
+      const { result, outcome } = await spin.spin({
         type: "O",
         sessionId: orcEntry.id,
         prompt: `[USER] ${text}`,
@@ -1092,7 +1092,12 @@ export class TuiSocketAdapter implements PlatformAdapter {
       });
       // #1398: Guard against replacement during the async spin call.
       if (!this._isConnCurrent(capturedGen)) return;
-      this._push({ t: "message", role: "assistant", markdown: result ?? "(no reply)" });
+      // #1651: the placeholder belongs here, at the display boundary — Spin
+      // reports what happened and never invents a result string.
+      const markdown = outcome === "content" ? result!
+        : outcome === "no_reply" ? "(no reply)"
+        : "(model returned no output)";
+      this._push({ t: "message", role: "assistant", markdown });
     } catch (err) {
       if (!this._isConnCurrent(capturedGen)) return;
       const message = err instanceof Error ? err.message : String(err);

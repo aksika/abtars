@@ -14,6 +14,7 @@
 
 import { logInfo, logWarn } from "./logger.js";
 import type { AgentName } from "./subagent-runtime.js";
+import type { ContentOutcome } from "./clean-response.js";
 import type { ManagedSession, SessionType } from "./spin-types.js";
 import {
   SkillSessionStore,
@@ -87,7 +88,7 @@ export interface SkillSpinFacade {
     userId?: string;
     settlementOwner: "spin";
     await: true;
-  }): Promise<{ sessionId: string; result?: string }>;
+  }): Promise<{ sessionId: string; result?: string; outcome?: ContentOutcome }>;
   finalizeExactSession(sessionId: string, expectedUserId: string): boolean;
 }
 
@@ -260,7 +261,9 @@ export class SkillSessionManager {
         settlementOwner: "spin",
         await: true,
       });
-      if (!result.result) throw new Error("empty model response");
+      // #1651: a bootstrap turn that carried no semantic content is a failure —
+      // an emoji-only reply counts as content, a fabricated placeholder never did.
+      if (result.outcome !== "content") throw new Error(`empty model response (${result.outcome ?? "unknown"})`);
       if (replacing && existing) {
         if (existing.sessionId && existing.sessionId !== session.id) await this.endTransport(existing, "replaced");
         candidate.sessionId = session.id;
@@ -280,7 +283,7 @@ export class SkillSessionManager {
         }
       }
       logInfo(TAG, `Skill "${skill}" ${resumed ? "resumed" : "launched"} for ${target.userId} (${target.platform}:${target.chatId}, session ${session.id})`);
-      return { ok: true, kind: resumed ? "resumed" : "launched", sessionId: session.id, response: result.result, skillName: skill };
+      return { ok: true, kind: resumed ? "resumed" : "launched", sessionId: session.id, response: result.result!, skillName: skill };
     } catch (err) {
       await this.abortLaunch(key, session, replacing ? existing : undefined);
       return {

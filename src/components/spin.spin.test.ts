@@ -214,7 +214,9 @@ function makeRuntime(opts: {
   const mockExec = {
     send: vi.fn(async (prompt: string, image?: any, context?: any) => {
       const response = await mockTransportInstance.sendPrompt("mock:exec", prompt, image, context);
-      return response ?? "(no output)";
+      // #1651: mirror production — the executor returns the provider's own
+      // string, empty included. It never substitutes a placeholder.
+      return response ?? "";
     }),
     close: vi.fn(),
     transport: mockTransportInstance,
@@ -224,7 +226,7 @@ function makeRuntime(opts: {
   };
   return {
     session: vi.fn().mockResolvedValue(agentSession),
-    complete: vi.fn(opts.completeImpl ?? (async () => opts.completeResponse ?? "(no output)")),
+    complete: vi.fn(opts.completeImpl ?? (async () => opts.completeResponse ?? "agent response")),
     openExecution: vi.fn(async () => mockExec),
     lastUsage,
   };
@@ -593,6 +595,78 @@ describe("spin(spec) — unified session API (#1271)", () => {
       expect(card.status).not.toBe("done");
       expect(card.status).not.toBe("failed");
       expect(callbackSend).not.toHaveBeenCalled();
+    });
+  });
+
+  /*
+   * #1651: Spin used to replace an empty provider response with the literal
+   * string "(no output)". That fabricated content made three downstream guards
+   * unreachable — the sleep completion guard (#1611/#1650), the skill bootstrap
+   * guard, and the chat empty/no-reply policy — and wrote the placeholder into
+   * memory, card summaries and report artifacts (#1474). These cases pin the
+   * truthful contract: the provider's own string, plus a classified outcome.
+   */
+  describe("empty and no-reply outcomes (#1651)", () => {
+    it("returns an empty provider response verbatim, never a placeholder", async () => {
+      spin.setRuntime(makeRuntime({ sendPromptImpl: async () => "" }) as any);
+
+      const r = await spin.spin({ type: "A", prompt: "hi", userId: "aksika", platform: "telegram", await: true });
+
+      expect(r.result).toBe("");
+      expect(r.outcome).toBe("empty");
+    });
+
+    it("reports a deliberate [NO_REPLY] as no_reply, not as empty", async () => {
+      spin.setRuntime(makeRuntime({ sendPromptImpl: async () => "[NO_REPLY]" }) as any);
+
+      const r = await spin.spin({ type: "A", prompt: "hi", userId: "aksika", platform: "telegram", await: true });
+
+      expect(r.outcome).toBe("no_reply");
+    });
+
+    it("never records a contentless turn as an assistant message in memory", async () => {
+      const recordMessage = vi.fn();
+      spin.setMemory({ recordMessage });
+      spin.setRuntime(makeRuntime({ sendPromptImpl: async () => "" }) as any);
+
+      await spin.spin({ type: "A", prompt: "hi", userId: "aksika", platform: "telegram", await: true });
+
+      expect(recordMessage).not.toHaveBeenCalled();
+    });
+
+    it("still records a normal turn in memory", async () => {
+      const recordMessage = vi.fn();
+      spin.setMemory({ recordMessage });
+      spin.setRuntime(makeRuntime({ sendPromptImpl: async () => "real answer" }) as any);
+
+      await spin.spin({ type: "A", prompt: "hi", userId: "aksika", platform: "telegram", await: true });
+
+      expect(recordMessage).toHaveBeenCalledWith(expect.objectContaining({ role: "assistant", content: "real answer" }));
+    });
+
+    it("fails an unsupervised card whose turn produced no content, and reports failed to the peer", async () => {
+      collectAndSettleOutcome.value = { settled: false, summary: "" };
+      const cardId = kanbanEnqueue("empty lane", "peer");
+      spin.setRuntime(makeRuntime({ sendPromptImpl: async () => "" }) as any);
+
+      await spin.spin({ type: "W", cardId, goal: "run lane", callbackPeer: "kp", await: true });
+      await new Promise(resolve => setTimeout(resolve, 0));
+
+      const card = (await import("./tasks/kanban-board.js") as any)._kanbanGetCardRaw(cardId);
+      expect(card.status).toBe("failed");
+      expect(callbackSend).toHaveBeenCalledWith("kp", expect.objectContaining({
+        payload: expect.objectContaining({ status: "failed", error: "model returned no output" }),
+      }));
+    });
+
+    it("exposes the outcome on the step event", async () => {
+      spin.setRuntime(makeRuntime({ sendPromptImpl: async () => "" }) as any);
+      const events: any[] = [];
+
+      await spin.spin({ type: "S", prompt: "x", await: true, onStepComplete: e => events.push(e) });
+
+      expect(events[0].result).toBe("");
+      expect(events[0].outcome).toBe("empty");
     });
   });
 

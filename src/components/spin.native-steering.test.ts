@@ -142,9 +142,9 @@ describe("spin() — #1531 native steering pump", () => {
         get isReady() { return true; },
         get transport() { return mockTransport(); },
       }),
-      complete: vi.fn(async () => "(no output)"),
+      complete: vi.fn(async () => "agent response"),
       openExecution: vi.fn(async () => ({
-        send: vi.fn(async () => "(no output)"),
+        send: vi.fn(async () => "agent response"),
         close: vi.fn(),
         transport: mockTransport(),
         sessionKey: "mock:exec",

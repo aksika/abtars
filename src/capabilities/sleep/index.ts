@@ -3,6 +3,7 @@ import { getEnv } from "../../components/env-schema.js";
 import { logInfo, logWarn, logError } from "../../components/logger.js";
 import { writeSleepStatus } from "../../components/transport/bridge-lock-transport.js";
 import { startSleepCard, type SleepCard } from "./sleep-card.js";
+import { classifyContent } from "../../components/clean-response.js";
 import type { CapabilityApi } from "../capability.js";
 
 export type SleepUnavailableCode =
@@ -303,16 +304,29 @@ export function createSleepHandle(opts: SleepOpts): SleepHandle {
           break;
         }
         if (spinResult.value.sessionId && !nightSessionId) nightSessionId = spinResult.value.sessionId;
-        if (!spinResult.value.result) {
+        if (spinResult.value.result === undefined) {
           // #1611: a transport terminal error with no valid semantic result
           // must reject the completion — never complete(""), which would look
           // like a domain retry and hide the provider failure.
           await terminateOnFailure(ownedLeaseId, req, "provider_failed", "spin settled without a semantic result");
           break;
         }
+        // #1651 narrows #1611: rejection, timeout and a missing result field are
+        // still terminal (handled above). A turn that SETTLED carrying no
+        // semantic content is a domain fact, so it settles as an empty
+        // completion and abmind's sendToRuntime applies its own bounded empty
+        // retry (MAX_DOMAIN_RETRIES → terminal invalid_response). Spin no longer
+        // fabricates "(no output)", so this is now observable at all; never
+        // synthesise content here and never launder a transport failure through
+        // this path.
+        const outcome = classifyContent(spinResult.value.result);
+        const completion = outcome === "content" ? spinResult.value.result : "";
+        if (outcome !== "content") {
+          logWarn("sleep", `Step ${req.stepId} produced no content (${outcome}) — settling as an empty completion for abmind's domain retry`);
+        }
 
         const completeResult = await runUntilDeadline(
-          () => client.sleep.runtime.complete(ownedLeaseId!, req.completionId, spinResult.value.result!),
+          () => client.sleep.runtime.complete(ownedLeaseId!, req.completionId, completion),
           settlementDeadlineAt(req.deadline),
         );
         if (completeResult.kind === "timed_out") {

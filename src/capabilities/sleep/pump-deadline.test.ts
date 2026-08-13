@@ -230,6 +230,66 @@ describe("createSleepHandle provider pump terminal settlement (#1517)", () => {
     expect(client.sleep.runtime.close).toHaveBeenCalledWith("lease-1");
   });
 
+  /*
+   * #1651: spin used to fabricate "(no output)" for an empty provider response,
+   * so the guard above could never distinguish "no content" from "no result" and
+   * every empty sleep step settled as a valid completion (#1650: watermark
+   * advanced, nothing extracted). A turn that SETTLED without content is a
+   * domain fact, not a transport failure: it goes to the broker as an empty
+   * completion and abmind's sendToRuntime owns the bounded empty retry
+   * (MAX_DOMAIN_RETRIES -> terminal invalid_response).
+   */
+  it("#1651: a settled turn carrying no content becomes an empty completion, not a pump failure", async () => {
+    const client = makeFakeClient();
+    client.sleep.start.mockResolvedValue({ status: "accepted", runId: "run-1" });
+    client.sleep.runtime.open.mockResolvedValue({ status: "ok", leaseId: "lease-1" });
+    client.sleep.runtime.next.mockImplementation(nextSequence(makeRequest(120_000)));
+    client.sleep.runtime.complete.mockResolvedValue({ status: "ok" });
+    const spin = vi.fn().mockResolvedValue({ sessionId: "s1", result: "" });
+    const quarantineSession = vi.fn();
+
+    const handle = createSleepHandle({
+      client,
+      memoryEnabled: true,
+      onComplete: vi.fn(),
+      onCycleEnd: vi.fn(),
+      sessionManager: { spin },
+      bufferSystemEvent: vi.fn(),
+      quarantineSession,
+      allocateSleepSession: () => "d-night-1",
+    });
+    handle.startScheduled();
+    await settleTicks();
+
+    expect(client.sleep.runtime.complete).toHaveBeenCalledWith("lease-1", "c1", "");
+    expect(client.sleep.runtime.fail).not.toHaveBeenCalled();
+    // cycle_end quarantine is normal teardown; a provider-failure quarantine is not.
+    expect(quarantineSession).not.toHaveBeenCalledWith("d-night-1", "provider_failed");
+  });
+
+  it("#1651: a [NO_REPLY]-only turn is also settled as empty, never as model content", async () => {
+    const client = makeFakeClient();
+    client.sleep.start.mockResolvedValue({ status: "accepted", runId: "run-1" });
+    client.sleep.runtime.open.mockResolvedValue({ status: "ok", leaseId: "lease-1" });
+    client.sleep.runtime.next.mockImplementation(nextSequence(makeRequest(120_000)));
+    client.sleep.runtime.complete.mockResolvedValue({ status: "ok" });
+    const spin = vi.fn().mockResolvedValue({ sessionId: "s1", result: "[NO_REPLY]" });
+
+    const handle = createSleepHandle({
+      client,
+      memoryEnabled: true,
+      onComplete: vi.fn(),
+      onCycleEnd: vi.fn(),
+      sessionManager: { spin },
+      bufferSystemEvent: vi.fn(),
+      allocateSleepSession: () => "d-night-1",
+    });
+    handle.startScheduled();
+    await settleTicks();
+
+    expect(client.sleep.runtime.complete).toHaveBeenCalledWith("lease-1", "c1", "");
+  });
+
   it("#1611: the pump exits on invalid_lease after a deadline — the lease is genuinely gone", async () => {
     const client = makeFakeClient();
     client.sleep.start.mockResolvedValue({ status: "accepted", runId: "run-1" });

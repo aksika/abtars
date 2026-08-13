@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { setUserRegistryOverride, type UserRegistry } from "./user-registry.js";
+import { classifyContent } from "./clean-response.js";
 import type { ManagedSession } from "./spin-types.js";
 import { DurableContextUnavailableError } from "./transport/pi-core-context.js";
 
@@ -84,13 +85,19 @@ function mockDeps(transport: IKiroTransport, overrides: Partial<PipelineDeps> = 
         // #1271: pipeline tests stub spin() to call the transport directly
         // (mirrors pre-refactor sendPrompt behavior). Streaming/tool callbacks
         // are set on the transport by the pipeline itself.
+        // #1651: the stub must mirror the production contract — the provider's
+        // own string, verbatim (possibly empty), plus the classified outcome.
+        // It previously returned `result ?? ""` while production spin returned
+        // the literal "(no output)", so the empty-response and [NO_REPLY] cases
+        // below asserted a policy production could never reach.
         const result = await transport.sendPrompt(
           spec.sessionId ?? "test_A_01",
           spec.prompt,
           spec.imageContent,
           spec.userId,
         );
-        return { sessionId: spec.sessionId ?? "test_A_01", result: result ?? "" };
+        const raw = result ?? "";
+        return { sessionId: spec.sessionId ?? "test_A_01", result: raw, outcome: classifyContent(raw) };
       },
     } as any,
     updateCtxStart: vi.fn(),

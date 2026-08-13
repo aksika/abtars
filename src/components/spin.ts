@@ -5,6 +5,8 @@
 
 import { logInfo, logWarn, logDebug } from "./logger.js";
 import { logAndSwallow } from "./log-and-swallow.js";
+import { classifyContent } from "./clean-response.js";
+import type { ContentOutcome } from "./clean-response.js";
 import { SpinDispatchAdmissionError } from "./spin-types.js";
 import { kanbanEnqueue, kanbanRunning, kanbanComplete, kanbanFail, kanbanRetryOrFail, kanbanGetCard, resolveRootId, checkWorkerSlotForProject } from "./tasks/kanban-board.js";
 import type { SubagentRuntime } from "./subagent-runtime.js";
@@ -888,12 +890,12 @@ export class Spin {
               contextProvider: ctx?.contextProvider ?? this.contextProvider.current ?? undefined,
             };
             if ((!this.sessionOutputFeed && !leaseEmitter) || !session.activeExecutionId) {
-              return (await executor.send(msg, img, enrichedContext)) || "(no output)";
+              return await executor.send(msg, img, enrichedContext);
             }
             const obs = makeOutputObserver();
             const enriched = { ...(ctx ?? {}), outputObserver: obs };
             try {
-              const r = (await executor.send(msg, img, { ...enrichedContext, ...enriched })) || "(no output)";
+              const r = await executor.send(msg, img, { ...enrichedContext, ...enriched });
               obs.end?.("complete");
               return r;
             } catch (err) {
@@ -951,7 +953,7 @@ export class Spin {
             // while the send is in flight; its result never replaces the send
             // result and a steering-only failure never replaces the send error.
             try {
-              const result = (await sendPromise) || "(no output)";
+              const result = await sendPromise;
               await pump.settle();
               return result;
             } catch (sendErr) {
@@ -961,14 +963,14 @@ export class Spin {
           }
           // Sequential path (ACP/tmux): no in-process agent queue; instructions
           // queued during the send are drained as post-send continuations.
-          let result = (await sendPromise) || "(no output)";
+          let result = await sendPromise;
           for (let round = 0; round < MAX_STEER_ROUNDS; round++) {
             const batch = leaseInstructions(session, "steer");
             if (!batch) { session.steeringAccepting = false; break; }
             try {
               const steeringPrompt = renderSteeringContinuation(batch.instructions as QueuedSessionInstruction[]);
               markDelivered(batch);
-              result = (await send(driver, steeringPrompt, undefined, {
+              result = await send(driver, steeringPrompt, undefined, {
                 userId: spec.userId ?? userId,
                 // #1552: every context Spin builds carries the trusted type.
                 sessionType: sessionType(session),
@@ -977,7 +979,7 @@ export class Spin {
                 // #1629: steering continuations belong to the same execution
                 // and inherit its trusted authorization mode.
                 authorizationMode,
-              })) || "(no output)";
+              });
               markConsumed(batch, session);
             } catch (steerErr) {
               if (batch.instructions.some((instruction) => instruction.state === "delivered")) {
@@ -1000,7 +1002,7 @@ export class Spin {
         executeWithSteering().then(r => {
           const telemetryUsage = executionTelemetry.snapshot();
           executionTelemetry.close();
-          return this.finishSpin(spec, profile, session, capturedExecutionId, cardId, stepIndex, started, r, terminate, telemetryUsage);
+          return this.finishSpin(spec, profile, session, capturedExecutionId, cardId, stepIndex, started, r, classifyContent(r), terminate, telemetryUsage);
         }).catch(e => {
           const telemetryUsage = executionTelemetry.snapshot();
           executionTelemetry.close();
@@ -1009,10 +1011,13 @@ export class Spin {
         return { sessionId: session.id, cardId };
       }
       const result = await executeWithSteering();
+      // #1651: the provider's own string is never replaced by a placeholder.
+      // One classification per settled turn, shared by settlement and callers.
+      const outcome = classifyContent(result);
       const telemetryUsage = executionTelemetry.snapshot();
       executionTelemetry.close();
-      await this.finishSpin(spec, profile, session, capturedExecutionId, cardId, stepIndex, started, result, terminate, telemetryUsage);
-      return { sessionId: session.id, cardId, result };
+      await this.finishSpin(spec, profile, session, capturedExecutionId, cardId, stepIndex, started, result, outcome, terminate, telemetryUsage);
+      return { sessionId: session.id, cardId, result, outcome };
     } catch (err) {
       const telemetryUsage = executionTelemetry.snapshot();
       executionTelemetry.close();
@@ -1166,6 +1171,7 @@ export class Spin {
   private async finishSpin(
     spec: SpinSessionSpec, profile: SessionProfile, session: ManagedSession, capturedExecutionId: string,
     cardId: number | undefined, stepIndex: number, started: number, result: string,
+    outcome: ContentOutcome,
     terminate: "call" | "response" | "external",
     telemetryUsage?: { input: number; output: number; cacheRead?: number; cacheWrite?: number },
   ): Promise<void> {
@@ -1199,9 +1205,16 @@ export class Spin {
     pushLog(session, "complete");
 
     if (this.memory) {
-      const sid = cardId !== undefined ? `${spec.type}_card${cardId}` : `${spec.type}_${session.id}`;
-      this.memory.recordMessage({ role: "user", content: spec.goal ?? spec.prompt ?? "", timestamp: Date.now(), userId: "system", sessionId: sid });
-      this.memory.recordMessage({ role: "assistant", content: result, timestamp: Date.now(), userId: "system", sessionId: sid });
+      // #1651: a turn that produced nothing must not enter durable memory as a
+      // real assistant message. Before the sentinel was removed this recorded
+      // the literal "(no output)" as if the model had answered.
+      if (outcome === "content") {
+        const sid = cardId !== undefined ? `${spec.type}_card${cardId}` : `${spec.type}_${session.id}`;
+        this.memory.recordMessage({ role: "user", content: spec.goal ?? spec.prompt ?? "", timestamp: Date.now(), userId: "system", sessionId: sid });
+        this.memory.recordMessage({ role: "assistant", content: result, timestamp: Date.now(), userId: "system", sessionId: sid });
+      } else {
+        logInfo(TAG, `Session ${session.id}: turn produced no content (${outcome}) — not recorded to memory`);
+      }
     }
     if (cardId !== undefined) {
       // #1248: If cancellation already won, skip normal completion settlement
@@ -1290,11 +1303,21 @@ export class Spin {
       // #1599: a supervised worker card settles by its criteria verdict, not by
       // the execution turn returning. Criteria failed → settle failed (never
       // delivered); criteria unreadable → defer terminal settlement.
+      // #1651: an unsupervised card whose turn carried no semantic content
+      // settles failed — a card reporting `done` with nothing in it is the same
+      // lie the "(no output)" sentinel used to tell one layer up. Supervised
+      // Workers are unaffected: their evidence outranks the text outcome.
+      const noContentReason = outcome === "no_reply"
+        ? "model signalled no reply"
+        : "model returned no output";
       if (shouldKanbanComplete && !staleWorkerResult && spec.settlementOwner !== "caller") {
         if (criteriaVerdict === "failed") {
           kanbanFail(cardId, workerSummary);
         } else if (criteriaVerdict === "unreadable") {
           logWarn(TAG, `Card ${cardId}: supervised worker criteria unreadable — deferring terminal settlement`);
+        } else if (criteriaVerdict === null && outcome !== "content") {
+          logWarn(TAG, `Card ${cardId}: ${noContentReason} — settling failed instead of done`);
+          kanbanFail(cardId, noContentReason);
         } else {
           kanbanComplete(cardId, null, workerSummary);
         }
@@ -1305,6 +1328,9 @@ export class Spin {
       if (spec.callbackPeer && !supervisedProject) {
         if (criteriaVerdict === "failed") {
           fireCallback(spec.callbackPeer, cardId, "failed", undefined, workerSummary);
+        } else if (criteriaVerdict === null && outcome !== "content") {
+          // #1651: never report done to a peer for a turn with no content.
+          fireCallback(spec.callbackPeer, cardId, "failed", undefined, noContentReason);
         } else if (criteriaVerdict !== "unreadable") {
           const card = kanbanGetCard(cardId);
           fireCallback(spec.callbackPeer, cardId, "done", result.slice(0, 500), undefined, artifacts, card?.tokens_used ?? 0);
@@ -1347,7 +1373,7 @@ export class Spin {
     }
 
     const stepEvent: StepEvent = {
-      sessionId: session.id, cardId, stepIndex, result,
+      sessionId: session.id, cardId, stepIndex, result, outcome,
       durationMs: Date.now() - started,
       inputTokens: usage?.input, outputTokens: usage?.output,
     };
