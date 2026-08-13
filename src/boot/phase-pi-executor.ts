@@ -102,13 +102,14 @@ export async function phasePiExecutor(ctx: BootCtx): Promise<void> {
     setCodingRouteService(codingService);
     setCodingCommandService(codingService);
     ctx.sessionManager!.setCodingSessionTeardown((sessionId) => {
-      const rec = codingStore.get(sessionId);
-      if (!rec) return false;
-      return codingService.endSession(sessionId, rec.ownerPrincipal);
+      return codingService.prepareEndSession(sessionId);
     });
-    setCodingCallbackHandler(async (sessionId, requestId, value) => {
+    setCodingCallbackHandler(async (sessionId, requestId, value, chatId) => {
       const rec = codingStore.get(sessionId);
       if (!rec) return false;
+      // Telegram callback payloads are untrusted. The durable chat target is
+      // the second ownership fence in addition to the service's user fence.
+      if (rec.chatId !== String(chatId)) return false;
       const coerced = value === "true" ? true : value === "false" ? false : value;
       const result = await codingService.reply(sessionId, requestId, coerced, rec.ownerPrincipal);
       return result.ok;

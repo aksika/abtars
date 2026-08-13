@@ -94,7 +94,7 @@ export class PiRuntimeHost {
     const args = [
       ...this.config_.fixedArgs,
       "--mode", "rpc",
-      ...buildTrustArgs(this.config_),
+      ...buildTrustArgs(this.config_, input.workspaceAlias),
     ];
     const env = buildChildEnv(this.config_, input.envIdentity, input.memoryMode ?? "abmind");
 

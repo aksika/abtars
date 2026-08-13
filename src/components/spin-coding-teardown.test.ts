@@ -61,6 +61,15 @@ describe("Spin coding-session teardown (#1635)", () => {
     expect(teardown).toHaveBeenCalledWith(session.id);
   });
 
+  it("refuses to finalize while coding teardown is still active", () => {
+    teardown.mockReturnValue(false);
+    const session = allocateCodingEnvelope("aksika", "telegram");
+    const result = spin.endSession("aksika", "telegram", session.shortIndex);
+    expect(result).toBe("Coding session is still stopping; retry shortly");
+    expect(teardown).toHaveBeenCalledWith(session.id);
+    expect(spin.getSessionById(session.id)?.status).not.toBe("ended");
+  });
+
   it("does NOT run the coding teardown for ordinary sessions", () => {
     const session = spin.createSession("aksika", "telegram", "B");
     const idx = (session as import("./spin-types.js").ManagedSession).shortIndex;

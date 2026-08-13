@@ -15,7 +15,7 @@
  * buildPrompt(), or any memory hook.
  */
 
-import { PiCodingSessionStore, type PiCodingSessionRecord } from "./pi-coding-session-store.js";
+import { PiCodingSessionStore, type PiCodingSessionRecord, type PiCodingTransitionUpdates } from "./pi-coding-session-store.js";
 import { PiWorkspaceClaimStore } from "./pi-workspace-claim-store.js";
 import { PiRuntimeHost } from "./pi-runtime-host.js";
 import type { PiExecutorConfig } from "./config.js";
@@ -69,6 +69,8 @@ interface OwnedTurn {
   workspacePath: string;
   beforeEvidence: { head?: string; status?: string } | null;
   settling: boolean;
+  released: boolean;
+  endRequested: boolean;
   abortTimer: ReturnType<typeof setTimeout> | null;
   wallClockStart: number;
   unsubTermination: (() => void) | null;
@@ -270,7 +272,7 @@ export class PiCodingSessionService {
       }
 
       await owned.client.prompt(input.text);
-      this.deps.store.touchActivity(input.sessionId);
+      this.deps.store.touchActivity(input.sessionId, generation);
       return { kind: "started" };
     } catch (err) {
       await this.teardownTurn(owned, "session_missing", boundedError(err));
@@ -288,7 +290,7 @@ export class PiCodingSessionService {
     if (this.checkWallClock(owned)) return { kind: "error", reason: "Turn exceeded the wall clock — aborted" };
     try {
       await owned.client.followUp(text);
-      this.deps.store.touchActivity(sessionId);
+      this.deps.store.touchActivity(sessionId, owned.generation);
       return { kind: "started" };
     } catch (err) {
       return { kind: "error", reason: boundedError(err) };
@@ -305,7 +307,7 @@ export class PiCodingSessionService {
     if (this.checkWallClock(owned)) return { kind: "error", reason: "Turn exceeded the wall clock — aborted" };
     try {
       await owned.client.steer(text);
-      this.deps.store.touchActivity(sessionId);
+      this.deps.store.touchActivity(sessionId, owned.generation);
       return { kind: "started" };
     } catch (err) {
       return { kind: "error", reason: boundedError(err) };
@@ -340,7 +342,7 @@ export class PiCodingSessionService {
     this.deps.store.casTransition(sessionId, "awaiting_input", "running", {
       pendingRequestId: null, pendingRequestType: null,
     });
-    this.deps.store.touchActivity(sessionId);
+    this.deps.store.touchActivity(sessionId, owned.generation);
     return { ok: true };
   }
 
@@ -418,21 +420,44 @@ export class PiCodingSessionService {
   // ── session end / shutdown ────────────────────────────────────────────────
 
   /**
-   * `/coding end` — stop any live turn, end the durable row and the Spin C
-   * envelope. Never touches the Pi transcript.
+   * `/coding end` — stop any live turn, then end the durable row and the Spin
+   * C envelope after generation-owned resources are released. Never touches
+   * the Pi transcript.
    */
   endSession(sessionId: string, ownerPrincipal: string): boolean {
     const rec = this.authorize(sessionId, ownerPrincipal);
     if (!rec) return false;
     const owned = this.live.get(sessionId);
-    if (owned && !owned.settling) {
-      this.cancelTurn(owned, "Session ended by user");
+    if (owned) {
+      owned.endRequested = true;
+      if (!owned.settling) this.cancelTurn(owned, "Session ended by user");
+      logInfo(TAG, `Coding session ${sessionId} end requested; waiting for Pi teardown`);
+      return true;
     }
     this.deps.store.markEnded(sessionId);
     try {
       this.deps.spin.endCodingExternalSession(sessionId, sessionId);
     } catch { /* best effort */ }
     logInfo(TAG, `Coding session ${sessionId} ended (transcript preserved)`);
+    return true;
+  }
+
+  /**
+   * Synchronous preflight used by `/session end|kill`. An active Pi process
+   * cannot be awaited by Spin's synchronous session API, so refuse envelope
+   * finalization and let releaseTurn finish it after reap. Idle sessions have
+   * no process and can be finalized by Spin immediately.
+   */
+  prepareEndSession(sessionId: string): boolean {
+    const rec = this.deps.store.get(sessionId);
+    if (!rec) return true;
+    const owned = this.live.get(sessionId);
+    if (owned) {
+      owned.endRequested = true;
+      if (!owned.settling) this.cancelTurn(owned, "Session ended by user");
+      return false;
+    }
+    this.deps.store.markEnded(sessionId);
     return true;
   }
 
@@ -532,7 +557,13 @@ export class PiCodingSessionService {
         outcome = { ok: false, busy: true };
         throw TURN_START_ROLLBACK;
       }
-      this.setLeaseInTx(rec.sessionId, generation, leaseOwner);
+      if (!this.setLeaseInTx(rec.sessionId, generation, leaseOwner)) {
+        // A stale lease on an otherwise startable row is still an exclusive
+        // writer. Roll back the whole transaction rather than launching a
+        // process with no durable lease fence.
+        outcome = { ok: false, busy: true };
+        throw TURN_START_ROLLBACK;
+      }
       outcome = { ok: true, generation };
     };
     try {
@@ -543,8 +574,8 @@ export class PiCodingSessionService {
     return outcome;
   }
 
-  private setLeaseInTx(sessionId: string, generation: number, leaseOwner: string): void {
-    this.deps.store.setLease(sessionId, {
+  private setLeaseInTx(sessionId: string, generation: number, leaseOwner: string): boolean {
+    return this.deps.store.setLease(sessionId, {
       frontend: "telegram-rpc",
       owner: leaseOwner,
       generation,
@@ -557,19 +588,29 @@ export class PiCodingSessionService {
     generation: number,
     canonicalPath: string,
   ): Promise<{ ok: true; owned: OwnedTurn } | { ok: false; reason: string }> {
-    const launched = await this.deps.host.launch({
-      workspaceAlias: rec.workspaceAlias,
-      envIdentity: {
-        id: rec.sessionId,
-        ownerPrincipalId: rec.ownerPrincipal,
-        executionGeneration: generation,
-      },
-      memoryMode: rec.memoryMode,
-    });
+    let launched: Awaited<ReturnType<PiRuntimeHost["launch"]>>;
+    try {
+      launched = await this.deps.host.launch({
+        workspaceAlias: rec.workspaceAlias,
+        envIdentity: {
+          id: rec.sessionId,
+          ownerPrincipalId: rec.ownerPrincipal,
+          executionGeneration: generation,
+        },
+        memoryMode: rec.memoryMode,
+      });
+    } catch (err) {
+      this.deps.claims.releaseForGeneration({ ownerId: rec.sessionId, generation });
+      this.deps.store.clearLease(rec.sessionId, generation);
+      this.deps.store.casTransition(rec.sessionId, "starting", "idle", {}, generation);
+      this.deps.host.releaseSlot();
+      return { ok: false, reason: boundedError(err) };
+    }
     if (!launched.ok) {
       this.deps.claims.releaseForGeneration({ ownerId: rec.sessionId, generation });
       this.deps.store.clearLease(rec.sessionId, generation);
       this.deps.store.casTransition(rec.sessionId, "starting", "idle", {}, generation);
+      this.deps.host.releaseSlot();
       return { ok: false, reason: launched.error };
     }
     const owned: OwnedTurn = {
@@ -579,6 +620,8 @@ export class PiCodingSessionService {
       workspacePath: canonicalPath,
       beforeEvidence: captureGitEvidence(canonicalPath),
       settling: false,
+      released: false,
+      endRequested: false,
       abortTimer: null,
       wallClockStart: Date.now(),
       unsubTermination: null,
@@ -650,7 +693,7 @@ export class PiCodingSessionService {
         this.deps.store.recordResumeCapability(rec.sessionId, proof.capability);
         return { ok: false, capability: proof.capability, reason: proof.reason };
       }
-      return { ok: true, sessionId: state.sessionId, sessionFile: state.sessionFile };
+      return { ok: true, sessionId: proof.sessionId, sessionFile: proof.canonicalFile };
     } catch (err) {
       return { ok: false, capability: "session_missing", reason: boundedError(err) };
     }
@@ -662,20 +705,40 @@ export class PiCodingSessionService {
     identity: { sessionId: string; sessionFile?: string },
     why: "turn" | "compact",
   ): Promise<void> {
+    // `agent_end`, process termination, and compact completion can race. The
+    // first path to settle owns the generation; later paths must not consume
+    // another process's shared slot.
+    if (owned.settling) return;
+    owned.settling = true;
     const sessionId = owned.sessionId;
     const afterEvidence = captureGitEvidence(owned.workspacePath);
     const summary = computeChangedFilesSummary(owned.beforeEvidence, afterEvidence);
     const usage = await owned.client.getSessionStats().catch(() => ({}));
     const usageJson = JSON.stringify(usage).slice(0, 1000);
-    this.deps.store.casTransition(sessionId, "running", "idle", {
-      piSessionId: identity.sessionId,
-      piSessionFile: identity.sessionFile,
+    const proof = validatePersistedSession({
+      sessionStorageRoot: this.deps.config.sessionStorageRoot,
+      expectedSessionId: identity.sessionId,
+      sessionFile: identity.sessionFile,
+    });
+    const updates: PiCodingTransitionUpdates = {
       usageJson,
       changedFilesSummary: summary,
-      resumeCapability: "available",
+      resumeCapability: proof.ok ? "available" : proof.capability,
       pendingRequestId: null,
       pendingRequestType: null,
-    }, owned.generation);
+    };
+    if (proof.ok) {
+      // Persist the canonical, proof-backed path. If final state is malformed
+      // or missing, retain the last known identity and downgrade capability;
+      // never turn an unproven path into `available`.
+      updates.piSessionId = proof.sessionId;
+      updates.piSessionFile = proof.canonicalFile;
+    }
+    const transitioned = this.deps.store.casTransition(sessionId, "running", "idle", updates, owned.generation);
+    if (transitioned.applied && why === "turn") {
+      const finalText = await owned.client.getLastAssistantText().catch(() => null);
+      if (finalText) this.deps.sink.assistantText(sessionId, finalText);
+    }
     this.deps.sink.turnComplete(sessionId, { usageJson, changedFilesSummary: summary });
     await this.releaseTurn(owned);
     logInfo(TAG, `Coding turn ${sessionId} (gen ${owned.generation}) returned to idle (${why})`);
@@ -707,6 +770,8 @@ export class PiCodingSessionService {
     capability: ResumeCapability,
     reason: string,
   ): Promise<void> {
+    if (owned.settling) return;
+    owned.settling = true;
     this.deps.store.casTransition(owned.sessionId, "starting", "idle", {
       resumeCapability: capability,
       pendingRequestId: null, pendingRequestType: null,
@@ -717,16 +782,25 @@ export class PiCodingSessionService {
 
   /** Release every generation-owned resource exactly once. */
   private async releaseTurn(owned: OwnedTurn): Promise<void> {
+    if (owned.released) return;
+    owned.released = true;
     if (owned.abortTimer) { clearTimeout(owned.abortTimer); owned.abortTimer = null; }
     if (owned.unsubTermination) { owned.unsubTermination(); owned.unsubTermination = null; }
     if (owned.unsubEvents) { owned.unsubEvents(); owned.unsubEvents = null; }
     if (owned.unsubUi) { owned.unsubUi(); owned.unsubUi = null; }
-    try { await owned.client.close(); } catch { /* ignore */ }
+    try { await owned.client.closeAndWait(); } catch { /* ignore */ }
     this.deps.store.clearLease(owned.sessionId, owned.generation);
     this.deps.claims.releaseForGeneration({ ownerId: owned.sessionId, generation: owned.generation });
     this.deps.host.releaseSlot();
     if (this.live.get(owned.sessionId) === owned) {
       this.live.delete(owned.sessionId);
+    }
+    if (owned.endRequested) {
+      this.deps.store.markEnded(owned.sessionId);
+      try {
+        this.deps.spin.endCodingExternalSession(owned.sessionId, owned.sessionId);
+      } catch { /* best effort */ }
+      logInfo(TAG, `Coding session ${owned.sessionId} ended after Pi teardown`);
     }
   }
 
@@ -734,6 +808,7 @@ export class PiCodingSessionService {
     if (owned.settling) return;
     if (owned.client.closed) return;
     if (owned.abortTimer) return; // cancelling — the grace timer settles
+    owned.settling = true;
     logWarn(TAG, `Unexpected Pi process termination for ${owned.sessionId} (gen=${owned.generation})`);
     const afterEvidence = captureGitEvidence(owned.workspacePath);
     const summary = computeChangedFilesSummary(owned.beforeEvidence, afterEvidence);
@@ -747,7 +822,8 @@ export class PiCodingSessionService {
   }
 
   private async onRpcEvent(owned: OwnedTurn, event: PiAgentEvent): Promise<void> {
-    this.deps.store.touchActivity(owned.sessionId);
+    if (owned.settling || owned.released) return;
+    this.deps.store.touchActivity(owned.sessionId, owned.generation);
     const proj = projectPiEvent(event);
     for (const p of proj.progress) {
       if (p.type === "tool_execution_start" || p.type === "tool_execution_end") {
@@ -777,7 +853,8 @@ export class PiCodingSessionService {
   }
 
   private async onUiRequest(owned: OwnedTurn, request: RpcExtensionUIRequest): Promise<void> {
-    this.deps.store.touchActivity(owned.sessionId);
+    if (owned.settling || owned.released) return;
+    this.deps.store.touchActivity(owned.sessionId, owned.generation);
     const method = request.method;
     const dialogMethods = new Set(["select", "confirm", "input", "editor"]);
     if (dialogMethods.has(method)) {

@@ -4,7 +4,7 @@
 
 import { describe, it, expect, vi, beforeAll, afterAll, beforeEach, afterEach } from "vitest";
 import { posix, win32 } from "node:path";
-import { isPathWithinRoot, resolveAndValidateWorkspace, validatePiWorkspaceAliases, type PiExecutorConfig, loadPiConfig } from "./config.js";
+import { buildTrustArgs, isPathWithinRoot, resolveAndValidateWorkspace, validatePiWorkspaceAliases, type PiExecutorConfig, loadPiConfig } from "./config.js";
 import { mkdtempSync, writeFileSync, rmSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir, homedir } from "node:os";
@@ -141,6 +141,19 @@ describe("validatePiWorkspaceAliases", () => {
     } as PiExecutorConfig;
     const result = resolveAndValidateWorkspace("test", config);
     expect(result.error).toContain("does not exist");
+  });
+});
+
+describe("buildTrustArgs", () => {
+  it("uses an alias-specific trust policy when configured", () => {
+    const config = {
+      enabled: true, command: "pi", fixedArgs: [], allowedEnv: [],
+      maxConcurrent: 1, maxWallClockMs: 60000, abortGraceMs: 5000,
+      projectTrust: "never", sessionStorageRoot: "",
+      workspaceAliases: { trusted: { path: "/tmp", projectTrust: "always" } },
+    } as PiExecutorConfig;
+    expect(buildTrustArgs(config, "trusted")).toEqual(["--approve"]);
+    expect(buildTrustArgs(config, "missing")).toEqual(["--no-approve"]);
   });
 });
 

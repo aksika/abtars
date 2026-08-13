@@ -319,10 +319,13 @@ export class PiCodingSessionStore {
     ).run(capability, sessionId);
   }
 
-  touchActivity(sessionId: string): void {
-    this.db.prepare(
-      `UPDATE pi_coding_sessions SET last_activity_at = datetime('now'), updated_at = datetime('now') WHERE session_id = ?`
-    ).run(sessionId);
+  /** Touch activity, optionally fenced to the owning runtime generation. */
+  touchActivity(sessionId: string, expectedGeneration?: number): boolean {
+    const generationClause = expectedGeneration === undefined ? "" : " AND runtime_generation = ?";
+    const result = this.db.prepare(
+      `UPDATE pi_coding_sessions SET last_activity_at = datetime('now'), updated_at = datetime('now') WHERE session_id = ?${generationClause}`
+    ).run(sessionId, ...(expectedGeneration === undefined ? [] : [expectedGeneration]));
+    return result.changes === 1;
   }
 
   /** #1635 — Terminal transition: the owner explicitly ended the session. The

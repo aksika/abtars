@@ -66,6 +66,8 @@ export class SupervisedPiRpcClient {
   private _closed = false;
   private _ready = false;
   private _terminationFired = false;
+  private processExitPromise: Promise<void> | null = null;
+  private resolveProcessExit: (() => void) | null = null;
 
   get closed(): boolean { return this._closed; }
   get ready(): boolean { return this._ready; }
@@ -80,6 +82,10 @@ export class SupervisedPiRpcClient {
     if (this.child) throw new PiRpcError("already_started", "Pi RPC client is already running");
     logDebug(TAG, `Launching: ${command} ${args.join(" ")}`);
 
+    this.processExitPromise = new Promise<void>((resolve) => {
+      this.resolveProcessExit = resolve;
+    });
+
     this.child = spawn(command, args, {
       cwd,
       env,
@@ -88,6 +94,8 @@ export class SupervisedPiRpcClient {
     });
 
     this.child.on("exit", (code, signal) => {
+      this.resolveProcessExit?.();
+      this.resolveProcessExit = null;
       logDebug(TAG, `Pi process exited: code=${code} signal=${signal}`);
       this._fireTermination({ kind: "exit", code, signal });
       if (!this._closed) {
@@ -95,6 +103,8 @@ export class SupervisedPiRpcClient {
       }
     });
     this.child.on("error", (err) => {
+      this.resolveProcessExit?.();
+      this.resolveProcessExit = null;
       logError(TAG, `Pi process error: ${err.message}`);
       this._fireTermination({ kind: "error", error: err });
       if (!this._closed) this._rejectAll(new PiRpcError("process_error", err.message));
@@ -251,6 +261,29 @@ export class SupervisedPiRpcClient {
     this.child = null;
     this.eventListeners.clear();
     this.uiRequestListeners.clear();
+  }
+
+  /**
+   * Request shutdown and wait until the child is reaped. The ordinary
+   * `close()` API remains prompt for callers that only need to detach; shared
+   * workspace/slot owners use this bounded variant so they never release a
+   * generation while its Pi process is still alive.
+   */
+  async closeAndWait(timeoutMs = 5_500): Promise<void> {
+    const exit = this.processExitPromise;
+    await this.close();
+    if (!exit) return;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    try {
+      await Promise.race([
+        exit,
+        new Promise<void>((resolve) => {
+          timer = setTimeout(resolve, timeoutMs);
+        }),
+      ]);
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
   }
 
   getStderr(): string {

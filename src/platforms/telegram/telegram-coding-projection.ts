@@ -20,13 +20,23 @@ import type { PiCodingProjectionSink } from "../../components/pi-executor/pi-cod
 import type { PiCodingSessionStore } from "../../components/pi-executor/pi-coding-session-store.js";
 import type { TelegramApi } from "./telegram-api.js";
 import { logWarn } from "../../components/logger.js";
+import { randomUUID } from "node:crypto";
 
 const TAG = "telegram-coding";
 const MAX_UI_OPTIONS = 10;
+const MAX_CALLBACK_TOKENS = 256;
+
+type CodingCallbackHandler = (sessionId: string, requestId: string, value: string, chatId: number) => Promise<boolean>;
+interface CodingCallback {
+  sessionId: string;
+  requestId: string;
+  value: string;
+}
 
 let adapter: PlatformAdapter | null = null;
 let api: TelegramApi | null = null;
-let callbackHandler: ((sessionId: string, requestId: string, value: string) => Promise<boolean>) | null = null;
+let callbackHandler: CodingCallbackHandler | null = null;
+const callbackTokens = new Map<string, CodingCallback>();
 
 /** #1635 — wire the Telegram adapter for coding projection (platform boot). */
 export function setTelegramCodingDelivery(a: PlatformAdapter | null, tgApi: TelegramApi | null): void {
@@ -35,24 +45,47 @@ export function setTelegramCodingDelivery(a: PlatformAdapter | null, tgApi: Tele
 }
 
 /** #1635 — wire the service reply path for inline control callbacks. */
-export function setCodingCallbackHandler(cb: ((sessionId: string, requestId: string, value: string) => Promise<boolean>) | null): void {
+export function setCodingCallbackHandler(cb: CodingCallbackHandler | null): void {
   callbackHandler = cb;
+  if (!cb) callbackTokens.clear();
 }
 
 export function isCodingCallback(data: string): boolean {
   return data.startsWith("coding:");
 }
 
-/** `coding:<sessionId>:<requestId>:<value>` callback routing. */
+function callbackData(sessionId: string, requestId: string, value: string): string {
+  const token = randomUUID().replaceAll("-", "");
+  callbackTokens.set(token, { sessionId, requestId, value });
+  while (callbackTokens.size > MAX_CALLBACK_TOKENS) {
+    const oldest = callbackTokens.keys().next().value as string | undefined;
+    if (!oldest) break;
+    callbackTokens.delete(oldest);
+  }
+  // Telegram limits callback_data to 64 bytes. Keep session/request/value
+  // out of the transport payload; the bounded in-process map also prevents a
+  // caller from forging a reply by guessing durable identifiers.
+  return `coding:${token}`;
+}
+
+function clearRequestTokens(sessionId: string, requestId: string): void {
+  for (const [token, pending] of callbackTokens) {
+    if (pending.sessionId === sessionId && pending.requestId === requestId) callbackTokens.delete(token);
+  }
+}
+
+/** `coding:<opaque-token>` callback routing. */
 export async function handleCodingCallback(data: string, chatId: number): Promise<boolean> {
-  const parts = data.split(":");
-  if (parts.length < 4) return false;
-  const sessionId = parts[1] ?? "";
-  const requestId = parts[2] ?? "";
-  const value = parts.slice(3).join(":");
-  if (!sessionId || !requestId) return false;
   if (!callbackHandler) return false;
-  const ok = await callbackHandler(sessionId, requestId, value);
+  const token = data.slice("coding:".length);
+  const pending = callbackTokens.get(token);
+  if (!pending) {
+    if (api) await api.sendMessage(chatId, "Pi control expired — the request is no longer pending.").catch(() => {});
+    return true;
+  }
+  callbackTokens.delete(token);
+  const ok = await callbackHandler(pending.sessionId, pending.requestId, pending.value, chatId);
+  if (ok) clearRequestTokens(pending.sessionId, pending.requestId);
   if (!ok && api) {
     await api.sendMessage(chatId, "Pi control expired — the request is no longer pending.").catch(() => {});
   }
@@ -115,8 +148,8 @@ export function createCodingProjectionSink(store: PiCodingSessionStore): PiCodin
         void send(chat, title, {
           reply_markup: {
             inline_keyboard: [[
-              { text: "Yes", callback_data: `coding:${sessionId}:${request.id}:true` },
-              { text: "No", callback_data: `coding:${sessionId}:${request.id}:false` },
+              { text: "Yes", callback_data: callbackData(sessionId, request.id, "true") },
+              { text: "No", callback_data: callbackData(sessionId, request.id, "false") },
             ]],
           },
         });
@@ -125,7 +158,7 @@ export function createCodingProjectionSink(store: PiCodingSessionStore): PiCodin
       if (request.method === "select") {
         const options = ((request as { options?: unknown }).options as string[] | undefined) ?? [];
         const rows = options.slice(0, MAX_UI_OPTIONS).map((opt) => ([
-          { text: opt.slice(0, 60), callback_data: `coding:${sessionId}:${request.id}:${opt.slice(0, 180)}` },
+          { text: opt.slice(0, 60), callback_data: callbackData(sessionId, request.id, opt) },
         ]));
         void send(chat, `${title}\n\nSelect an option:`, {
           reply_markup: { inline_keyboard: rows },

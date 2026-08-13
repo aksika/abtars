@@ -345,5 +345,13 @@ describe("SupervisedPiRpcClient", () => {
       await client.close();
       await client.close();
     });
+
+    it("closeAndWait waits for the child to exit after requesting shutdown", async () => {
+      const closing = client.closeAndWait(1000);
+      await Promise.resolve();
+      expect(child.kill).toHaveBeenCalledWith("SIGTERM");
+      child.emit("exit", 0, "SIGTERM");
+      await closing;
+    });
   });
 });

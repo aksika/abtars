@@ -73,6 +73,7 @@ const fake = vi.hoisted(() => {
     async getSessionStats(): Promise<Record<string, unknown>> { this.record("getSessionStats"); return { turns: 1 }; }
     async abort(): Promise<void> { this.record("abort"); }
     async close(): Promise<void> { this.record("close"); this.closed = true; }
+    async closeAndWait(): Promise<void> { await this.close(); }
     onTermination(cb: (e: unknown) => void): () => void { this.termCbs.add(cb); return () => this.termCbs.delete(cb); }
     subscribe(cb: (e: unknown) => void): () => void { this.subs.add(cb); return () => this.subs.delete(cb); }
     onUiRequest(cb: (e: unknown) => void): () => void { this.uiCbs.add(cb); return () => this.uiCbs.delete(cb); }
@@ -231,6 +232,9 @@ describe("PiCodingSessionService #1635 — turn lifecycle", () => {
     expect(rec.piSessionId).toBe("sess-1");
     expect(rec.resumeCapability).toBe("available");
     expect(rec.runtimeGeneration).toBe(2);
+    expect(h.sink.events.filter(e => e.kind === "assistant_text")).toEqual([
+      { kind: "assistant_text", sessionId, text: "done" },
+    ]);
     // every generation-owned resource is released: no lease, no claim, no live turn
     expect(rec.leaseGeneration).toBeUndefined();
     expect(h.claims.list()).toHaveLength(0);
@@ -352,6 +356,56 @@ describe("PiCodingSessionService #1635 — turn lifecycle", () => {
     expect(h.host.reservedCount).toBe(0); // slot released
   });
 
+  it("a Pi launch failure releases the shared slot, claim, and lease", async () => {
+    const h = harness;
+    const sessionId = createSession(h);
+    vi.spyOn(h.host, "launch").mockResolvedValue({ ok: false, error: "Pi unavailable" });
+
+    const result = await h.service.startTurn({ sessionId, text: "go", ownerPrincipal: "usr-1", leaseOwner: "tg:1" });
+
+    expect(result).toEqual({ kind: "error", reason: "Pi unavailable" });
+    expect(h.host.reservedCount).toBe(0);
+    expect(h.claims.list()).toHaveLength(0);
+    expect(h.store.get(sessionId)!.state).toBe("idle");
+    expect(h.store.get(sessionId)!.leaseGeneration).toBeUndefined();
+  });
+
+  it("duplicate agent_end events complete once and release one shared slot", async () => {
+    const h = harness;
+    const sessionId = createSession(h);
+    const savedFile = writeSession(h.root, "duplicate.jsonl", "sess-1");
+    fake.FakeClient.defaultState = { sessionId: "sess-1", sessionFile: savedFile, isStreaming: false, isCompacting: false };
+    await h.service.startTurn({ sessionId, text: "go", ownerPrincipal: "usr-1", leaseOwner: "tg:1" });
+
+    const client = fake.FakeClient.instances[0]!;
+    client.emitEvent(agentEnd());
+    client.emitEvent(agentEnd());
+    await vi.waitFor(() => expect(h.store.get(sessionId)!.state).toBe("idle"));
+
+    expect(h.host.reservedCount).toBe(0);
+    expect(h.service.liveCount).toBe(0);
+    expect(h.sink.events.filter(e => e.kind === "assistant_text")).toHaveLength(1);
+    expect(h.sink.events.filter(e => e.kind === "turn_complete")).toHaveLength(1);
+  });
+
+  it("final identity proof failure preserves the last identity and downgrades resumability", async () => {
+    const h = harness;
+    const sessionId = createSession(h);
+    const savedFile = writeSession(h.root, "final-proof.jsonl", "sess-1");
+    fake.FakeClient.defaultState = { sessionId: "sess-1", sessionFile: savedFile, isStreaming: false, isCompacting: false };
+    await h.service.startTurn({ sessionId, text: "go", ownerPrincipal: "usr-1", leaseOwner: "tg:1" });
+
+    const client = fake.FakeClient.instances[0]!;
+    client.state = { sessionId: "sess-1", sessionFile: undefined, isStreaming: false, isCompacting: false };
+    client.emitEvent(agentEnd());
+    await vi.waitFor(() => expect(h.store.get(sessionId)!.state).toBe("idle"));
+
+    const rec = h.store.get(sessionId)!;
+    expect(rec.piSessionId).toBe("sess-1");
+    expect(rec.piSessionFile).toBe(savedFile);
+    expect(rec.resumeCapability).toBe("session_missing");
+  });
+
   it("a message racing startup gets a bounded retry response, never a second process", async () => {
     const h = harness;
     const sessionId = createSession(h);
@@ -388,6 +442,21 @@ describe("PiCodingSessionService #1635 — turn lifecycle", () => {
     expect(rec.state).toBe("ended");
     expect(h.spin.ended).toContain(sessionId);
     expect(h.service.listForOwner("usr-1")).toHaveLength(0);
+  });
+
+  it("active end waits for Pi teardown before ending the envelope", async () => {
+    const h = harness;
+    const sessionId = createSession(h);
+    fake.FakeClient.defaultState = { sessionId: "sess-1", sessionFile: writeSession(h.root, "end.jsonl", "sess-1"), isStreaming: false, isCompacting: false };
+    await h.service.startTurn({ sessionId, text: "go", ownerPrincipal: "usr-1", leaseOwner: "tg:1" });
+
+    expect(h.service.endSession(sessionId, "usr-1")).toBe(true);
+    expect(h.spin.ended).not.toContain(sessionId);
+    expect(h.store.get(sessionId)!.state).toBe("running");
+    await vi.waitFor(() => expect(h.service.liveCount).toBe(0));
+    expect(h.store.get(sessionId)!.state).toBe("ended");
+    expect(h.spin.ended).toContain(sessionId);
+    expect(h.host.reservedCount).toBe(0);
   });
 
   it("a non-owner cannot start a turn", async () => {

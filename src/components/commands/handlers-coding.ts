@@ -31,8 +31,8 @@ export async function handleCoding(text: string, ctx: CommandContext): Promise<b
       return resumeMostRecent(svc, ctx, args === "resume" ? text.replace(/^\/coding\s+resume\s*/i, "").trim() : "");
     }
 
-    if (args.startsWith("new")) {
-      const alias = args.replace(/^new\s*/i, "").trim();
+    if (args === "new" || args.startsWith("new ")) {
+      const alias = args.slice("new".length).trim();
       if (!alias) {
         await ctx.reply("Usage: /coding new <workspace-alias>");
         return true;
@@ -75,15 +75,19 @@ export async function handleCoding(text: string, ctx: CommandContext): Promise<b
       const sessions = svc.listForOwner(ctx.userId);
       const sessionId = target || sessions[0]?.sessionId;
       if (!sessionId) { await ctx.reply("No coding session to end."); return true; }
+      const current = svc.getSession(sessionId, ctx.userId);
+      const wasActive = current && ["starting", "running", "awaiting_input", "resuming"].includes(current.state);
       const ended = svc.endSession(sessionId, ctx.userId);
-      await ctx.reply(ended ? `✓ Coding session ended (transcript preserved on disk).` : "Coding session not found.");
+      await ctx.reply(ended
+        ? wasActive ? "Coding session teardown requested; the transcript will be preserved." : "Coding session ended (transcript preserved on disk)."
+        : "Coding session not found.");
       return true;
     }
 
     await ctx.reply("Usage: /coding | /coding new <alias> | /coding status | /coding off | /coding resume | /coding end");
     return true;
   } catch (err) {
-    await ctx.reply(`❌ ${err instanceof Error ? err.message : String(err)}`);
+    await ctx.reply(`Error: ${err instanceof Error ? err.message : String(err)}`);
     return true;
   }
 }

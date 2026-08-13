@@ -205,7 +205,9 @@ export class Spin {
   /**
    * #1635 — coding-session teardown hook (wired at boot). /session end|kill
    * on a coding C envelope must release the Pi turn's slot/claim/lease and
-   * preserve the transcript BEFORE the envelope is finalized.
+   * preserve the transcript BEFORE the envelope is finalized. A live coding
+   * process makes the synchronous end/kill call return a bounded retry result;
+   * the coding owner finalizes the envelope after asynchronous reap.
    */
   private _codingTeardown: ((sessionId: string) => boolean) | null = null;
 
@@ -221,18 +223,21 @@ export class Spin {
 
   /** #1635 — resolve the coding teardown target and run the owner's
    * generation-fenced teardown before the envelope is finalized. */
-  private preEndCodingTeardown(userId: string, platform: string, index?: number): void {
+  private preEndCodingTeardown(userId: string, platform: string, index?: number): boolean {
     const target = this.sessions.resolveAddressable(userId, platform, index);
-    if (!this.isCodingEnvelope(target)) return;
+    if (!this.isCodingEnvelope(target)) return true;
     try {
-      this._codingTeardown?.(target.id);
+      return this._codingTeardown?.(target.id) ?? true;
     } catch (err) {
       logWarn("spin", `Coding teardown failed for ${target.id}: ${err instanceof Error ? err.message : String(err)}`);
+      return false;
     }
   }
 
   endSession(userId: string, platform: string, index?: number): ManagedSession | string {
-    this.preEndCodingTeardown(userId, platform, index);
+    if (!this.preEndCodingTeardown(userId, platform, index)) {
+      return "Coding session is still stopping; retry shortly";
+    }
     const r = this.sessions.end(userId, platform, index);
     if (typeof r === "string") return r;
     this.finalizeSession(r, "ended");
@@ -240,7 +245,9 @@ export class Spin {
   }
 
   killSession(userId: string, platform: string, index: number): ManagedSession | string {
-    this.preEndCodingTeardown(userId, platform, index);
+    if (!this.preEndCodingTeardown(userId, platform, index)) {
+      return "Coding session is still stopping; retry shortly";
+    }
     const r = this.sessions.kill(userId, platform, index);
     if (typeof r === "string") {
       const bg = this.sessions.getByGlobalIndex(index);

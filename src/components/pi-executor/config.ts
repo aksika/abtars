@@ -11,7 +11,7 @@ export interface PiExecutorConfig {
   enabled: boolean;
   command: string;
   fixedArgs: readonly string[];
-  workspaceAliases: Record<string, { path: string; root?: string }>;
+  workspaceAliases: Record<string, { path: string; root?: string; projectTrust?: "always" | "never" }>;
   allowedEnv: readonly string[];
   maxConcurrent: number;
   maxWallClockMs: number;
@@ -147,8 +147,10 @@ export function resolveAndValidateWorkspace(alias: string, config: PiExecutorCon
   }
 }
 
-export function buildTrustArgs(config: PiExecutorConfig): string[] {
-  return config.projectTrust === "always" ? ["--approve"] : ["--no-approve"];
+export function buildTrustArgs(config: PiExecutorConfig, workspaceAlias?: string): string[] {
+  const aliasTrust = workspaceAlias ? config.workspaceAliases[workspaceAlias]?.projectTrust : undefined;
+  const trust = aliasTrust ?? config.projectTrust;
+  return trust === "always" ? ["--approve"] : ["--no-approve"];
 }
 
 /**

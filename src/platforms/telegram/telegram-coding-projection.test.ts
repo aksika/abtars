@@ -121,16 +121,19 @@ describe("telegram coding projection #1635", () => {
     expect(sent).toHaveLength(1);
     const markup = (sent[0]!.opts as { reply_markup: { inline_keyboard: Array<Array<{ text: string; callback_data: string }>> } }).reply_markup;
     expect(markup.inline_keyboard[0]!.map(b => b.text)).toEqual(["Yes", "No"]);
-    expect(markup.inline_keyboard[0]![0]!.callback_data).toBe("coding:coding-1:req-1:true");
-    expect(markup.inline_keyboard[0]![1]!.callback_data).toBe("coding:coding-1:req-1:false");
+    expect(markup.inline_keyboard[0]![0]!.callback_data).toMatch(/^coding:[0-9a-f]+$/);
+    expect(markup.inline_keyboard[0]![1]!.callback_data).toMatch(/^coding:[0-9a-f]+$/);
+    expect(markup.inline_keyboard[0]![0]!.callback_data.length).toBeLessThanOrEqual(64);
   });
 
-  it("select renders options as buttons without the raw option payload beyond the label", () => {
+  it("select renders options as bounded opaque callbacks", () => {
     const sink = createCodingProjectionSink(store);
-    sink.uiRequest("coding-1", { type: "extension_ui_request", id: "req-2", method: "select", title: "Pick", options: ["option-a", "option-b"] });
+    const longOption = "option-a:" + "x".repeat(500);
+    sink.uiRequest("coding-1", { type: "extension_ui_request", id: "req-2", method: "select", title: "Pick", options: [longOption, "option-b"] });
     const markup = (sent[0]!.opts as { reply_markup: { inline_keyboard: Array<Array<{ text: string; callback_data: string }>> } }).reply_markup;
     expect(markup.inline_keyboard).toHaveLength(2);
-    expect(markup.inline_keyboard[0]![0]!.callback_data).toContain("option-a");
+    expect(markup.inline_keyboard[0]![0]!.callback_data).not.toContain("option-a");
+    expect(markup.inline_keyboard[0]![0]!.callback_data.length).toBeLessThanOrEqual(64);
   });
 
   it("input renders as a correlated prompt with a suggestion", () => {
@@ -144,9 +147,13 @@ describe("telegram coding projection #1635", () => {
   it("callback routing invokes the wired service reply path with coerced booleans", async () => {
     const handler = vi.fn(async () => true);
     setCodingCallbackHandler(handler);
-    expect(isCodingCallback("coding:coding-1:req-1:true")).toBe(true);
+    const sink = createCodingProjectionSink(store);
+    sink.uiRequest("coding-1", { type: "extension_ui_request", id: "req-1", method: "confirm", title: "Approve?", message: "run it" });
+    const markup = (sent[0]!.opts as { reply_markup: { inline_keyboard: Array<Array<{ text: string; callback_data: string }>> } }).reply_markup;
+    const callback = markup.inline_keyboard[0]![0]!.callback_data;
+    expect(isCodingCallback(callback)).toBe(true);
     expect(isCodingCallback("model:gpt")).toBe(false);
-    await handleCodingCallback("coding:coding-1:req-1:true", 100);
-    expect(handler).toHaveBeenCalledWith("coding-1", "req-1", "true");
+    await handleCodingCallback(callback, 100);
+    expect(handler).toHaveBeenCalledWith("coding-1", "req-1", "true", 100);
   });
 });

@@ -73,7 +73,8 @@ registerExact("/whoami", handleWhoami);
 registerExact("/tribe", handleTribe);
 registerExact("/metrics", handleMetrics);
 registerExact("/session", handleSession);
-registerPrefix("/coding", handleCoding);
+registerExact("/coding", handleCoding);
+registerPrefix("/coding ", handleCoding);
 
 // ── Prefix-match commands ───────────────────────────────────────────────────
 registerPrefix("/session ", handleSession);

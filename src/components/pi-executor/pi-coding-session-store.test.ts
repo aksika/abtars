@@ -86,6 +86,13 @@ describe("PiCodingSessionStore #1635", () => {
     expect((r as { reason: string }).reason).toBe("stale_generation");
   });
 
+  it("activity updates are generation-fenced", () => {
+    const h = makeStore();
+    seed(h);
+    expect(h.store.touchActivity("c-1", 2)).toBe(false);
+    expect(h.store.touchActivity("c-1", 1)).toBe(true);
+  });
+
   it("advanceGeneration bumps the runtime generation with the explicit intent", () => {
     const h = makeStore();
     seed(h);
