@@ -33,6 +33,7 @@ import {
 import { Spin, type ManagedSession, type SessionType } from "../../components/spin.js";
 import { createSpinSessionRegistry, type SpinSessionRegistry } from "../../components/spin-sessions.js";
 import type { QueuedSessionInstruction } from "../../components/spin-types.js";
+import { classifyContent } from "../../components/clean-response.js";
 import type { InboundMessage } from "../../types/platform.js";
 import { expireInstructions, drainInstructionBatch } from "../../components/session-instruction-queue.js";
 import { OrcActivityFeed } from "../../components/orc-activity-feed.js";
@@ -101,7 +102,11 @@ function makeMockSpin(opts: MockSpinOpts = {}): { spin: Spin; calls: { getActive
     listAllSessions: vi.fn(() => allEntries),
     spin: vi.fn(async (spec: unknown) => {
       calls.spin.push([spec]);
-      return opts.spinResult ?? { sessionId: "1749563282_O_01", cardId: 1, result: "orc-reply" };
+      // #1651: mirror the production contract — the provider's own string,
+      // verbatim (possibly empty), plus the classified outcome. Production
+      // spin computes outcome via classifyContent at the single settle point.
+      const settled = opts.spinResult ?? { sessionId: "1749563282_O_01", cardId: 1, result: "orc-reply" };
+      return { ...settled, outcome: classifyContent(settled.result ?? "") };
     }),
   };
   return { spin: spin as Spin, calls };
