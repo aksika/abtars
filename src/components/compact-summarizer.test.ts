@@ -29,6 +29,16 @@ describe("buildCompactionPrompt #1406", () => {
     expect(prompt).not.toContain("Prior checkpoint");
     expect(prompt).not.toContain("Additional focus");
   });
+
+  it("keeps the storage-only wake-up marker out of the provider prompt", () => {
+    const prompt = buildCompactionPrompt({
+      serializedTurns: "1\tassistant\t[WAKE-UP QUESTION id=q-1] Hello!\n\nDreamy needs your help with one memory: Which city?",
+      priorCheckpoint: "[WAKE-UP QUESTION id=q-2] Old greeting",
+      maxOutputTokens: 1000,
+    });
+    expect(prompt).not.toContain("[WAKE-UP QUESTION");
+    expect(prompt).toContain("Dreamy needs your help with one memory: Which city?");
+  });
 });
 
 describe("createCompactionSummarizer #1406", () => {

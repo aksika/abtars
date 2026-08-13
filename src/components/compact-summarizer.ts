@@ -18,6 +18,14 @@ export const MAX_COMPACT_INSTRUCTIONS_BYTES = 4_000;
 /** One-shot call timeout. */
 export const COMPACTION_CALL_TIMEOUT_MS = 120_000;
 
+// #1515: the marker is persisted only so abmind can correlate a delivered
+// boot question in later transcripts. It is never part of provider input,
+// including when an older daemon returns an unstripped compaction candidate.
+const WAKE_UP_QUESTION_MARKER_RE = /(^|\n)([^\n]*\t[^\n]*\t)?\[WAKE-UP QUESTION id=[^\]\r\n]{1,128}\][ \t]*/gm;
+function stripWakeUpQuestionMarkers(text: string): string {
+  return text.replace(WAKE_UP_QUESTION_MARKER_RE, "$1$2");
+}
+
 export interface CompactionSummarizeInput {
   serializedTurns: string;
   priorCheckpoint: string;
@@ -60,9 +68,9 @@ export function buildCompactionPrompt(input: {
     parts.push(`Additional focus for this compaction: ${input.customInstructions}`);
   }
   if (input.priorCheckpoint) {
-    parts.push(`Prior checkpoint (already compacted history — build on it, do not repeat it):\n${input.priorCheckpoint}`);
+    parts.push(`Prior checkpoint (already compacted history — build on it, do not repeat it):\n${stripWakeUpQuestionMarkers(input.priorCheckpoint)}`);
   }
-  parts.push(`Conversation source:\n${input.serializedTurns}`);
+  parts.push(`Conversation source:\n${stripWakeUpQuestionMarkers(input.serializedTurns)}`);
   return parts.join("\n\n");
 }
 
