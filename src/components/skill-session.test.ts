@@ -194,6 +194,25 @@ describe("SkillSessionManager launch", () => {
     expect(spin.finalized).toHaveLength(1);
   });
 
+  it.each<[string, string]>([
+    ["a reaction-only", "[REACT:👋]"],
+    ["a no-reply", "[NO_REPLY]"],
+    ["an empty", ""],
+  ])("#1651 v2: bootstrap fails when the first K turn yields %s outcome — only text content activates a skill", async (_label, raw) => {
+    const spin = fakeSpin();
+    spin.facade.spin = async ({ sessionId, prompt }) => {
+      const session = spin.sessions.get(sessionId);
+      if (!session) throw new Error(`unknown session ${sessionId}`);
+      return { sessionId, result: raw, outcome: classifyContent(raw) };
+    };
+    const mgr = makeManager(spin);
+    const result = await mgr.launch({ skill: "spanish-tutor", agent: "professor", target: TARGET, message: "hola" });
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.error.message).toContain("empty model response");
+    expect(mgr.list(TARGET)).toBeUndefined();
+  });
+
   it("same skill + same agent reuses the same K session", async () => {
     const spin = fakeSpin();
     const mgr = makeManager(spin);

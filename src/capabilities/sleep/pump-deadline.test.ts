@@ -20,6 +20,14 @@ vi.mock("../../components/transport/bridge-lock-transport.js", () => ({
 }));
 
 import { createSleepHandle } from "./index.js";
+import { classifyContent } from "../../components/clean-response.js";
+
+/** #1651 v2: the spin stub mirrors the production contract — the provider's
+ *  own string verbatim plus Spin's single classification of it. A stub that
+ *  omits the outcome would make the pump treat a text turn as contentless. */
+function settleSpin(result: string, sessionId = "s1"): { result: string; sessionId: string; outcome: ReturnType<typeof classifyContent> } {
+  return { result, sessionId, outcome: classifyContent(result) };
+}
 
 function makeFakeClient(): any {
   return {
@@ -71,7 +79,7 @@ describe("createSleepHandle provider pump terminal settlement (#1517)", () => {
     client.sleep.runtime.open.mockResolvedValue({ status: "ok", leaseId: "lease-1" });
     client.sleep.runtime.next.mockImplementation(nextSequence(makeRequest(120_000)));
     client.sleep.runtime.complete.mockResolvedValue({ status: "ok" });
-    const spin = vi.fn().mockResolvedValue({ result: "done", sessionId: "s1" });
+    const spin = vi.fn().mockResolvedValue(settleSpin("done"));
 
     const handle = createSleepHandle({
       client,
@@ -245,7 +253,7 @@ describe("createSleepHandle provider pump terminal settlement (#1517)", () => {
     client.sleep.runtime.open.mockResolvedValue({ status: "ok", leaseId: "lease-1" });
     client.sleep.runtime.next.mockImplementation(nextSequence(makeRequest(120_000)));
     client.sleep.runtime.complete.mockResolvedValue({ status: "ok" });
-    const spin = vi.fn().mockResolvedValue({ sessionId: "s1", result: "" });
+    const spin = vi.fn().mockResolvedValue(settleSpin(""));
     const quarantineSession = vi.fn();
 
     const handle = createSleepHandle({
@@ -273,7 +281,7 @@ describe("createSleepHandle provider pump terminal settlement (#1517)", () => {
     client.sleep.runtime.open.mockResolvedValue({ status: "ok", leaseId: "lease-1" });
     client.sleep.runtime.next.mockImplementation(nextSequence(makeRequest(120_000)));
     client.sleep.runtime.complete.mockResolvedValue({ status: "ok" });
-    const spin = vi.fn().mockResolvedValue({ sessionId: "s1", result: "[NO_REPLY]" });
+    const spin = vi.fn().mockResolvedValue(settleSpin("[NO_REPLY]"));
 
     const handle = createSleepHandle({
       client,
@@ -288,6 +296,30 @@ describe("createSleepHandle provider pump terminal settlement (#1517)", () => {
     await settleTicks();
 
     expect(client.sleep.runtime.complete).toHaveBeenCalledWith("lease-1", "c1", "");
+  });
+
+  it("#1651 v2: a reaction-only turn is a chat control signal, not curation content — settled as an empty completion", async () => {
+    const client = makeFakeClient();
+    client.sleep.start.mockResolvedValue({ status: "accepted", runId: "run-1" });
+    client.sleep.runtime.open.mockResolvedValue({ status: "ok", leaseId: "lease-1" });
+    client.sleep.runtime.next.mockImplementation(nextSequence(makeRequest(120_000)));
+    client.sleep.runtime.complete.mockResolvedValue({ status: "ok" });
+    const spin = vi.fn().mockResolvedValue(settleSpin("[REACT:🧠]"));
+
+    const handle = createSleepHandle({
+      client,
+      memoryEnabled: true,
+      onComplete: vi.fn(),
+      onCycleEnd: vi.fn(),
+      sessionManager: { spin },
+      bufferSystemEvent: vi.fn(),
+      allocateSleepSession: () => "d-night-1",
+    });
+    handle.startScheduled();
+    await settleTicks();
+
+    expect(client.sleep.runtime.complete).toHaveBeenCalledWith("lease-1", "c1", "");
+    expect(client.sleep.runtime.fail).not.toHaveBeenCalled();
   });
 
   it("#1611: the pump exits on invalid_lease after a deadline — the lease is genuinely gone", async () => {
@@ -389,7 +421,7 @@ describe("createSleepHandle provider pump terminal settlement (#1517)", () => {
     client.sleep.runtime.open.mockResolvedValue({ status: "ok", leaseId: "lease-1" });
     client.sleep.runtime.next.mockImplementation(nextSequence(makeRequest(120_000), makeRequest(120_000)));
     client.sleep.runtime.complete.mockResolvedValue({ status: "invalid_completion" });
-    const spin = vi.fn().mockResolvedValue({ result: "late", sessionId: "s1" });
+    const spin = vi.fn().mockResolvedValue(settleSpin("late"));
 
     const handle = createSleepHandle({
       client,
@@ -417,7 +449,7 @@ describe("createSleepHandle provider pump terminal settlement (#1517)", () => {
     client.sleep.runtime.next.mockImplementation(nextSequence(makeRequest(120_000), makeRequest(120_000)));
     client.sleep.runtime.complete.mockRejectedValue(new Error("daemon connection lost"));
     client.sleep.runtime.fail.mockResolvedValue({ status: "ok" });
-    const spin = vi.fn().mockResolvedValue({ result: "served", sessionId: "s1" });
+    const spin = vi.fn().mockResolvedValue(settleSpin("served"));
     const quarantineSession = vi.fn();
 
     const handle = createSleepHandle({
@@ -446,7 +478,7 @@ describe("createSleepHandle provider pump terminal settlement (#1517)", () => {
     client.sleep.runtime.open.mockResolvedValue({ status: "ok", leaseId: "lease-1" });
     client.sleep.runtime.next.mockImplementation(nextSequence(makeRequest(120_000), makeRequest(120_000)));
     client.sleep.runtime.complete.mockResolvedValue({ status: "invalid_completion" });
-    const spin = vi.fn().mockResolvedValue({ result: "late", sessionId: "s1" });
+    const spin = vi.fn().mockResolvedValue(settleSpin("late"));
     const quarantineSession = vi.fn();
 
     const handle = createSleepHandle({
@@ -480,7 +512,7 @@ describe("createSleepHandle provider pump terminal settlement (#1517)", () => {
         .mockRejectedValueOnce(new Error("Request timeout")) // transport race
         .mockImplementation(nextSequence(makeRequest(120_000)));
       client.sleep.runtime.complete.mockResolvedValue({ status: "ok" });
-      const spin = vi.fn().mockResolvedValue({ result: "served", sessionId: "s1" });
+      const spin = vi.fn().mockResolvedValue(settleSpin("served"));
 
       const handle = createSleepHandle({
         client,
@@ -548,8 +580,8 @@ describe("createSleepHandle provider pump terminal settlement (#1517)", () => {
     // The spin promise resolves AFTER the provider deadline (a transport that
     // ignores cancellation): the race must win, quarantine must run, and the
     // late result must never reach the broker.
-    let resolveLate!: (v: { result: string; sessionId: string }) => void;
-    const spin = vi.fn().mockReturnValue(new Promise<{ result: string; sessionId: string }>(r => { resolveLate = r; }));
+    let resolveLate!: (v: { result: string; sessionId: string; outcome: ReturnType<typeof classifyContent> }) => void;
+    const spin = vi.fn().mockReturnValue(new Promise<{ result: string; sessionId: string; outcome: ReturnType<typeof classifyContent> }>(r => { resolveLate = r; }));
     const quarantineSession = vi.fn();
 
     const handle = createSleepHandle({
@@ -576,7 +608,7 @@ describe("createSleepHandle provider pump terminal settlement (#1517)", () => {
     expect(handle.isActive).toBe(false);
 
     // The transport finally settles late — the broker is never told.
-    resolveLate({ result: "late result", sessionId: "d-night-1" });
+    resolveLate(settleSpin("late result", "d-night-1"));
     await vi.advanceTimersByTimeAsync(0);
     expect(client.sleep.runtime.complete, "a late provider result must not complete a broker request").not.toHaveBeenCalled();
     expect(client.sleep.runtime.fail).toHaveBeenCalledTimes(1);
@@ -587,7 +619,7 @@ describe("createSleepHandle provider pump terminal settlement (#1517)", () => {
     client.sleep.runtime.open.mockResolvedValue({ status: "ok", leaseId: "lease-2" });
     client.sleep.runtime.next.mockImplementation(nextSequence(makeRequest(60_000)));
     client.sleep.runtime.complete.mockResolvedValue({ status: "ok" });
-    spin.mockResolvedValue({ result: "fresh", sessionId: "s2" });
+    spin.mockResolvedValue(settleSpin("fresh", "s2"));
 
     handle.startScheduled();
     await vi.advanceTimersByTimeAsync(0);
@@ -603,7 +635,7 @@ describe("createSleepHandle provider pump terminal settlement (#1517)", () => {
     client.sleep.runtime.open.mockResolvedValue({ status: "ok", leaseId: "lease-1" });
     client.sleep.runtime.next.mockImplementation(nextSequence(makeRequest(120_000), makeRequest(120_000)));
     client.sleep.runtime.complete.mockResolvedValue({ status: "ok" });
-    const spin = vi.fn().mockResolvedValue({ result: "done", sessionId: "s1" });
+    const spin = vi.fn().mockResolvedValue(settleSpin("done"));
     const allocateSleepSession = vi.fn().mockReturnValue("d-night-1");
 
     const handle = createSleepHandle({
@@ -651,10 +683,10 @@ describe("createSleepHandle provider pump terminal settlement (#1517)", () => {
     client.sleep.runtime.next.mockImplementation(nextSequence(makeRequest(120_000), makeRequest(120_000)));
     client.sleep.runtime.complete.mockResolvedValue({ status: "ok" });
     const spin = vi.fn()
-      .mockResolvedValueOnce({ result: "done", sessionId: "d-night-1" })
-      .mockResolvedValueOnce({ result: "done", sessionId: "d-night-1" })
-      .mockResolvedValueOnce({ result: "done", sessionId: "d-night-2" })
-      .mockResolvedValueOnce({ result: "done", sessionId: "d-night-2" });
+      .mockResolvedValueOnce(settleSpin("done", "d-night-1"))
+      .mockResolvedValueOnce(settleSpin("done", "d-night-1"))
+      .mockResolvedValueOnce(settleSpin("done", "d-night-2"))
+      .mockResolvedValueOnce(settleSpin("done", "d-night-2"));
 
     const handle = createSleepHandle({
       client,

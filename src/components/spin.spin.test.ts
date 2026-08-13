@@ -624,6 +624,40 @@ describe("spin(spec) — unified session API (#1271)", () => {
       expect(r.outcome).toBe("no_reply");
     });
 
+    it("#1651 v2: reports a reaction-only turn as reaction, not as text content", async () => {
+      spin.setRuntime(makeRuntime({ sendPromptImpl: async () => "[REACT:👋]" }) as any);
+
+      const r = await spin.spin({ type: "A", prompt: "hi", userId: "aksika", platform: "telegram", await: true });
+
+      expect(r.result).toBe("[REACT:👋]");
+      expect(r.outcome).toBe("reaction");
+    });
+
+    it("#1651 v2: never records a reaction-only turn as an assistant message in memory", async () => {
+      const recordMessage = vi.fn();
+      spin.setMemory({ recordMessage });
+      spin.setRuntime(makeRuntime({ sendPromptImpl: async () => "[REACT:👋]" }) as any);
+
+      await spin.spin({ type: "A", prompt: "hi", userId: "aksika", platform: "telegram", await: true });
+
+      expect(recordMessage).not.toHaveBeenCalled();
+    });
+
+    it("#1651 v2: fails an unsupervised card whose turn produced only a reaction, and reports failed to the peer", async () => {
+      collectAndSettleOutcome.value = { settled: false, summary: "" };
+      const cardId = kanbanEnqueue("reaction lane", "peer");
+      spin.setRuntime(makeRuntime({ sendPromptImpl: async () => "[REACT:👋]" }) as any);
+
+      await spin.spin({ type: "W", cardId, goal: "run lane", callbackPeer: "kp", await: true });
+      await new Promise(resolve => setTimeout(resolve, 0));
+
+      const card = (await import("./tasks/kanban-board.js") as any)._kanbanGetCardRaw(cardId);
+      expect(card.status).toBe("failed");
+      expect(callbackSend).toHaveBeenCalledWith("kp", expect.objectContaining({
+        payload: expect.objectContaining({ status: "failed", error: "model returned only a reaction" }),
+      }));
+    });
+
     it("never records a contentless turn as an assistant message in memory", async () => {
       const recordMessage = vi.fn();
       spin.setMemory({ recordMessage });

@@ -47,18 +47,21 @@ describe("cleanResponse", () => {
 });
 
 /*
- * #1651: classifyContent is the single normalization of "did this turn produce
- * anything". Before it existed, spin fabricated "(no output)" for an empty
- * provider response, which made three downstream guards unreachable (sleep
- * completion, skill bootstrap, and the whole chat empty/no-reply policy). These
- * cases pin the classification each of those guards now depends on.
+ * #1651: classifyContent is the single normalization of "what did this settled
+ * turn produce". Before it existed, spin fabricated "(no output)" for an empty
+ * provider response, which made downstream guards unreachable (sleep
+ * completion, skill bootstrap, and the whole chat empty/no-reply policy).
+ * #1651 v2: the four-way outcome separates chat control signals (reaction)
+ * from textual domain content (text). These cases pin the classification each
+ * consumer guard now depends on.
  */
 describe("classifyContent (#1651)", () => {
   const cases: ReadonlyArray<readonly [string, string, ContentOutcome]> = [
-    ["plain text", "Here is the answer.", "content"],
+    ["plain text", "Here is the answer.", "text"],
     ["deliberate silence", "[NO_REPLY]", "no_reply"],
-    ["silence marker with text — text wins", "[NO_REPLY]\n\nSleep finished — 5 things done.", "content"],
-    ["reaction emoji only IS the reply", "[REACT:👋]", "content"],
+    ["silence marker with text — text wins", "[NO_REPLY]\n\nSleep finished — 5 things done.", "text"],
+    ["reaction emoji only is a reaction, not text", "[REACT:👋]", "reaction"],
+    ["reaction marker with text — text wins", "[REACT:👋] Here is the answer.", "text"],
     ["empty provider response", "", "empty"],
     ["whitespace-only provider response", "   \n\t ", "empty"],
     ["echoed internal context only", "[CONTEXT — do not respond]\nSOUL.md content\n[/CONTEXT]", "empty"],

@@ -464,6 +464,114 @@ describe("ScheduledTaskRunner #1610 announce delivery contract", () => {
     }));
     expect(outcome.safeDetail).toBe(LONG_RESULT.slice(0, 200));
   });
+
+  it.each<[string, string]>([
+    ["empty", ""],
+    ["no_reply", "[NO_REPLY]"],
+    ["reaction", "[REACT:👋]"],
+  ])("#1651 v2: a %s announce turn settles failed with empty_model_response — never success, never delivery", async (_name, raw) => {
+    const { classifyContent } = await import("../clean-response.js");
+    const agentRunner = vi.fn(async () => ({ cardId: 7, result: raw, outcome: classifyContent(raw) }));
+    const runner = new ScheduledTaskRunner({ agentRunner });
+    const outcome = await runner.run(makeEntry(`announce-${_name}`), makeReservation(`announce-${_name}`));
+
+    expect(outcome.status).toBe("failed");
+    expect(mockedSettle).toHaveBeenCalledWith(expect.objectContaining({
+      outcome: "failed",
+      cardId: 7,
+      diagnostic: expect.objectContaining({
+        category: "execution",
+        code: "empty_model_response",
+        retryability: "none",
+      }),
+    }));
+    const settleCall = mockedSettle.mock.calls[0]![0] as Record<string, unknown>;
+    expect(settleCall["deliveryText"]).toBeUndefined();
+    expect(settleCall["releaseDelivery"]).not.toBe(true);
+    expect(mockedSettle).not.toHaveBeenCalledWith(expect.objectContaining({ outcome: "success" }));
+  });
+
+  it("#1651 v2: a text announce turn keeps success settlement and delivery", async () => {
+    const agentRunner = vi.fn(async () => ({ cardId: 7, result: "morning briefing", outcome: "text" as const }));
+    const runner = new ScheduledTaskRunner({ agentRunner });
+    const outcome = await runner.run(makeEntry("announce-text"), makeReservation("announce-text"));
+
+    expect(outcome.status).toBe("success");
+    expect(mockedSettle).toHaveBeenCalledWith(expect.objectContaining({
+      outcome: "success",
+      cardId: 7,
+      deliveryText: "morning briefing",
+      releaseDelivery: true,
+    }));
+  });
+
+  it("#1651 v2: a report with a valid artifact succeeds even when the final prose is non-text", async () => {
+    const agentRunner = vi.fn(async () => ({ cardId: 7, result: "[NO_REPLY]", outcome: "no_reply" as const }));
+    const runner = new ScheduledTaskRunner({ agentRunner });
+    const entry = makeEntry("report-artifact-wins");
+    entry.delivery = "report";
+    entry.report = {
+      artifact: "/tmp/daily.md",
+      requiredSections: ["# Summary"],
+      minBytes: 100,
+      requires: { files: [], executables: [], tools: [] },
+    };
+    const preflightMod = await import("./task-preflight.js");
+    vi.mocked(preflightMod.preflightTask).mockReturnValue({
+      ok: true,
+      report: {
+        artifactPath: "/tmp/daily.md",
+        artifactLabel: "/tmp/daily.md",
+        requiredSections: ["# Summary"],
+        minBytes: 100,
+        requiredFiles: [],
+        executables: [],
+        tools: [],
+      },
+      artifactBaseline: { existed: false },
+    });
+    vi.mocked(preflightMod.validateReportArtifact).mockReturnValue({ ok: true, size: 1234 });
+    const outcome = await runner.run(entry, makeReservation("report-artifact-wins"));
+
+    expect(outcome.status).toBe("success");
+    expect(mockedSettle).toHaveBeenCalledWith(expect.objectContaining({ outcome: "success", releaseDelivery: true }));
+    expect(mockedSettle).not.toHaveBeenCalledWith(expect.objectContaining({ code: "empty_model_response" }));
+  });
+
+  it("#1651 v2: a report with an invalid artifact still fails — the text gate never rescues a bad artifact", async () => {
+    const agentRunner = vi.fn(async () => ({ cardId: 7, result: "lots of useful prose", outcome: "text" as const }));
+    const runner = new ScheduledTaskRunner({ agentRunner });
+    const entry = makeEntry("report-artifact-fails");
+    entry.delivery = "report";
+    entry.report = {
+      artifact: "/tmp/daily.md",
+      requiredSections: ["# Summary"],
+      minBytes: 100,
+      requires: { files: [], executables: [], tools: [] },
+    };
+    const preflightMod = await import("./task-preflight.js");
+    vi.mocked(preflightMod.preflightTask).mockReturnValue({
+      ok: true,
+      report: {
+        artifactPath: "/tmp/daily.md",
+        artifactLabel: "/tmp/daily.md",
+        requiredSections: ["# Summary"],
+        minBytes: 100,
+        requiredFiles: [],
+        executables: [],
+        tools: [],
+      },
+      artifactBaseline: { existed: false },
+    });
+    vi.mocked(preflightMod.validateReportArtifact).mockReturnValue({ ok: false, code: "artifact_too_small", reason: "artifact is 12 bytes, minimum is 100" });
+    const outcome = await runner.run(entry, makeReservation("report-artifact-fails"));
+
+    expect(outcome.status).toBe("failed");
+    expect(mockedSettle).toHaveBeenCalledWith(expect.objectContaining({
+      outcome: "failed",
+      diagnostic: expect.objectContaining({ category: "validation", code: "artifact_too_small" }),
+    }));
+  });
 });
 
 describe("ScheduledTaskRunner #1297 credits_exhausted mapping", () => {

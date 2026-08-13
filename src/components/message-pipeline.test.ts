@@ -232,6 +232,24 @@ describe("handleInboundMessage", () => {
     expect(adapter.setReaction).toHaveBeenCalledWith(expect.any(String), 7, "👍");
   });
 
+  it("#1651 v2: simple delivery delivers a reaction-only response as the emoji payload, never the raw marker", async () => {
+    transport.sendPrompt = vi.fn().mockResolvedValue("[REACT:👍]") as any;
+    const adapter = mockAdapter();
+    const deps = mockDeps(transport);
+    const spinMod = await import("./spin.js");
+    const active = spinMod.spin.getActiveSession("test", "telegram");
+    const originalDelivery = active.delivery;
+    active.delivery = "simple";
+    try {
+      await handleInboundMessage(makeMsg({ messageId: 9 }), adapter, deps);
+
+      expect(adapter.sendMessage).toHaveBeenCalledWith("100", "👍", expect.any(Object));
+      expect(adapter.sendMessage).not.toHaveBeenCalledWith("100", expect.stringContaining("[REACT:"), expect.any(Object));
+    } finally {
+      active.delivery = originalDelivery;
+    }
+  });
+
   it("cleans up busyChats and resets idle timer in finally block", async () => {
     const adapter = mockAdapter();
     const deps = mockDeps(transport);

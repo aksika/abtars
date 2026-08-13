@@ -3,6 +3,20 @@ import { createSelfHealerTask } from "./self-healer.js";
 import { _resetEnv } from "./env-schema.js";
 import { BOOT_QUIET_MS, isWithinBootQuietWindow } from "./self-healer-utils.js";
 
+/*
+ * TEST DEFICIENCY (2026-08-13):
+ * Missing: handleUnknownFault's #1651 v2 text-only success gate — a non-text
+ * dispatchAwait outcome routes through the failure path (recordResult false,
+ * AGENT FAIL notification) instead of AGENT OK. The full path needs a live
+ * bridge.lock, adapter notify stub, and a git-clone fallback harness.
+ * Reason deferred: disproportionate harness (fs + git + adapter mocks) for a
+ * 4-line guard whose policy shape is identical to the tested Agent API peer
+ * gate (agent-api-adapter.test.ts) and scheduled announce gate
+ * (scheduled-task-runner.test.ts).
+ * Future verification: a component test mocking fs/git after the healer is
+ * refactored to accept an injectable dispatch facade.
+ */
+
 vi.mock("./logger.js", () => ({
   logInfo: vi.fn(), logWarn: vi.fn(), logError: vi.fn(), logDebug: vi.fn(),
   getLogFile: () => "/dev/null",

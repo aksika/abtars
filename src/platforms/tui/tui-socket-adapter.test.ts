@@ -734,6 +734,29 @@ describe("TuiSocketAdapter — orc mode", () => {
 
     conn.destroy(); adapter.stop();
   });
+
+  it("#1651 v2: a reaction-only Orc turn renders the parsed emoji at the display boundary, never the raw marker", async () => {
+    const orc = { id: "1749563282_O_01" } as unknown as ManagedSession;
+    mock = makeMockSpin({
+      orcSession: orc,
+      orcBusy: false,
+      spinResult: { sessionId: "1749563282_O_01", cardId: 1, result: "[REACT:🧠]" },
+    });
+    const adapter = new TuiSocketAdapter({ spin: mock.spin, onMessage, socketPath: sockPath });
+    await adapter.start();
+    const { conn, frames } = await attachAndCollect(sockPath, { kind: "orc" });
+    conn.write(encodeFrame({ t: "input", text: "are you alive?" }));
+    await new Promise((r) => setTimeout(r, 100));
+
+    const assistantMsg = frames.find((f) => f.t === "message" && (f as { role: string }).role === "assistant");
+    expect(assistantMsg).toBeDefined();
+    if (assistantMsg && assistantMsg.t === "message") {
+      expect(assistantMsg.markdown).toBe("🧠");
+      expect(assistantMsg.markdown).not.toContain("[REACT:");
+    }
+
+    conn.destroy(); adapter.stop();
+  });
 });
 
 // ── #1332: steering in orc mode ──────────────────────────────────────
