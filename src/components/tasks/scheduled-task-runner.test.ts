@@ -137,9 +137,9 @@ describe("ScheduledTaskRunner #1506 deadline ownership", () => {
   it("#1539 accepts a child fact whose own time predates the deadline even when observed after it", async () => {
     const deadlineAt = Date.now() + 10_000;
     let started!: (control: any) => void;
-    let complete!: (value: { cardId: number; result: string; factAt: number }) => void;
+    let complete!: (value: { cardId: number; result: string; outcome: "text"; factAt: number }) => void;
     const startedPromise = new Promise<any>((resolve) => { started = resolve; });
-    const resultPromise = new Promise<{ cardId: number; result: string; factAt: number }>((resolve) => { complete = resolve; });
+    const resultPromise = new Promise<{ cardId: number; result: string; outcome: "text"; factAt: number }>((resolve) => { complete = resolve; });
     const runner = new ScheduledTaskRunner({
       agentRunner: async (request) => {
         request.executionControl?.setCardId(44);
@@ -152,7 +152,7 @@ describe("ScheduledTaskRunner #1506 deadline ownership", () => {
     const control = await startedPromise;
     await vi.advanceTimersByTimeAsync(10_000);
     // The fact occurred 5s BEFORE the deadline but is observed after it.
-    complete({ cardId: 44, result: "pre-deadline result", factAt: deadlineAt - 5000 });
+    complete({ cardId: 44, result: "pre-deadline result", outcome: "text", factAt: deadlineAt - 5000 });
     await vi.advanceTimersByTimeAsync(5_000);
 
     const outcome = await runPromise;
@@ -174,7 +174,7 @@ describe("ScheduledTaskRunner #1516 orchestration dispatch", () => {
   });
 
   it("routes maxAgents=1 through the direct agent runner exactly once", async () => {
-    const agentRunner = vi.fn(async () => ({ cardId: 7, result: "direct result" }));
+    const agentRunner = vi.fn(async () => ({ cardId: 7, result: "direct result", outcome: "text" as const }));
     const projectRunner = vi.fn(async () => ({ cardId: 8, result: "project result" }));
     const runner = new ScheduledTaskRunner({ agentRunner, projectRunner });
     const outcome = await runner.run(makeEntry("dispatch-direct"), makeReservation("dispatch-direct"));
@@ -192,7 +192,7 @@ describe("ScheduledTaskRunner #1516 orchestration dispatch", () => {
     expect(vi.mocked((await import("./kanban-board.js")).kanbanComplete)).not.toHaveBeenCalled();
   });
 
-  it("runs an old production-shaped task without orchestration through the direct runner exactly once", async () => {
+  it("fails closed when a single-agent runner omits the required outcome", async () => {
     const agentRunner = vi.fn(async () => ({ cardId: 9, result: "legacy result" }));
     const projectRunner = vi.fn(async () => ({ cardId: 8, result: "project result" }));
     const runner = new ScheduledTaskRunner({ agentRunner, projectRunner });
@@ -200,10 +200,14 @@ describe("ScheduledTaskRunner #1516 orchestration dispatch", () => {
     delete legacy.orchestration;
     const outcome = await runner.run(legacy, makeReservation("dispatch-legacy"));
 
-    expect(outcome.status).toBe("success");
+    expect(outcome.status).toBe("failed");
     expect(agentRunner).toHaveBeenCalledTimes(1);
     expect(projectRunner).not.toHaveBeenCalled();
-    expect(mockedSettle).toHaveBeenCalledWith(expect.objectContaining({ outcome: "success", cardId: 9 }));
+    expect(mockedSettle).toHaveBeenCalledWith(expect.objectContaining({
+      outcome: "failed",
+      cardId: 9,
+      diagnostic: expect.objectContaining({ code: "empty_model_response" }),
+    }));
   });
 
   it("routes maxAgents>1 through the project runner exactly once, never the direct runner", async () => {
@@ -319,7 +323,7 @@ describe("ScheduledTaskRunner #1602 normalized-entry guard", () => {
   });
 
   it("keeps valid oneshot entries flowing through the direct runner", async () => {
-    const agentRunner = vi.fn(async () => ({ cardId: 7, result: "direct result" }));
+    const agentRunner = vi.fn(async () => ({ cardId: 7, result: "direct result", outcome: "text" as const }));
     const runner = new ScheduledTaskRunner({ agentRunner });
     const outcome = await runner.run(makeEntry("valid-oneshot"), makeReservation("valid-oneshot"));
     expect(outcome.status).toBe("success");
@@ -390,7 +394,7 @@ describe("ScheduledTaskRunner #1610 announce delivery contract", () => {
   ].join("\n");
 
   it("appends the delivery contract to one-shot announce dispatch prompts", async () => {
-    const agentRunner = vi.fn(async () => ({ cardId: 7, result: "direct result" }));
+    const agentRunner = vi.fn(async () => ({ cardId: 7, result: "direct result", outcome: "text" as const }));
     const runner = new ScheduledTaskRunner({ agentRunner });
     const outcome = await runner.run(makeEntry("contract-announce"), makeReservation("contract-announce"));
 
@@ -404,7 +408,7 @@ describe("ScheduledTaskRunner #1610 announce delivery contract", () => {
   });
 
   it("leaves report dispatch prompts unchanged", async () => {
-    const agentRunner = vi.fn(async () => ({ cardId: 7, result: "report result" }));
+    const agentRunner = vi.fn(async () => ({ cardId: 7, result: "report result", outcome: "text" as const }));
     const runner = new ScheduledTaskRunner({ agentRunner });
     const entry = makeEntry("contract-report");
     entry.delivery = "report";
@@ -450,7 +454,7 @@ describe("ScheduledTaskRunner #1610 announce delivery contract", () => {
   });
 
   it("passes the final response as deliveryText while detail stays a short prefix", async () => {
-    const agentRunner = vi.fn(async () => ({ cardId: 7, result: LONG_RESULT }));
+    const agentRunner = vi.fn(async () => ({ cardId: 7, result: LONG_RESULT, outcome: "text" as const }));
     const runner = new ScheduledTaskRunner({ agentRunner });
     const outcome = await runner.run(makeEntry("contract-long"), makeReservation("contract-long"));
 

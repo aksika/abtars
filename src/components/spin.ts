@@ -1518,9 +1518,9 @@ export class Spin {
     // "external" → stays alive (Orc, persistent D); 1hr housekeeping prunes ended ones
   }
 
-  /** #1271: Background one-shot (e.g. compaction summary). Returns the result string. */
+  /** #1271: Background one-shot (e.g. compaction summary). Returns text only. */
   async dispatchBackground(opts: DispatchBackgroundOptions): Promise<string> {
-    const { result } = await this.spin({
+    const { result, outcome } = await this.spin({
       type: opts.type ?? "S",
       prompt: opts.prompt,
       timeoutMs: opts.timeoutMs,
@@ -1529,7 +1529,14 @@ export class Spin {
       settlementOwner: "spin",
       await: true,
     });
-    return result ?? "";
+    // #1651 v2: background callers persist the returned string as durable
+    // domain content (currently conversation compaction). Never let a
+    // reaction/control marker or a contentless turn cross that boundary as if
+    // it were a successful summary.
+    if (outcome !== "text") {
+      throw new Error(`background spin returned non-text outcome: ${outcome}`);
+    }
+    return result;
   }
 
   // ── Dispatch (legacy wrappers, #1271) ───────────────────────────────────

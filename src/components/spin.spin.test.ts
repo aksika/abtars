@@ -784,6 +784,17 @@ describe("spin(spec) — unified session API (#1271)", () => {
       const call = (runtime.openExecution as any).mock.calls[0];
       expect(call[0]).toBe("dreamy");
     });
+
+    it.each<[string, string]>([
+      ["empty", ""],
+      ["no_reply", "[NO_REPLY]"],
+      ["reaction", "[REACT:👋]"],
+    ])("rejects a %s response instead of returning it as background text", async (_name, raw) => {
+      spin.setRuntime(makeRuntime({ sendPromptImpl: async () => raw }) as any);
+      await expect(spin.dispatchBackground({ prompt: "compact" })).rejects.toThrow(
+        "background spin returned non-text outcome",
+      );
+    });
   });
 
   describe("Orc parity (#1271 — highest-risk area)", () => {

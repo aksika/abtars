@@ -141,7 +141,7 @@ interface SchedulerDoubles {
 
 let doubles: SchedulerDoubles;
 
-function fakeAgentRunner(request: import("../../components/spin-types.js").SpinRequest): Promise<{ cardId: number; result: string }> {
+function fakeAgentRunner(request: import("../../components/spin-types.js").SpinRequest): Promise<{ cardId: number; result: string; outcome: "text" }> {
   const entryId = (request.title ?? "").toLowerCase().replace(/\s+/g, "-");
   doubles.dispatchedGoals.push(request.goal ?? "");
   if (entryId === "flaky-task" && doubles.providerFailures > 0) {
@@ -167,9 +167,9 @@ function fakeAgentRunner(request: import("../../components/spin-types.js").SpinR
   // #1610: the announce task's model result is a multi-paragraph greeting
   // longer than 200 characters — the exact escaped production shape.
   if (entryId === "announce-task") {
-    return Promise.resolve({ cardId, result: ANNOUNCE_GREETING });
+    return Promise.resolve({ cardId, result: ANNOUNCE_GREETING, outcome: "text" });
   }
-  return Promise.resolve({ cardId, result: `result for ${entryId}` });
+  return Promise.resolve({ cardId, result: `result for ${entryId}`, outcome: "text" });
 }
 
 function makeDeliveryDeps() {

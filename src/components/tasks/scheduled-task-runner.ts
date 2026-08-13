@@ -420,17 +420,23 @@ export class ScheduledTaskRunner {
         // report task never reaches this branch: its validated artifact owns
         // settlement above the text outcome. Multi-agent project lanes carry
         // no synthetic Spin outcome (accepted evidence owns them), so the
-        // gate applies only when the single-agent contract provided one.
-        if (outcome !== undefined && outcome !== "text") {
+        // gate applies only to the single-agent contract. The direct runner
+        // is required to return an outcome; an omitted outcome is therefore
+        // a contract violation and must fail closed just like `empty`.
+        // Multi-agent project results intentionally omit the Spin outcome and
+        // are accepted here only after their evidence/artifact gates above.
+        if (maxAgents === 1 && outcome !== "text") {
           const detail = outcome === "no_reply"
             ? "model signalled no reply"
             : outcome === "reaction"
               ? "model returned only a reaction"
-              : "model returned no output";
-          logWarn(TAG, `Task ${entry.id}: announce turn produced no text (${outcome}) — settling failed without delivery`);
+              : outcome === "empty"
+                ? "model returned no output"
+                : "model result omitted its content outcome";
+          logWarn(TAG, `Task ${entry.id}: announce turn produced no text (${outcome ?? "missing"}) — settling failed without delivery`);
           settleRunOnce({
             entry, run: reservation, outcome: "failed",
-            diagnostic: makeTaskFailure("execution", "empty_model_response", "executing", detail, "none"),
+            diagnostic: makeTaskFailure("execution", "empty_model_response", "validating", detail, "none"),
             detail, cardId: boardId, executionRef: runId, onPaused: this.onPaused, onFailure: this.onFailure, factAt: childFactAt,
           });
           return { status: "failed", safeDetail: detail, cardId: boardId };
