@@ -1,5 +1,6 @@
 import { describe, it, expect } from "vitest";
-import { cleanResponse } from "./clean-response.js";
+import { classifyContent, cleanResponse } from "./clean-response.js";
+import type { ContentOutcome } from "./clean-response.js";
 
 describe("cleanResponse", () => {
   it("strips [CONTEXT] block", () => {
@@ -42,5 +43,28 @@ describe("cleanResponse", () => {
     const raw = "[Current time: 2026-04-24 14:00 (Thursday)]\n[Flashback] some memory\nActual response.";
     const { text } = cleanResponse(raw);
     expect(text).toBe("Actual response.");
+  });
+});
+
+/*
+ * #1651: classifyContent is the single normalization of "did this turn produce
+ * anything". Before it existed, spin fabricated "(no output)" for an empty
+ * provider response, which made three downstream guards unreachable (sleep
+ * completion, skill bootstrap, and the whole chat empty/no-reply policy). These
+ * cases pin the classification each of those guards now depends on.
+ */
+describe("classifyContent (#1651)", () => {
+  const cases: ReadonlyArray<readonly [string, string, ContentOutcome]> = [
+    ["plain text", "Here is the answer.", "content"],
+    ["deliberate silence", "[NO_REPLY]", "no_reply"],
+    ["silence marker with text — text wins", "[NO_REPLY]\n\nSleep finished — 5 things done.", "content"],
+    ["reaction emoji only IS the reply", "[REACT:👋]", "content"],
+    ["empty provider response", "", "empty"],
+    ["whitespace-only provider response", "   \n\t ", "empty"],
+    ["echoed internal context only", "[CONTEXT — do not respond]\nSOUL.md content\n[/CONTEXT]", "empty"],
+  ];
+
+  it.each(cases)("%s → %s", (_name, raw, expected) => {
+    expect(classifyContent(raw)).toBe(expected);
   });
 });

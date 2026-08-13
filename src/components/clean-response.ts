@@ -62,3 +62,23 @@ export function cleanResponse(raw: string): CleanedResponse {
 
   return { text, reactionEmoji, noReply, topics };
 }
+
+/**
+ * #1651: whether a settled model turn carried semantic content, and if not, why.
+ *
+ * - `content`  — usable text, or a `[REACT:emoji]` that IS the reply
+ * - `no_reply` — the model deliberately declined via `[NO_REPLY]`
+ * - `empty`    — the provider settled the turn with nothing at all
+ *
+ * Text always wins: `"[NO_REPLY] here you go"` is content, mirroring the
+ * pipeline's own `if (!userResponse && noReply)` ordering. Spin classifies every
+ * settled turn with this and never fabricates a placeholder result.
+ */
+export type ContentOutcome = "content" | "no_reply" | "empty";
+
+/** Classify a raw provider response into a {@link ContentOutcome}. */
+export function classifyContent(raw: string): ContentOutcome {
+  const { text, reactionEmoji, noReply } = cleanResponse(raw);
+  if (text.trim() || reactionEmoji) return "content";
+  return noReply ? "no_reply" : "empty";
+}

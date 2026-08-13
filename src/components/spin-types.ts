@@ -4,6 +4,7 @@
  */
 
 import type { AgentName } from "./subagent-runtime.js";
+import type { ContentOutcome } from "./clean-response.js";
 import type { Delivery, DeliveryMode } from "./tasks/task-types.js";
 import type { IKiroTransport, RuntimeUsageSnapshot } from "./transport/kiro-transport.js";
 import type { SandboxPolicy } from "./tool-sandbox.js";
@@ -343,7 +344,9 @@ export interface StepEvent {
   sessionId: string;
   cardId?: number;
   stepIndex: number;        // 1-based call count within this session
-  result?: string;          // undefined on failure
+  result?: string;          // undefined on failure; MAY be "" (#1651)
+  /** #1651: whether the settled turn carried semantic content. */
+  outcome?: ContentOutcome;
   error?: Error;
   durationMs: number;
   inputTokens?: number;     // per-call absolute (usage.input), not a delta
@@ -353,7 +356,12 @@ export interface StepEvent {
 export interface SpinResult {
   sessionId: string;
   cardId?: number;
-  result?: string;          // present when await: true
+  /** Present when `await: true`. The provider's own string — never fabricated,
+   *  so it MAY be empty (#1651). Consult `outcome` instead of truthiness when
+   *  the distinction between deliberate silence and provider failure matters. */
+  result?: string;
+  /** #1651: present when `await: true`. */
+  outcome?: ContentOutcome;
 }
 
 /** #1361: Per-execution continuation-capable driver for Spin's execution loop.
