@@ -15,7 +15,10 @@
  * buildPrompt(), or any memory hook.
  */
 
-import { PiCodingSessionStore, type PiCodingSessionRecord, type PiCodingTransitionUpdates } from "./pi-coding-session-store.js";
+import { randomUUID } from "node:crypto";
+import { readdirSync, type Dirent } from "node:fs";
+import { join } from "node:path";
+import { PiCodingSessionStore, type PiCodingSessionRecord, type PiCodingTransitionUpdates, type PiCodingState, type PiCodingLeaseFrontend } from "./pi-coding-session-store.js";
 import { PiWorkspaceClaimStore } from "./pi-workspace-claim-store.js";
 import { PiRuntimeHost } from "./pi-runtime-host.js";
 import type { PiExecutorConfig } from "./config.js";
@@ -26,7 +29,8 @@ import type { RpcExtensionUIRequest } from "@earendil-works/pi-coding-agent";
 import type { Spin } from "../spin.js";
 import { captureGitEvidence, computeChangedFilesSummary } from "./evidence.js";
 import type { PiUiReply, ResumeCapability } from "./types.js";
-import { logInfo, logWarn } from "../logger.js";
+import { logInfo, logWarn, logDebug } from "../logger.js";
+import type { NativeCodingHandoffInfo } from "../../platforms/tui/tui-protocol.js";
 
 const TAG = "pi-coding";
 
@@ -90,15 +94,37 @@ export interface CreateCodingSessionResult {
   spinSessionId: string;
 }
 
+/** #1635 Phase 2 — a live native TUI handoff. The client owns the Pi process;
+ *  the daemon holds the generation-owned slot/claim/lease until the client
+ *  reports exit (or its connection dies and the process is proven gone). */
+interface NativeHandoffState {
+  sessionId: string;
+  generation: number;
+  leaseOwner: string;
+  /** Initial-case Pi session id handed to the client via `--session-id`. */
+  newPiSessionId?: string;
+  /** True once the client reported its spawned Pi pid. */
+  started: boolean;
+}
+
+export type NativeHandoffResult =
+  | { ok: true; handoff: NativeCodingHandoffInfo }
+  | { ok: false; reason: string };
+
 export class PiCodingSessionService {
   private readonly deps: PiCodingServiceDeps;
   private readonly live = new Map<string, OwnedTurn>();
+  /** #1635 Phase 2 — live native TUI handoffs keyed by session id. */
+  private readonly nativeHandoffs = new Map<string, NativeHandoffState>();
 
   constructor(deps: PiCodingServiceDeps) {
     this.deps = deps;
   }
 
   get liveCount(): number { return this.live.size; }
+
+  /** Number of currently active native TUI handoffs (capacity accounting). */
+  get nativeHandoffCount(): number { return this.nativeHandoffs.size; }
 
   // ── session creation / listing ────────────────────────────────────────────
 
@@ -461,7 +487,291 @@ export class PiCodingSessionService {
     return true;
   }
 
-  /** Bridge shutdown: abort every live turn; leave sessions interrupted. */
+  // ── #1635 Phase 2 — native TUI handoff ────────────────────────────────────
+
+  /**
+   * Resolve an `idle|interrupted` session for a native TUI handoff and hold
+   * the generation-owned resources for its whole lifetime. Sequence (design
+   * §8): prove no prior writer process -> synchronously reserve a shared Pi
+   * slot -> atomically (advance generation + CAS idle|interrupted -> starting
+   * + acquire the interactive workspace claim + set the native-tui writer
+   * lease). The reply carries ONLY session facts — never an executable or
+   * argument vector; the client resolves Pi and builds its own args.
+   *
+   * `command` is the raw client line: `/coding`, `/coding new <alias>`, or
+   * `/coding resume [sessionId]` — same resolution semantics as Telegram.
+   */
+  beginNativeHandoff(input: {
+    ownerPrincipal: string;
+    leaseOwner: string;
+    command: string;
+  }): NativeHandoffResult {
+    const resolved = this.resolveHandoffTarget(input.command, input.ownerPrincipal);
+    if (!resolved.ok) return { ok: false, reason: resolved.reason };
+    let rec = resolved.rec!;
+
+    // R2.4 — prove no prior writer process before acquiring the lease. A live
+    // pid (previous crashed handoff / unreaped writer) must never be written
+    // over by a second process.
+    if (rec.observedPid !== undefined && isProcessAlive(rec.observedPid)) {
+      return { ok: false, reason: `A prior Pi session process (pid ${rec.observedPid}) is still running on this workspace — quit it before starting a native handoff` };
+    }
+
+    // Self-heal a stale native handoff fence: a dead client connection or
+    // daemon restart leaves the native lease/claim held on a `starting` or
+    // `interrupted` row. The pid check above already proved no live writer,
+    // so the stale fence can be released and the accept proceeds.
+    if (rec.leaseFrontend === "native-tui" && rec.leaseGeneration !== undefined) {
+      const stale = this.nativeHandoffs.get(rec.sessionId);
+      if (stale) {
+        this.nativeHandoffs.delete(rec.sessionId);
+        this.deps.host.releaseSlot();
+      }
+      this.deps.store.casTransition(rec.sessionId, ["starting", "interrupted"], "interrupted", {
+        resumeCapability: this.capabilityForRow(rec),
+      }, rec.runtimeGeneration);
+      this.deps.store.clearLease(rec.sessionId, rec.leaseGeneration);
+      this.deps.claims.releaseForGeneration({ ownerId: rec.sessionId, generation: rec.runtimeGeneration });
+      logWarn(TAG, `Coding session ${rec.sessionId}: cleared stale native handoff fence`);
+      rec = this.deps.store.get(rec.sessionId)!;
+    }
+
+    // R2.4 — fail closed from live states.
+    if (rec.state !== "idle" && rec.state !== "interrupted") {
+      return { ok: false, reason: `Native handoff requires an idle session (state is ${rec.state})` };
+    }
+
+    // Resume requires a proven target, never an inferred one (R4.4).
+    const isResume = Boolean(rec.piSessionId && rec.piSessionFile);
+    let proof: ReturnType<typeof validatePersistedSession> | null = null;
+    if (isResume) {
+      proof = validatePersistedSession({
+        sessionStorageRoot: this.deps.config.sessionStorageRoot,
+        expectedSessionId: rec.piSessionId,
+        sessionFile: rec.piSessionFile,
+      });
+      if (!proof.ok) {
+        this.deps.store.recordResumeCapability(rec.sessionId, proof.capability);
+        return { ok: false, reason: `Pi session is not resumable (${proof.capability}): ${proof.reason}` };
+      }
+    }
+
+    const ws = resolveAndValidateWorkspace(rec.workspaceAlias, this.deps.config);
+    if (ws.error) return { ok: false, reason: ws.error };
+
+    // R4.6 — synchronously reserve the shared Pi slot before anything else.
+    if (!this.deps.host.tryReserveSlot()) {
+      return { ok: false, reason: "Pi capacity is full — retry when a slot frees up" };
+    }
+
+    const intent: "initial" | "resume" = isResume ? "resume" : "initial";
+    let generation: number;
+    try {
+      const tx = this.txTurnStart(rec, rec.runtimeGeneration, intent, input.leaseOwner, ws.canonicalPath, "native-tui");
+      if (!tx.ok) {
+        this.deps.host.releaseSlot();
+        return { ok: false, reason: tx.busy
+          ? "Workspace is busy — another Pi worker holds it"
+          : "Session changed state before the handoff could start" };
+      }
+      generation = tx.generation;
+    } catch {
+      this.deps.host.releaseSlot();
+      return { ok: false, reason: "Failed to start the native handoff" };
+    }
+
+    const newPiSessionId = isResume ? undefined : randomUUID();
+    this.nativeHandoffs.set(rec.sessionId, {
+      sessionId: rec.sessionId,
+      generation,
+      leaseOwner: input.leaseOwner,
+      newPiSessionId,
+      started: false,
+    });
+
+    const handoff: NativeCodingHandoffInfo = {
+      sessionId: rec.sessionId,
+      workspaceAlias: rec.workspaceAlias,
+      canonicalPath: ws.canonicalPath,
+      memoryMode: rec.memoryMode,
+      sessionStorageRoot: this.deps.config.sessionStorageRoot,
+      piSessionId: proof?.ok ? proof.sessionId : undefined,
+      piSessionFile: proof?.ok ? proof.canonicalFile : undefined,
+      newPiSessionId,
+      modelProvider: rec.modelProvider,
+      modelId: rec.modelId,
+      thinking: rec.thinking,
+    };
+    logInfo(TAG, `Native handoff ${rec.sessionId} (gen ${generation}) started by ${input.leaseOwner} (${intent})`);
+    return { ok: true, handoff };
+  }
+
+  /**
+   * The client spawned the pinned Pi executable — persist the pid as the
+   * exclusive-writer fence (`observedPid`). Generation- and lease-fenced: a
+   * stale connection can never write a newer handoff's row.
+   */
+  recordNativeHandoffPid(input: { sessionId: string; leaseOwner: string; pid: number }): void {
+    const h = this.nativeHandoffs.get(input.sessionId);
+    if (!h || h.leaseOwner !== input.leaseOwner) return;
+    const cas = this.deps.store.casTransition(input.sessionId, "starting", "starting", {
+      observedPid: input.pid,
+    }, h.generation);
+    if (cas.applied) {
+      h.started = true;
+      logDebug(TAG, `Native handoff ${input.sessionId}: writer pid ${input.pid} recorded`);
+    }
+  }
+
+  /**
+   * Pi exited (or the client aborted before spawning). Reconcile the durable
+   * session truthfully, then release the generation-owned slot/claim/lease.
+   * `code === 0` with a valid proof returns the session to `idle`; anything
+   * else lands `interrupted` with a proof-derived capability — never a false
+   * `available`.
+   */
+  endNativeHandoff(input: { sessionId: string; leaseOwner: string; code: number | null }): { ok: boolean; message: string } {
+    const h = this.nativeHandoffs.get(input.sessionId);
+    if (!h) return { ok: false, message: "No active native handoff for this session" };
+    if (h.leaseOwner !== input.leaseOwner) return { ok: false, message: "Handoff lease owner mismatch" };
+
+    const rec = this.deps.store.get(input.sessionId);
+    if (!rec) {
+      this.releaseNativeHandoff(h);
+      return { ok: false, message: "Session not found" };
+    }
+
+    const updates: PiCodingTransitionUpdates = {
+      pendingRequestId: null,
+      pendingRequestType: null,
+    };
+    let state: PiCodingState;
+    let provedIdentity: { sessionId: string; canonicalFile: string } | null = null;
+
+    if (rec.piSessionId && rec.piSessionFile) {
+      const proof = validatePersistedSession({
+        sessionStorageRoot: this.deps.config.sessionStorageRoot,
+        expectedSessionId: rec.piSessionId,
+        sessionFile: rec.piSessionFile,
+      });
+      updates.resumeCapability = proof.ok ? "available" : proof.capability;
+      if (proof.ok) provedIdentity = { sessionId: proof.sessionId, canonicalFile: proof.canonicalFile };
+      state = input.code === 0 && proof.ok ? "idle" : "interrupted";
+    } else if (h.newPiSessionId) {
+      // Initial handoff: the client launched Pi with `--session-id`; discover
+      // the file it created under the configured storage root, then prove it.
+      const found = findSessionFileBySuffix(this.deps.config.sessionStorageRoot, h.newPiSessionId);
+      const proof = found
+        ? validatePersistedSession({
+          sessionStorageRoot: this.deps.config.sessionStorageRoot,
+          expectedSessionId: h.newPiSessionId,
+          sessionFile: found,
+        })
+        : { ok: false as const, capability: "session_missing" as const, reason: "no session file created by Pi" };
+      if (proof.ok) {
+        provedIdentity = { sessionId: proof.sessionId, canonicalFile: proof.canonicalFile };
+        updates.resumeCapability = "available";
+        state = input.code === 0 ? "idle" : "interrupted";
+      } else {
+        updates.resumeCapability = proof.capability;
+        state = "interrupted";
+      }
+    } else {
+      updates.resumeCapability = "never_started";
+      state = "interrupted";
+    }
+
+    if (provedIdentity) {
+      updates.piSessionId = provedIdentity.sessionId;
+      updates.piSessionFile = provedIdentity.canonicalFile;
+    }
+    this.deps.store.casTransition(input.sessionId, "starting", state, updates, h.generation);
+    this.releaseNativeHandoff(h);
+    logInfo(TAG, `Native handoff ${input.sessionId} ended (code ${input.code}) -> ${state}`);
+    return { ok: true, message: state === "idle" ? "Pi session returned to idle" : `Pi session ended abnormally (${state})` };
+  }
+
+  /**
+   * The handoff connection died. The client-owned Pi process may still be
+   * alive and writing the session file: if its recorded pid is live, keep the
+   * workspace claim and writer lease (the next handoff's prior-writer check
+   * blocks until the process actually exits); otherwise release everything.
+   * The shared slot is always released — the daemon cannot supervise an
+   * orphaned client process.
+   */
+  abortNativeHandoff(leaseOwner: string): void {
+    for (const [sessionId, h] of this.nativeHandoffs) {
+      if (h.leaseOwner !== leaseOwner) continue;
+      this.nativeHandoffs.delete(sessionId);
+      this.deps.host.releaseSlot();
+      const rec = this.deps.store.get(sessionId);
+      if (!rec) return;
+      const capability = this.capabilityForRow(rec);
+      const orphanWrites = h.started && rec.observedPid !== undefined && isProcessAlive(rec.observedPid);
+      if (orphanWrites) {
+        // Keep the claim + lease as the exclusive-writer fence; state is
+        // interrupted. The next handoff accept self-heals once the process
+        // is proven gone.
+        this.deps.store.casTransition(sessionId, "starting", "interrupted", {
+          resumeCapability: capability,
+        }, h.generation);
+        logWarn(TAG, `Native handoff ${sessionId} connection died; writer pid ${rec.observedPid} still alive — claim kept`);
+        return;
+      }
+      this.deps.store.casTransition(sessionId, "starting", "interrupted", {
+        resumeCapability: capability,
+      }, h.generation);
+      if (rec.leaseGeneration !== undefined) {
+        this.deps.store.clearLease(sessionId, rec.leaseGeneration);
+      }
+      this.deps.claims.releaseForGeneration({ ownerId: sessionId, generation: h.generation });
+      logWarn(TAG, `Native handoff ${sessionId} aborted (connection lost) — resources released`);
+      return;
+    }
+  }
+
+  // ── native handoff helpers ──────────────────────────────────────────────
+
+  /** Resolve the client's `/coding...` line to a session (Telegram semantics). */
+  private resolveHandoffTarget(
+    command: string,
+    ownerPrincipal: string,
+  ): { ok: true; rec: PiCodingSessionRecord } | { ok: false; reason: string } {
+    const args = command.replace(/^\/coding\s*/i, "").trim();
+    if (args.startsWith("new")) {
+      const alias = args.slice("new".length).trim();
+      if (!alias) return { ok: false, reason: "Usage: /coding new <workspace-alias>" };
+      try {
+        const created = this.createCodingSession({ ownerPrincipal, workspaceAlias: alias });
+        const rec = this.deps.store.get(created.sessionId);
+        if (!rec) return { ok: false, reason: "Coding session could not be created" };
+        return { ok: true, rec };
+      } catch (err) {
+        return { ok: false, reason: boundedError(err) };
+      }
+    }
+    const explicit = args.replace(/^resume\s*/i, "").trim();
+    if (explicit) {
+      const rec = this.getSession(explicit, ownerPrincipal);
+      if (!rec) return { ok: false, reason: "Coding session not found" };
+      return { ok: true, rec };
+    }
+    const rec = this.deps.store.getMostRecentForOwner(ownerPrincipal);
+    if (!rec) return { ok: false, reason: "No coding sessions. Start one with /coding new <workspace-alias>." };
+    return { ok: true, rec };
+  }
+
+  /** Release the generation-owned slot/claim/lease of a finished handoff. */
+  private releaseNativeHandoff(h: NativeHandoffState): void {
+    this.nativeHandoffs.delete(h.sessionId);
+    this.deps.store.clearLease(h.sessionId, h.generation);
+    this.deps.claims.releaseForGeneration({ ownerId: h.sessionId, generation: h.generation });
+    this.deps.host.releaseSlot();
+  }
+
+  /**
+   * Bridge shutdown: abort every live turn; leave sessions interrupted.
+   */
   async interruptAll(): Promise<void> {
     const snapshot = [...this.live.values()];
     await Promise.all(snapshot.map(async (owned) => {
@@ -492,12 +802,25 @@ export class PiCodingSessionService {
         pendingRequestId: null,
         pendingRequestType: null,
       }, rec.runtimeGeneration);
+      if (rec.leaseFrontend === "native-tui" && rec.observedPid !== undefined && isProcessAlive(rec.observedPid)) {
+        // #1635 Phase 2 — a native handoff's Pi process is CLIENT-owned and
+        // survives the bridge restart. It may still be writing the session
+        // file: keep the claim + lease as the exclusive-writer fence; the
+        // next handoff accept self-heals them once the pid is proven gone.
+        logWarn(TAG, `Coding session ${rec.sessionId}: native writer pid ${rec.observedPid} alive at boot — claim kept`);
+        continue;
+      }
       this.deps.claims.releaseForGeneration({ ownerId: rec.sessionId, generation: rec.runtimeGeneration });
       this.deps.store.clearLease(rec.sessionId, rec.runtimeGeneration);
       logInfo(TAG, `Coding session ${rec.sessionId} interrupted at boot (capability ${capability})`);
     }
     for (const rec of this.deps.store.listStaleLeases()) {
       if (rec.leaseGeneration === undefined) continue;
+      if (rec.leaseFrontend === "native-tui" && rec.observedPid !== undefined && isProcessAlive(rec.observedPid)) {
+        // same fence for rows that crashed outside the live states
+        logWarn(TAG, `Coding session ${rec.sessionId}: native writer pid ${rec.observedPid} alive at boot — lease kept`);
+        continue;
+      }
       this.deps.store.clearLease(rec.sessionId, rec.leaseGeneration);
       logInfo(TAG, `Coding session ${rec.sessionId}: cleared stale lease (gen ${rec.leaseGeneration})`);
     }
@@ -532,6 +855,7 @@ export class PiCodingSessionService {
     intent: "initial" | "resume",
     leaseOwner: string,
     canonicalPath: string,
+    frontend: PiCodingLeaseFrontend = "telegram-rpc",
   ): { ok: true; generation: number } | { ok: false; busy: boolean } {
     let outcome: { ok: true; generation: number } | { ok: false; busy: boolean } = { ok: false, busy: false };
     const run = (): void => {
@@ -557,7 +881,7 @@ export class PiCodingSessionService {
         outcome = { ok: false, busy: true };
         throw TURN_START_ROLLBACK;
       }
-      if (!this.setLeaseInTx(rec.sessionId, generation, leaseOwner)) {
+      if (!this.setLeaseInTx(rec.sessionId, generation, leaseOwner, frontend)) {
         // A stale lease on an otherwise startable row is still an exclusive
         // writer. Roll back the whole transaction rather than launching a
         // process with no durable lease fence.
@@ -574,9 +898,9 @@ export class PiCodingSessionService {
     return outcome;
   }
 
-  private setLeaseInTx(sessionId: string, generation: number, leaseOwner: string): boolean {
+  private setLeaseInTx(sessionId: string, generation: number, leaseOwner: string, frontend: PiCodingLeaseFrontend): boolean {
     return this.deps.store.setLease(sessionId, {
-      frontend: "telegram-rpc",
+      frontend,
       owner: leaseOwner,
       generation,
       acquiredAt: new Date().toISOString(),
@@ -914,4 +1238,47 @@ type PiCodingUiType = "select" | "confirm" | "input" | "editor";
 function boundedError(err: unknown): string {
   const message = err instanceof Error ? err.message : String(err);
   return message.slice(0, 300);
+}
+
+/** True when a pid names a live process on this host (ESRCH = gone). */
+export function isProcessAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (err) {
+    return (err as NodeJS.ErrnoException).code !== "ESRCH";
+  }
+}
+
+const SESSION_FILE_SCAN_MAX_ENTRIES = 2000;
+const SESSION_FILE_SCAN_MAX_DEPTH = 8;
+
+/**
+ * Bounded recursive scan of the session storage root for the file Pi created
+ * for a `--session-id` launch: `<root>/--<encoded-cwd>--/<timestamp>_<id>.jsonl`.
+ * Bounded by entry count and directory depth — never a full-tree walk.
+ */
+export function findSessionFileBySuffix(root: string, sessionId: string): string | null {
+  const suffix = `_${sessionId}.jsonl`;
+  const stack: Array<{ dir: string; depth: number }> = [{ dir: root, depth: 0 }];
+  let visited = 0;
+  while (stack.length > 0) {
+    const { dir, depth } = stack.pop()!;
+    if (depth > SESSION_FILE_SCAN_MAX_DEPTH) continue;
+    let entries: Dirent[];
+    try {
+      entries = readdirSync(dir, { withFileTypes: true });
+    } catch {
+      continue;
+    }
+    for (const entry of entries) {
+      if (visited++ >= SESSION_FILE_SCAN_MAX_ENTRIES) return null;
+      if (entry.isDirectory()) {
+        stack.push({ dir: join(dir, entry.name), depth: depth + 1 });
+      } else if (entry.isFile() && entry.name.endsWith(suffix)) {
+        return join(dir, entry.name);
+      }
+    }
+  }
+  return null;
 }

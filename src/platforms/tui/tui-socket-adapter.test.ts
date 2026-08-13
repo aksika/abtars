@@ -2058,3 +2058,118 @@ describe("TuiSocketAdapter — #1319 idle Orc execution-follow", () => {
     second.conn.destroy();
   });
 });
+
+// ── #1635 Phase 2 — native TUI handoff ──────────────────────────────────
+
+describe("TuiSocketAdapter — native coding handoff", () => {
+  let sockPath: string;
+  let adapter: TuiSocketAdapter;
+  let coding: {
+    beginNativeHandoff: ReturnType<typeof vi.fn>;
+    recordNativeHandoffPid: ReturnType<typeof vi.fn>;
+    endNativeHandoff: ReturnType<typeof vi.fn>;
+    abortNativeHandoff: ReturnType<typeof vi.fn>;
+  };
+  const H1 = { sessionId: "spin-c-1", workspaceAlias: "repo-a", canonicalPath: "/ws/repo-a", memoryMode: "none", sessionStorageRoot: "/state", piSessionId: "sess-1", piSessionFile: "/state/sess-1.jsonl" } as const;
+
+  beforeEach(async () => {
+    sockPath = tmpSocketPath();
+    coding = {
+      beginNativeHandoff: vi.fn(() => ({ ok: true, handoff: H1 })),
+      recordNativeHandoffPid: vi.fn(),
+      endNativeHandoff: vi.fn(() => ({ ok: true, message: "Pi session returned to idle" })),
+      abortNativeHandoff: vi.fn(),
+    };
+    adapter = new TuiSocketAdapter({
+      spin: makeMockSpin().spin,
+      onMessage: makeRecoveryHandler(),
+      socketPath: sockPath,
+      codingService: coding as never,
+    });
+    await adapter.start();
+  });
+
+  afterEach(() => { adapter.stop(); });
+
+  async function openConn(): Promise<{ conn: net.Socket; frames: TuiServerFrame[] }> {
+    const frames: TuiServerFrame[] = [];
+    const decoder = createFrameDecoder<TuiServerFrame>();
+    const conn = net.createConnection(sockPath);
+    await new Promise<void>((resolve, reject) => {
+      conn.once("connect", () => resolve());
+      conn.once("error", reject);
+    });
+    conn.on("data", (buf: Buffer) => {
+      for (const f of decoder.push(buf)) frames.push(f);
+    });
+    await new Promise((r) => setTimeout(r, 30));
+    return { conn, frames };
+  }
+
+  it("accepts a coding-handoff request and replies with session facts only", async () => {
+    const { conn, frames } = await openConn();
+    conn.write(encodeFrame({ t: "coding-handoff", text: "/coding" }));
+    await waitFor(() => frames.some((f) => f.t === "coding-handoff-accepted"), 2000);
+
+    expect(coding.beginNativeHandoff).toHaveBeenCalledWith(expect.objectContaining({
+      ownerPrincipal: "aksika",
+      command: "/coding",
+    }));
+    const accepted = frames.find((f) => f.t === "coding-handoff-accepted");
+    expect(accepted).toMatchObject({ t: "coding-handoff-accepted", handoff: H1 });
+    conn.destroy();
+  });
+
+  it("rejects with the bounded reason when the service refuses", async () => {
+    coding.beginNativeHandoff.mockReturnValue({ ok: false, reason: "Session is running" });
+    const { conn, frames } = await openConn();
+    conn.write(encodeFrame({ t: "coding-handoff", text: "/coding" }));
+    await waitFor(() => frames.some((f) => f.t === "coding-handoff-rejected"), 2000);
+    expect(frames.find((f) => f.t === "coding-handoff-rejected")).toMatchObject({
+      t: "coding-handoff-rejected", message: "Session is running",
+    });
+    conn.destroy();
+  });
+
+  it("rejects when the bridge has no coding service", async () => {
+    adapter.stop();
+    sockPath = tmpSocketPath();
+    adapter = new TuiSocketAdapter({
+      spin: makeMockSpin().spin,
+      onMessage: makeRecoveryHandler(),
+      socketPath: sockPath,
+    });
+    await adapter.start();
+    const { conn, frames } = await openConn();
+    conn.write(encodeFrame({ t: "coding-handoff", text: "/coding" }));
+    await waitFor(() => frames.some((f) => f.t === "coding-handoff-rejected"), 2000);
+    expect(frames.find((f) => f.t === "coding-handoff-rejected")).toMatchObject({
+      t: "coding-handoff-rejected",
+    });
+    conn.destroy();
+  });
+
+  it("forwards coding-handoff-started pid and coding-handoff-exit to the service", async () => {
+    const { conn, frames } = await openConn();
+    conn.write(encodeFrame({ t: "coding-handoff-started", sessionId: "spin-c-1", pid: 4242 }));
+    conn.write(encodeFrame({ t: "coding-handoff-exit", sessionId: "spin-c-1", code: 0 }));
+    await waitFor(() => frames.some((f) => f.t === "coding-handoff-released"), 2000);
+
+    expect(coding.recordNativeHandoffPid).toHaveBeenCalledWith(expect.objectContaining({ sessionId: "spin-c-1", pid: 4242 }));
+    expect(coding.endNativeHandoff).toHaveBeenCalledWith(expect.objectContaining({ sessionId: "spin-c-1", code: 0 }));
+    expect(frames.find((f) => f.t === "coding-handoff-released")).toMatchObject({
+      t: "coding-handoff-released",
+    });
+    conn.destroy();
+  });
+
+  it("aborts the handoff when the connection dies", async () => {
+    const { conn } = await openConn();
+    conn.write(encodeFrame({ t: "coding-handoff", text: "/coding" }));
+    await waitFor(() => coding.beginNativeHandoff.mock.calls.length > 0, 2000);
+    const leaseOwner = `tui:${(adapter as unknown as { _connGen: number })._connGen}`;
+    conn.destroy();
+    await waitFor(() => coding.abortNativeHandoff.mock.calls.length > 0, 2000);
+    expect(coding.abortNativeHandoff).toHaveBeenCalledWith(leaseOwner);
+  });
+});

@@ -11,6 +11,7 @@ import { createRequire } from "node:module";
 import { join } from "node:path";
 import { tmpdir, homedir } from "node:os";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
 import { PiCodingSessionStore } from "./pi-coding-session-store.js";
 import { PiWorkspaceClaimStore } from "./pi-workspace-claim-store.js";
 import { PiRuntimeHost } from "./pi-runtime-host.js";
@@ -558,6 +559,326 @@ describe("PiCodingSessionService #1635 — turn lifecycle", () => {
       expect(client.switches).toContain(savedFile);
       expect(client.prompts).toEqual(["resumed prompt"]);
       expect(h.store.get(sessionId)!.state).toBe("running");
+    });
+  });
+
+  describe("#1635 Phase 2 — native TUI handoff", () => {
+    function deadPid(): number {
+      const res = spawnSync(process.execPath, ["-e", "0"], { stdio: "ignore" });
+      return res.pid;
+    }
+
+    /** Run one Telegram turn to completion so the row carries a proven identity. */
+    async function sessionWithIdentity(h: Harness): Promise<{ sessionId: string; savedFile: string }> {
+      const sessionId = createSession(h);
+      const savedFile = writeSession(h.root, "t1.jsonl", "sess-1");
+      fake.FakeClient.defaultState = { sessionId: "sess-1", sessionFile: savedFile, isStreaming: false, isCompacting: false };
+      await h.service.startTurn({ sessionId, text: "first", ownerPrincipal: "usr-1", leaseOwner: "tg:1" });
+      fake.FakeClient.instances[0]!.emitEvent(agentEnd());
+      await vi.waitFor(() => {
+        expect(h.store.get(sessionId)!.state).toBe("idle");
+      });
+      // the RPC process is reaped in reality — clear the observed pid so the
+      // handoff's prior-writer check is deterministic (the fake client's
+      // synthetic pid 4242 could collide with a live OS process).
+      h.store.casTransition(sessionId, "idle", "idle", { observedPid: null });
+      return { sessionId, savedFile };
+    }
+
+    it("resume handoff from idle holds slot/claim/lease and returns session facts only", async () => {
+      const h = harness;
+      const { sessionId, savedFile } = await sessionWithIdentity(h);
+
+      const result = h.service.beginNativeHandoff({ ownerPrincipal: "usr-1", leaseOwner: "tui:1", command: "/coding" });
+      expect(result.ok).toBe(true);
+      if (!result.ok) return;
+      expect(result.handoff.piSessionId).toBe("sess-1");
+      expect(result.handoff.piSessionFile).toBe(savedFile);
+      expect(result.handoff.newPiSessionId).toBeUndefined();
+      expect(result.handoff.canonicalPath).toBe(h.wsPath);
+      expect(result.handoff.sessionStorageRoot).toBe(h.root);
+      expect(result.handoff.workspaceAlias).toBe("repo-a");
+
+      const rec = h.store.get(sessionId)!;
+      expect(rec.state).toBe("starting");
+      expect(rec.leaseFrontend).toBe("native-tui");
+      expect(rec.leaseOwner).toBe("tui:1");
+      expect(rec.leaseGeneration).toBe(rec.runtimeGeneration);
+      // the claim and shared slot are held for the whole handoff
+      expect(h.claims.list()).toHaveLength(1);
+      expect(h.host.reservedCount).toBe(1);
+
+      // Telegram cannot open the same session file while the native lease runs
+      // (design §4: a starting session gets a bounded retry — never a second writer)
+      const turn = await h.service.startTurn({ sessionId, text: "x", ownerPrincipal: "usr-1", leaseOwner: "tg:1" });
+      expect(turn.kind === "busy" || turn.kind === "retry").toBe(true);
+      expect(h.store.get(sessionId)!.state).toBe("starting");
+      expect(h.claims.list()).toHaveLength(1);
+      expect(fake.FakeClient.instances).toHaveLength(1); // no RPC process spawned
+
+      // an autonomous worker stays blocked for the whole handoff (R3.7)
+      const workerClaim = h.claims.tryAcquireInTx({
+        canonicalPath: h.wsPath,
+        ownerId: "run-worker-1",
+        generation: 1,
+        ownerKind: "standalone",
+      });
+      expect(workerClaim.kind).toBe("busy");
+
+      // ... and proceeds after exit releases the claim
+      h.service.endNativeHandoff({ sessionId, leaseOwner: "tui:1", code: 0 });
+      expect(h.claims.list()).toHaveLength(0);
+      const afterExit = h.claims.tryAcquireInTx({
+        canonicalPath: h.wsPath,
+        ownerId: "run-worker-2",
+        generation: 1,
+        ownerKind: "standalone",
+      });
+      expect(afterExit.kind).toBe("claimed");
+      h.claims.releaseForGeneration({ ownerId: "run-worker-2", generation: 1 });
+    });
+
+    it("records the client-spawned pid as the exclusive-writer fence", async () => {
+      const h = harness;
+      const { sessionId } = await sessionWithIdentity(h);
+      const result = h.service.beginNativeHandoff({ ownerPrincipal: "usr-1", leaseOwner: "tui:1", command: "/coding" });
+      expect(result.ok).toBe(true);
+      h.service.recordNativeHandoffPid({ sessionId, leaseOwner: "tui:1", pid: 77777 });
+      expect(h.store.get(sessionId)!.observedPid).toBe(77777);
+      // a stale connection cannot write the fence
+      h.service.recordNativeHandoffPid({ sessionId, leaseOwner: "tui:other", pid: 88888 });
+      expect(h.store.get(sessionId)!.observedPid).toBe(77777);
+    });
+
+    it("exit 0 with a valid proof returns the session to idle and releases everything", async () => {
+      const h = harness;
+      const { sessionId } = await sessionWithIdentity(h);
+      h.service.beginNativeHandoff({ ownerPrincipal: "usr-1", leaseOwner: "tui:1", command: "/coding" });
+      h.service.recordNativeHandoffPid({ sessionId, leaseOwner: "tui:1", pid: 77777 });
+
+      const ended = h.service.endNativeHandoff({ sessionId, leaseOwner: "tui:1", code: 0 });
+      expect(ended.ok).toBe(true);
+      const rec = h.store.get(sessionId)!;
+      expect(rec.state).toBe("idle");
+      expect(rec.resumeCapability).toBe("available");
+      expect(rec.leaseGeneration).toBeUndefined();
+      expect(rec.leaseFrontend).toBeUndefined();
+      expect(h.claims.list()).toHaveLength(0);
+      expect(h.host.reservedCount).toBe(0);
+      expect(h.service.nativeHandoffCount).toBe(0);
+    });
+
+    it("non-zero exit marks interrupted with a truthful proof-derived capability", async () => {
+      const h = harness;
+      const { sessionId } = await sessionWithIdentity(h);
+      h.service.beginNativeHandoff({ ownerPrincipal: "usr-1", leaseOwner: "tui:1", command: "/coding" });
+      const ended = h.service.endNativeHandoff({ sessionId, leaseOwner: "tui:1", code: 1 });
+      expect(ended.ok).toBe(true);
+      const rec = h.store.get(sessionId)!;
+      expect(rec.state).toBe("interrupted");
+      // the transcript is intact — capability stays truthful
+      expect(rec.resumeCapability).toBe("available");
+      expect(h.claims.list()).toHaveLength(0);
+    });
+
+    it("handoff from running fails closed", async () => {
+      const h = harness;
+      const sessionId = createSession(h);
+      // craft a running row directly — no observed pid (the fake pid could
+      // collide with a live OS process)
+      h.store.casTransition(sessionId, "idle", "running", {});
+      const result = h.service.beginNativeHandoff({ ownerPrincipal: "usr-1", leaseOwner: "tui:1", command: "/coding" });
+      expect(result.ok).toBe(false);
+      if (result.ok) return;
+      expect(result.reason).toContain("requires an idle session");
+      expect(h.claims.list()).toHaveLength(0);
+      expect(h.host.reservedCount).toBe(0);
+    });
+
+    it("initial handoff issues a --session-id identity and discovers the file at exit", async () => {
+      const h = harness;
+      const sessionId = createSession(h); // fresh — no Pi identity yet
+      const result = h.service.beginNativeHandoff({ ownerPrincipal: "usr-1", leaseOwner: "tui:1", command: "/coding" });
+      expect(result.ok).toBe(true);
+      if (!result.ok) return;
+      expect(result.handoff.newPiSessionId).toBeTruthy();
+      expect(result.handoff.piSessionFile).toBeUndefined();
+      const newId = result.handoff.newPiSessionId!;
+
+      // Pi wrote the session file under the configured storage root during
+      // the handoff (--session-dir layout: <root>/--<encoded-cwd>--/<ts>_<id>.jsonl)
+      const encoded = `--${h.wsPath.replace(/^[/\\]/, "").replace(/[/\\:]/g, "-")}--`;
+      mkdirSync(join(h.root, encoded), { recursive: true });
+      const sessionFile = join(h.root, encoded, `2026-08-13T00-00-00-000Z_${newId}.jsonl`);
+      writeFileSync(sessionFile, JSON.stringify({ type: "session", id: newId }) + "\n", "utf-8");
+
+      const ended = h.service.endNativeHandoff({ sessionId, leaseOwner: "tui:1", code: 0 });
+      expect(ended.ok).toBe(true);
+      const rec = h.store.get(sessionId)!;
+      expect(rec.state).toBe("idle");
+      expect(rec.piSessionId).toBe(newId);
+      expect(rec.piSessionFile).toBe(sessionFile);
+      expect(rec.resumeCapability).toBe("available");
+      expect(h.claims.list()).toHaveLength(0);
+    });
+
+    it("initial handoff with no file written lands interrupted + session_missing", async () => {
+      const h = harness;
+      const sessionId = createSession(h);
+      const result = h.service.beginNativeHandoff({ ownerPrincipal: "usr-1", leaseOwner: "tui:1", command: "/coding" });
+      expect(result.ok).toBe(true);
+      h.service.endNativeHandoff({ sessionId, leaseOwner: "tui:1", code: 0 });
+      const rec = h.store.get(sessionId)!;
+      expect(rec.state).toBe("interrupted");
+      expect(rec.resumeCapability).toBe("session_missing");
+      expect(h.claims.list()).toHaveLength(0);
+    });
+
+    it("a busy workspace claim reports busy and leaks nothing", async () => {
+      const h = harness;
+      const sessionId = createSession(h);
+      h.claims.tryAcquireInTx({ canonicalPath: h.wsPath, ownerId: "worker-1", generation: 1, ownerKind: "standalone" });
+      const result = h.service.beginNativeHandoff({ ownerPrincipal: "usr-1", leaseOwner: "tui:1", command: "/coding" });
+      expect(result.ok).toBe(false);
+      if (result.ok) return;
+      expect(result.reason).toContain("busy");
+      const rec = h.store.get(sessionId)!;
+      expect(rec.state).toBe("idle");
+      expect(rec.runtimeGeneration).toBe(1);
+      expect(h.claims.list()).toHaveLength(1); // only the worker's claim
+      expect(h.host.reservedCount).toBe(0);    // slot released
+    });
+
+    it("rejects a handoff while a prior writer pid is still alive", async () => {
+      const h = harness;
+      const sessionId = createSession(h);
+      h.store.casTransition(sessionId, "idle", "idle", { observedPid: process.pid });
+      const result = h.service.beginNativeHandoff({ ownerPrincipal: "usr-1", leaseOwner: "tui:1", command: "/coding" });
+      expect(result.ok).toBe(false);
+      if (result.ok) return;
+      expect(result.reason).toContain("still running");
+      expect(h.claims.list()).toHaveLength(0);
+      expect(h.host.reservedCount).toBe(0);
+    });
+
+    it("self-heals a stale native handoff fence once the prior pid is gone", async () => {
+      const h = harness;
+      const sessionId = createSession(h);
+      const savedFile = writeSession(h.root, "stale.jsonl", "sess-1");
+      // craft a crashed-handoff state: starting + native lease + claim, dead pid
+      h.store.advanceGeneration(sessionId, 1, "resume");
+      h.store.casTransition(sessionId, "idle", "starting", {
+        piSessionId: "sess-1", piSessionFile: savedFile, observedPid: deadPid(),
+      }, 2);
+      h.store.setLease(sessionId, { frontend: "native-tui", owner: "tui:dead", generation: 2, acquiredAt: "2026-08-13" }, 2);
+      h.claims.tryAcquireInTx({ canonicalPath: h.wsPath, ownerId: sessionId, generation: 2, ownerKind: "interactive" });
+
+      const result = h.service.beginNativeHandoff({ ownerPrincipal: "usr-1", leaseOwner: "tui:1", command: "/coding" });
+      expect(result.ok).toBe(true);
+      if (!result.ok) return;
+      const rec = h.store.get(sessionId)!;
+      expect(rec.state).toBe("starting");
+      expect(rec.leaseOwner).toBe("tui:1");     // fresh lease
+      expect(rec.leaseGeneration).toBe(3);       // new generation
+      expect(h.claims.list()).toHaveLength(1);
+      expect(h.claims.list()[0]!.generation).toBe(3); // stale claim released, fresh acquired
+      expect(h.host.reservedCount).toBe(1);
+    });
+
+    it("abortNativeHandoff keeps the claim while the writer pid lives and releases when gone", async () => {
+      const h = harness;
+      const { sessionId } = await sessionWithIdentity(h);
+      h.service.beginNativeHandoff({ ownerPrincipal: "usr-1", leaseOwner: "tui:1", command: "/coding" });
+      // the client reported a live writer pid, then its connection died
+      h.service.recordNativeHandoffPid({ sessionId, leaseOwner: "tui:1", pid: process.pid });
+      h.service.abortNativeHandoff("tui:1");
+      let rec = h.store.get(sessionId)!;
+      expect(rec.state).toBe("interrupted");
+      expect(h.host.reservedCount).toBe(0);      // slot always released
+      expect(h.claims.list()).toHaveLength(1);   // claim kept — orphan still writes
+      expect(rec.leaseGeneration).not.toBeUndefined();
+
+      // the orphan is gone (dead pid recorded now) — the next accept self-heals
+      h.store.casTransition(sessionId, "interrupted", "interrupted", { observedPid: deadPid() });
+      const result = h.service.beginNativeHandoff({ ownerPrincipal: "usr-1", leaseOwner: "tui:2", command: "/coding" });
+      expect(result.ok).toBe(true);
+      rec = h.store.get(sessionId)!;
+      expect(rec.state).toBe("starting");
+      expect(rec.leaseOwner).toBe("tui:2");
+      expect(h.claims.list()).toHaveLength(1);
+
+      // the same abort path with a dead pid releases claim + lease entirely
+      h.service.abortNativeHandoff("tui:2");
+      rec = h.store.get(sessionId)!;
+      expect(rec.leaseGeneration).toBeUndefined();
+      expect(h.claims.list()).toHaveLength(0);
+    });
+
+    it("endNativeHandoff refuses a mismatched lease owner", async () => {
+      const h = harness;
+      const { sessionId } = await sessionWithIdentity(h);
+      h.service.beginNativeHandoff({ ownerPrincipal: "usr-1", leaseOwner: "tui:1", command: "/coding" });
+      const wrong = h.service.endNativeHandoff({ sessionId, leaseOwner: "tui:other", code: 0 });
+      expect(wrong.ok).toBe(false);
+      expect(wrong.message).toContain("lease owner");
+      expect(h.claims.list()).toHaveLength(1);   // still held
+      expect(h.host.reservedCount).toBe(1);
+    });
+
+    it("beginNativeHandoff resolves /coding new and /coding resume subcommands", async () => {
+      const h = harness;
+      const fresh = h.service.beginNativeHandoff({ ownerPrincipal: "usr-1", leaseOwner: "tui:1", command: "/coding new repo-a" });
+      expect(fresh.ok).toBe(true);
+      if (!fresh.ok) return;
+      expect(fresh.handoff.newPiSessionId).toBeTruthy();
+      expect(fresh.handoff.workspaceAlias).toBe("repo-a");
+      const newSessionId = fresh.handoff.sessionId;
+      h.service.endNativeHandoff({ sessionId: newSessionId, leaseOwner: "tui:1", code: 0 });
+
+      const resumed = h.service.beginNativeHandoff({ ownerPrincipal: "usr-1", leaseOwner: "tui:2", command: `/coding resume ${newSessionId}` });
+      expect(resumed.ok).toBe(true);
+      if (!resumed.ok) return;
+      expect(resumed.handoff.sessionId).toBe(newSessionId);
+      h.service.endNativeHandoff({ sessionId: newSessionId, leaseOwner: "tui:2", code: 0 });
+    });
+
+    it("reconcileOnBoot keeps the native fence while the client-owned writer lives", async () => {
+      const h = harness;
+      const sessionId = createSession(h);
+      const savedFile = writeSession(h.root, "t.jsonl", "sess-1");
+      h.store.advanceGeneration(sessionId, 1, "resume");
+      h.store.casTransition(sessionId, "idle", "starting", {
+        piSessionId: "sess-1", piSessionFile: savedFile, observedPid: process.pid,
+      }, 2);
+      h.store.setLease(sessionId, { frontend: "native-tui", owner: "tui:9", generation: 2, acquiredAt: "2026-08-13" }, 2);
+      h.claims.tryAcquireInTx({ canonicalPath: h.wsPath, ownerId: sessionId, generation: 2, ownerKind: "interactive" });
+
+      h.service.reconcileOnBoot();
+      const rec = h.store.get(sessionId)!;
+      expect(rec.state).toBe("interrupted");
+      // the client-owned Pi survives the bridge restart and may still write —
+      // the claim and lease stay as the exclusive-writer fence
+      expect(rec.leaseGeneration).toBe(2);
+      expect(h.claims.list()).toHaveLength(1);
+
+      // once the writer pid is gone, the next handoff accept self-heals
+      h.store.casTransition(sessionId, "interrupted", "interrupted", { observedPid: deadPid() });
+      const result = h.service.beginNativeHandoff({ ownerPrincipal: "usr-1", leaseOwner: "tui:1", command: "/coding" });
+      expect(result.ok).toBe(true);
+      expect(h.claims.list()).toHaveLength(1);
+      expect(h.claims.list()[0]!.generation).toBe(3);
+    });
+
+    it("unknown alias and unknown resume id are rejected before any process starts", () => {
+      const h = harness;
+      const badAlias = h.service.beginNativeHandoff({ ownerPrincipal: "usr-1", leaseOwner: "tui:1", command: "/coding new nope" });
+      expect(badAlias.ok).toBe(false);
+      if (badAlias.ok) return;
+      expect(badAlias.reason).toContain("Unknown workspace alias");
+      const badResume = h.service.beginNativeHandoff({ ownerPrincipal: "usr-1", leaseOwner: "tui:1", command: "/coding resume spin-c-999" });
+      expect(badResume.ok).toBe(false);
+      expect(h.host.reservedCount).toBe(0);
+      expect(h.claims.list()).toHaveLength(0);
     });
   });
 });

@@ -155,6 +155,8 @@ export async function phasePlatformsConnect(ctx: BootCtx): Promise<PhaseResult> 
         onMessage: (msg) => recovery.handle(msg, adapter),
         orcActivityFeed: ctx.orcActivityFeed,
         sessionOutputFeed: ctx.sessionOutputFeed,
+        // #1635 Phase 2 — native TUI handoff (undefined when Pi coding is off)
+        codingService: ctx.codingSessionService ?? null,
       });
       platformAdapters.set("tui", adapter);
       // Retry path (#1306): wire full pipeline if phasePipelineDeps already ran.

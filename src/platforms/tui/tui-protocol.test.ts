@@ -384,6 +384,37 @@ describe("validateClientFrame", () => {
     const result = validateClientFrame({ t: "steer", sessionId: "s1", instructionId: "i1", text: uni });
     expect(result.ok).toBe(false);
   });
+
+  it("accepts a valid coding-handoff request", () => {
+    const result = validateClientFrame({ t: "coding-handoff", text: "/coding" });
+    expect(result.ok).toBe(true);
+  });
+
+  it("rejects coding-handoff with empty or oversized text", () => {
+    expect(validateClientFrame({ t: "coding-handoff", text: "  " }).ok).toBe(false);
+    expect(validateClientFrame({ t: "coding-handoff", text: "x".repeat(MAX_TUI_STEER_TEXT_BYTES + 1) }).ok).toBe(false);
+  });
+
+  it("accepts a valid coding-handoff-started frame", () => {
+    const result = validateClientFrame({ t: "coding-handoff-started", sessionId: "spin-c-1", pid: 4242 });
+    expect(result.ok).toBe(true);
+  });
+
+  it("rejects coding-handoff-started with invalid pid or sessionId", () => {
+    expect(validateClientFrame({ t: "coding-handoff-started", sessionId: "s", pid: 0 }).ok).toBe(false);
+    expect(validateClientFrame({ t: "coding-handoff-started", sessionId: "s", pid: 1.5 }).ok).toBe(false);
+    expect(validateClientFrame({ t: "coding-handoff-started", sessionId: "", pid: 1 }).ok).toBe(false);
+  });
+
+  it("accepts a valid coding-handoff-exit frame", () => {
+    expect(validateClientFrame({ t: "coding-handoff-exit", sessionId: "spin-c-1", code: 0 }).ok).toBe(true);
+    expect(validateClientFrame({ t: "coding-handoff-exit", sessionId: "spin-c-1", code: null }).ok).toBe(true);
+  });
+
+  it("rejects coding-handoff-exit with a non-integer code", () => {
+    expect(validateClientFrame({ t: "coding-handoff-exit", sessionId: "s", code: 1.5 }).ok).toBe(false);
+    expect(validateClientFrame({ t: "coding-handoff-exit", sessionId: "s", code: "0" as any }).ok).toBe(false);
+  });
 });
 
 describe("isServerFrame / isClientFrame", () => {
@@ -393,6 +424,9 @@ describe("isServerFrame / isClientFrame", () => {
     expect(isServerFrame({ t: "typing" })).toBe(true);
     expect(isServerFrame({ t: "stream-start", id: "s1", executionId: "e1" })).toBe(true);
     expect(isServerFrame({ t: "tool-start", id: "s1", executionId: "e1", name: "read" })).toBe(true);
+    expect(isServerFrame({ t: "coding-handoff-accepted", handoff: { sessionId: "s", workspaceAlias: "a", canonicalPath: "/w", memoryMode: "none", sessionStorageRoot: "/r" } })).toBe(true);
+    expect(isServerFrame({ t: "coding-handoff-rejected", message: "busy" })).toBe(true);
+    expect(isServerFrame({ t: "coding-handoff-released", message: "ok" })).toBe(true);
     expect(isServerFrame({ t: "input", text: "x" })).toBe(false);
     expect(isServerFrame({ t: "attach", mode: { kind: "resume" }, cols: 1, rows: 1 })).toBe(false);
     expect(isServerFrame({})).toBe(false);
@@ -404,6 +438,9 @@ describe("isServerFrame / isClientFrame", () => {
     expect(isClientFrame({ t: "attach", mode: { kind: "resume" }, cols: 1, rows: 1 })).toBe(true);
     expect(isClientFrame({ t: "input", text: "x" })).toBe(true);
     expect(isClientFrame({ t: "resize", cols: 1, rows: 1 })).toBe(true);
+    expect(isClientFrame({ t: "coding-handoff", text: "/coding" })).toBe(true);
+    expect(isClientFrame({ t: "coding-handoff-started", sessionId: "s", pid: 1 })).toBe(true);
+    expect(isClientFrame({ t: "coding-handoff-exit", sessionId: "s", code: 0 })).toBe(true);
     expect(isClientFrame({ t: "ready", sessionLabel: "", sessionId: "" })).toBe(false);
     expect(isClientFrame({ t: "message", role: "assistant", markdown: "" })).toBe(false);
     expect(isClientFrame({})).toBe(false);

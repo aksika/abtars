@@ -44,7 +44,35 @@ export type TuiClientFrame =
   | { t: "attach"; mode: TuiAttachMode; cols: number; rows: number }
   | { t: "input"; text: string }
   | { t: "resize"; cols: number; rows: number }
-  | { t: "steer"; sessionId: string; instructionId: string; text: string };  // #1332: explicit steer intent
+  | { t: "steer"; sessionId: string; instructionId: string; text: string }  // #1332: explicit steer intent
+  // #1635 Phase 2 — native TUI handoff
+  | { t: "coding-handoff"; text: string }                                   // request a native Pi handoff
+  | { t: "coding-handoff-started"; sessionId: string; pid: number }         // the client spawned Pi (writer fence)
+  | { t: "coding-handoff-exit"; sessionId: string; code: number | null };   // Pi exited; release resources
+
+/**
+ * #1635 Phase 2 — session facts the bridge hands a native handoff client.
+ * Deliberately contains NO executable and NO argument vector: the client
+ * resolves the pinned Pi executable and builds its own args locally
+ * (local-host-only rule). Fields are structured facts about the approved
+ * session and workspace.
+ */
+export interface NativeCodingHandoffInfo {
+  sessionId: string;
+  workspaceAlias: string;
+  canonicalPath: string;
+  memoryMode: "none" | "abmind";
+  sessionStorageRoot: string;
+  /** Resume: the proven persisted Pi session identity. */
+  piSessionId?: string;
+  /** Resume: the proven canonical session file to open with `--session`. */
+  piSessionFile?: string;
+  /** Initial: the Pi session id to create with `--session-id`. */
+  newPiSessionId?: string;
+  modelProvider?: string;
+  modelId?: string;
+  thinking?: string;
+}
 
 export type TuiServerFrame =
   | { t: "ready"; sessionLabel: string; sessionId: string }              // attach accepted
@@ -62,7 +90,11 @@ export type TuiServerFrame =
   // #1319 R5: bounded omission marker — writer pressure dropped discussion
   // frames. Contains no discarded content and never claims replay.
   | { t: "activity-gap"; sequence: number }
-  | { t: "status"; status: import("./runtime-status.js").TuiRuntimeStatus };
+  | { t: "status"; status: import("./runtime-status.js").TuiRuntimeStatus }
+  // #1635 Phase 2 — native TUI handoff
+  | { t: "coding-handoff-accepted"; handoff: NativeCodingHandoffInfo }
+  | { t: "coding-handoff-rejected"; message: string }
+  | { t: "coding-handoff-released"; message: string };
 
 export function encodeFrame(f: TuiServerFrame | TuiClientFrame): string {
   return JSON.stringify(f) + "\n";
@@ -261,6 +293,40 @@ export function validateClientFrame(frame: TuiClientFrame): FrameValidationResul
       }
       return { ok: true };
     }
+    // #1635 Phase 2 — native TUI handoff
+    case "coding-handoff": {
+      if (typeof frame.text !== "string" || !frame.text.trim()) {
+        return { ok: false, error: "coding-handoff text must be a non-empty string" };
+      }
+      if (Buffer.byteLength(frame.text, "utf8") > MAX_TUI_STEER_TEXT_BYTES) {
+        return { ok: false, error: `coding-handoff text exceeds ${MAX_TUI_STEER_TEXT_BYTES} byte limit` };
+      }
+      return { ok: true };
+    }
+    case "coding-handoff-started": {
+      if (typeof frame.sessionId !== "string" || !frame.sessionId) {
+        return { ok: false, error: "coding-handoff-started sessionId must be a non-empty string" };
+      }
+      if (Buffer.byteLength(frame.sessionId, "utf8") > MAX_TUI_SESSION_ID_BYTES) {
+        return { ok: false, error: `coding-handoff-started sessionId exceeds ${MAX_TUI_SESSION_ID_BYTES} byte limit` };
+      }
+      if (typeof frame.pid !== "number" || !Number.isInteger(frame.pid) || frame.pid < 1) {
+        return { ok: false, error: "coding-handoff-started pid must be a positive integer" };
+      }
+      return { ok: true };
+    }
+    case "coding-handoff-exit": {
+      if (typeof frame.sessionId !== "string" || !frame.sessionId) {
+        return { ok: false, error: "coding-handoff-exit sessionId must be a non-empty string" };
+      }
+      if (Buffer.byteLength(frame.sessionId, "utf8") > MAX_TUI_SESSION_ID_BYTES) {
+        return { ok: false, error: `coding-handoff-exit sessionId exceeds ${MAX_TUI_SESSION_ID_BYTES} byte limit` };
+      }
+      if (frame.code !== null && (typeof frame.code !== "number" || !Number.isInteger(frame.code))) {
+        return { ok: false, error: "coding-handoff-exit code must be an integer or null" };
+      }
+      return { ok: true };
+    }
   }
 }
 
@@ -272,12 +338,16 @@ export function isServerFrame(x: unknown): x is TuiServerFrame {
          t === "stream-start" || t === "chunk" || t === "chunk-end" ||
          t === "tool-start" || t === "typing" || t === "steer-ack" ||
          t === "activity-snapshot" || t === "activity" || t === "activity-gap"
-         || t === "status";
+         || t === "status"
+         || t === "coding-handoff-accepted" || t === "coding-handoff-rejected"
+         || t === "coding-handoff-released";
 }
 
 /** True if the parsed frame looks like a TuiClientFrame (narrowing helper). */
 export function isClientFrame(x: unknown): x is TuiClientFrame {
   if (typeof x !== "object" || x === null) return false;
   const t = (x as { t?: unknown }).t;
-  return t === "attach" || t === "input" || t === "resize" || t === "steer";
+  return t === "attach" || t === "input" || t === "resize" || t === "steer"
+         || t === "coding-handoff" || t === "coding-handoff-started"
+         || t === "coding-handoff-exit";
 }

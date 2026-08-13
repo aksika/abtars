@@ -135,6 +135,8 @@ export interface TuiAdapterDeps {
   sessionOutputFeed?: SessionOutputFeed;
   onMessage: (msg: InboundMessage) => void;
   socketPath?: string;
+  /** #1635 Phase 2 — interactive Pi coding sessions (native TUI handoff). */
+  codingService?: import("../../components/pi-executor/pi-coding-session-service.js").PiCodingSessionService | null;
 }
 
 export class TuiSocketAdapter implements PlatformAdapter {
@@ -547,8 +549,13 @@ export class TuiSocketAdapter implements PlatformAdapter {
     });
     conn.on("error", (err) => logAndSwallow(TAG, "conn error", err));
 
-    // Close handler: detach only if this generation is still current.
+    // Close handler: abort any native handoff owned by this connection, then
+    // detach only if this generation is still current.
     conn.on("close", () => {
+      const coding = this.deps.codingService;
+      if (coding) {
+        try { coding.abortNativeHandoff(`tui:${connGen}`); } catch { /* best effort */ }
+      }
       if (this._connGen === connGen) {
         this.detachConnection();
       }
@@ -567,6 +574,15 @@ export class TuiSocketAdapter implements PlatformAdapter {
         return;
       case "steer":
         await this._handleSteer(frame);
+        return;
+      case "coding-handoff":
+        await this._handleCodingHandoff(frame.text);
+        return;
+      case "coding-handoff-started":
+        await this._handleCodingHandoffStarted(frame.sessionId, frame.pid);
+        return;
+      case "coding-handoff-exit":
+        await this._handleCodingHandoffExit(frame.sessionId, frame.code);
         return;
     }
   }
@@ -1063,6 +1079,71 @@ export class TuiSocketAdapter implements PlatformAdapter {
       };
       this._push({ t: "steer-ack", status: "rejected", instructionId: clientInstructionId, message: reasonMap[result.reason] ?? "Steering rejected." });
     }
+  }
+
+  // ── #1635 Phase 2 — native TUI handoff ──────────────────────────────────
+
+  /**
+   * Resolve + reserve a native Pi handoff through the coding session service.
+   * The reply is written DIRECTLY on the socket (never through the bounded
+   * writer — a dropped accept/release frame would strand the client). The
+   * frame carries only session facts; the client builds its own args.
+   */
+  private async _handleCodingHandoff(text: string): Promise<void> {
+    const capturedConnGen = this._connGen;
+    const coding = this.deps.codingService;
+    if (!coding) {
+      this._pushHandoffDirect({ t: "coding-handoff-rejected", message: "Interactive Pi coding is not available on this bridge" }, capturedConnGen);
+      return;
+    }
+    const leaseOwner = `tui:${this._connGen}`;
+    let result: import("../../components/pi-executor/pi-coding-session-service.js").NativeHandoffResult;
+    try {
+      result = coding.beginNativeHandoff({
+        ownerPrincipal: getMasterUserId(),
+        leaseOwner,
+        command: text,
+      });
+    } catch (err) {
+      result = { ok: false, reason: err instanceof Error ? err.message : String(err) };
+    }
+    if (!this._isConnCurrent(capturedConnGen)) return;
+    if (!result.ok) {
+      this._pushHandoffDirect({ t: "coding-handoff-rejected", message: result.reason }, capturedConnGen);
+      return;
+    }
+    this._pushHandoffDirect({ t: "coding-handoff-accepted", handoff: result.handoff }, capturedConnGen);
+  }
+
+  /** Record the client's spawned Pi pid as the exclusive-writer fence. */
+  private async _handleCodingHandoffStarted(sessionId: string, pid: number): Promise<void> {
+    const coding = this.deps.codingService;
+    if (!coding) return;
+    try {
+      coding.recordNativeHandoffPid({ sessionId, leaseOwner: `tui:${this._connGen}`, pid });
+    } catch { /* best effort — the accept-time writer check still fences */ }
+  }
+
+  /** Pi exited — reconcile and release the generation-owned resources. */
+  private async _handleCodingHandoffExit(sessionId: string, code: number | null): Promise<void> {
+    const capturedConnGen = this._connGen;
+    const coding = this.deps.codingService;
+    if (!coding) return;
+    let message: string;
+    try {
+      message = coding.endNativeHandoff({ sessionId, leaseOwner: `tui:${this._connGen}`, code }).message;
+    } catch (err) {
+      message = err instanceof Error ? err.message : String(err);
+    }
+    this._pushHandoffDirect({ t: "coding-handoff-released", message }, capturedConnGen);
+  }
+
+  /** Direct write for critical handoff frames — bypasses the overflow-dropping writer. */
+  private _pushHandoffDirect(frame: TuiServerFrame, capturedConnGen: number): void {
+    if (!this._isConnCurrent(capturedConnGen)) return;
+    try {
+      this.conn!.write(encodeFrame(frame));
+    } catch { /* best effort */ }
   }
 
   private async _routeToOrc(text: string): Promise<void> {
