@@ -398,6 +398,22 @@ export async function buildTransport(ctx: BootCtx): Promise<PhaseResult> {
   setHostToolService(hostToolService);
   logDebug("main", "🔐 Host tool service wired (sealed handles + shared bash)");
 
+  // #1660: the authenticated local tool socket the ACP stdio proxy forwards
+  // to. Started once; Main ACP sessions get the MCP server definition.
+  const { ensureSealedAcpBridge } = await import("../components/transport/sealed-acp-bridge.js");
+  try {
+    await ensureSealedAcpBridge({
+      hostService: hostToolService,
+      runtimeHolder: {
+        get current() { return ctx.memoryToolDependencies.current?.runtime ?? null; },
+      },
+      handles: sealedHandles,
+    });
+    logDebug("main", "🔌 Sealed tool socket ready for ACP");
+  } catch (bridgeErr) {
+    logWarn("main", `Sealed tool socket failed to start: ${bridgeErr instanceof Error ? bridgeErr.message : String(bridgeErr)}`);
+  }
+
   // #906: Wire seatbelt into tool-registry
   if (ctx.seatbeltActive) {
     const { setSeatbelt } = await import("../components/transport/tool-registry.js");

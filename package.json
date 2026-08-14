@@ -54,7 +54,8 @@
   },
   "bin": {
     "abtars": "bundle/abtars-cli.js",
-    "abtars-restart": "bundle/abtars-restart.js"
+    "abtars-restart": "bundle/abtars-restart.js",
+    "abtars-sealed-mcp": "bundle/abtars-sealed-mcp.js"
   },
   "license": "Apache-2.0",
   "files": [

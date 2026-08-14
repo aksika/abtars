@@ -73,6 +73,8 @@ export class AcpTransport implements IKiroTransport {
   private agent: ChildProcess | null = null;
   private client: ClientSideConnection | null = null;
   private sessions = new Map<string, string>(); // sessionKey → acpSessionId
+  /** #1660: trusted session type per session key, learned from sendPrompt context. */
+  private sessionTypes = new Map<string, import("../spin-types.js").SessionType>();
   private responseChunks = new Map<string, string[]>(); // sessionId → chunks
   /** Raw text length already offered as a pre-tool semantic segment. */
   private segmentOffsets = new Map<string, number>();
@@ -162,6 +164,12 @@ export class AcpTransport implements IKiroTransport {
   private readonly tag: string;
 
   async initialize(): Promise<void> {
+    // #1660: every session token dies with the transport instance.
+    try {
+      const { revokeAllSealedSessions } = await import("./sealed-acp-bridge.js");
+      revokeAllSealedSessions();
+      this.sessionTypes.clear();
+    } catch { /* bridge may not be wired */ }
     for (const kiroId of this.sessions.values()) this.cleanupKiroFiles(kiroId);
     this.sessions.clear(); // Fresh CLI instance = all old session IDs are stale
     this.onReinit?.();
@@ -367,6 +375,9 @@ export class AcpTransport implements IKiroTransport {
     }
 
     this._toolCallsSucceeded = 0;
+    // #1660: remember the trusted session type before session creation so
+    // Main sessions get the sealed MCP server definition.
+    if (context?.sessionType) this.sessionTypes.set(sessionKey, context.sessionType);
     const sessionId = await this.getOrCreateSession(sessionKey);
     this.responseChunks.set(sessionId, []);
     this.segmentOffsets.set(sessionId, 0);
@@ -384,6 +395,24 @@ export class AcpTransport implements IKiroTransport {
     this.lastPromptText = message;
     this.lastSessionKey = sessionKey;
     this.sm.startPrompt();
+
+    // #1660: activate the Main session's sealed token with the trusted
+    // execution context for the duration of this prompt; the socket endpoint
+    // serves tool calls only while the token is active.
+    const sealedSessionType = context?.sessionType;
+    const sealedUserId = context?.userId ?? "";
+    const sealedExecutionId = context?.executionId ?? `${sessionKey}-${Date.now()}`;
+    if (sealedSessionType === "A" && sealedUserId) {
+      try {
+        const { activateSealedToken } = await import("./sealed-acp-bridge.js");
+        activateSealedToken(sessionKey, {
+          userId: sealedUserId,
+          executionId: sealedExecutionId,
+          sessionType: "A",
+          sandboxed: true,
+        });
+      } catch (err) { logAndSwallow(TAG, "activate sealed token", err); }
+    }
 
     // client.prompt() blocks until the full turn completes.
     // While running, sessionUpdate fires for each agent_message_chunk.
@@ -429,6 +458,14 @@ export class AcpTransport implements IKiroTransport {
       this.segmentOffsets.delete(usedSid);
       return chunks.join("") || "(no response)";
     } finally {
+      // #1660: deactivate the sealed token in every success/failure/cancel
+      // finalizer so a stale context can never serve a later tool call.
+      if (sealedSessionType === "A" && sealedUserId) {
+        try {
+          const { deactivateSealedToken } = await import("./sealed-acp-bridge.js");
+          deactivateSealedToken(sessionKey);
+        } catch (err) { logAndSwallow(TAG, "deactivate sealed token", err); }
+      }
       // #1338: drop the observer association so late events from a completed
       // call cannot publish into a newer attachment.
       this.outputObservers.delete(usedSid);
@@ -561,7 +598,13 @@ export class AcpTransport implements IKiroTransport {
 
         if (code === -32603 && msg.includes("No session found")) {
           const key = [...this.sessions.entries()].find(([, v]) => v === sid)?.[0];
-          if (key) { this.cleanupKiroFiles(sid); this.sessions.delete(key); }
+          if (key) {
+            this.cleanupKiroFiles(sid);
+            this.sessions.delete(key);
+            try {
+              import("./sealed-acp-bridge.js").then(({ revokeSealedSession }) => revokeSealedSession(key)).catch(() => {});
+            } catch { /* bridge may not be wired */ }
+          }
           logWarn(this.tag, `Session ${sessionId} expired — invalidated, will recreate`);
           if (attempt < maxRetries) {
             sid = await this.getOrCreateSession(this.lastSessionKey);
@@ -636,6 +679,13 @@ export class AcpTransport implements IKiroTransport {
   }
 
   destroy(): void {
+    // #1660: revoke sealed session tokens before dropping the session map.
+    try {
+      import("./sealed-acp-bridge.js").then(({ revokeAllSealedSessions }) => {
+        revokeAllSealedSessions();
+        this.sessionTypes.clear();
+      }).catch(() => { /* bridge may not be wired */ });
+    } catch { /* bridge may not be wired */ }
     // #992: clean kiro session files before clearing the map
     for (const kiroId of this.sessions.values()) this.cleanupKiroFiles(kiroId);
     this.sessions.clear();
@@ -793,8 +843,20 @@ export class AcpTransport implements IKiroTransport {
     const existing = this.sessions.get(sessionKey);
     if (existing) return existing;
 
+    // #1660: Main ACP sessions carry the sealed-tools stdio MCP server; the
+    // proxy never resolves/executes locally — it forwards to our socket. The
+    // session token travels only in the MCP server's child environment.
+    let mcpServers: unknown[] = [];
+    if (this.sessionTypes.get(sessionKey) === "A") {
+      const { sealedMcpServerDefinition, isSealedBridgeReady } = await import("./sealed-acp-bridge.js");
+      if (isSealedBridgeReady()) {
+        const def = sealedMcpServerDefinition(sessionKey, "A");
+        if (def) mcpServers = [def];
+      }
+    }
+
     if (AcpTransport._rawMode && this._rawClient) {
-      const session = await this._rawClient.newSession({ cwd: this.workingDir, mcpServers: [] });
+      const session = await this._rawClient.newSession({ cwd: this.workingDir, mcpServers });
       this.sessions.set(sessionKey, session.sessionId);
       logInfo(this.tag, `Created session ${session.sessionId} for ${sessionKey} [raw]`);
       return session.sessionId;
@@ -804,7 +866,7 @@ export class AcpTransport implements IKiroTransport {
 
     const session = await this.client.newSession({
       cwd: this.workingDir,
-      mcpServers: [],
+      mcpServers: mcpServers as unknown as import("@agentclientprotocol/sdk").McpServer[],
     });
 
     if (this.isGemini && this.modelId) {
