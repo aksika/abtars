@@ -30,6 +30,7 @@ import { AbmindRequestOutbox } from "./abmind-request-outbox.js";
 import { AbtarsRouteController } from "./abmind-route-controller.js";
 import type { RetryFailureClassLike } from "./abmind-route-contract.js";
 import type { WssProfile } from "./abmind-endpoint-config.js";
+import { redactSecrets } from "./logger.js";
 
 // ── Wire constants (must match abmind's signed-wire protocol) ──────────────
 
@@ -38,6 +39,8 @@ const ABMIND_WSS_DOMAIN_REQUEST = "abmind-wss-request-v1";
 const ABMIND_PROTOCOL_VERSION = 1;
 
 const WSS_REQUEST_TIMEOUT_MS = 120_000;
+const ERROR_MESSAGE_MAX = 512;
+const ERROR_REQUEST_ID_MAX = 128;
 
 interface WssAuthFields {
   peerId: string;
@@ -300,7 +303,9 @@ export class AbtarsSignedWssClient implements AbmindClientLike {
     for (const [, p] of this.pending) {
       clearTimeout(p.timer);
       if (p.resolve) {
-        p.resolve({ ok: false, requestId: p.requestId, error: { code: "unavailable", message: "Transport closed" } });
+        p.resolve({ ok: false, requestId: p.requestId, error: {
+          code: "unavailable", message: "Transport closed", retryable: true, action: "retry", stage: "response",
+        } });
       }
     }
     this.pending.clear();
@@ -392,14 +397,23 @@ export class AbtarsSignedWssClient implements AbmindClientLike {
     stageOverride?: AbmindFailureStageLike,
   ): AbmindClientErrorLike {
     const contract = errorContract(code);
-    const err = new Error(message) as AbmindClientErrorLike;
+    const safeMessage = redactSecrets(String(message));
+    const boundedMessage = safeMessage.length <= ERROR_MESSAGE_MAX
+      ? safeMessage
+      : `${safeMessage.slice(0, ERROR_MESSAGE_MAX - 3)}...`;
+    const err = new Error(boundedMessage) as AbmindClientErrorLike;
     Object.assign(err, {
       name: "AbmindClientError",
       code,
-      requestId,
-      retryable: retryableOverride ?? contract.retryable,
-      action: actionOverride ?? contract.action,
-      stage: stageOverride ?? "pre_dispatch",
+      requestId: redactSecrets(String(requestId)).slice(0, ERROR_REQUEST_ID_MAX),
+      retryable: typeof retryableOverride === "boolean" ? retryableOverride : contract.retryable,
+      action: actionOverride === "fix_input" || actionOverride === "re_recall" || actionOverride === "retry"
+        || actionOverride === "reconcile" || actionOverride === "stop"
+        ? actionOverride
+        : contract.action,
+      stage: stageOverride === "pre_dispatch" || stageOverride === "dispatch" || stageOverride === "response"
+        ? stageOverride
+        : code === "outcome_unknown" ? "response" : "pre_dispatch",
       ...(current !== undefined ? { current } : {}),
     });
     return err;
@@ -470,7 +484,10 @@ export class AbtarsSignedWssClient implements AbmindClientLike {
       clearTimeout(pending.timer);
       this.pending.delete(frameId);
       if (pending.resolve) {
-        pending.resolve({ ok: false, requestId, error: { code: "outcome_unknown", message: "Request outcome unknown after retry budget" } });
+        pending.resolve({ ok: false, requestId, error: {
+          code: "outcome_unknown", message: "Request outcome unknown after retry budget",
+          retryable: false, action: "reconcile", stage: "response",
+        } });
       }
     }
     this.sentOnGen.delete(frameId);
@@ -500,7 +517,9 @@ export class AbtarsSignedWssClient implements AbmindClientLike {
     for (const [, p] of this.pending) {
       clearTimeout(p.timer);
       if (p.resolve) {
-        p.resolve({ ok: false, requestId: p.requestId, error: { code: "unavailable", message: "Outbox persistence failed" } });
+        p.resolve({ ok: false, requestId: p.requestId, error: {
+          code: "unavailable", message: "Outbox persistence failed", retryable: true, action: "retry", stage: "response",
+        } });
       }
     }
     this.pending.clear();

@@ -237,7 +237,7 @@ describe("AbtarsSignedWssClient", () => {
     try {
       await client.negotiate();
       await expect(client.callRaw("private.cascadeDelete", { userId: "u", messageIds: [1] }, "k"))
-        .rejects.toMatchObject({ code: "unauthorized" });
+        .rejects.toMatchObject({ code: "unauthorized", retryable: false, action: "stop", stage: "pre_dispatch" });
     } finally {
       await client.close();
       await server.close();
@@ -260,7 +260,9 @@ describe("AbtarsSignedWssClient", () => {
     });
     try {
       await client.negotiate();
-      await expect(client.callRaw("system.status", {})).rejects.toMatchObject({ code: "outcome_unknown" });
+      await expect(client.callRaw("system.status", {})).rejects.toMatchObject({
+        code: "outcome_unknown", retryable: false, action: "reconcile", stage: "response",
+      });
     } finally {
       await client.close();
       await server.close();

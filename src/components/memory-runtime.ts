@@ -7,7 +7,7 @@ import type {
   SleepStatusLike,
 } from "./abmind-client-contract.js";
 
-import { logWarn } from "./logger.js";
+import { logWarn, redactSecrets } from "./logger.js";
 import type { MemoryMutationFamily } from "./memory-operation-key.js";
 
 // ── Types ──────────────────────────────────────────────────────────────────
@@ -50,6 +50,24 @@ export interface MemoryMutationFailureFields {
   readonly retryable: boolean;
   readonly action: "fix_input" | "re_recall" | "retry" | "reconcile" | "stop";
   readonly stage: "pre_dispatch" | "dispatch" | "response";
+}
+
+const MEMORY_FAILURE_MESSAGE_MAX = 512;
+const MEMORY_FAILURE_CODE_MAX = 64;
+const MEMORY_FAILURE_REQUEST_ID_MAX = 128;
+
+function boundedFailureText(value: unknown, max: number): string {
+  const raw = value instanceof Error
+    ? value.message
+    : value && typeof value === "object" && "message" in value && typeof (value as { message?: unknown }).message === "string"
+      ? (value as { message: string }).message
+      : String(value);
+  const redacted = redactSecrets(raw);
+  return redacted.length <= max ? redacted : `${redacted.slice(0, max - 3)}...`;
+}
+
+function boundedFailureMessage(value: unknown): string {
+  return boundedFailureText(value, MEMORY_FAILURE_MESSAGE_MAX);
 }
 
 export type InstantStoreResult =
@@ -307,12 +325,12 @@ function bridgeFailureCode(code: string): string {
 /** Normalize a thrown structural client error into the shared failure fields. */
 function failureFields(err: unknown): MemoryMutationFailureFields {
   const e = err as Partial<AbmindClientErrorLike> | null | undefined;
-  const code = e && typeof e.code === "string" ? e.code : "unknown";
+  const code = e && typeof e.code === "string" ? boundedFailureText(e.code, MEMORY_FAILURE_CODE_MAX) : "unknown";
   const hasStructuralStage = e && (e.stage === "pre_dispatch" || e.stage === "dispatch" || e.stage === "response");
   return {
     code: bridgeFailureCode(code),
-    message: e instanceof Error ? e.message : String(err),
-    requestId: e && typeof e.requestId === "string" ? e.requestId : "",
+    message: boundedFailureMessage(err),
+    requestId: e && typeof e.requestId === "string" ? boundedFailureText(e.requestId, MEMORY_FAILURE_REQUEST_ID_MAX) : "",
     retryable: e && typeof e.retryable === "boolean" ? e.retryable : false,
     action: e && (e.action === "fix_input" || e.action === "re_recall" || e.action === "retry" || e.action === "reconcile" || e.action === "stop")
       ? e.action

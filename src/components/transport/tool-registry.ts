@@ -65,6 +65,19 @@ function optionalStringValue(value: unknown): string | undefined {
 
 const BASH_TIMEOUT_MS = 300_000;
 const CLI_TIMEOUT_MS = 60_000;
+const MEMORY_TOOL_ERROR_MAX = 512;
+
+function boundedMemoryToolError(err: unknown): string {
+  const raw = err instanceof Error
+    ? err.message
+    : err && typeof err === "object" && "message" in err && typeof (err as { message?: unknown }).message === "string"
+      ? (err as { message: string }).message
+      : String(err);
+  const redacted = redactSecrets(raw);
+  return redacted.length <= MEMORY_TOOL_ERROR_MAX
+    ? redacted
+    : `${redacted.slice(0, MEMORY_TOOL_ERROR_MAX - 3)}...`;
+}
 
 /**
  * #1595: parse-only shell validation before any execution. A malformed command
@@ -437,7 +450,7 @@ const memoryStoreTool: ToolDefinition = {
       // committed: commit the reservation conservatively and surface
       // `unknown` — never release on the assumption it failed.
       if (reservationId) deps.quota.commit(reservationId);
-      return JSON.stringify({ error: err instanceof Error ? err.message : String(err) });
+      return JSON.stringify({ error: boundedMemoryToolError(err) });
     }
   },
 };
@@ -541,7 +554,7 @@ const memoryEditTool: ToolDefinition = {
       // code/requestId/action/stage/retryable without message flattening.
       return JSON.stringify(result);
     } catch (err) {
-      return JSON.stringify({ error: err instanceof Error ? err.message : String(err) });
+      return JSON.stringify({ error: boundedMemoryToolError(err) });
     }
   },
 };

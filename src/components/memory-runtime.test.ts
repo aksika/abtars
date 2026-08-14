@@ -350,6 +350,27 @@ describe("#1659 runtime failure contract", () => {
       expect(result.message).toContain("connection reset");
     }
   });
+
+  it("preserves a plain structural error object's message while bounding it", async () => {
+    const client = mockClient(WRITE_CAPS);
+    (client.privateMemory.instantStore as ReturnType<typeof vi.fn>)
+      .mockRejectedValue({
+        code: "outcome_unknown",
+        message: `secret sk-${"a".repeat(30)} ${"x".repeat(700)}`,
+        requestId: "req-object",
+        retryable: false,
+        action: "reconcile",
+        stage: "response",
+      });
+    const rt = createClientRuntime(client);
+    const result = await rt.instantStore({ userId: "u1", contentEn: "x", contentOriginal: "x", memoryType: "fact", emotionScore: 0, confidence: 3, classification: 1 });
+    expect(result.stored).toBe(false);
+    if (!result.stored) {
+      expect(result.code).toBe("memory_outcome_unknown");
+      expect(result.message).toContain("***REDACTED***");
+      expect(result.message.length).toBeLessThanOrEqual(512);
+    }
+  });
 });
 
 describe("attemptMemoryMutation", () => {
