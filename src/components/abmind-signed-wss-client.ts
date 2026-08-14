@@ -70,7 +70,9 @@ function errorContract(code: string): { retryable: boolean; action: AbmindFailur
     case "unauthorized": return { retryable: false, action: "stop" };
     case "idempotency_conflict": return { retryable: false, action: "stop" };
     case "outcome_unknown": return { retryable: false, action: "reconcile" };
-    default: return { retryable: true, action: "retry" };
+    case "unavailable": return { retryable: true, action: "retry" };
+    // Unknown codes carry no dispatch evidence: never claim retry safety.
+    default: return { retryable: false, action: "reconcile" };
   }
 }
 

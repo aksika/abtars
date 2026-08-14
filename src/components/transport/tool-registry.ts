@@ -541,10 +541,6 @@ const memoryEditTool: ToolDefinition = {
       // code/requestId/action/stage/retryable without message flattening.
       return JSON.stringify(result);
     } catch (err) {
-      const code = err && typeof err === "object" && "code" in err ? String((err as { code: unknown }).code) : "";
-      if (code === "conflict") {
-        return JSON.stringify({ ok: false, error: "Stale revision: memory was modified since you last read it. Please re-recall and retry.", retryable: false, code: "conflict" });
-      }
       return JSON.stringify({ error: err instanceof Error ? err.message : String(err) });
     }
   },
