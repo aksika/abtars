@@ -38,6 +38,8 @@ export interface ToolExecutionContext {
   /** #1629: trusted tool authorization mode (from Spin via the Pi tool context).
    *  Never read from tool arguments — missing values fail closed to interactive. */
   authorizationMode?: import("../action-gate.js").ToolAuthorizationMode;
+  /** #1660: active execution id — sealed handles bind to it and expire with it. */
+  executionId?: string;
 }
 
 export type ToolDefinition = {
@@ -316,6 +318,28 @@ export function setActionGate(gate: import("../action-gate.js").ActionGate | nul
   _actionGate = gate;
 }
 
+// #1660: the single shared host bash service and the execution-scoped sealed
+// handle store. Wired once at boot; PiCore and ACP both route through them.
+let _hostToolService: import("../host-tool-service.js").HostToolService | null = null;
+let _sealedHandles: import("../sealed-secret-handles.js").SealedSecretHandles | null = null;
+
+export function setHostToolService(service: import("../host-tool-service.js").HostToolService | null): void {
+  _hostToolService = service;
+}
+
+export function getHostToolService(): import("../host-tool-service.js").HostToolService | null {
+  return _hostToolService;
+}
+
+export function getSealedSecretHandles(): import("../sealed-secret-handles.js").SealedSecretHandles {
+  if (!_sealedHandles) {
+    const { SealedSecretHandles } = require("../sealed-secret-handles.js") as typeof import("../sealed-secret-handles.js");
+    _sealedHandles = new SealedSecretHandles();
+  }
+  return _sealedHandles;
+}
+
+
 let _peerActivityCb: ((msg: string) => void) | null = null;
 
 /** Wire peer activity notification callback. */
@@ -327,13 +351,41 @@ export function setPeerActivityCallback(cb: ((msg: string) => void) | null): voi
 
 const bashTool: ToolDefinition = {
   name: "execute_bash",
-  description: "Execute a bash command. Use for file operations, git, running scripts, and any shell command. Commands that would spawn or restart a bridge/watchdog process (node main.js, abtars.sh, abtars-watchdog.sh, launchctl load/bootstrap/kickstart/start) are blocked — the bridge is already supervised.",
+  description: "Execute a bash command. Use for file operations, git, running scripts, and any shell command. Commands that would spawn or restart a bridge/watchdog process (node main.js, abtars.sh, abtars-watchdog.sh, launchctl load/bootstrap/kickstart/start) are blocked — the bridge is already supervised. For credentials, use secret_find first and reference the returned ABTARS_SECRET_* variables in secret_env — never paste the secret into the command text.",
   parameters: {
     type: "object",
-    properties: { command: { type: "string", description: "The bash command to execute" } },
+    properties: {
+      command: { type: "string", description: "The bash command to execute" },
+      secret_env: {
+        type: "object",
+        additionalProperties: { type: "string" },
+        description: "Optional. Maps ABTARS_SECRET_* variable names (uppercase letters, digits, underscore) to opaque sealed handles returned by secret_find. The child process receives the real values only in its environment; outputs are scrubbed.",
+      },
+    },
     required: ["command"],
   },
-  execute: (args, context) => runBash(stringValue(args["command"]), BASH_TIMEOUT_MS, context?.signal, context?.executionScope, context?.authorizationMode),
+  async execute(args, context) {
+    const command = stringValue(args["command"]);
+    const secretEnvRaw = args["secret_env"];
+    const secretEnv = secretEnvRaw && typeof secretEnvRaw === "object" && !Array.isArray(secretEnvRaw)
+      ? secretEnvRaw as Record<string, unknown>
+      : undefined;
+    const service = getHostToolService();
+    if (service) {
+      return service.runBash(
+        { command, secretEnv: secretEnv ? Object.fromEntries(Object.entries(secretEnv).map(([k, v]) => [k, stringValue(v)])) : undefined },
+        {
+          userId: context?.userId ?? getMasterUserId(),
+          executionId: context?.executionId ?? "",
+          signal: context?.signal,
+          executionScope: context?.executionScope,
+          authorizationMode: context?.authorizationMode,
+        },
+      );
+    }
+    // Legacy fallback (tests/CLI without a wired service): no secret_env.
+    return runBash(command, BASH_TIMEOUT_MS, context?.signal, context?.executionScope, context?.authorizationMode);
+  },
 };
 
 /** #1552: resolve the current memory-tool dependencies from the execution
@@ -358,16 +410,18 @@ const EDIT_UNAVAILABLE = {
 
 const memoryStoreTool: ToolDefinition = {
   name: "memory_store",
-  description: "Store a memory. Use after learning something about the user, their preferences, decisions, or facts worth remembering.",
+  description: "Store a memory. Use after learning something about the user, their preferences, decisions, or facts worth remembering. For credentials (classification=3) provide the EXACT value in 'original' and a short descriptive 'label' — never a paraphrase of the value; the label is what you will search by later.",
   parameters: {
     type: "object",
     properties: {
       translated: { type: "string", description: "Memory content in English" },
-      original: { type: "string", description: "Memory content in original language (if not English)" },
+      original: { type: "string", description: "Memory content in original language (if not English). For classification=3 this is the exact credential value — required." },
       type: { type: "string", enum: ["fact", "preference", "decision", "experience", "skill", "relationship", "goal"], description: "Memory type" },
       emotion: { type: "integer", description: "Emotion score -5 to +5 (0=neutral)" },
       confidence: { type: "integer", description: "Confidence 1-5 (3=default)" },
-      classification: { type: "integer", description: "0=public (general knowledge), 1=internal (default), 2=confidential (personal preferences, habits, opinions about specific users), 3=secret (credentials, API keys, tokens, passwords — store IMMEDIATELY with exact string, never paraphrase, never wait for Dreamy)" },
+      classification: { type: "integer", description: "0=public (general knowledge), 1=internal (default), 2=confidential (personal preferences, habits, opinions about specific users), 3=secret (credentials, API keys, tokens, passwords — store IMMEDIATELY with exact string in 'original', never paraphrase, never wait for Dreamy)" },
+      label: { type: "string", description: "Required for classification=3: a short descriptive label that does NOT contain the value (e.g. \"OpenRouter API key\"). Searched via secret_find." },
+      keyword: { type: "string", description: "Optional for classification=3: non-sensitive retrieval keyword." },
     },
     required: ["translated", "type"],
   },
@@ -378,19 +432,39 @@ const memoryStoreTool: ToolDefinition = {
     if (sessionType !== "A" && sessionType !== "D") {
       return JSON.stringify({ stored: false, code: "memory_store_not_allowed", retryable: false });
     }
+    // #1660: class-3 stores are Main-only — a Dreamy session cannot mint
+    // credentials, matching secret_find's own session-type gate.
+    const classification = parseInt(stringValue(args["classification"] ?? "1"), 10);
+    const isSecret = classification === 3;
+    if (isSecret && sessionType !== "A") {
+      return JSON.stringify({ stored: false, code: "memory_store_not_allowed", retryable: false });
+    }
     const deps = memoryDeps(context);
     if (!deps || !deps.runtime.supports("instantStore")) {
       return JSON.stringify(PRIVATE_WRITE_UNAVAILABLE);
     }
     const userId = context?.userId ?? getMasterUserId();
+    const label = stringValue(args["label"] ?? "").trim();
+    if (isSecret && !label) {
+      return JSON.stringify({ stored: false, code: "memory_validation", retryable: false, message: "class-3 memory_store requires a descriptive label that does not contain the value" });
+    }
+    // #1660: at class 3, original is the exact value (required) and the
+    // `original ?? translated` fallback must NOT apply — otherwise the label
+    // silently becomes the value. The runtime's sealed projection encrypts it.
+    const original = stringValue(args["original"]);
+    if (isSecret && !original) {
+      return JSON.stringify({ stored: false, code: "memory_validation", retryable: false, message: "class-3 memory_store requires the exact credential value in 'original'" });
+    }
     const storeOnce = async (): Promise<import("../memory-runtime.js").InstantStoreResult> => deps.runtime.instantStore({
       userId,
-      contentEn: stringValue(args["translated"]),
-      contentOriginal: stringValue(args["original"] ?? args["translated"]),
+      contentEn: isSecret ? label : stringValue(args["translated"]),
+      contentOriginal: isSecret ? original : stringValue(args["original"] ?? args["translated"]),
       memoryType: stringValue(args["type"] ?? "fact"),
       emotionScore: parseInt(stringValue(args["emotion"] ?? "0"), 10),
       confidence: parseInt(stringValue(args["confidence"] ?? "3"), 10),
-      classification: parseInt(stringValue(args["classification"] ?? "1"), 10),
+      classification,
+      sealedLabel: isSecret ? label : undefined,
+      sealedKeyword: isSecret ? optionalStringValue(args["keyword"]) : undefined,
     });
 
     // #1552 R2/R5: Main reserves exactly once before the first attempt; the
@@ -802,6 +876,53 @@ const secretGetTool: ToolDefinition = {
   },
 };
 
+// #1660: owner-only sealed credential discovery. Returns labels + opaque
+// execution-scoped handles — never memory ids or values. Handles are
+// consumable by execute_bash's secret_env in the same execution.
+const secretFindTool: ToolDefinition = {
+  name: "secret_find",
+  description: "Find stored credentials (classification=3) by a descriptive label and return opaque execution-scoped handles. Pass each handle as the value of an ABTARS_SECRET_* variable in execute_bash's secret_env — the value is injected into the child environment only and never shown to you. Never paste a handle into command text you do not own, and never print the resolved value.",
+  parameters: {
+    type: "object",
+    properties: {
+      query: { type: "string", description: "Label or keyword to search (e.g. \"OpenRouter API key\")" },
+      limit: { type: "integer", description: "Maximum results (1-25, default 10)" },
+    },
+    required: ["query"],
+  },
+  async execute(args, context): Promise<string> {
+    // #1660: Main-only (trusted session type A) with an active execution;
+    // every other session type — including Dreamy — fails closed.
+    if (context?.sessionType !== "A" || !context.executionId) {
+      return JSON.stringify({ error: "secret_find_not_allowed", reason: "secret_find requires a Main session with an active execution" });
+    }
+    const deps = memoryDeps(context);
+    if (!deps || !deps.runtime.supports("sealedSecrets")) {
+      return JSON.stringify({ error: "sealed_secrets_unavailable", reason: "Sealed secret lookup is unavailable in this runtime." });
+    }
+    const userId = context?.userId ?? getMasterUserId();
+    const query = stringValue(args["query"]).trim();
+    if (!query) return JSON.stringify({ error: "query is required" });
+    const limit = Number.isSafeInteger(args["limit"]) ? Math.min(Math.max(args["limit"] as number, 1), 25) : 10;
+    try {
+      const refs = await deps.runtime.findSealedSecrets({ userId, query, limit });
+      const handles = getSealedSecretHandles();
+      const results = refs.map((ref) => ({
+        label: ref.label,
+        handle: handles.issue({
+          executionId: context.executionId!,
+          userId,
+          memoryId: ref.memoryId,
+          semanticRevision: ref.semanticRevision,
+        }),
+      }));
+      return JSON.stringify({ ok: true, results });
+    } catch (err) {
+      return JSON.stringify({ error: "sealed_find_failed", reason: err instanceof Error ? err.message : String(err) });
+    }
+  },
+};
+
 import { skillCreateTool, skillUpdateTool, skillPatchTool, skillRemoveTool } from "./skill-authoring.js";
 import { mcpTool } from "./mcp-tool.js";
 import { getDelegationTools } from "./delegation-tools.js";
@@ -811,7 +932,7 @@ import { kanbanTool } from "./kanban-tool.js";
 import { channelPostTool, channelReadTool } from "./channel-tool.js";
 import { artifactPushTool, artifactPullTool, artifactAttachTool } from "./artifact-tools.js";
 
-const ALL_TOOLS: ToolDefinition[] = [bashTool, memoryStoreTool, memoryRecallTool, memoryEditTool, todoTool, taskTool, sendDocumentTool, peerSessionTool, peerDoorbellTool, secretGetTool, skillCreateTool, skillUpdateTool, skillPatchTool, skillRemoveTool, mcpTool, kanbanTool, channelPostTool, channelReadTool, artifactAttachTool, ...getDelegationTools(), ...getPeerHelpTools(), ...getOrcTools()];
+const ALL_TOOLS: ToolDefinition[] = [bashTool, memoryStoreTool, memoryRecallTool, memoryEditTool, todoTool, taskTool, sendDocumentTool, peerSessionTool, peerDoorbellTool, secretGetTool, secretFindTool, skillCreateTool, skillUpdateTool, skillPatchTool, skillRemoveTool, mcpTool, kanbanTool, channelPostTool, channelReadTool, artifactAttachTool, ...getDelegationTools(), ...getPeerHelpTools(), ...getOrcTools()];
 
 // Conditional: artifact store tools (#929)
 if (process.env["ARTIFACT_S3_ENDPOINT"]) {
@@ -871,9 +992,13 @@ export async function executeToolCall(name: string, args: Record<string, unknown
 
   // #621: redact abmind_store args based on classification
   const storeClass = (name === "abmind_store" || name === "memory_store") ? parseInt(stringValue(args.classification ?? args.class ?? "1"), 10) : 0;
-  const auditArgs = storeClass >= 2
+  let auditArgs = storeClass >= 2
     ? `{"class":${storeClass},"[REDACTED]":true}`
     : redactSecrets(JSON.stringify(args));
+  // #1660: sealed handle values must never reach the audit sink.
+  if (name === "execute_bash" && typeof auditArgs === "string") {
+    auditArgs = auditArgs.replace(/secret:[A-Za-z0-9_-]+/g, "[SEALED_HANDLE]");
+  }
   audit({ ts, tool: name, args: auditArgs, userId: context?.userId });
 
   try {

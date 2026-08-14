@@ -121,6 +121,7 @@ function definitionToAgentTool(def: ToolDefinition, context: PiCoreToolContext):
       try {
         const result = await executeToolCall(def.name, params, {
           userId: context.userId,
+          executionId: context.executionId,
           signal: signal ?? context.signal,
           sandboxPolicy: context.sandboxPolicy,
           executionScope: context.executionScope,
@@ -200,6 +201,9 @@ export function createPiAgentTools(context: PiCoreToolContext): AgentTool[] {
     // (D). Every other type — including missing/forged types — does not see
     // the tool, so a model cannot even attempt it through the schema.
     if (def.name === "memory_store" && context.sessionType !== "A" && context.sessionType !== "D") continue;
+    // #1660: secret_find is Main-only; its execution-time gate is mirrored at
+    // presentation so non-Main models never see the schema.
+    if (def.name === "secret_find" && context.sessionType !== "A") continue;
 
     try {
       const agentTool = definitionToAgentTool(def, context);

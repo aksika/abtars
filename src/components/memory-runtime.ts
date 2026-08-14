@@ -26,7 +26,10 @@ export type MemoryRuntimeCapability =
   | "durableContext"
   | "compaction"
   | "dreamQuestions"
-  | "dreamQuestionsNextPending";
+  | "dreamQuestionsNextPending"
+  // #1660: composite local sealed-secret capability (find + resolve on a
+  // local route). Absent for signed peers and remote routes.
+  | "sealedSecrets";
 
 export interface InstantStoreInput {
   userId: string;
@@ -36,6 +39,10 @@ export interface InstantStoreInput {
   emotionScore: number;
   confidence: number;
   classification: number;
+  /** #1660: class-3 only — descriptive label stored in content_en. */
+  sealedLabel?: string;
+  /** #1660: class-3 only — non-sensitive retrieval keyword. */
+  sealedKeyword?: string;
 }
 
 /**
@@ -89,6 +96,10 @@ export interface EditMemoryInput {
   emotionScore?: number;
   confidence?: number;
   classification?: number;
+  /** #1660: class-3 promotion label (content_en), never the value. */
+  sealedLabel?: string;
+  /** #1660: class-3 promotion keyword. */
+  sealedKeyword?: string;
 }
 
 export type EditMemoryResult =
@@ -217,6 +228,32 @@ export interface MaintenanceResult {
 
 export interface EmbeddingInput { texts: string[] }
 export interface EmbeddingResult { vectors: Array<number[] | null>; model: string }
+
+// ── #1660: sealed secrets (labels metadata + local-only plaintext) ───────────
+
+export interface SealedSecretRef {
+  readonly memoryId: number;
+  readonly semanticRevision: number;
+  readonly label: string;
+  readonly memoryType: string;
+  readonly createdAt: number;
+}
+
+export interface FindSealedSecretsInput {
+  readonly userId: string;
+  readonly query: string;
+  readonly limit?: number;
+}
+
+export type SealedSecretResolution =
+  | { ok: true; value: string; semanticRevision: number }
+  | { ok: false; code: "sealed_resolution_failed" };
+
+export interface ResolveSealedSecretInput {
+  readonly userId: string;
+  readonly memoryId: number;
+  readonly expectedRevision: number;
+}
 
 // ── #1527: durable context projection ────────────────────────────────────────
 
@@ -430,6 +467,10 @@ export interface AbtarsMemoryRuntime {
     markAsked(userId: string, questionId: string, deliveryKey: string): Promise<{ status: "asked" | "not_found" | "conflict" }>;
     dismiss(userId: string, questionId: string): Promise<{ status: "dismissed" | "not_found" | "already_terminal" }>;
   };
+  /** #1660: owner-only sealed label search (metadata only). */
+  findSealedSecrets(input: FindSealedSecretsInput): Promise<SealedSecretRef[]>;
+  /** #1660: local-only plaintext resolution, revision-checked. */
+  resolveSealedSecret(input: ResolveSealedSecretInput): Promise<SealedSecretResolution>;
   close(): Promise<void>;
 }
 
@@ -473,6 +514,12 @@ function projectCapabilities(client: AbmindClientLike): Set<MemoryRuntimeCapabil
     && methods.has("private.dreamQuestions.list")
     && methods.has("private.dreamQuestions.markAsked")
     && methods.has("private.dreamQuestions.dismiss")) result.add("dreamQuestions");
+  // #1660: composite local sealed-secret capability. Signed peers never
+  // negotiate the resolver (abmind strips both methods), so their presence in
+  // the negotiated method set implies a local route.
+  if (methods.has("private.findSealedSecrets") && methods.has("private.resolveSealedSecret")) {
+    result.add("sealedSecrets");
+  }
 
   return result;
 }
@@ -663,6 +710,10 @@ export function createClientRuntime(client: AbmindClientLike): AbtarsMemoryRunti
           emotionScore: input.emotionScore,
           confidence: input.confidence,
           classification: input.classification,
+          // #1660: class-3 sealed stores carry label/keyword explicitly; the
+          // value must never ride in the label-bearing field.
+          sealedLabel: input.sealedLabel,
+          sealedKeyword: input.sealedKeyword,
           createdBy: "tool:memory_store",
         })) as Record<string, unknown>;
         return {
@@ -690,6 +741,8 @@ export function createClientRuntime(client: AbmindClientLike): AbtarsMemoryRunti
           emotionScore: input.emotionScore,
           confidence: input.confidence,
           classification: input.classification,
+          sealedLabel: input.sealedLabel,
+          sealedKeyword: input.sealedKeyword,
         })) as Record<string, unknown>;
         const ref = (result["ref"] ?? result) as Record<string, unknown>;
         return {
@@ -765,6 +818,27 @@ export function createClientRuntime(client: AbmindClientLike): AbtarsMemoryRunti
         const result = await pm.dreamQuestions.dismiss({ userId, questionId }, dreamQuestionIdempotencyKey("dismiss", questionId)) as unknown;
         return normalizeDismissResult(result);
       },
+    },
+
+    async findSealedSecrets(input: FindSealedSecretsInput): Promise<SealedSecretRef[]> {
+      requireClientCapability(capabilities, "sealedSecrets");
+      const result = (await pm.findSealedSecrets(input)) as unknown;
+      if (!Array.isArray(result)) throw new Error("Sealed secret search returned a non-array response");
+      return result.map((raw) => {
+        const r = (raw && typeof raw === "object" ? raw : {}) as Record<string, unknown>;
+        return {
+          memoryId: typeof r["memoryId"] === "number" ? r["memoryId"] : 0,
+          semanticRevision: typeof r["semanticRevision"] === "number" ? r["semanticRevision"] : 0,
+          label: typeof r["label"] === "string" ? r["label"] : "",
+          memoryType: typeof r["memoryType"] === "string" ? r["memoryType"] : "",
+          createdAt: typeof r["createdAt"] === "number" ? r["createdAt"] : 0,
+        };
+      });
+    },
+
+    async resolveSealedSecret(input: ResolveSealedSecretInput): Promise<SealedSecretResolution> {
+      requireClientCapability(capabilities, "sealedSecrets");
+      return (await pm.resolveSealedSecret(input)) as SealedSecretResolution;
     },
 
     async close(): Promise<void> {
@@ -971,6 +1045,8 @@ export function createDisabledRuntime(): AbtarsMemoryRuntime {
       markAsked: async () => { unavailable("dreamQuestions.markAsked"); return { status: "not_found" as const }; },
       dismiss: async () => { unavailable("dreamQuestions.dismiss"); return { status: "not_found" as const }; },
     },
+    findSealedSecrets: async () => { unavailable("findSealedSecrets"); return []; },
+    resolveSealedSecret: async () => { unavailable("resolveSealedSecret"); return { ok: false as const, code: "sealed_resolution_failed" as const }; },
     close: async () => {},
   };
 }
@@ -1006,6 +1082,8 @@ export function createUnavailableRuntime(): AbtarsMemoryRuntime {
       markAsked: async () => { unavailable("dreamQuestions.markAsked"); return { status: "not_found" as const }; },
       dismiss: async () => { unavailable("dreamQuestions.dismiss"); return { status: "not_found" as const }; },
     },
+    findSealedSecrets: async () => { unavailable("findSealedSecrets"); return []; },
+    resolveSealedSecret: async () => { unavailable("resolveSealedSecret"); return { ok: false as const, code: "sealed_resolution_failed" as const }; },
     close: async () => {},
   };
 }

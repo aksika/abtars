@@ -67,6 +67,10 @@ export interface AbmindPrivateMemoryLike {
     markAsked(input: { userId: string; questionId: string; deliveryKey: string }, idempotencyKey?: string): Promise<unknown>;
     dismiss(input: { userId: string; questionId: string }, idempotencyKey?: string): Promise<unknown>;
   };
+  /** #1660: owner-only sealed label search (metadata only). */
+  findSealedSecrets(input: unknown): Promise<unknown>;
+  /** #1660: local-only plaintext resolution, revision-checked. */
+  resolveSealedSecret(input: unknown): Promise<unknown>;
 }
 
 export interface SleepStartResultLike {

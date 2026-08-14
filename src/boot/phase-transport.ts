@@ -374,6 +374,30 @@ export async function buildTransport(ctx: BootCtx): Promise<PhaseResult> {
   setActionGate(ctx.actionGate);
   logDebug("main", "🔒 ActionGate wired");
 
+  // #1660: the shared host bash service + sealed handle store used by PiCore
+  // and ACP. Resolution is late-bound to the memory runtime holder, so the
+  // service can be wired before transports exist.
+  const { HostToolService } = await import("../components/host-tool-service.js");
+  const { getSealedSecretHandles, setHostToolService } = await import("../components/transport/tool-registry.js");
+  const sealedHandles = getSealedSecretHandles();
+  const hostToolService = new HostToolService({
+    handles: sealedHandles,
+    actionGate: ctx.actionGate,
+    resolveHandle: async (binding) => {
+      const runtime = ctx.memoryToolDependencies?.current?.runtime;
+      if (!runtime || !runtime.supports("sealedSecrets")) return null;
+      const resolved = await runtime.resolveSealedSecret({
+        userId: binding.userId,
+        memoryId: binding.memoryId,
+        expectedRevision: binding.semanticRevision,
+      });
+      if (!resolved.ok) return null;
+      return { memoryId: binding.memoryId, semanticRevision: resolved.semanticRevision, value: resolved.value };
+    },
+  });
+  setHostToolService(hostToolService);
+  logDebug("main", "🔐 Host tool service wired (sealed handles + shared bash)");
+
   // #906: Wire seatbelt into tool-registry
   if (ctx.seatbeltActive) {
     const { setSeatbelt } = await import("../components/transport/tool-registry.js");

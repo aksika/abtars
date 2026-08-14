@@ -245,6 +245,10 @@ export class AbtarsSignedWssClient implements AbmindClientLike {
         markAsked: (p, key) => this.call("private.dreamQuestions.markAsked", p, key),
         dismiss: (p, key) => this.call("private.dreamQuestions.dismiss", p, key),
       },
+      // #1660: present on the structural contract; abmind refuses both for
+      // signed peers at dispatch, so these always fail closed on a peer route.
+      findSealedSecrets: (p) => this.call("private.findSealedSecrets", p),
+      resolveSealedSecret: (p) => this.call("private.resolveSealedSecret", p),
     };
 
     this.sleep = {
