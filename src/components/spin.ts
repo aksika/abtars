@@ -45,6 +45,18 @@ const DEFAULT_TIMEOUT_MS = 30 * 60_000;
 
 const MAX_STEER_ROUNDS = 10;
 
+/** Best-effort cleanup for execution-scoped sealed handles. */
+async function revokeSealedSecretExecution(executionId: string | undefined): Promise<void> {
+  if (!executionId) return;
+  try {
+    const { revokeSealedSecretExecution: revoke } = await import("./transport/tool-registry.js");
+    revoke(executionId);
+  } catch {
+    // Handle cleanup must never turn a terminal session transition into a
+    // second failure, and the execution id itself is not logged.
+  }
+}
+
 const MAX_CONCURRENT: Partial<Record<SessionType, number>> = {
   T: 1, O: 1, B: 1, D: 1, H: 1, W: 3,
 };
@@ -1230,6 +1242,7 @@ export class Spin {
     terminate: "call" | "response" | "external",
     telemetryUsage?: { input: number; output: number; cacheRead?: number; cacheWrite?: number },
   ): Promise<void> {
+    await revokeSealedSecretExecution(capturedExecutionId);
     // #1611: a quarantined/superseded generation is inert — a late provider
     // settlement must not mutate session state, memory, hooks, or cards.
     if (this.isStaleCompletion(session, capturedExecutionId)) {
@@ -1459,6 +1472,7 @@ export class Spin {
     terminate: "call" | "response" | "external",
     telemetryUsage?: { input: number; output: number; cacheRead?: number; cacheWrite?: number },
   ): Promise<void> {
+    await revokeSealedSecretExecution(capturedExecutionId);
     // #1611: a quarantined/superseded generation is inert — its failure must
     // not mutate session state, memory, hooks, or cards.
     if (this.isStaleCompletion(session, capturedExecutionId)) {
@@ -1869,6 +1883,7 @@ export class Spin {
   private finalizeSession(session: ManagedSession, reason: string): void {
     const metadata = session as unknown as Record<string, unknown>;
     if (session.status === "ended" && metadata["endedAt"] !== undefined) return;
+    void revokeSealedSecretExecution(session.activeExecutionId);
     this.releaseSessionTransport(session);
     session.active = false;
     metadata["endedAt"] = Date.now();

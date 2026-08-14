@@ -343,6 +343,12 @@ export function setSealedSecretHandles(handles: import("../sealed-secret-handles
   _sealedHandles = handles;
 }
 
+/** Delete every sealed handle bound to one completed/cancelled execution. */
+export function revokeSealedSecretExecution(executionId: string): number {
+  if (!executionId) return 0;
+  return getSealedSecretHandles().revokeExecution(executionId);
+}
+
 
 let _peerActivityCb: ((msg: string) => void) | null = null;
 
@@ -423,11 +429,11 @@ const memoryStoreTool: ToolDefinition = {
       type: { type: "string", enum: ["fact", "preference", "decision", "experience", "skill", "relationship", "goal"], description: "Memory type" },
       emotion: { type: "integer", description: "Emotion score -5 to +5 (0=neutral)" },
       confidence: { type: "integer", description: "Confidence 1-5 (3=default)" },
-      classification: { type: "integer", description: "0=public (general knowledge), 1=internal (default), 2=confidential (personal preferences, habits, opinions about specific users), 3=secret (credentials, API keys, tokens, passwords — store IMMEDIATELY with exact string in 'original', never paraphrase, never wait for Dreamy)" },
+      classification: { type: "integer", minimum: 0, maximum: 3, description: "0=public (general knowledge), 1=internal (default), 2=confidential (personal preferences, habits, opinions about specific users), 3=secret (credentials, API keys, tokens, passwords — store IMMEDIATELY with exact string in 'original', never paraphrase, never wait for Dreamy)" },
       label: { type: "string", description: "Required for classification=3: a short descriptive label that does NOT contain the value (e.g. \"OpenRouter API key\"). Searched via secret_find." },
       keyword: { type: "string", description: "Optional for classification=3: non-sensitive retrieval keyword." },
     },
-    required: ["translated", "type"],
+    required: ["type"],
   },
   async execute(args, context): Promise<string> {
     // #1552 R1: execution-time allowlist — a forged or direct call with any
@@ -438,8 +444,14 @@ const memoryStoreTool: ToolDefinition = {
     }
     // #1660: class-3 stores are Main-only — a Dreamy session cannot mint
     // credentials, matching secret_find's own session-type gate.
-    const classification = parseInt(stringValue(args["classification"] ?? "1"), 10);
-    const isSecret = classification === 3;
+    const rawClassification = args["classification"];
+    const classification = rawClassification === undefined || rawClassification === null || stringValue(rawClassification).trim() === ""
+      ? 1
+      : Number(rawClassification);
+    if (!Number.isSafeInteger(classification) || classification < 0 || classification > 3) {
+      return JSON.stringify({ stored: false, code: "memory_validation", retryable: false, message: "classification must be an integer from 0 to 3" });
+    }
+    const isSecret = classification >= 3;
     if (isSecret && sessionType !== "A") {
       return JSON.stringify({ stored: false, code: "memory_store_not_allowed", retryable: false });
     }
@@ -458,6 +470,9 @@ const memoryStoreTool: ToolDefinition = {
     const original = stringValue(args["original"]);
     if (isSecret && !original) {
       return JSON.stringify({ stored: false, code: "memory_validation", retryable: false, message: "class-3 memory_store requires the exact credential value in 'original'" });
+    }
+    if (!isSecret && !stringValue(args["translated"]).trim()) {
+      return JSON.stringify({ stored: false, code: "memory_validation", retryable: false, message: "memory_store requires translated content" });
     }
     const storeOnce = async (): Promise<import("../memory-runtime.js").InstantStoreResult> => deps.runtime.instantStore({
       userId,
@@ -619,7 +634,13 @@ const memoryEditTool: ToolDefinition = {
       if (!Number.isSafeInteger(expectedRevision) || expectedRevision < 1) {
         return JSON.stringify({ ok: false, error: "expected_revision must be a positive integer" });
       }
-      const classification = args["classification"] ? parseInt(stringValue(args["classification"]), 10) : undefined;
+      const rawClassification = args["classification"];
+      const classification = rawClassification === undefined || rawClassification === null || stringValue(rawClassification).trim() === ""
+        ? undefined
+        : Number(rawClassification);
+      if (classification !== undefined && (!Number.isSafeInteger(classification) || classification < 0 || classification > 3)) {
+        return JSON.stringify({ ok: false, error: "classification must be an integer from 0 to 3" });
+      }
       const isPromotingToSecret = classification === 3;
       const label = optionalStringValue(args["label"])?.trim() ?? "";
       if (isPromotingToSecret && !label) {

@@ -54,7 +54,7 @@ export class SealedTokenRegistry {
   }
 
   activate(token: string, ctx: SealedExecutionContext): void {
-    if (!token.startsWith(SEALED_TOKEN_PREFIX)) return;
+    if (!token.startsWith(SEALED_TOKEN_PREFIX) || ctx.sessionType !== "A" || !ctx.executionId || !ctx.userId) return;
     this.contexts.set(token, { ctx, expiresAt: Date.now() + TOKEN_TTL_MS });
   }
 
@@ -108,7 +108,6 @@ export function startSealedToolSocket(
   const server = createServer((socket: Socket) => {
     let buffer = "";
     let token: string | null = null;
-    let connectedContext: SealedExecutionContext | null = null;
     socket.setEncoding("utf-8");
     openSockets.add(socket);
     socket.on("close", () => openSockets.delete(socket));
@@ -125,65 +124,72 @@ export function startSealedToolSocket(
 
     socket.on("data", (chunk: string) => {
       buffer += chunk;
-      if (buffer.length > FRAME_MAX_BYTES * 4) {
-        reject("frame_too_large");
-        return;
-      }
-      const newline = buffer.indexOf("\n");
-      if (newline < 0) return;
-      const raw = buffer.slice(0, newline);
-      buffer = buffer.slice(newline + 1);
-      if (raw.trim() === "") return;
-
-      let frame: unknown;
-      try {
-        frame = JSON.parse(raw) as unknown;
-      } catch {
-        reject("malformed_frame");
-        return;
-      }
-      if (!frame || typeof frame !== "object") {
-        reject("malformed_frame");
-        return;
-      }
-      const record = frame as Record<string, unknown>;
-
-      // Authenticate before parsing tool input.
-      if (token === null) {
-        if (record.type !== "hello" || typeof record.token !== "string") {
-          reject("authentication_required");
+      while (true) {
+        const newline = buffer.indexOf("\n");
+        if (newline < 0) break;
+        const raw = buffer.slice(0, newline);
+        buffer = buffer.slice(newline + 1);
+        if (Buffer.byteLength(raw, "utf-8") > FRAME_MAX_BYTES) {
+          reject("frame_too_large");
           return;
         }
-        token = record.token;
-        connectedContext = registry.activeContext(token);
-        if (!connectedContext) {
+        if (raw.trim() === "") continue;
+
+        let frame: unknown;
+        try {
+          frame = JSON.parse(raw) as unknown;
+        } catch {
+          reject("malformed_frame");
+          return;
+        }
+        if (!frame || typeof frame !== "object") {
+          reject("malformed_frame");
+          return;
+        }
+        const record = frame as Record<string, unknown>;
+
+        // Authenticate before parsing tool input.
+        if (token === null) {
+          if (record.type !== "hello" || typeof record.token !== "string") {
+            reject("authentication_required");
+            return;
+          }
+          token = record.token;
+          const active = registry.activeContext(token);
+          if (!active || active.sessionType !== "A" || !active.executionId) {
+            reject("token_inactive_or_revoked");
+            return;
+          }
+          reply({ ok: true, hello: "abtars-sealed-tools-v1" });
+          continue;
+        }
+
+        if (record.type !== "tool_call" || !record.name || typeof record.name !== "string") {
+          reject("unsupported_frame");
+          return;
+        }
+        // Re-check the registry for every call. Deactivation must revoke an
+        // already-open socket, and reactivation must use the new execution.
+        const ctx = registry.activeContext(token);
+        if (!ctx || ctx.sessionType !== "A" || !ctx.executionId) {
           reject("token_inactive_or_revoked");
           return;
         }
-        reply({ ok: true, hello: "abtars-sealed-tools-v1" });
-        return;
-      }
+        const call = frame as ToolCallFrame;
+        const args = call.arguments && typeof call.arguments === "object" && !Array.isArray(call.arguments)
+          ? call.arguments
+          : {};
 
-      if (record.type !== "tool_call" || !record.name || typeof record.name !== "string") {
-        reject("unsupported_frame");
-        return;
+        void handleToolCall(call.name, args, ctx, deps)
+          .then((result) => reply({ ok: true, result }))
+          .catch(() => {
+            logWarn("sealed-tool-socket", `tool_call failed ${call.name}`);
+            reply({ ok: false, error: "tool_call_failed" });
+          });
       }
-      const ctx = connectedContext;
-      if (!ctx) {
-        reject("token_inactive_or_revoked");
-        return;
+      if (Buffer.byteLength(buffer, "utf-8") > FRAME_MAX_BYTES) {
+        reject("frame_too_large");
       }
-      const call = frame as ToolCallFrame;
-      const args = call.arguments && typeof call.arguments === "object" && !Array.isArray(call.arguments)
-        ? call.arguments
-        : {};
-
-      void handleToolCall(call.name, args, ctx, deps)
-        .then((result) => reply({ ok: true, result }))
-        .catch((err) => {
-          logWarn("sealed-tool-socket", `tool_call failed ${call.name}: ${err instanceof Error ? err.message : String(err)}`);
-          reply({ ok: false, error: "tool_call_failed" });
-        });
     });
 
     socket.on("error", () => { /* connection dropped */ });

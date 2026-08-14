@@ -75,15 +75,15 @@ let socketBuffer = "";
 let authResolver: ((ok: boolean) => void) | null = null;
 socket.on("data", (chunk: string) => {
   socketBuffer += chunk;
-  if (socketBuffer.length > FRAME_MAX_BYTES * 4) {
-    socket.destroy();
-    process.exit(1);
-  }
   let newline = socketBuffer.indexOf("\n");
   while (newline >= 0) {
     const raw = socketBuffer.slice(0, newline);
     socketBuffer = socketBuffer.slice(newline + 1);
     newline = socketBuffer.indexOf("\n");
+    if (Buffer.byteLength(raw, "utf-8") > FRAME_MAX_BYTES) {
+      socket.destroy();
+      process.exit(1);
+    }
     if (raw.trim() === "") continue;
     let payload: unknown;
     try {
@@ -114,6 +114,10 @@ socket.on("data", (chunk: string) => {
     } else {
       respondError(pending.id, -32000, typeof record["error"] === "string" ? record["error"] : "sealed_tool_call_failed");
     }
+  }
+  if (Buffer.byteLength(socketBuffer, "utf-8") > FRAME_MAX_BYTES) {
+    socket.destroy();
+    process.exit(1);
   }
 });
 

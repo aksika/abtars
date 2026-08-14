@@ -106,6 +106,19 @@ describe("HostToolService secret_env execution", () => {
     expect(JSON.parse(result)).toMatchObject({ error: "sealed_handle_invalid" });
   });
 
+  it("does not expose a resolver exception or reject the request", async () => {
+    const { service, handles } = makeService({
+      handleResolver: async () => { throw new Error(FAKE_VALUE); },
+    });
+    const token = handles.issue({ executionId: "e1", userId: "u1", memoryId: 7, semanticRevision: 1 });
+    const result = await service.runBash(
+      { command: "printf '%s' \"$ABTARS_SECRET_TOKEN\"", secretEnv: { ABTARS_SECRET_TOKEN: token } },
+      { userId: "u1", executionId: "e1" },
+    );
+    expect(JSON.parse(result)).toMatchObject({ error: "execution_failed" });
+    expect(result).not.toContain(FAKE_VALUE);
+  });
+
   it("blocks guardrail-rejected and bridge-spawn commands before any resolution", async () => {
     const resolver = vi.fn(async () => ({ value: "x" }));
     const { service } = makeService({ handleResolver: resolver });

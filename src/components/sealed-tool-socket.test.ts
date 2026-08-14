@@ -141,6 +141,19 @@ describe("#1660 sealed tool socket", () => {
     expect(hello.error).toBe("token_inactive_or_revoked");
   });
 
+  it("re-checks token activity on an already-authenticated socket", async () => {
+    const token = registry.issueToken();
+    registry.activate(token, { userId: "u1", executionId: "e", sessionType: "A", sandboxed: true });
+    const { socket, readFrame } = await open();
+    socket.write(JSON.stringify({ type: "hello", token }) + "\n");
+    await readFrame();
+    registry.deactivate(token);
+    socket.write(JSON.stringify({ type: "tool_call", name: "secret_find", arguments: { query: "x" } }) + "\n");
+    const rejected = await readFrame();
+    expect(rejected).toEqual({ ok: false, error: "token_inactive_or_revoked" });
+    socket.destroy();
+  });
+
   it("handles execute_bash through the shared host service with handle resolution", async () => {
     const ctx: SealedExecutionContext = { userId: "u1", executionId: "exec-2", sessionType: "A", sandboxed: true };
     const token = registry.issueToken();

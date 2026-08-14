@@ -32,6 +32,12 @@ export function pushLog(session: ManagedSession, event: string): void {
  * control's requestCancel and the transport release are idempotent / guarded.
  */
 export function cancelSessionExecution(session: ManagedSession, reason: import("./swarm-executor-types.js").CancelReason): void {
+  if (session.activeExecutionId) {
+    const executionId = session.activeExecutionId;
+    void import("./transport/tool-registry.js")
+      .then(({ revokeSealedSecretExecution }) => { revokeSealedSecretExecution(executionId); })
+      .catch(() => { /* terminal cleanup is best effort */ });
+  }
   const ctrl = session.executionControl;
   if (ctrl && !ctrl.terminal) {
     void ctrl.requestCancel(reason).catch(() => {});

@@ -221,22 +221,37 @@ export class HostToolService {
 
     // Resolve every handle after approval; spawn nothing on any failure.
     const resolvedEnv: Array<{ name: string; value: string }> = [];
-    if (input.secretEnv) {
-      for (const [name, handle] of Object.entries(input.secretEnv)) {
-        const binding = this.deps.handles.lookup(handle, { executionId: ctx.executionId, userId: ctx.userId });
-        const resolved = binding ? await this.deps.resolveHandle(binding) : null;
-        if (!resolved) {
-          return JSON.stringify({ error: "sealed_handle_invalid", stderr: "One or more sealed handles could not be resolved for this execution.", exit_code: 126, command_fingerprint: fingerprintCommand(cmd), command_preview: previewCommand(cmd) });
-        }
-        resolvedEnv.push({ name, value: resolved.value });
-      }
-    }
-
     try {
-      const result = await this.spawnBash(cmd, ctx, resolvedEnv, resolvedEnv.map((entry) => entry.value));
-      return result;
+      if (input.secretEnv) {
+        for (const [name, handle] of Object.entries(input.secretEnv)) {
+          const binding = this.deps.handles.lookup(handle, { executionId: ctx.executionId, userId: ctx.userId });
+          const resolved = binding ? await this.deps.resolveHandle(binding) : null;
+          if (!resolved) {
+            return JSON.stringify({ error: "sealed_handle_invalid", stderr: "One or more sealed handles could not be resolved for this execution.", exit_code: 126, command_fingerprint: fingerprintCommand(cmd), command_preview: previewCommand(cmd) });
+          }
+          resolvedEnv.push({ name, value: resolved.value });
+        }
+      }
+
+      const literals = resolvedEnv.map((entry) => entry.value);
+      const result = await this.spawnBash(cmd, ctx, resolvedEnv, literals);
+      // spawnBash scrubs its text fields; this second pass covers every JSON
+      // field (including previews and future result fields) before return.
+      return redactLiterals(result, literals);
+    } catch {
+      // A resolver or child-process exception must not cross the boundary:
+      // third-party error messages may contain a credential. Keep the failure
+      // deliberately generic and expose only a non-sensitive command digest.
+      return JSON.stringify({
+        error: "execution_failed",
+        stderr: "Sealed command execution failed.",
+        exit_code: null,
+        command_fingerprint: fingerprintCommand(cmd),
+      });
     } finally {
-      // Release local value references.
+      // Release local value references, including values retained in the
+      // mutable entries until the finally block runs.
+      for (const entry of resolvedEnv) entry.value = "";
       resolvedEnv.length = 0;
     }
   }
