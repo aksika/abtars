@@ -194,4 +194,96 @@ describe("Local Swarm E2E", () => {
       expect(result.counts.outboundDeliveries).toBe(1);
     });
   }, CHILD_TIMEOUT_MS + 10_000);
+
+  it("pi_spin_route (#1638 Gate A S2): no-alias contract runs the existing Spin path even with Pi live", async () => {
+    await runScenario("pi_spin_route", (result) => {
+      expect(result.ok).toBe(true);
+      const ss = result.scenarioSpecific as Record<string, unknown>;
+      expect(ss).toBeDefined();
+      expect(ss.spinAttemptExecutor).toBe("agent/spin-local");
+      expect(ss.spinProvenance).toBe("agent");
+      expect(Number(ss.piRunsCreated)).toBe(0);
+      expect(Number(ss.workspaceClaims)).toBe(0);
+      expect(result.terminal.projectState).toBe("accepted");
+      expect(result.counts.outboundDeliveries).toBe(1);
+    });
+  }, CHILD_TIMEOUT_MS + 10_000);
+
+  it("pi_unavailable (#1638 Gate A S3): coding child fails closed with a stated reason and zero orphans", async () => {
+    await runScenario("pi_unavailable", (result) => {
+      expect(result.ok).toBe(true);
+      const ss = result.scenarioSpecific as Record<string, unknown>;
+      expect(ss).toBeDefined();
+      expect(ss.attemptLifecycle).toBe("failed");
+      expect(String(ss.failureReason)).toContain("pi_executor_unavailable");
+      expect(String(ss.executor)).toContain("pi/");
+      expect(Number(ss.piRuns)).toBe(0);
+      expect(Number(ss.claims)).toBe(0);
+      expect(Number(ss.piCards)).toBe(0);
+      expect(ss.cardStatus).toBe("failed");
+      expect(result.counts.workerResults).toBeGreaterThan(0);
+    });
+  }, CHILD_TIMEOUT_MS + 10_000);
+
+  it("pi_workspace_contention (#1638 Gate A S4): same canonical path via two aliases serializes; waiter defers without spending a retry", async () => {
+    await runScenario("pi_workspace_contention", (result) => {
+      expect(result.ok).toBe(true);
+      const ss = result.scenarioSpecific as Record<string, unknown>;
+      expect(ss).toBeDefined();
+      expect(ss.attemptBWhileBusy).toBe("pending");
+      expect(Number(ss.attemptsForB)).toBe(1);
+      expect(Number(ss.peakConcurrentPerPath)).toBe(1);
+      expect(ss.claimsReleased).toBe(true);
+      expect(result.counts.workerAttempts).toBe(2);
+      expect(result.terminal.projectState).toBe("accepted");
+      expect(result.counts.outboundDeliveries).toBe(1);
+    });
+  }, CHILD_TIMEOUT_MS + 10_000);
+
+  it("pi_standalone_capacity (#1648 Gate A S4b): second standalone run stays paired-queued, survives the Spin legacy drain, starts on release", async () => {
+    await runScenario("pi_standalone_capacity", (result) => {
+      expect(result.ok).toBe(true);
+      const ss = result.scenarioSpecific as Record<string, unknown>;
+      expect(ss).toBeDefined();
+      expect(ss.secondRunWhileBusy).toBe("queued");
+      expect(ss.secondCardWhileBusy).toBe("queued");
+      expect(ss.survivedDrain).toBe(true);
+      expect(ss.firstFinalStatus).toBe("completed");
+      expect(ss.secondFinalStatus).toBe("completed");
+      expect(ss.secondCardFinalStatus).toBe("done");
+    });
+  }, CHILD_TIMEOUT_MS + 10_000);
+
+  it("pi_replay_stale (#1638 Gate A S5): terminal replay and a stale generation settle exactly once", async () => {
+    await runScenario("pi_replay_stale", (result) => {
+      expect(result.ok).toBe(true);
+      const ss = result.scenarioSpecific as Record<string, unknown>;
+      expect(ss).toBeDefined();
+      expect(ss.piRunStatus).toBe("completed");
+      expect(ss.piProvenance).toBe("pi");
+      expect(result.counts.workerResults).toBe(1);
+      expect(result.counts.workerAttempts).toBe(1);
+      expect(result.counts.outboundDeliveries).toBe(1);
+      expect(result.terminal.projectState).toBe("accepted");
+    });
+  }, CHILD_TIMEOUT_MS + 10_000);
+
+  it("pi_input_answer (#1638 Gate A S6): live question → structured zero-charge evidence → Orc answer → resumed retry", async () => {
+    await runScenario("pi_input_answer", (result) => {
+      expect(result.ok).toBe(true);
+      const ss = result.scenarioSpecific as Record<string, unknown>;
+      expect(ss).toBeDefined();
+      expect(ss.firstLifecycle).toBe("failed");
+      expect(Number(ss.chargedTokens)).toBe(0);
+      expect(ss.questionEvidenceCode).toBe("INPUT_REQUESTED");
+      expect(ss.runStatusAfterQuestion).toBe("interrupted");
+      expect(ss.resumeCapability).toBe("available");
+      expect(Number(ss.attempts)).toBe(2);
+      expect(ss.retryContinuity).toBe("resumed");
+      expect(Number(ss.retryGeneration)).toBe(2);
+      expect(ss.retryRunStatus).toBe("completed");
+      expect(result.terminal.projectState).toBe("accepted");
+      expect(result.counts.outboundDeliveries).toBe(1);
+    });
+  }, CHILD_TIMEOUT_MS + 10_000);
 });
