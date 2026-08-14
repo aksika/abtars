@@ -838,7 +838,21 @@ export function createClientRuntime(client: AbmindClientLike): AbtarsMemoryRunti
 
     async resolveSealedSecret(input: ResolveSealedSecretInput): Promise<SealedSecretResolution> {
       requireClientCapability(capabilities, "sealedSecrets");
-      return (await pm.resolveSealedSecret(input)) as SealedSecretResolution;
+      try {
+        const result = (await pm.resolveSealedSecret(input)) as unknown;
+        if (result && typeof result === "object" && (result as Record<string, unknown>)["ok"] === true) {
+          const value = (result as Record<string, unknown>)["value"];
+          if (typeof value === "string") {
+            return { ok: true, value, semanticRevision: Number((result as Record<string, unknown>)["semanticRevision"] ?? 0) };
+          }
+        }
+        return { ok: false, code: "sealed_resolution_failed" };
+      } catch {
+        // #1660: every failure — dispatch refusal, forged frame, wrong owner,
+        // stale revision, expired row — collapses to the same indistinguishable
+        // outcome so callers can never learn whether another owner's row exists.
+        return { ok: false, code: "sealed_resolution_failed" };
+      }
     },
 
     async close(): Promise<void> {

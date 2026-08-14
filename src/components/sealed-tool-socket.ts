@@ -158,6 +158,7 @@ export function startSealedToolSocket(
         connectedContext = registry.activeContext(token);
         if (!connectedContext) {
           reject("token_inactive_or_revoked");
+          return;
         }
         reply({ ok: true, hello: "abtars-sealed-tools-v1" });
         return;

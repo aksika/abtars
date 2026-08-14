@@ -15,6 +15,7 @@ import { isDefinitivePreDispatchFailure } from "../memory-runtime.js";
 import type { ToolExecutionScope } from "../tasks/task-package.js";
 import type { OrcInvocationContextV1 } from "../orc-project/orc-project-contracts.js";
 import { checkCommand, classifyCommand } from "../guardrails.js";
+import { SealedSecretHandles as staticSealedHandles } from "../sealed-secret-handles.js";
 
 const TAG = "tool_registry";
 
@@ -333,10 +334,13 @@ export function getHostToolService(): import("../host-tool-service.js").HostTool
 
 export function getSealedSecretHandles(): import("../sealed-secret-handles.js").SealedSecretHandles {
   if (!_sealedHandles) {
-    const { SealedSecretHandles } = require("../sealed-secret-handles.js") as typeof import("../sealed-secret-handles.js");
-    _sealedHandles = new SealedSecretHandles();
+    _sealedHandles = new (staticSealedHandles)();
   }
   return _sealedHandles;
+}
+
+export function setSealedSecretHandles(handles: import("../sealed-secret-handles.js").SealedSecretHandles | null): void {
+  _sealedHandles = handles;
 }
 
 
