@@ -604,6 +604,8 @@ const memoryEditTool: ToolDefinition = {
       emotion: { type: "integer", description: "New emotion score" },
       confidence: { type: "integer", description: "New confidence" },
       classification: { type: "integer", description: "New classification" },
+      label: { type: "string", description: "Required when promoting to classification=3: a short descriptive label that does NOT contain the value." },
+      keyword: { type: "string", description: "Optional for classification=3: non-sensitive retrieval keyword." },
     },
     required: ["memory_id", "expected_revision"],
   },
@@ -617,6 +619,12 @@ const memoryEditTool: ToolDefinition = {
       if (!Number.isSafeInteger(expectedRevision) || expectedRevision < 1) {
         return JSON.stringify({ ok: false, error: "expected_revision must be a positive integer" });
       }
+      const classification = args["classification"] ? parseInt(stringValue(args["classification"]), 10) : undefined;
+      const isPromotingToSecret = classification === 3;
+      const label = optionalStringValue(args["label"])?.trim() ?? "";
+      if (isPromotingToSecret && !label) {
+        return JSON.stringify({ ok: false, error: "promoting to classification=3 requires a descriptive label that does not contain the value" });
+      }
       const result = await runtime.editMemory({
         memoryId: parseInt(stringValue(args["memory_id"] ?? "0"), 10),
         expectedRevision,
@@ -626,7 +634,10 @@ const memoryEditTool: ToolDefinition = {
         memoryType: optionalStringValue(args["type"]),
         emotionScore: args["emotion"] ? parseInt(stringValue(args["emotion"]), 10) : undefined,
         confidence: args["confidence"] ? parseInt(stringValue(args["confidence"]), 10) : undefined,
-        classification: args["classification"] ? parseInt(stringValue(args["classification"]), 10) : undefined,
+        classification,
+        // #1660: class-3 promotion needs the label in the same CAS.
+        sealedLabel: isPromotingToSecret ? label : undefined,
+        sealedKeyword: isPromotingToSecret ? optionalStringValue(args["keyword"]) : undefined,
       });
       // The runtime returns the structured failure unchanged; the model gets
       // code/requestId/action/stage/retryable without message flattening.
