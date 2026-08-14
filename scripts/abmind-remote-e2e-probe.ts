@@ -100,14 +100,16 @@ async function main(): Promise<ProbeResult> {
       confidence: 5,
       classification: 1,
     });
-    if (!storeResult.stored || !storeResult.memoryId || !storeResult.semanticRevision) {
+    if (!storeResult.stored) {
       failures.push(`instantStore failed: ${JSON.stringify(storeResult)}`);
     }
 
-    if (storeResult.semanticRevision) {
+    if (storeResult.stored) {
+      const memoryId = storeResult.memoryId;
+      const revision = storeResult.semanticRevision;
       const editResult = await result.runtime.editMemory({
-        memoryId: storeResult.memoryId!,
-        expectedRevision: storeResult.semanticRevision,
+        memoryId,
+        expectedRevision: revision,
         userId: user,
         contentEn: "Remote probe edit test",
       });
@@ -116,12 +118,12 @@ async function main(): Promise<ProbeResult> {
       }
 
       const staleEditResult = await result.runtime.editMemory({
-        memoryId: storeResult.memoryId!,
-        expectedRevision: storeResult.semanticRevision,
+        memoryId,
+        expectedRevision: revision,
         userId: user,
         contentEn: "Stale remote probe edit",
       });
-      if (editResult.ok && (staleEditResult.ok || staleEditResult.error !== "conflict")) {
+      if (editResult.ok && (staleEditResult.ok || staleEditResult.code !== "memory_conflict")) {
         failures.push(`stale edit should have produced a conflict: ${JSON.stringify(staleEditResult)}`);
       }
     }

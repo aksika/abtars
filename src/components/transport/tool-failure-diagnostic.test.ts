@@ -185,6 +185,43 @@ describe("parseToolResultToDiagnostic", () => {
     expect(d).not.toBeNull();
     expect(d!.stderr_excerpt).not.toContain("sk-aaaaaaaaaaaaaaaaaaaaaa");
   });
+
+  it("maps structured memory failures to their bridge reasons, never unknown (#1659)", () => {
+    const cases: Array<{ code: string; action: string; stage: string; retryable: boolean }> = [
+      { code: "memory_validation", action: "fix_input", stage: "pre_dispatch", retryable: false },
+      { code: "memory_not_found", action: "stop", stage: "pre_dispatch", retryable: false },
+      { code: "memory_conflict", action: "re_recall", stage: "pre_dispatch", retryable: false },
+      { code: "memory_unauthorized", action: "stop", stage: "pre_dispatch", retryable: false },
+      { code: "memory_idempotency_conflict", action: "stop", stage: "pre_dispatch", retryable: false },
+      { code: "memory_unavailable", action: "retry", stage: "pre_dispatch", retryable: true },
+      { code: "memory_outcome_unknown", action: "reconcile", stage: "response", retryable: false },
+    ];
+    for (const c of cases) {
+      const result = JSON.stringify({
+        stored: false, memoriesCount: 0, code: c.code, message: `${c.code} detail`,
+        requestId: "req-abc", retryable: c.retryable, action: c.action, stage: c.stage,
+      });
+      const d = parseToolResultToDiagnostic(result, execId, "memory_store");
+      expect(d).not.toBeNull();
+      expect(d!.reason).toBe(c.code);
+      expect(d!.memory_failure).toMatchObject({ code: c.code, request_id: "req-abc", retryable: c.retryable, action: c.action, stage: c.stage });
+      expect(d!.stderr_excerpt).toContain(`${c.code} detail`);
+    }
+  });
+
+  it("redacts and caps structured memory failure messages", () => {
+    const result = JSON.stringify({
+      stored: false, memoriesCount: 0, code: "memory_validation",
+      message: `secret sk-aaaaaaaaaaaaaaaaaaaaaa ${"x".repeat(900)}`,
+      requestId: "req-xyz", retryable: false, action: "fix_input", stage: "pre_dispatch",
+    });
+    const d = parseToolResultToDiagnostic(result, execId, "memory_store");
+    expect(d).not.toBeNull();
+    expect(d!.reason).toBe("memory_validation");
+    expect(d!.stderr_excerpt).not.toContain("sk-aaaaaaaaaaaaaaaaaaaaaa");
+    expect(d!.stderr_excerpt!.length).toBeLessThanOrEqual(500);
+    expect(d!.memory_failure!.request_id).toBe("req-xyz");
+  });
 });
 
 describe("buildUnknownDiagnostic", () => {

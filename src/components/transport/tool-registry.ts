@@ -11,6 +11,7 @@ import { logWarn, redactSecrets } from "../logger.js";
 import { logAndSwallow } from "../log-and-swallow.js";
 import { checkTool, checkPath, auditDeny, type SandboxPolicy } from "../tool-sandbox.js";
 import { getMasterUserId } from "../master-user.js";
+import { isDefinitivePreDispatchFailure } from "../memory-runtime.js";
 import type { ToolExecutionScope } from "../tasks/task-package.js";
 import type { OrcInvocationContextV1 } from "../orc-project/orc-project-contracts.js";
 import { checkCommand, classifyCommand } from "../guardrails.js";
@@ -407,35 +408,61 @@ const memoryStoreTool: ToolDefinition = {
     }
     try {
       const result = await storeOnce();
-      // #1552 R3/R5: only a final stored:true commits the reservation; a
-      // definitively unsuccessful write releases it so it does not count.
-      if (reservationId) {
-        if (result.stored === true) deps.quota.commit(reservationId);
-        else deps.quota.release(reservationId);
-      }
-      return JSON.stringify(result);
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      // #706: FTS corruption self-heal — rebuild indexes and retry once,
-      // still inside the same reservation.
-      if ((msg.includes("fts5") || msg.includes("corruption")) && deps.runtime.supports("rebuildFts")) {
+
+      // #706/#1659: FTS corruption self-heal may run only for a definitive
+      // typed pre-dispatch FTS failure — never from a substring match on an
+      // unknown post-dispatch message. The reservation stays pending across
+      // the retry and is finalized exactly once by the exhaustive rule.
+      if (!result.stored
+        && isDefinitivePreDispatchFailure(result.code, result.stage)
+        && /fts5|corruption/i.test(result.message)
+        && deps.runtime.supports("rebuildFts")) {
         try {
           await deps.runtime.rebuildFtsIndexes();
           logWarn("tool-registry", "FTS corruption detected — rebuilt indexes, retrying store");
-          const result = await storeOnce();
-          if (reservationId) {
-            if (result.stored === true) deps.quota.commit(reservationId);
-            else deps.quota.release(reservationId);
-          }
-          return JSON.stringify(result);
-        } catch (retryErr) { /* fall through */ }
+          const retried = await storeOnce();
+          if (reservationId) finalizeStoreQuota(deps, reservationId, retried);
+          return JSON.stringify(retried);
+        } catch (retryErr) { /* fall through to the finalize below */ }
       }
-      // Known thrown failure after all retry handling: release the slot.
-      if (reservationId) deps.quota.release(reservationId);
-      return JSON.stringify({ error: msg });
+
+      // #1552 R3/R5: only a final stored:true commits the reservation.
+      // Definitive failures (typed rejection, proven pre-dispatch refusal)
+      // release it so it does not count; an outcome-unknown store commits
+      // conservatively because the mutation may have been accepted (#1659).
+      if (reservationId) finalizeStoreQuota(deps, reservationId, result);
+      return JSON.stringify(result);
+    } catch (err) {
+      // An unclassified thrown error after invoking the client may have
+      // committed: commit the reservation conservatively and surface
+      // `unknown` — never release on the assumption it failed.
+      if (reservationId) deps.quota.commit(reservationId);
+      return JSON.stringify({ error: err instanceof Error ? err.message : String(err) });
     }
   },
 };
+
+/**
+ * #1659: exhaustive quota finalization for one memory-store attempt.
+ * - success -> commit;
+ * - definitive rejection / proven pre-dispatch refusal -> release;
+ * - outcome_unknown (or anything else) -> commit conservatively.
+ */
+function finalizeStoreQuota(
+  deps: import("../memory-store-quota.js").MemoryToolDependencies,
+  reservationId: string,
+  result: import("../memory-runtime.js").InstantStoreResult,
+): void {
+  if (result.stored === true) {
+    deps.quota.commit(reservationId);
+    return;
+  }
+  if (isDefinitivePreDispatchFailure(result.code, result.stage)) {
+    deps.quota.release(reservationId);
+    return;
+  }
+  deps.quota.commit(reservationId);
+}
 
 const memoryRecallTool: ToolDefinition = {
   name: "memory_recall",
@@ -510,6 +537,8 @@ const memoryEditTool: ToolDefinition = {
         confidence: args["confidence"] ? parseInt(stringValue(args["confidence"]), 10) : undefined,
         classification: args["classification"] ? parseInt(stringValue(args["classification"]), 10) : undefined,
       });
+      // The runtime returns the structured failure unchanged; the model gets
+      // code/requestId/action/stage/retryable without message flattening.
       return JSON.stringify(result);
     } catch (err) {
       const code = err && typeof err === "object" && "code" in err ? String((err as { code: unknown }).code) : "";

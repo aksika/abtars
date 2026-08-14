@@ -20,6 +20,28 @@ export interface AbmindCapabilitiesLike {
   features: Record<string, unknown>;
 }
 
+// ── #1659: structural mutation failure contract ─────────────────────────────
+
+/** What the caller should do with a mutation failure. */
+export type AbmindFailureActionLike = "fix_input" | "re_recall" | "retry" | "reconcile" | "stop";
+
+/** Where the failure was classified in the mutation lifecycle. */
+export type AbmindFailureStageLike = "pre_dispatch" | "dispatch" | "response";
+
+/**
+ * Structural protocol failure raised by either client (local abmind or the
+ * abtars-owned signed WSS client). Callers must never derive retry safety
+ * from message text.
+ */
+export interface AbmindClientErrorLike extends Error {
+  readonly code: string;
+  readonly requestId: string;
+  readonly retryable: boolean;
+  readonly action: AbmindFailureActionLike;
+  readonly stage: AbmindFailureStageLike;
+  readonly current?: unknown;
+}
+
 export interface AbmindPrivateMemoryLike {
   instantStore(params: unknown, idempotencyKey?: string): Promise<unknown>;
   editMemory(params: unknown, idempotencyKey?: string): Promise<unknown>;

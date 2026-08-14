@@ -286,6 +286,72 @@ describe("createClientRuntime", () => {
   });
 });
 
+describe("#1659 runtime failure contract", () => {
+  const WRITE_CAPS = caps(ALL_METHODS, { private_read: "true", private_write: "true", private_mutation_contract: "revision-v1" });
+
+  function structuralError(code: string, message: string, stage: string, retryable: boolean, action: string): Error {
+    return Object.assign(new Error(message), {
+      name: "AbmindClientError", code, requestId: "req-123", retryable, action, stage,
+    });
+  }
+
+  it.each<{ code: string; stage: string; retryable: boolean; action: string; bridgeCode: string }>([
+    { code: "validation_error", stage: "pre_dispatch", retryable: false, action: "fix_input", bridgeCode: "memory_validation" },
+    { code: "not_found", stage: "pre_dispatch", retryable: false, action: "stop", bridgeCode: "memory_not_found" },
+    { code: "conflict", stage: "pre_dispatch", retryable: false, action: "re_recall", bridgeCode: "memory_conflict" },
+    { code: "unauthorized", stage: "pre_dispatch", retryable: false, action: "stop", bridgeCode: "memory_unauthorized" },
+    { code: "idempotency_conflict", stage: "pre_dispatch", retryable: false, action: "stop", bridgeCode: "memory_idempotency_conflict" },
+    { code: "unavailable", stage: "pre_dispatch", retryable: true, action: "retry", bridgeCode: "memory_unavailable" },
+    { code: "outcome_unknown", stage: "response", retryable: false, action: "reconcile", bridgeCode: "memory_outcome_unknown" },
+  ])("instantStore preserves the structural failure contract for $code", async ({ code, stage, retryable, action, bridgeCode }) => {
+    const client = mockClient(WRITE_CAPS);
+    (client.privateMemory.instantStore as ReturnType<typeof vi.fn>)
+      .mockRejectedValue(structuralError(code, `${code} happened`, stage, retryable, action));
+    const rt = createClientRuntime(client);
+    const result = await rt.instantStore({ userId: "u1", contentEn: "x", contentOriginal: "x", memoryType: "fact", emotionScore: 0, confidence: 3, classification: 1 });
+    expect(result.stored).toBe(false);
+    if (!result.stored) {
+      expect(result).toMatchObject({
+        code: bridgeCode,
+        message: `${code} happened`,
+        requestId: "req-123",
+        retryable,
+        action,
+        stage,
+      });
+    }
+  });
+
+  it("editMemory surfaces a conflict as memory_conflict/re_recall without flattening", async () => {
+    const client = mockClient(WRITE_CAPS);
+    (client.privateMemory.editMemory as ReturnType<typeof vi.fn>)
+      .mockRejectedValue(structuralError("conflict", "Semantic revision conflict", "pre_dispatch", false, "re_recall"));
+    const rt = createClientRuntime(client);
+    const result = await rt.editMemory({ memoryId: 7, expectedRevision: 2, userId: "u1" });
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.code).toBe("memory_conflict");
+      expect(result.action).toBe("re_recall");
+      expect(result.retryable).toBe(false);
+    }
+  });
+
+  it("an unstructured thrown error becomes an uncertain response-stage failure, never pre_dispatch", async () => {
+    const client = mockClient(WRITE_CAPS);
+    (client.privateMemory.instantStore as ReturnType<typeof vi.fn>)
+      .mockRejectedValue(new Error("connection reset"));
+    const rt = createClientRuntime(client);
+    const result = await rt.instantStore({ userId: "u1", contentEn: "x", contentOriginal: "x", memoryType: "fact", emotionScore: 0, confidence: 3, classification: 1 });
+    expect(result.stored).toBe(false);
+    if (!result.stored) {
+      expect(result.code).toBe("unknown");
+      expect(result.stage).toBe("response");
+      expect(result.action).toBe("reconcile");
+      expect(result.message).toContain("connection reset");
+    }
+  });
+});
+
 describe("attemptMemoryMutation", () => {
   it("returns ok: true with value on success", async () => {
     const result = await attemptMemoryMutation({

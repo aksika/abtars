@@ -18,7 +18,21 @@ export type ToolFailureReason =
   | "candidate_round_limit"
   | "prompt_round_limit"
   | "candidate_exhausted"
+  // #1659: structured memory mutation failures (never collapsed to `unknown`).
+  | "memory_validation"
+  | "memory_not_found"
+  | "memory_conflict"
+  | "memory_unauthorized"
+  | "memory_idempotency_conflict"
+  | "memory_unavailable"
+  | "memory_outcome_unknown"
   | "unknown";
+
+const MEMORY_FAILURE_REASONS: ReadonlySet<string> = new Set([
+  "memory_validation", "memory_not_found", "memory_conflict",
+  "memory_unauthorized", "memory_idempotency_conflict",
+  "memory_unavailable", "memory_outcome_unknown",
+]);
 
 export interface ToolFailureDiagnosticV1 {
   version: 1;
@@ -38,6 +52,14 @@ export interface ToolFailureDiagnosticV1 {
   candidate_exhausted?: boolean;
   /** #1595: structured bash syntax error — never auto-corrected, model must re-submit. */
   syntax_hint?: string;
+  /** #1659: bounded structural memory failure metadata, redacted. */
+  memory_failure?: {
+    code: string;
+    request_id: string;
+    retryable: boolean;
+    action: string;
+    stage: string;
+  };
   /** #1595: a prior tool failure retained only as supporting context when a terminal cause leads. */
   last_tool_failure?: {
     tool: string;
@@ -166,6 +188,28 @@ export function parseToolResultToDiagnostic(
     const hasBashFields = "exit_code" in parsed || "timed_out" in parsed || "command_fingerprint" in parsed;
     if (hasBashFields) {
       return parseBashResultToDiagnostic(result, executionId, tool);
+    }
+    // #1659: a structured memory failure maps by its bridge code — never
+    // fall back to `unknown` when a known code exists.
+    const code = typeof parsed.code === "string" ? parsed.code : "";
+    if (MEMORY_FAILURE_REASONS.has(code)) {
+      const memoryFailure: ToolFailureDiagnosticV1["memory_failure"] = {
+        code,
+        request_id: typeof parsed.requestId === "string" ? capAndRedact(parsed.requestId, 64) : "",
+        retryable: parsed.retryable === true,
+        action: typeof parsed.action === "string" ? capAndRedact(parsed.action, 32) : "",
+        stage: typeof parsed.stage === "string" ? capAndRedact(parsed.stage, 32) : "",
+      };
+      return {
+        version: 1,
+        execution_id: executionId,
+        tool,
+        reason: code as ToolFailureReason,
+        timed_out: false,
+        aborted: false,
+        stderr_excerpt: typeof parsed.message === "string" ? capAndRedact(parsed.message, STDERR_CAP) : undefined,
+        memory_failure: memoryFailure,
+      };
     }
     if (parsed.error != null) {
       return {
@@ -297,6 +341,8 @@ export function renderDiagnostic(d: ToolFailureDiagnosticV1): string {
     parts.push("reason: candidate round limit");
   } else if (d.reason === "prompt_round_limit") {
     parts.push("reason: prompt round limit");
+  } else if (MEMORY_FAILURE_REASONS.has(d.reason)) {
+    parts.push(`reason: ${d.reason}`);
   } else if (d.reason === "unknown") {
     parts.push("reason: unknown error");
   }
@@ -304,6 +350,11 @@ export function renderDiagnostic(d: ToolFailureDiagnosticV1): string {
   if (d.syntax_hint) parts.push(`syntax: ${d.syntax_hint}`);
   if (d.exit_code != null && d.exit_code !== 0) parts.push(`exit:${d.exit_code}`);
   if (d.signal) parts.push(`signal:${d.signal}`);
+
+  if (d.memory_failure) {
+    const mf = d.memory_failure;
+    parts.push(`memory: code=${mf.code} requestId=${mf.request_id} retryable=${mf.retryable} action=${mf.action} stage=${mf.stage}`);
+  }
 
   if (d.stderr_excerpt) parts.push(`stderr: ${d.stderr_excerpt}`);
   if (d.stdout_excerpt) parts.push(`stdout: ${d.stdout_excerpt}`);

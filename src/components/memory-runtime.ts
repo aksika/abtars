@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import type {
   AbmindClientLike,
+  AbmindClientErrorLike,
   AbmindPrivateMemoryLike,
   AbmindRouteSnapshotV1Like,
   SleepStatusLike,
@@ -37,13 +38,28 @@ export interface InstantStoreInput {
   classification: number;
 }
 
-export interface InstantStoreResult {
-  stored: boolean;
-  memoriesCount?: number;
-  error?: string;
-  memoryId?: number;
-  semanticRevision?: number;
+/**
+ * #1659: normalized structural mutation failure shared by store and edit
+ * paths. Fields are preserved from the protocol contract; the bridge code
+ * keeps its own stable `memory_*` classification.
+ */
+export interface MemoryMutationFailureFields {
+  readonly code: string;
+  readonly message: string;
+  readonly requestId: string;
+  readonly retryable: boolean;
+  readonly action: "fix_input" | "re_recall" | "retry" | "reconcile" | "stop";
+  readonly stage: "pre_dispatch" | "dispatch" | "response";
 }
+
+export type InstantStoreResult =
+  | {
+      readonly stored: true;
+      readonly memoriesCount: number;
+      readonly memoryId: number;
+      readonly semanticRevision: number;
+    }
+  | ({ readonly stored: false; readonly memoriesCount: 0 } & MemoryMutationFailureFields);
 
 export interface EditMemoryInput {
   memoryId: number;
@@ -57,11 +73,9 @@ export interface EditMemoryInput {
   classification?: number;
 }
 
-export interface EditMemoryResult {
-  ok: boolean;
-  error?: string;
-  semanticRevision?: number;
-}
+export type EditMemoryResult =
+  | { readonly ok: true; readonly semanticRevision?: number }
+  | ({ readonly ok: false } & MemoryMutationFailureFields);
 
 export interface RecordMessageInput {
   userId: string;
@@ -273,6 +287,50 @@ export interface DreamQuestionWireLike {
 export type DreamQuestionStatusLike = "pending" | "asked" | "resolved" | "expired" | "dismissed";
 
 const PROJECTION_ROLES: ReadonlySet<string> = new Set(["user", "assistant", "tool"]);
+
+// ── #1659: structural failure normalization ─────────────────────────────────
+
+/** Stable bridge-side code for the protocol failure table. */
+function bridgeFailureCode(code: string): string {
+  switch (code) {
+    case "validation_error": return "memory_validation";
+    case "not_found": return "memory_not_found";
+    case "conflict": return "memory_conflict";
+    case "unauthorized": return "memory_unauthorized";
+    case "idempotency_conflict": return "memory_idempotency_conflict";
+    case "unavailable": return "memory_unavailable";
+    case "outcome_unknown": return "memory_outcome_unknown";
+    default: return code;
+  }
+}
+
+/** Normalize a thrown structural client error into the shared failure fields. */
+function failureFields(err: unknown): MemoryMutationFailureFields {
+  const e = err as Partial<AbmindClientErrorLike> | null | undefined;
+  const code = e && typeof e.code === "string" ? e.code : "unknown";
+  const hasStructuralStage = e && (e.stage === "pre_dispatch" || e.stage === "dispatch" || e.stage === "response");
+  return {
+    code: bridgeFailureCode(code),
+    message: e instanceof Error ? e.message : String(err),
+    requestId: e && typeof e.requestId === "string" ? e.requestId : "",
+    retryable: e && typeof e.retryable === "boolean" ? e.retryable : false,
+    action: e && (e.action === "fix_input" || e.action === "re_recall" || e.action === "retry" || e.action === "reconcile" || e.action === "stop")
+      ? e.action
+      : "reconcile",
+    // Unstructured errors provide no dispatch evidence: treat the outcome as
+    // uncertain (response), never as a proven pre-dispatch refusal.
+    stage: hasStructuralStage
+      ? (e!.stage as MemoryMutationFailureFields["stage"])
+      : "response",
+  };
+}
+
+/** True when a structured failure proves the mutation definitely did not begin. */
+export function isDefinitivePreDispatchFailure(code: string, stage: string): boolean {
+  if (stage === "pre_dispatch") return true;
+  return code === "memory_not_found" || code === "memory_conflict" || code === "memory_validation"
+    || code === "memory_unauthorized" || code === "memory_idempotency_conflict";
+}
 
 function normalizeProjectionResult(value: unknown): DurableContextProjectionResult {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
@@ -578,47 +636,51 @@ export function createClientRuntime(client: AbmindClientLike): AbtarsMemoryRunti
 
     async instantStore(input: InstantStoreInput): Promise<InstantStoreResult> {
       requireClientCapability(capabilities, "instantStore");
-      const result = (await pm.instantStore({
-        userId: input.userId,
-        contentEn: input.contentEn,
-        contentOriginal: input.contentOriginal,
-        memoryType: input.memoryType as string,
-        emotionScore: input.emotionScore,
-        confidence: input.confidence,
-        classification: input.classification,
-        createdBy: "tool:memory_store",
-      })) as Record<string, unknown>;
-      return {
-        stored: result["stored"] === true,
-        memoriesCount: typeof result["memoriesCount"] === "number" ? result["memoriesCount"] : undefined,
-        error: typeof result["error"] === "string" ? result["error"] : undefined,
-        memoryId: typeof result["memoryId"] === "number" ? result["memoryId"] : undefined,
-        semanticRevision: typeof result["semanticRevision"] === "number" ? result["semanticRevision"] : undefined,
-      };
+      try {
+        const result = (await pm.instantStore({
+          userId: input.userId,
+          contentEn: input.contentEn,
+          contentOriginal: input.contentOriginal,
+          memoryType: input.memoryType as string,
+          emotionScore: input.emotionScore,
+          confidence: input.confidence,
+          classification: input.classification,
+          createdBy: "tool:memory_store",
+        })) as Record<string, unknown>;
+        return {
+          stored: true,
+          memoriesCount: typeof result["memoriesCount"] === "number" ? result["memoriesCount"] : 1,
+          memoryId: typeof result["memoryId"] === "number" ? result["memoryId"] : 0,
+          semanticRevision: typeof result["semanticRevision"] === "number" ? result["semanticRevision"] : 1,
+        };
+      } catch (err) {
+        // #1659: never flatten a protocol failure back to a bare string.
+        return { stored: false, memoriesCount: 0, ...failureFields(err) };
+      }
     },
 
     async editMemory(input: EditMemoryInput): Promise<EditMemoryResult> {
       requireClientCapability(capabilities, "editMemory");
-      const result = (await pm.editMemory({
-        memoryId: input.memoryId,
-        userId: input.userId,
-        expectedRevision: input.expectedRevision,
-        contentEn: input.contentEn,
-        contentOriginal: input.contentOriginal,
-        memoryType: input.memoryType as string,
-        emotionScore: input.emotionScore,
-        confidence: input.confidence,
-        classification: input.classification,
-      })) as Record<string, unknown>;
-      if (result["ok"] !== true) {
-        const code = typeof result["code"] === "string" ? result["code"] : "unknown";
-        return { ok: false, error: code === "validation_error" ? String(result["message"] ?? "") : code };
+      try {
+        const result = (await pm.editMemory({
+          memoryId: input.memoryId,
+          userId: input.userId,
+          expectedRevision: input.expectedRevision,
+          contentEn: input.contentEn,
+          contentOriginal: input.contentOriginal,
+          memoryType: input.memoryType as string,
+          emotionScore: input.emotionScore,
+          confidence: input.confidence,
+          classification: input.classification,
+        })) as Record<string, unknown>;
+        const ref = (result["ref"] ?? result) as Record<string, unknown>;
+        return {
+          ok: true,
+          semanticRevision: typeof ref["semanticRevision"] === "number" ? ref["semanticRevision"] : undefined,
+        };
+      } catch (err) {
+        return { ok: false, ...failureFields(err) };
       }
-      const ref = (result["ref"] ?? result) as Record<string, unknown>;
-      return {
-        ok: true,
-        semanticRevision: typeof ref["semanticRevision"] === "number" ? ref["semanticRevision"] : undefined,
-      };
     },
 
     async rebuildFtsIndexes(): Promise<{ rebuilt: string[] }> {
@@ -879,8 +941,8 @@ export function createDisabledRuntime(): AbtarsMemoryRuntime {
     recordFeedback: async () => { unavailable("recordFeedback"); return { ok: false }; },
     embed: async () => { unavailable("embed"); return { vectors: [], model: "" }; },
     runMaintenance: async () => { unavailable("runMaintenance"); return { ok: false, summary: "Memory disabled" }; },
-    instantStore: async () => { unavailable("instantStore"); return { stored: false }; },
-    editMemory: async () => { unavailable("editMemory"); return { ok: false }; },
+    instantStore: async () => { unavailable("instantStore"); return { stored: false, memoriesCount: 0, code: "memory_unavailable", message: "Memory is disabled", requestId: "", retryable: false, action: "stop" as const, stage: "pre_dispatch" as const }; },
+    editMemory: async () => { unavailable("editMemory"); return { ok: false, code: "memory_unavailable", message: "Memory is disabled", requestId: "", retryable: false, action: "stop" as const, stage: "pre_dispatch" as const }; },
     rebuildFtsIndexes: async () => { unavailable("rebuildFtsIndexes"); return { rebuilt: [] }; },
     projectDurableContext: async () => { unavailable("projectDurableContext"); throw new Error("Memory is disabled: projectDurableContext not available"); },
     prepareConversationCompaction: async () => { unavailable("prepareConversationCompaction"); throw new Error("Memory is disabled: prepareConversationCompaction not available"); },
@@ -914,8 +976,8 @@ export function createUnavailableRuntime(): AbtarsMemoryRuntime {
     recordFeedback: async () => { unavailable("recordFeedback"); return { ok: false }; },
     embed: async () => { unavailable("embed"); return { vectors: [], model: "" }; },
     runMaintenance: async () => { unavailable("runMaintenance"); return { ok: false, summary: "Memory unavailable" }; },
-    instantStore: async () => { unavailable("instantStore"); return { stored: false }; },
-    editMemory: async () => { unavailable("editMemory"); return { ok: false }; },
+    instantStore: async () => { unavailable("instantStore"); return { stored: false, memoriesCount: 0, code: "memory_unavailable", message: "Memory unavailable", requestId: "", retryable: false, action: "stop" as const, stage: "pre_dispatch" as const }; },
+    editMemory: async () => { unavailable("editMemory"); return { ok: false, code: "memory_unavailable", message: "Memory unavailable", requestId: "", retryable: false, action: "stop" as const, stage: "pre_dispatch" as const }; },
     rebuildFtsIndexes: async () => { unavailable("rebuildFtsIndexes"); return { rebuilt: [] }; },
     projectDurableContext: async () => { unavailable("projectDurableContext"); throw new Error("Memory unavailable: projectDurableContext not available"); },
     prepareConversationCompaction: async () => { unavailable("prepareConversationCompaction"); throw new Error("Memory unavailable: prepareConversationCompaction not available"); },

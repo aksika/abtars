@@ -22,6 +22,7 @@ import { readFileSync } from "node:fs";
 import WebSocket from "ws";
 import type {
   AbmindClientLike, AbmindCapabilitiesLike,
+  AbmindClientErrorLike, AbmindFailureActionLike, AbmindFailureStageLike,
   AbmindPrivateMemoryLike, AbmindSleepLike,
   AbmindRouteSnapshotV1Like, AbmindRouteStateLike,
 } from "./abmind-client-contract.js";
@@ -49,7 +50,28 @@ interface AbmindResponseV1 {
   ok: boolean;
   requestId: string;
   result?: unknown;
-  error?: { code: string; message: string; current?: unknown };
+  error?: {
+    code: string;
+    message: string;
+    retryable?: boolean;
+    action?: AbmindFailureActionLike;
+    stage?: AbmindFailureStageLike;
+    current?: unknown;
+  };
+}
+
+// ── #1659: exhaustive code → retryability/action mapping (mirrors abmind) ──
+
+function errorContract(code: string): { retryable: boolean; action: AbmindFailureActionLike } {
+  switch (code) {
+    case "validation_error": return { retryable: false, action: "fix_input" };
+    case "not_found": return { retryable: false, action: "stop" };
+    case "conflict": return { retryable: false, action: "re_recall" };
+    case "unauthorized": return { retryable: false, action: "stop" };
+    case "idempotency_conflict": return { retryable: false, action: "stop" };
+    case "outcome_unknown": return { retryable: false, action: "reconcile" };
+    default: return { retryable: true, action: "retry" };
+  }
 }
 
 // ── Canonical serialization (conforms to abmind's signed-wire) ─────────────
@@ -291,39 +313,31 @@ export class AbtarsSignedWssClient implements AbmindClientLike {
   }
 
   /**
-   * Semantic mutations expose their bounded failure contract as data, matching
-   * the abmind client contract consumed by the memory runtime: a rejected
-   * mutation returns { ok: false, code, ... } instead of throwing. Transport
-   * and protocol failures outside that contract still reject normally.
+   * Semantic mutations surface their bounded failure contract exactly like
+   * the local abmind client: a structural AbmindClientErrorLike is thrown
+   * (code, requestId, retryable, action, stage, current). The memory runtime
+   * normalizes it; nothing here flattens the contract into message text.
    */
   private async callPrivateMutation(
     method: "private.edit",
     payload: unknown,
     idempotencyKey?: string,
   ): Promise<Record<string, unknown>> {
-    try {
-      const result = await this.call(method, payload, idempotencyKey);
-      return (result && typeof result === "object" ? result : {}) as Record<string, unknown>;
-    } catch (err) {
-      const e = err as Error & { code?: string; current?: unknown };
-      if (e.code === "conflict" || e.code === "not_found" || e.code === "unauthorized" || e.code === "validation_error") {
-        return { ok: false, code: e.code, current: e.current, message: e.message };
-      }
-      throw err;
-    }
+    const result = await this.call(method, payload, idempotencyKey);
+    return (result && typeof result === "object" ? result : {}) as Record<string, unknown>;
   }
 
   private async call(method: string, payload: unknown, idempotencyKey?: string): Promise<unknown> {
     const requestId = `wss-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
     if (this.closed_) {
-      throw this.errorWithCode("unavailable", "Transport is closed");
+      throw this.errorWithCode("unavailable", "Transport is closed", requestId);
     }
     if (this.degraded_ || this.outbox.isQuarantined || this.outbox.isDegraded) {
-      throw this.errorWithCode("unavailable", "Outbox state is not usable");
+      throw this.errorWithCode("unavailable", "Outbox state is not usable", requestId);
     }
     // Fail-closed admission: only a ready current generation admits work.
     if (!this.controller.isReady()) {
-      throw this.errorWithCode("unavailable", "Route not ready");
+      throw this.errorWithCode("unavailable", "Route not ready", requestId);
     }
     const isMutating = METHOD_IS_MUTATING.has(method);
     let key: string | undefined = idempotencyKey;
@@ -343,7 +357,7 @@ export class AbtarsSignedWssClient implements AbmindClientLike {
 
     const appended = this.outbox.append(frameId, method, requestId, key, body, ABMIND_PROTOCOL_VERSION, payload);
     if (!appended) {
-      throw this.errorWithCode("unavailable", "Outbox persistence failed");
+      throw this.errorWithCode("unavailable", "Outbox persistence failed", requestId);
     }
 
     const response = await new Promise<AbmindResponseV1>((resolve) => {
@@ -353,15 +367,39 @@ export class AbtarsSignedWssClient implements AbmindClientLike {
     if (response.ok) {
       return response.result;
     }
-    throw this.errorWithCode(response.error?.code ?? "unavailable", response.error?.message ?? "Request failed", response.error?.current);
+    throw this.errorWithCode(
+      response.error?.code ?? "unavailable",
+      response.error?.message ?? "Request failed",
+      response.requestId,
+      response.error?.current,
+      response.error?.retryable,
+      response.error?.action,
+      response.error?.stage,
+    );
   }
 
   private idemCounter = 0;
 
-  private errorWithCode(code: string, message: string, current?: unknown): Error & { code: string; current?: unknown } {
-    const err = new Error(message) as Error & { code: string; current?: unknown };
-    err.code = code;
-    err.current = current;
+  private errorWithCode(
+    code: string,
+    message: string,
+    requestId: string,
+    current?: unknown,
+    retryableOverride?: boolean,
+    actionOverride?: AbmindFailureActionLike,
+    stageOverride?: AbmindFailureStageLike,
+  ): AbmindClientErrorLike {
+    const contract = errorContract(code);
+    const err = new Error(message) as AbmindClientErrorLike;
+    Object.assign(err, {
+      name: "AbmindClientError",
+      code,
+      requestId,
+      retryable: retryableOverride ?? contract.retryable,
+      action: actionOverride ?? contract.action,
+      stage: stageOverride ?? "pre_dispatch",
+      ...(current !== undefined ? { current } : {}),
+    });
     return err;
   }
 

@@ -40,6 +40,23 @@ function mockAbmindClient(caps: { methods: string[]; features: Record<string, st
   return client;
 }
 
+/** Structural protocol failure in the shape both clients now throw (#1659). */
+function structuredStoreError(code: string, message: string, stage: string): Error {
+  const action = code === "validation_error" ? "fix_input"
+    : code === "outcome_unknown" ? "reconcile"
+    : code === "conflict" ? "re_recall"
+    : code === "unavailable" ? "retry"
+    : "stop";
+  return Object.assign(new Error(message), {
+    name: "AbmindClientError",
+    code,
+    requestId: "test-request-id",
+    retryable: code === "unavailable",
+    action,
+    stage,
+  });
+}
+
 describe("isBridgeSpawnCommand", () => {
   it.each([
     "node current/dist/main.js --all --web --agent",
@@ -408,18 +425,22 @@ describe("memory tools with runtime wired (#1507)", () => {
       expect(client.privateMemory.editMemory).toHaveBeenCalledTimes(1);
     });
 
-    it("genuine store error still produces generic error result", async () => {
+    it("genuine store error surfaces as a structured failure, never a bare error string", async () => {
       client.privateMemory.instantStore = vi.fn().mockRejectedValue(new Error("disk full"));
       const result = await executeToolCall("memory_store", { translated: "test", type: "fact" }, storeContext());
       const parsed = JSON.parse(result);
-      expect(parsed.error).toMatch(/disk full/);
+      expect(parsed.stored).toBe(false);
+      expect(parsed.code).toBe("unknown");
+      expect(parsed.message).toMatch(/disk full/);
     });
 
-    it("genuine edit error still produces generic error result", async () => {
+    it("genuine edit error surfaces as a structured failure, never a bare error string", async () => {
       client.privateMemory.editMemory = vi.fn().mockRejectedValue(new Error("not found"));
       const result = await executeToolCall("memory_edit", { memory_id: "999", expected_revision: "1" }, storeContext());
       const parsed = JSON.parse(result);
-      expect(parsed.error).toMatch(/not found/);
+      expect(parsed.ok).toBe(false);
+      expect(parsed.code).toBe("unknown");
+      expect(parsed.message).toMatch(/not found/);
     });
   });
 
@@ -456,34 +477,83 @@ describe("memory tools with runtime wired (#1507)", () => {
       expect(countQuotaRows()).toBe(20);
     });
 
-    it("A: a stored:false result releases the reservation so it does not count", async () => {
+    it("A: a definitive validation rejection releases the reservation so it does not count", async () => {
       client.privateMemory.instantStore = vi.fn()
-        .mockResolvedValueOnce({ stored: false, error: "rejected by backend" })
+        .mockRejectedValueOnce(structuredStoreError("validation_error", "rejected by backend", "pre_dispatch"))
         .mockResolvedValueOnce({ stored: true, memoriesCount: 1 });
       const first = JSON.parse(await executeToolCall("memory_store", { translated: "rejected", type: "fact" }, storeContext()));
       expect(first.stored).toBe(false);
+      expect(first.code).toBe("memory_validation");
+      expect(first.stage).toBe("pre_dispatch");
+      expect(first.retryable).toBe(false);
       expect(countQuotaRows()).toBe(0);
       const second = JSON.parse(await executeToolCall("memory_store", { translated: "ok", type: "fact" }, storeContext()));
       expect(second.stored).toBe(true);
       expect(countQuotaRows()).toBe(1);
     });
 
-    it("A: a known thrown failure after retry handling releases the reservation", async () => {
+    it("A: an unclassified thrown error after invoking the client commits conservatively", async () => {
       client.privateMemory.instantStore = vi.fn().mockRejectedValue(new Error("disk full"));
       const result = JSON.parse(await executeToolCall("memory_store", { translated: "boom", type: "fact" }, storeContext()));
-      expect(result.error).toMatch(/disk full/);
-      expect(countQuotaRows()).toBe(0);
+      expect(result.stored).toBe(false);
+      expect(result.code).toBe("unknown");
+      expect(result.message).toMatch(/disk full/);
+      expect(result.stage).toBe("response");
+      // The mutation may have been accepted — the slot is committed, never
+      // released on the assumption it failed (#1659).
+      expect(countQuotaRows()).toBe(1);
     });
 
-    it("A: FTS corruption rebuild/retry stays inside one reservation and commits once", async () => {
+    it("A: a proven pre-dispatch unavailable releases the reservation", async () => {
       client.privateMemory.instantStore = vi.fn()
-        .mockRejectedValueOnce(new Error("fts5: disk I/O error"))
+        .mockRejectedValueOnce(structuredStoreError("unavailable", "could not connect to daemon", "pre_dispatch"))
+        .mockResolvedValueOnce({ stored: true, memoriesCount: 1 });
+      const first = JSON.parse(await executeToolCall("memory_store", { translated: "pre", type: "fact" }, storeContext()));
+      expect(first.stored).toBe(false);
+      expect(first.code).toBe("memory_unavailable");
+      expect(first.retryable).toBe(true);
+      expect(countQuotaRows()).toBe(0);
+      const second = JSON.parse(await executeToolCall("memory_store", { translated: "ok", type: "fact" }, storeContext()));
+      expect(second.stored).toBe(true);
+      expect(countQuotaRows()).toBe(1);
+    });
+
+    it("A: an outcome-unknown store commits the reservation conservatively", async () => {
+      client.privateMemory.instantStore = vi.fn()
+        .mockRejectedValueOnce(structuredStoreError("outcome_unknown", "dispatch outcome unknown", "response"))
+        .mockResolvedValueOnce({ stored: true, memoriesCount: 1 });
+      const first = JSON.parse(await executeToolCall("memory_store", { translated: "uncertain", type: "fact" }, storeContext()));
+      expect(first.stored).toBe(false);
+      expect(first.code).toBe("memory_outcome_unknown");
+      expect(first.action).toBe("reconcile");
+      expect(countQuotaRows()).toBe(1);
+      const second = JSON.parse(await executeToolCall("memory_store", { translated: "ok", type: "fact" }, storeContext()));
+      expect(second.stored).toBe(true);
+      expect(countQuotaRows()).toBe(2);
+    });
+
+    it("A: FTS corruption rebuild/retry runs only for a definitive typed pre-dispatch FTS failure", async () => {
+      client.privateMemory.instantStore = vi.fn()
+        .mockRejectedValueOnce(structuredStoreError("unavailable", "fts5: disk I/O error", "pre_dispatch"))
         .mockResolvedValueOnce({ stored: true, memoriesCount: 1 });
       client.privateMemory.rebuildFtsIndexes = vi.fn().mockResolvedValue({ rebuilt: ["memories"] });
       const result = JSON.parse(await executeToolCall("memory_store", { translated: "test", type: "fact" }, storeContext()));
       expect(result.stored).toBe(true);
       expect(client.privateMemory.rebuildFtsIndexes).toHaveBeenCalledTimes(1);
       expect(client.privateMemory.instantStore).toHaveBeenCalledTimes(2);
+      expect(countQuotaRows()).toBe(1);
+    });
+
+    it("A: an unknown post-dispatch message never triggers the FTS rebuild retry", async () => {
+      client.privateMemory.instantStore = vi.fn()
+        .mockRejectedValueOnce(structuredStoreError("outcome_unknown", "fts5 corruption possible after timeout", "response"))
+        .mockResolvedValueOnce({ stored: true, memoriesCount: 1 });
+      client.privateMemory.rebuildFtsIndexes = vi.fn().mockResolvedValue({ rebuilt: ["memories"] });
+      const result = JSON.parse(await executeToolCall("memory_store", { translated: "test", type: "fact" }, storeContext()));
+      expect(result.stored).toBe(false);
+      expect(result.code).toBe("memory_outcome_unknown");
+      expect(client.privateMemory.rebuildFtsIndexes).not.toHaveBeenCalled();
+      expect(client.privateMemory.instantStore).toHaveBeenCalledTimes(1);
       expect(countQuotaRows()).toBe(1);
     });
 
