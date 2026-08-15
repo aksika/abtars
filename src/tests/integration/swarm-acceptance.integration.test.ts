@@ -165,7 +165,7 @@ function makeEnvelope(childId: number, contractId: string, rootCriterionId: stri
     schema_version: 1,
     attempt: { id: `a_${childId}_1`, ordinal: 1, contract_id: contractId, contract_digest: `d_${contractId}`, executor_kind: "agent", executor_id: "spin-local", started_at: now, finished_at: now },
     outcome: "completed",
-    criteria: [{ criterion_id: rootCriterionId, status: "passed", evidence_ids: [`chk_${childId}`] }],
+    criteria: [{ criterion_id: `wc_${childId}`, status: "passed", evidence_ids: [`chk_${childId}`] }],
     checks: [{ check_id: `chk_${childId}`, argv: ["echo", "ok"], started_at: now, finished_at: now, timed_out: false, exit_code: 0, signal: null, stdout_excerpt: "ok", stderr_excerpt: "" }],
     artifacts: [{ artifact_id: `art_${childId}`, exists: true, kind: "file", ref: `out_${childId}`, size: 42 }],
     worker_report: { summary: `Worker ${childId} ok`, claims: [], unresolved_risks: [] },
