@@ -14,10 +14,22 @@
 
 import { SupervisedPiRpcClient } from "./pi-rpc-client.js";
 import { buildChildEnv, buildTrustArgs, resolveAndValidateWorkspace, validatePersistedSession, validateSessionFile, type PiExecutorConfig, type SessionProof } from "./config.js";
+import { basename } from "node:path";
+import { statSync } from "node:fs";
 
 /** Memory mode for a Pi child process. `none` disables abmind hooks and
  * correlation env (#1635 R5); the default keeps `/pi run`'s existing env. */
 export type PiMemoryMode = "none" | "abmind";
+
+/** Bounded pre-spawn check: regular readable file (rejects symlinks). */
+function isRegularReadableFile(path: string): boolean {
+  try {
+    const stat = statSync(path);
+    return stat.isFile() && !stat.isSymbolicLink() && stat.size > 0;
+  } catch {
+    return false;
+  }
+}
 
 /** Result of a host launch. The caller owns settlement on `ok: false` and
  * process cleanup on `ok: true`. */
@@ -92,18 +104,34 @@ export class PiRuntimeHost {
    * Resolve the canonical workspace and spawn the pinned Pi executable in RPC
    * mode with the trust flags and child env. On failure the client is closed
    * and the error returned; the caller settles its own store state.
+   *
+   * `extensionPaths` (#1643) are explicit launch input: each path is validated
+   * before the process is spawned and appended as one owned `--extension
+   * <path>` pair before `--mode rpc`. Operator `fixedArgs` remain forbidden
+   * from supplying `--extension` (see validateFixedArgs).
    */
   async launch(input: {
     workspaceAlias: string;
     envIdentity: PiEnvIdentity;
     memoryMode?: PiMemoryMode;
+    extensionPaths?: readonly string[];
   }): Promise<PiLaunchOutcome> {
     const ws = resolveAndValidateWorkspace(input.workspaceAlias, this.config_);
     if (ws.error) return { ok: false, error: ws.error };
 
+    const extensionPaths = input.extensionPaths ?? [];
+    for (const path of extensionPaths) {
+      // Bounded pre-spawn validation: a missing/unreadable artifact is a
+      // launch failure BEFORE any process is reserved or spawned.
+      if (!path || path.length > 4096 || !isRegularReadableFile(path)) {
+        return { ok: false, error: `Extension artifact is missing or unreadable: ${basename(path) || "unknown"}` };
+      }
+    }
+
     const client = new SupervisedPiRpcClient();
     const args = [
       ...this.config_.fixedArgs,
+      ...extensionPaths.flatMap((path) => ["--extension", path] as const),
       "--mode", "rpc",
       ...buildTrustArgs(this.config_, input.workspaceAlias),
     ];

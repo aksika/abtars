@@ -43,6 +43,9 @@ function db(): SqliteDb | null {
     try { _db.exec(`ALTER TABLE agent_channel ADD COLUMN msg_type TEXT DEFAULT 'progress'`); } catch { /* already exists */ }
     // #949: dedup index only enforced via INSERT OR IGNORE in channelPostFromRemote
     try { _db.exec(`CREATE INDEX IF NOT EXISTS idx_ac_dedup ON agent_channel(card_id, from_agent, created_at)`); } catch { /* already exists */ }
+    // #1643: durable dedup reference for supervised Worker/Orc notifications.
+    try { _db.exec(`ALTER TABLE agent_channel ADD COLUMN source_ref TEXT DEFAULT NULL`); } catch { /* already exists */ }
+    try { _db.exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_ac_source_ref ON agent_channel(source_ref) WHERE source_ref IS NOT NULL`); } catch { /* already exists */ }
   } catch {
     logWarn("channel", "better-sqlite3 not available — channel features disabled (run: abtars deps install)");
     _db = null;
@@ -60,9 +63,11 @@ export interface ChannelMessage {
   created_at: string;
   remote_peer: string | null;
   msg_type: string;
+  source_ref: string | null;
 }
 
 const MAX_MESSAGE_LEN = 1000;
+const MAX_SOURCE_REF_LEN = 200;
 
 export function channelPost(cardId: number, from: string, to: string, message: string, directive = false, msgType = "progress"): number {
   const d = db();
@@ -75,10 +80,41 @@ export function channelPost(cardId: number, from: string, to: string, message: s
   return result.lastInsertRowid as number;
 }
 
+/**
+ * #1643 — durable once-only channel post keyed by `sourceRef`. The non-null
+ * partial unique index makes a duplicate delivery a silent INSERT OR IGNORE;
+ * `channel:message` fires only for the winning insert, so a replayed RPC frame
+ * can never emit a second Nerve/activity event. Existing null-source callers
+ * are untouched and keep plain duplicate behavior.
+ */
+export function channelPostOnce(input: {
+  cardId: number;
+  from: string;
+  to: string;
+  message: string;
+  directive?: boolean;
+  msgType?: string;
+  sourceRef: string;
+}): "posted" | "duplicate" | "unavailable" {
+  const d = db();
+  if (!d) return "unavailable";
+  let message = input.message;
+  if (message.length > MAX_MESSAGE_LEN) message = message.slice(0, MAX_MESSAGE_LEN) + "…";
+  if (!message.trim()) return "duplicate";
+  const sourceRef = input.sourceRef.slice(0, MAX_SOURCE_REF_LEN);
+  if (!sourceRef) return "duplicate";
+  const stmt = d.prepare("INSERT OR IGNORE INTO agent_channel (card_id, from_agent, to_agent, message, directive, msg_type, source_ref) VALUES (?, ?, ?, ?, ?, ?, ?)");
+  const result = stmt.run(input.cardId, input.from, input.to || "ALL", message, input.directive ? 1 : 0, input.msgType ?? "progress", sourceRef);
+  if ((result.changes as number) !== 1) return "duplicate";
+  nerve.fire("channel:message", input.cardId, { from: input.from, to: input.to || "ALL", message });
+  logInfo("channel", `[${input.from}→${input.to || "ALL"}] card:${input.cardId} (once, ${message.length} chars)`);
+  return "posted";
+}
+
 export function channelRead(cardId: number, opts?: { since?: string; from?: string }): ChannelMessage[] {
   const d = db();
   if (!d) return [];
-  let sql = "SELECT id, card_id, from_agent, to_agent, message, directive, created_at, remote_peer, msg_type FROM agent_channel WHERE card_id = ?";
+  let sql = "SELECT id, card_id, from_agent, to_agent, message, directive, created_at, remote_peer, msg_type, source_ref FROM agent_channel WHERE card_id = ?";
   const params: any[] = [cardId];
   if (opts?.since) { sql += " AND created_at > ?"; params.push(opts.since); }
   if (opts?.from) { sql += " AND from_agent = ?"; params.push(opts.from); }
@@ -90,7 +126,7 @@ export function channelRead(cardId: number, opts?: { since?: string; from?: stri
 export function channelUnread(cardId: number, agentName: string): ChannelMessage[] {
   const d = db();
   if (!d) return [];
-  const sql = `SELECT id, card_id, from_agent, to_agent, message, directive, created_at 
+  const sql = `SELECT id, card_id, from_agent, to_agent, message, directive, created_at, source_ref
     FROM agent_channel 
     WHERE card_id = ? AND to_agent IN ('ALL', ?) AND last_seen_by NOT LIKE ?
     ORDER BY directive DESC, created_at DESC LIMIT 10`;
@@ -150,7 +186,7 @@ export function channelPostFromRemote(cardId: number, from: string, message: str
 export function channelGetSince(cardId: number, since: string): ChannelMessage[] {
   const d = db();
   if (!d) return [];
-  return d.prepare("SELECT id, card_id, from_agent, to_agent, message, directive, created_at FROM agent_channel WHERE card_id = ? AND created_at > ? ORDER BY created_at ASC")
+  return d.prepare("SELECT id, card_id, from_agent, to_agent, message, directive, created_at, source_ref FROM agent_channel WHERE card_id = ? AND created_at > ? ORDER BY created_at ASC")
     .all(cardId, since) as ChannelMessage[];
 }
 

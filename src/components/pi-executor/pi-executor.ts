@@ -4,6 +4,8 @@ import { projectPiEvent } from "./pi-event-projection.js";
 import type { RpcExtensionUIRequest } from "@earendil-works/pi-coding-agent";
 import { PiRunStore, type PiTerminalOutcome } from "./pi-run-store.js";
 import type { PiExecutorConfig } from "./config.js";
+import { resolveWorkerOrcExtensionPath, WORKER_ORC_EXTENSION_PROTOCOL } from "./worker-orc-extension.js";
+import type { SupervisedPiCommunicationPort } from "./supervised-pi-communication.js";
 import { validatePersistedSession, type SessionProof } from "./config.js";
 import { PiRuntimeHost } from "./pi-runtime-host.js";
 import type { PiRunRecord, PiRunStatus, PiPendingRequestType, PiUiReply, PendingUiClaim, ResumeCapability } from "./types.js";
@@ -70,6 +72,10 @@ export class PiExecutor {
   /** #1647 — generation-fenced closer for the external Spin C session. Wired
    * at boot from ctx.sessionManager.endExternalSession. */
   private _endExternalSession: EndExternalSession | null = null;
+  /** #1643 — typed supervised Worker/Orc communication port. When wired, raw
+   * tool_execution_start frames are routed before generic projection strips
+   * tool-call identity and arguments. */
+  private _communicationPort: SupervisedPiCommunicationPort | null = null;
   /** #1647 — typed interruption router (wired at boot with the supervised
    * coordinator). Routes standalone vs supervised interruption; the fallback
    * uses the standalone store operation. */
@@ -112,6 +118,11 @@ export class PiExecutor {
   /** #1647 — wire the typed interruption router (standalone vs supervised). */
   setInterruptRouter(router: (input: { runId: string; generation: number; continuity: SessionProof }) => { interrupted: boolean }): void {
     this._interruptRouter = router;
+  }
+
+  /** #1643 — wire the typed supervised Worker/Orc communication port. */
+  setCommunicationPort(port: SupervisedPiCommunicationPort): void {
+    this._communicationPort = port;
   }
 
   /** Register a callback fired when a Pi slot is released. */
@@ -370,6 +381,20 @@ export class PiExecutor {
   private async _startProcess(run: PiRunRecord, sessionId: string): Promise<OwnedProcess | null> {
     const gen = run.executionGeneration;
 
+    // #1643 — supervised-only extension loading. Resolve BEFORE the runtime
+    // host reserves or spawns anything; a missing artifact is a bounded launch
+    // failure settled by the existing start-failure path. Every other Pi
+    // consumer passes no path and keeps its current argument vector.
+    let extensionPaths: readonly string[] = [];
+    if (run.origin === "supervised") {
+      const resolved = resolveWorkerOrcExtensionPath();
+      if (!resolved.ok) {
+        await this._settleAndCleanupGen(run.id, gen, ["starting"], "failed", { error: resolved.error });
+        return null;
+      }
+      extensionPaths = [resolved.path];
+    }
+
     // #1635 — spawn through the shared runtime host (canonical workspace
     // resolution, args/trust/env construction, process launch).
     const launched = await this.host.launch({
@@ -379,6 +404,7 @@ export class PiExecutor {
         ownerPrincipalId: run.ownerPrincipalId,
         executionGeneration: gen,
       },
+      extensionPaths,
     });
     if (!launched.ok) {
       await this._settleAndCleanupGen(run.id, gen, ["starting"], "failed", { error: launched.error });
@@ -780,6 +806,30 @@ export class PiExecutor {
     if (!owned || owned.generation !== expectedGeneration || owned.settling) return;
     // Every frame from Pi counts as activity (drives timeout/idle logic).
     this.store.touchActivity(runId, expectedGeneration);
+
+    // #1643 — route typed communication tool-start frames BEFORE the generic
+    // projection strips tool-call identity and arguments. Only the live
+    // non-settling owned process reaches here, so the port revalidates
+    // lineage/attempt/bounds and durably posts; every outcome is bounded and
+    // recorded without the message body or raw arguments.
+    if (event.type === "tool_execution_start" && this._communicationPort) {
+      const outcome = this._communicationPort.onToolStart({
+        runId,
+        piGeneration: expectedGeneration,
+        toolCallId: event.toolCallId,
+        toolName: event.toolName,
+        args: event.args,
+      });
+      // Bounded observable outcome for tell_orc: protocol, result, and a
+      // tool-call ID suffix — never the message body or raw arguments.
+      if (event.toolName === "tell_orc") {
+        this.store.addProgress(runId, "worker_orc", JSON.stringify({
+          protocol: WORKER_ORC_EXTENSION_PROTOCOL,
+          outcome,
+          call: event.toolCallId.slice(-8),
+        }), expectedGeneration);
+      }
+    }
 
     const proj = projectPiEvent(event);
     for (const p of proj.progress) {

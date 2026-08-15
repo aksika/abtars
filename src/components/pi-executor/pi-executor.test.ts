@@ -71,6 +71,7 @@ const fake = vi.hoisted(() => {
     onUiRequest(cb: (e: unknown) => void): () => void { this.uiCbs.add(cb); return () => this.uiCbs.delete(cb); }
     emitTermination(e: unknown): void { for (const cb of [...this.termCbs]) cb(e); }
     emitEvent(e: unknown): void { for (const cb of [...this.subs]) cb(e); }
+    emitUiRequest(e: unknown): void { for (const cb of [...this.uiCbs]) cb(e); }
     static reset(): void {
       FakeClient.instances = [];
       FakeClient.defaultState = { sessionId: "fresh-process", sessionFile: undefined, isStreaming: false, isCompacting: false };
@@ -104,6 +105,7 @@ function createTestDb(): TaskDatabase {
     priority TEXT NOT NULL DEFAULT 'MEDIUM',
     type TEXT NOT NULL DEFAULT 'pi',
     notes TEXT,
+    parent_id INTEGER,
     delivery_mode TEXT NOT NULL DEFAULT 'silent',
     status TEXT NOT NULL DEFAULT 'queued',
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
@@ -407,5 +409,108 @@ describe("PiExecutor #1647 — interruption and exact-generation cleanup", () =>
     const card = h.db.prepare(`SELECT status FROM kanban_board WHERE id = ?`).get(9131) as { status: string };
     expect(card.status).toBe("running");
     expect(h.ended.some(e => e.runId === runId && e.generation === 1)).toBe(true);
+  });
+});
+
+describe("PiExecutor #1643 — ask_orc enters the #1638 input suspension", () => {
+  /** Bounded poll helper for async cleanup that trails a synchronous commit. */
+  async function eventually(probe: () => boolean | null, timeoutMs = 2000): Promise<void> {
+    const start = Date.now();
+    while (Date.now() - start < timeoutMs) {
+      if (probe()) return;
+      await new Promise(r => setTimeout(r, 10));
+    }
+    throw new Error("eventually: condition not met");
+  }
+
+  it("suspends a live supervised run from the real ask_orc UI request: zero charge, resources released, stale frames fenced", async () => {
+    const h = harness;
+    const now = new Date().toISOString();
+    h.db.prepare(`INSERT OR IGNORE INTO kanban_board (id, title, source, status, type, created_at, updated_at) VALUES (?, ?, 't', 'running', 'O', ?, ?)`).run(9300, "proj", now, now);
+    h.db.prepare(`INSERT OR IGNORE INTO kanban_board (id, title, source, status, type, parent_id, created_at, updated_at) VALUES (?, ?, 't', 'queued', 'W', ?, ?, ?)`).run(9301, "child", 9300, now, now);
+    const { WorkerSupervisionStore } = await import("../worker-supervision-store.js");
+    const { SupervisedPiSettlement } = await import("./supervised-pi-settlement.js");
+    const workerStore = new WorkerSupervisionStore(h.db);
+    workerStore.insertContract({ schema_version: 1, id: "c_ask2", digest: "d", goal: "g", criteria: [{ id: "c1", description: "d" }], expected_artifacts: [], verification_commands: [], required_capabilities: [], limits: {}, provenance: { root_card_id: 9300, card_id: 9301, authored_by: "t", created_at: now } }, 9301);
+    workerStore.insertAttempt({ id: "a_ask2", card_id: 9301, contract_id: "c_ask2", ordinal: 1, executor_kind: "pi", executor_id: "pi-coding", status: "pending", started_at: now });
+    workerStore.lifecycleTransition("a_ask2", ["pending"], "claimed");
+    workerStore.lifecycleTransition("a_ask2", ["claimed"], "starting");
+
+    // Durable session proof: header file carries the reported session id.
+    const sessionFile = writeSession(h.root, "ask2-session.json", "ask2-process");
+    fake.FakeClient.defaultState = { sessionId: "ask2-process", sessionFile, isStreaming: false, isCompacting: false };
+    const created = h.store.createSupervisedRun({ cardId: 9301, workspaceAlias: "repo-a", goal: "g", ownerPrincipalId: "p", sessionId: "c-ask2" });
+    const claim = h.store.claimSupervisedGeneration({ runId: created.runId, expectedGeneration: created.generation, canonicalPath: h.wsPath });
+    if (claim.kind !== "claimed") throw new Error(`claim failed: ${claim.kind}`);
+    workerStore.bindExecutorResource({ attemptId: "a_ask2", expectedAttemptGeneration: 1, executorKind: "pi", resourceId: created.runId, resourceGeneration: created.generation, continuity: "initial" });
+    workerStore.lifecycleTransition("a_ask2", ["starting"], "running");
+
+    const coordinator = new SupervisedPiSettlement(h.store, workerStore, h.executor.config);
+    // #1638 wiring exactly as boot phase-pi-executor does.
+    h.executor.setSettlementRouter((obs) => coordinator.settlePiExecution(obs as any));
+    h.executor.setInputSuspendHook(async (runId, generation, request) => {
+      const run = h.store.get(runId);
+      if (!run) return false;
+      const binding = workerStore.getAttemptForExecutorResource("pi", runId, generation);
+      if (!binding) return false;
+      // Same extraction as boot phase-pi-executor (#1643): input dialogs carry
+      // the question in placeholder; select/confirm/editor in message/title.
+      const req = request as { method?: string; message?: unknown; title?: unknown; placeholder?: unknown };
+      const primary = req.method === "input" ? req.placeholder : req.message;
+      const question = String(primary ?? req.title ?? "input requested");
+      const outcome = coordinator.suspendForInput({ runId, generation, question, requestId: request.id ?? `req_${Date.now()}`, sessionFile: run.piSessionFile ?? undefined });
+      return outcome.suspended;
+    });
+
+    const started = await h.executor.startWithClaim(created.runId, created.generation, "c-ask2");
+    expect(started).toBe("started");
+    expect(h.executor.host.reservedCount).toBe(1);
+    const client = fake.FakeClient.instances[0]!;
+
+    // The real ask_orc extension emits exactly this frame (title "Ask Orc",
+    // placeholder = question, no timeout).
+    client.emitUiRequest({
+      type: "extension_ui_request",
+      id: "ask-req-1",
+      method: "input",
+      title: "Ask Orc",
+      placeholder: "Which target branch should this change be based on?",
+    });
+
+    // Attempt settled once as zero-charge input_requested with the bounded
+    // question in failure evidence.
+    const attempt = workerStore.getAttempt("a_ask2")!;
+    expect(attempt.lifecycle).toBe("failed");
+    expect(attempt.charged_tokens).toBe(0);
+    const result = workerStore.getResultByAttempt(attempt.id);
+    expect(result?.envelope.error?.code).toBe("INPUT_REQUESTED");
+    expect(result?.envelope.error?.message).toContain("Which target branch");
+
+    // Run interrupted, durable session preserved for the retry, process and
+    // capacity released, external C session ended. The suspension commits
+    // synchronously; the executor's async cleanup (close + slot release)
+    // trails the hook, so wait for the release.
+    const run = h.store.get(created.runId)!;
+    expect(run.status).toBe("interrupted");
+    expect(run.resumeCapability).toBe("available");
+    expect(run.piSessionFile).toBe(sessionFile);
+    await eventually(() => (h.executor.host.reservedCount === 0 ? true : null));
+    expect(h.store.listWorkspaceClaims()).toHaveLength(0);
+    expect(client.closed).toBe(true);
+    expect(h.ended.some(e => e.runId === created.runId && e.generation === created.generation)).toBe(true);
+    expect(workerStore.getAttemptsForCard(9301)).toHaveLength(1);
+
+    // A stale late input frame for the same generation cannot mutate the
+    // newer state: no owned process remains, nothing re-settles.
+    const resultsBefore = workerStore.getAttemptsForCard(9301).length;
+    client.emitUiRequest({
+      type: "extension_ui_request",
+      id: "ask-req-1",
+      method: "input",
+      title: "Ask Orc",
+      placeholder: "late duplicate",
+    });
+    expect(workerStore.getAttemptsForCard(9301).length).toBe(resultsBefore);
+    expect(h.store.get(created.runId)!.status).toBe("interrupted");
   });
 });

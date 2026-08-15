@@ -933,7 +933,7 @@ async function runScheduledCap(): Promise<LocalSwarmResult> {
 
 // ── #1638 Task 9: Epic 27 Gate A — shared Pi harness ────────────────────────
 
-type PiBehavior = "complete" | "input_request";
+type PiBehavior = "complete" | "input_request" | "ask_orc_request";
 
 interface PiHarness {
   spin: any;
@@ -1008,7 +1008,13 @@ class FakePiExecutor {
   }
 
   setSettlementRouter(): void {}
-  setInputSuspendHook(): void {}
+  // #1643: the production-shaped input-suspension hook (wired per scenario,
+  // exactly like boot phase-pi-executor). ask_orc_request behavior delivers
+  // the real ask_orc extension_ui_request frame through it.
+  inputSuspendHook: ((runId: string, generation: number, request: any) => Promise<boolean>) | null = null;
+  setInputSuspendHook(hook: (runId: string, generation: number, request: any) => Promise<boolean>): void {
+    this.inputSuspendHook = hook;
+  }
   setInterruptRouter(): void {}
   setExternalSessionCloser(): void {}
   cancel: () => Promise<boolean> = async () => true;
@@ -1052,6 +1058,22 @@ class FakePiExecutor {
   private async finishRun(runId: string, generation: number): Promise<void> {
     const run = this.piStore.get(runId);
     if (!run) return this.releaseSlot(runId);
+    // #1643: the ask_orc extension emits exactly this frame — method input,
+    // title "Ask Orc", the question in placeholder, no timeout. It flows
+    // through the production-shaped input-suspension hook exactly like the
+    // real executor's _onUiRequest does; the hook owns settlement.
+    if (this.behavior === "ask_orc_request" && !this.askedForInput.has(run.cardId) && run.status === "running" && this.inputSuspendHook) {
+      this.askedForInput.add(run.cardId);
+      const suspended = await this.inputSuspendHook(runId, generation, {
+        type: "extension_ui_request",
+        id: `ask_${runId}`,
+        method: "input",
+        title: "Ask Orc",
+        placeholder: "Which target branch should this change be based on?",
+      });
+      if (suspended) this.releaseSlot(runId);
+      return;
+    }
     if (this.behavior === "input_request" && !this.askedForInput.has(run.cardId) && run.status === "running") {
       this.askedForInput.add(run.cardId);
       this.coordinator.suspendForInput({
@@ -1892,6 +1914,161 @@ async function runPiInputAnswer(): Promise<LocalSwarmResult> {
   };
 }
 
+// ── #1643: ask_orc frame → #1638 suspension → Orc answer → resumed retry ────
+
+async function runPiAskOrc(): Promise<LocalSwarmResult> {
+  const h = await installPiHarness({ behavior: "ask_orc_request", holdMs: 150 });
+  h.spin.setRuntime(createMockRuntime(4000) as any);
+  // #1643: wire the production-shaped input-suspension hook exactly like boot
+  // phase-pi-executor — placeholder carries the question for input dialogs.
+  h.fakeExecutor.setInputSuspendHook(async (runId: string, generation: number, request: any) => {
+    const run = h.piStore.get(runId);
+    if (!run) return false;
+    const binding = h.workerStore.getAttemptForExecutorResource("pi", runId, generation);
+    if (!binding) return false;
+    const req = request as { method?: string; message?: unknown; title?: unknown; placeholder?: unknown };
+    const primary = req.method === "input" ? req.placeholder : req.message;
+    const question = String(primary ?? req.title ?? "input requested");
+    const outcome = h.coordinator.suspendForInput({
+      runId, generation, question,
+      requestId: request.id ?? `req_${Date.now()}`,
+      sessionFile: run.piSessionFile ?? undefined,
+    });
+    if (outcome.suspended) {
+      try { h.requestWorkerDispatch(); } catch { /* best effort */ }
+    }
+    return outcome.suspended;
+  });
+
+  const projectCardId = h.kanbanEnqueue("E2E Pi ask-orc project", "test", undefined, {
+    type: "O", priority: "MEDIUM", deliveryMode: "deliver",
+  });
+  activeProjectCardId = projectCardId;
+  h.kanbanRunning(projectCardId);
+  bindProjectWorkspace(projectCardId);
+  h.startReconciler();
+
+  const { getOrcTools } = await import("../../components/transport/orc-tools.js");
+  const orcTools = getOrcTools();
+  const defineContractTool = orcTools.find(t => t.name === "define_project_contract")!;
+  const reviewWorkerFailureTool = orcTools.find(t => t.name === "review_worker_failure")!;
+  const contractResult = await defineContractTool.execute({
+    goal: "Complete the E2E Pi ask-orc scenario",
+    project_card_id: String(projectCardId),
+    criteria: JSON.stringify([
+      { id: "c1", description: "Coding criterion is met", required: true, execution_owner: "delegated", evidence_expectation: "observed" },
+      { id: "c2", description: "Research criterion is met", required: true, execution_owner: "delegated", evidence_expectation: "observed" },
+    ]),
+    required_outputs: JSON.stringify([
+      { id: "o1", description: "Coding result", kind: "report", required: true },
+    ]),
+    constraints: JSON.stringify(["None"]),
+  }, { userId: "test", orcContext: makeOrcContext(projectCardId) as never });
+  if (contractResult.startsWith("[err]")) fail("define_contract", "CONTRACT_FAILED", contractResult);
+  h.requestReconcile(projectCardId);
+  await new Promise(r => setTimeout(r, 200));
+
+  const orcContext = makeOrcContext(projectCardId);
+  const siblingCardId = await spawnSupervisedWorker(h, projectCardId, {
+    workspaceAlias: undefined, criteriaId: "c2", title: "Sibling Researcher",
+  });
+  const childCardId = await spawnSupervisedWorker(h, projectCardId, {
+    workspaceAlias: "repo-a", criteriaId: "c1", title: "Pi Coder",
+  });
+  h.requestReconcile(projectCardId);
+  h.requestReconcile(siblingCardId);
+  h.requestReconcile(childCardId);
+  h.requestWorkerDispatch();
+
+  const store = new h.WorkerSupervisionStore();
+  const reviewStore = new h.ProjectReviewStore();
+  // The real ask_orc frame settles the attempt once as zero-charge
+  // input_requested with the PLACEHOLDER question in failure evidence.
+  await eventually("ask-orc-requested", () => {
+    const a = store.getLatestAttempt(childCardId);
+    return a && a.lifecycle === "failed" ? a : null;
+  }, 30000);
+  const attempt1 = store.getLatestAttempt(childCardId)!;
+  if (!String(attempt1.cancel_reason ?? "").includes("pi_input_requested")) {
+    fail("ask_orc", "WRONG_REASON", `cancel_reason=${attempt1.cancel_reason}`);
+  }
+  if (attempt1.charged_tokens !== 0) fail("ask_orc", "CHARGED", `charged ${attempt1.charged_tokens} tokens for a question`);
+  const result1 = store.getResultByAttempt(attempt1.id);
+  if (result1?.envelope?.error?.code !== "INPUT_REQUESTED") {
+    fail("ask_orc", "NO_QUESTION", JSON.stringify(result1?.envelope ?? null));
+  }
+  const questionEvidence = String(result1?.envelope?.error?.message ?? "");
+  if (!questionEvidence.includes("Which target branch should this change be based on?")) {
+    fail("ask_orc", "WRONG_QUESTION", `evidence carried title instead of placeholder: ${questionEvidence.slice(0, 200)}`);
+  }
+  const runAfterQuestion = h.piStore.getByCardId(childCardId)!;
+  if (runAfterQuestion.status !== "interrupted") fail("ask_orc", "NOT_INTERRUPTED", runAfterQuestion.status);
+  if (runAfterQuestion.resumeCapability !== "available") fail("ask_orc", "NOT_RESUMABLE", runAfterQuestion.resumeCapability);
+  if (h.piStore.listWorkspaceClaims().length !== 0) fail("ask_orc", "SLOT_HELD", "workspace claim still held after suspension");
+  if (store.getAttemptsForCard(childCardId).length !== 1) fail("ask_orc", "AUTO_RETRY", "input_requested was auto-retried instead of reviewed");
+  if (reviewStore.getLatestOpenCase(projectCardId)) fail("ask_orc", "EARLY_REVIEW", "review case opened while a lane still ran");
+
+  // Orc answers through the existing review_worker_failure path; the retry
+  // resumes the durable session at generation 2.
+  const reviewResult = await reviewWorkerFailureTool.execute({
+    attempt_id: attempt1.id,
+    action: "retry",
+    project_card_id: String(projectCardId),
+    input_answer: "Target branch is main.",
+    rationale: "The worker asked a legitimate question.",
+  }, { userId: "test", orcContext: orcContext as any });
+  if (!reviewResult.includes("Retry directive created")) fail("ask_orc", "RETRY_REJECTED", reviewResult);
+
+  h.requestReconcile(projectCardId);
+  h.requestReconcile(childCardId);
+  h.requestWorkerDispatch();
+
+  await eventually("ask-orc-answered", () => {
+    const a = store.getLatestAttempt(childCardId);
+    return a && store.isAttemptTerminal(a.lifecycle) ? a : null;
+  }, 30000);
+  const attempt2 = store.getLatestAttempt(childCardId)!;
+  if (attempt2.id === attempt1.id || attempt2.ordinal !== 2) fail("ask_orc", "NO_RETRY", `latest=${attempt2.id} ordinal=${attempt2.ordinal}`);
+  if (attempt2.lifecycle !== "completed") fail("ask_orc", "RETRY_NOT_COMPLETED", attempt2.lifecycle);
+  const binding = store.getExecutorResourceBinding(attempt2.id);
+  if (!binding || binding.continuity !== "resumed") {
+    fail("ask_orc", "NOT_RESUMED", `continuity=${binding?.continuity}`);
+  }
+  const runFinal = h.piStore.getByCardId(childCardId)!;
+  if (runFinal.executionGeneration !== 2 || runFinal.status !== "completed") {
+    fail("ask_orc", "RUN_NOT_RESUMED", `gen=${runFinal.executionGeneration} status=${runFinal.status}`);
+  }
+  const result2 = store.getResultByAttempt(attempt2.id);
+  if (result2?.envelope?.attempt?.executor_kind !== "pi") fail("ask_orc", "NO_PI_PROVENANCE", "retry result lost Pi provenance");
+  if (h.piStore.listWorkspaceClaims().length !== 0) fail("ask_orc", "CLAIM_LEAK", "workspace claim leaked after retry");
+
+  await acceptAndDeliver(h, projectCardId, orcContext);
+  const finalCard = h.kanbanGetCard(projectCardId)!;
+  return {
+    schemaVersion: 2, ok: true, scenario, scenarioId, projectCardId,
+    childCardIds: [siblingCardId, childCardId],
+    peakActiveWorkers: _peakActiveWorkers,
+    counts: readCounts(),
+    terminal: {
+      projectState: reviewStore.getSupervision(projectCardId)?.state ?? "unknown",
+      cardStatus: finalCard?.status ?? "unknown",
+      deliveryResult: finalCard?.delivery_result ?? "unknown",
+    },
+    scenarioSpecific: {
+      firstLifecycle: attempt1.lifecycle,
+      chargedTokens: attempt1.charged_tokens,
+      questionEvidenceCode: result1?.envelope?.error?.code,
+      questionFromPlaceholder: questionEvidence.includes("Which target branch should this change be based on?"),
+      runStatusAfterQuestion: runAfterQuestion.status,
+      resumeCapability: runAfterQuestion.resumeCapability,
+      attempts: store.getAttemptsForCard(childCardId).length,
+      retryContinuity: binding?.continuity,
+      retryGeneration: runFinal.executionGeneration,
+      retryRunStatus: runFinal.status,
+    },
+  };
+}
+
 // ── Main dispatch ────────────────────────────────────────────────────────────
 
 async function main(): Promise<void> {
@@ -1934,6 +2111,9 @@ async function main(): Promise<void> {
         break;
       case "pi_input_answer":
         result = await runPiInputAnswer();
+        break;
+      case "pi_ask_orc":
+        result = await runPiAskOrc();
         break;
       default:
         result = await runHappyPath();

@@ -241,7 +241,12 @@ export async function phasePiExecutor(ctx: BootCtx): Promise<void> {
   try {
     const { SupervisedPiSettlement } = await import("../components/pi-executor/supervised-pi-settlement.js");
     const { WorkerSupervisionStore } = await import("../components/worker-supervision-store.js");
-    const coordinator = new SupervisedPiSettlement(store, new WorkerSupervisionStore(taskDb), config);
+    const workerSupervision = new WorkerSupervisionStore(taskDb);
+    const coordinator = new SupervisedPiSettlement(store, workerSupervision, config);
+    // #1643: one communication component on the same stores/DB identity —
+    // routes typed tell_orc tool frames to the durable root channel.
+    const { SupervisedPiCommunication } = await import("../components/pi-executor/supervised-pi-communication.js");
+    executor.setCommunicationPort(new SupervisedPiCommunication(store, workerSupervision));
     settleSupervisedRecovery = (runId, generation) => coordinator.settlePiExecution({
       runId,
       generation,
@@ -259,9 +264,14 @@ export async function phasePiExecutor(ctx: BootCtx): Promise<void> {
       const run = store.get(runId);
       if (!run) return false;
       // only supervised runs suspend — standalone keeps awaiting_input
-      const binding = new WorkerSupervisionStore(taskDb).getAttemptForExecutorResource("pi", runId, generation);
+      const binding = workerSupervision.getAttemptForExecutorResource("pi", runId, generation);
       if (!binding) return false;
-      const question = String((request as { message?: unknown }).message ?? (request as { title?: unknown }).title ?? "input requested");
+      // #1643: an input dialog carries the question in `placeholder` (the
+      // ask_orc extension sends exactly title="Ask Orc" + placeholder=question);
+      // select/confirm/editor dialogs carry it in message/title.
+      const req = request as { method?: string; message?: unknown; title?: unknown; placeholder?: unknown };
+      const primary = req.method === "input" ? req.placeholder : req.message;
+      const question = String(primary ?? req.title ?? "input requested");
       const sessionFile = run.piSessionFile ?? undefined;
       const outcome = coordinator.suspendForInput({ runId, generation, question, requestId: request.id ?? `req_${Date.now()}`, sessionFile });
       if (outcome.suspended) {

@@ -286,4 +286,24 @@ describe("Local Swarm E2E", () => {
       expect(result.counts.outboundDeliveries).toBe(1);
     });
   }, CHILD_TIMEOUT_MS + 10_000);
+
+  it("pi_ask_orc (#1643): real ask_orc UI frame → placeholder question evidence → zero-charge suspension → Orc answer → resumed retry", async () => {
+    await runScenario("pi_ask_orc", (result) => {
+      expect(result.ok).toBe(true);
+      const ss = result.scenarioSpecific as Record<string, unknown>;
+      expect(ss).toBeDefined();
+      expect(ss.firstLifecycle).toBe("failed");
+      expect(Number(ss.chargedTokens)).toBe(0);
+      expect(ss.questionEvidenceCode).toBe("INPUT_REQUESTED");
+      expect(ss.questionFromPlaceholder).toBe(true);
+      expect(ss.runStatusAfterQuestion).toBe("interrupted");
+      expect(ss.resumeCapability).toBe("available");
+      expect(Number(ss.attempts)).toBe(2);
+      expect(ss.retryContinuity).toBe("resumed");
+      expect(Number(ss.retryGeneration)).toBe(2);
+      expect(ss.retryRunStatus).toBe("completed");
+      expect(result.terminal.projectState).toBe("accepted");
+      expect(result.counts.outboundDeliveries).toBe(1);
+    });
+  }, CHILD_TIMEOUT_MS + 10_000);
 });
