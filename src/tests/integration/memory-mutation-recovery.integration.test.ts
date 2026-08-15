@@ -38,8 +38,14 @@ describe("#1659 memory mutation recovery integration", () => {
   let runtime: AbtarsMemoryRuntime;
   let quota: MemoryStoreQuota;
   let holder: MemoryToolDependenciesHolder;
+  let savedOwner: string | undefined;
 
   beforeAll(async () => {
+    // #1658/#1660: abmind's Master-only gate resolves the primary owner from
+    // ABMIND_USER_ID; this suite stores as local-user, so pin it explicitly
+    // instead of inheriting whatever the host manifest resolves.
+    savedOwner = process.env["ABMIND_USER_ID"];
+    process.env["ABMIND_USER_ID"] = "local-user";
     tmpDir = mkdtempSync(join(tmpdir(), "abtars-mutation-integration-"));
     const config: MemoryConfig = { ...MEMORY_CONFIG_DEFAULTS, memoryDir: join(tmpDir, "memory") };
     manager = new MemoryManager(config);
@@ -74,6 +80,8 @@ describe("#1659 memory mutation recovery integration", () => {
     await endpoint.stop();
     manager.close();
     rmSync(tmpDir, { recursive: true, force: true });
+    if (savedOwner === undefined) delete process.env["ABMIND_USER_ID"];
+    else process.env["ABMIND_USER_ID"] = savedOwner;
   });
 
   function storeContext() {

@@ -439,6 +439,13 @@ const PRIVATE_WRITE_UNAVAILABLE = {
   message: "Explicit memory storage is unavailable in this runtime. Do not retry this call.",
 };
 
+/** #1659: pre-dispatch inline guards carry a synthetic requestId — no transport
+ *  request was issued, so no server id exists, but the structured contract
+ *  requires the field to be present. */
+function preDispatchRequestId(): string {
+  return `pre-dispatch-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+}
+
 const EDIT_UNAVAILABLE = {
   edited: false,
   code: "private_write_unavailable",
@@ -477,7 +484,7 @@ const memoryStoreTool: ToolDefinition = {
       ? 1
       : Number(rawClassification);
     if (!Number.isSafeInteger(classification) || classification < 0 || classification > 3) {
-      return JSON.stringify({ stored: false, code: "memory_validation", retryable: false, message: "classification must be an integer from 0 to 3" });
+      return JSON.stringify({ stored: false, code: "memory_validation", retryable: false, action: "fix_input", stage: "pre_dispatch", requestId: preDispatchRequestId(), message: "classification must be an integer from 0 to 3" });
     }
     const isSecret = classification >= 3;
     if (isSecret && sessionType !== "A") {
@@ -490,17 +497,17 @@ const memoryStoreTool: ToolDefinition = {
     const userId = context?.userId ?? getMasterUserId();
     const label = stringValue(args["label"] ?? "").trim();
     if (isSecret && !label) {
-      return JSON.stringify({ stored: false, code: "memory_validation", retryable: false, message: "class-3 memory_store requires a descriptive label that does not contain the value" });
+      return JSON.stringify({ stored: false, code: "memory_validation", retryable: false, action: "fix_input", stage: "pre_dispatch", requestId: preDispatchRequestId(), message: "class-3 memory_store requires a descriptive label that does not contain the value" });
     }
     // #1660: at class 3, original is the exact value (required) and the
     // `original ?? translated` fallback must NOT apply — otherwise the label
     // silently becomes the value. The runtime's sealed projection encrypts it.
     const original = stringValue(args["original"]);
     if (isSecret && !original) {
-      return JSON.stringify({ stored: false, code: "memory_validation", retryable: false, message: "class-3 memory_store requires the exact credential value in 'original'" });
+      return JSON.stringify({ stored: false, code: "memory_validation", retryable: false, action: "fix_input", stage: "pre_dispatch", requestId: preDispatchRequestId(), message: "class-3 memory_store requires the exact credential value in 'original'" });
     }
     if (!isSecret && !stringValue(args["translated"]).trim()) {
-      return JSON.stringify({ stored: false, code: "memory_validation", retryable: false, message: "memory_store requires translated content" });
+      return JSON.stringify({ stored: false, code: "memory_validation", retryable: false, action: "fix_input", stage: "pre_dispatch", requestId: preDispatchRequestId(), message: "memory_store requires translated content" });
     }
     const storeOnce = async (): Promise<import("../memory-runtime.js").InstantStoreResult> => deps.runtime.instantStore({
       userId,

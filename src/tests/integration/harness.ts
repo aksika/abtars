@@ -7,6 +7,25 @@ import { join } from "node:path";
 import { type Database } from "better-sqlite3";
 import { MemoryManager, type MemoryConfig, MEMORY_CONFIG_DEFAULTS, detectCitations, type RecallMemoryRef } from "abmind";
 
+/**
+ * #1658/#1660: abmind's Master-only creation gate resolves the primary owner
+ * from ABMIND_USER_ID (never "master" placeholders). The harness must pin a
+ * canonical test owner so stores for `u1` are not rejected against whatever
+ * the host manifest resolves.
+ */
+const TEST_PRIMARY_OWNER = "u1";
+
+function pinTestOwner(): string | undefined {
+  const saved = process.env["ABMIND_USER_ID"];
+  process.env["ABMIND_USER_ID"] = TEST_PRIMARY_OWNER;
+  return saved;
+}
+
+function restoreTestOwner(saved: string | undefined): void {
+  if (saved === undefined) delete process.env["ABMIND_USER_ID"];
+  else process.env["ABMIND_USER_ID"] = saved;
+}
+
 export interface IntegrationHarness {
   memory: MemoryManager;
   tmpDir: string;
@@ -23,6 +42,7 @@ export function memoryDb(memory: MemoryManager): Database {
 }
 
 export async function createHarness(): Promise<IntegrationHarness> {
+  const savedOwner = pinTestOwner();
   const tmpDir = mkdtempSync(join(tmpdir(), "abtars-integration-"));
   const config: MemoryConfig = { ...MEMORY_CONFIG_DEFAULTS, memoryDir: tmpDir };
   const memory = new MemoryManager(config);
@@ -30,8 +50,7 @@ export async function createHarness(): Promise<IntegrationHarness> {
   return {
     memory,
     tmpDir,
-    cleanup: () => { memory.close(); rmSync(tmpDir, { recursive: true, force: true }); },
+    cleanup: () => { memory.close(); rmSync(tmpDir, { recursive: true, force: true }); restoreTestOwner(savedOwner); },
   };
 }
-
 export { detectCitations, type RecallMemoryRef };
