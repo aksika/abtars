@@ -54,6 +54,30 @@ export type ToolDefinition = {
   execute(args: Record<string, unknown>, context?: ToolExecutionContext): Promise<string>;
 };
 
+export interface ToolAvailabilityContext {
+  readonly authorizationMode?: import("../action-gate.js").ToolAuthorizationMode;
+}
+
+/**
+ * #1663: one shared contextual availability decision for canonical tool names
+ * plus trusted execution context. Both schema presentation
+ * (createPiAgentTools) and the execution boundary (executeToolCall) consume
+ * this function — never duplicate the conditional in two modules.
+ *
+ * The decision is provider-neutral and derived only from trusted host context;
+ * model arguments, prompt text, agent names, and provider candidates cannot
+ * select or override it.
+ */
+export function checkToolAvailability(toolName: string, context: ToolAvailabilityContext): import("../tool-sandbox.js").CheckResult {
+  if (toolName === "send_document" && context.authorizationMode === "unattended-task") {
+    return {
+      allowed: false,
+      reason: "Tool 'send_document' is unavailable during unattended scheduled execution; delivery is owned by scheduled settlement",
+    };
+  }
+  return { allowed: true };
+}
+
 /** Tool implementations may still consume textual CLI-style values, but the
  * registry boundary preserves the provider's JSON types until that point. */
 function stringValue(value: unknown): string {
@@ -1003,6 +1027,23 @@ function checkSkillRead(toolName: string, args: Record<string, unknown>): void {
 }
 
 export async function executeToolCall(name: string, args: Record<string, unknown>, context?: ToolExecutionContext & { sandboxPolicy?: SandboxPolicy }): Promise<string> {
+  // #1663: the shared contextual availability policy is enforced BEFORE tool
+  // lookup/invocation can reach a platform callback. It is authoritative even
+  // if schema presentation was bypassed (forged, stale, replayed, or future
+  // transport-level calls). The trusted authorization mode comes only from
+  // the execution context — a model argument can never override it. Denied
+  // attempts are recorded through the existing safe audit mechanism and
+  // never touch delivery claims, delivery_ready, card status, or settlement.
+  const availability = checkToolAvailability(name, context ?? {});
+  if (!availability.allowed) {
+    auditDeny(name, undefined, "unattended-task", availability.reason!);
+    return JSON.stringify({
+      error: `Tool '${name}' is not available in this session`,
+      reason: "unattended_scheduled_delivery",
+      detail: availability.reason,
+    });
+  }
+
   // Sandbox enforcement
   if (context?.sandboxPolicy) {
     const toolCheck = checkTool(name, context.sandboxPolicy);

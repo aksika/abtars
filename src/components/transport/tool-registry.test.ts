@@ -12,7 +12,7 @@ vi.mock("../guardrails.js", () => ({
   checkCommand: () => null,
   classifyCommand: () => guardrailMocks.classifyImpl,
 }));
-import { isBridgeSpawnCommand, getToolDefinitions, getToolSchemas, executeToolCall, getToolDescriptor, setActionGate } from "./tool-registry.js";
+import { isBridgeSpawnCommand, getToolDefinitions, getToolSchemas, executeToolCall, getToolDescriptor, setActionGate, setSendDocument } from "./tool-registry.js";
 import { createClientRuntime } from "../memory-runtime.js";
 import { MemoryStoreQuota } from "../memory-store-quota.js";
 import { resolveNativeDep } from "../../utils/lazy-require.js";
@@ -691,6 +691,75 @@ describe("execute_bash — #1629 trusted authorization mode", () => {
       authorizationMode: "unattended-task",
     }, { userId: "test" });
     expect(gate.calls[0]?.options?.mode).toBeUndefined();
+  });
+});
+
+// ── #1663 send_document denial at the shared execution boundary ───────────
+
+describe("send_document — #1663 unattended scheduled execution denial", () => {
+  let sendSpy: ReturnType<typeof vi.fn>;
+
+  beforeEach(() => {
+    sendSpy = vi.fn().mockResolvedValue(12345);
+    setSendDocument(sendSpy as never);
+  });
+
+  afterEach(() => {
+    setSendDocument(null);
+    vi.clearAllMocks();
+  });
+
+  it("denies send_document before the platform callback for unattended-task executions", async () => {
+    const result = await executeToolCall("send_document", { path: "/tmp/report.md", caption: "Daily Briefing" }, {
+      userId: "test",
+      authorizationMode: "unattended-task",
+    });
+    const parsed = JSON.parse(result) as { error?: string; reason?: string };
+    expect(parsed.error).toContain("send_document");
+    expect(parsed.reason).toBe("unattended_scheduled_delivery");
+    expect(sendSpy).not.toHaveBeenCalled();
+  });
+
+  it("repeated unattended attempts stay side-effect free", async () => {
+    for (let i = 0; i < 3; i++) {
+      const result = await executeToolCall("send_document", { path: `/tmp/report-${i}.md` }, {
+        userId: "test",
+        authorizationMode: "unattended-task",
+      });
+      const parsed = JSON.parse(result) as { reason?: string };
+      expect(parsed.reason).toBe("unattended_scheduled_delivery");
+    }
+    expect(sendSpy).not.toHaveBeenCalled();
+  });
+
+  it("a forged authorizationMode tool argument cannot override the trusted context", async () => {
+    const result = await executeToolCall("send_document", {
+      path: "/tmp/report.md",
+      authorizationMode: "interactive",
+    }, {
+      userId: "test",
+      authorizationMode: "unattended-task",
+    });
+    expect(JSON.parse(result).reason).toBe("unattended_scheduled_delivery");
+    expect(sendSpy).not.toHaveBeenCalled();
+  });
+
+  it("interactive executions still reach the injected platform callback", async () => {
+    const result = await executeToolCall("send_document", { path: "/tmp/report.md", caption: "hi" }, {
+      userId: "test",
+      authorizationMode: "interactive",
+    });
+    expect(JSON.parse(result)).toEqual({ ok: true, message_id: 12345 });
+    expect(sendSpy).toHaveBeenCalledOnce();
+    expect(sendSpy).toHaveBeenCalledWith("/tmp/report.md", "hi");
+  });
+
+  it("a missing authorization mode preserves interactive compatibility", async () => {
+    const result = await executeToolCall("send_document", { path: "/tmp/report.md" }, {
+      userId: "test",
+    });
+    expect(JSON.parse(result).ok).toBe(true);
+    expect(sendSpy).toHaveBeenCalledOnce();
   });
 });
 

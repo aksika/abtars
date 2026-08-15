@@ -1,7 +1,7 @@
 import { logWarn } from "../logger.js";
 import type { AgentTool, AgentToolResult } from "./pi-core-types.js";
 import type { PiExecutionSafetyController } from "./pi-core-safety.js";
-import { getToolDefinitions, executeToolCall } from "./tool-registry.js";
+import { getToolDefinitions, executeToolCall, checkToolAvailability } from "./tool-registry.js";
 import type { ToolDefinition } from "./tool-registry.js";
 import type { SandboxPolicy } from "../tool-sandbox.js";
 import { checkTool } from "../tool-sandbox.js";
@@ -196,6 +196,12 @@ export function createPiAgentTools(context: PiCoreToolContext): AgentTool[] {
   for (const def of definitions) {
     const allowed = checkTool(def.name, policy);
     if (!allowed.allowed) continue;
+
+    // #1663: the shared contextual availability policy — unattended scheduled
+    // executions never receive a send_document schema, so the model cannot
+    // plan around a capability it cannot use. The registry execution boundary
+    // remains authoritative; this filter only improves model behavior.
+    if (!checkToolAvailability(def.name, context).allowed) continue;
 
     // #1552 R1: memory_store is only ever presented to Main (A) and Dreamy
     // (D). Every other type — including missing/forged types — does not see

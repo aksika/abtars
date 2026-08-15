@@ -239,4 +239,70 @@ describe("createPiAgentTools", () => {
       expect(result.content[0]?.text).toContain("skipped");
     }
   });
+
+  // #1663: unattended scheduled executions must not see or reach the
+  // platform delivery tool. Presentation hiding is a model-behavior aid; the
+  // registry execution boundary is the authority (tool-registry.test.ts).
+  describe("#1663 send_document availability for unattended scheduled executions", () => {
+    const ownerWithSend = () => buildPolicy("owner", { allowedTools: ["send_document", "review_project"] });
+
+    it("hides send_document from an unattended one-shot T execution", () => {
+      const tools = createPiAgentTools(makeContext({
+        sandboxPolicy: ownerWithSend(),
+        sessionType: "T",
+        authorizationMode: "unattended-task",
+      }));
+      expect(tools.find(t => t.name === "send_document")).toBeUndefined();
+    });
+
+    it("hides send_document from an unattended scheduled Orc but keeps review_project", () => {
+      const tools = createPiAgentTools(makeContext({
+        sandboxPolicy: ownerWithSend(),
+        sessionType: "O",
+        authorizationMode: "unattended-task",
+      }));
+      expect(tools.find(t => t.name === "send_document")).toBeUndefined();
+      expect(tools.find(t => t.name === "review_project")).toBeDefined();
+    });
+
+    it("hides send_document from an unattended scheduled Worker W execution", () => {
+      const tools = createPiAgentTools(makeContext({
+        sandboxPolicy: ownerWithSend(),
+        sessionType: "W",
+        authorizationMode: "unattended-task",
+      }));
+      expect(tools.find(t => t.name === "send_document")).toBeUndefined();
+    });
+
+    it("keeps send_document for an interactive execution with the same sandbox", () => {
+      const tools = createPiAgentTools(makeContext({
+        sandboxPolicy: ownerWithSend(),
+        sessionType: "T",
+        authorizationMode: "interactive",
+      }));
+      expect(tools.find(t => t.name === "send_document")).toBeDefined();
+    });
+
+    it("keeps send_document when the trusted authorization mode is absent (interactive compatibility)", () => {
+      const tools = createPiAgentTools(makeContext({
+        sandboxPolicy: ownerWithSend(),
+        sessionType: "T",
+        authorizationMode: undefined,
+      }));
+      expect(tools.find(t => t.name === "send_document")).toBeDefined();
+    });
+
+    it("ignores a forged authorizationMode tool argument — the trusted context wins", async () => {
+      const ctx = makeContext({
+        sandboxPolicy: ownerWithSend(),
+        sessionType: "T",
+        authorizationMode: "unattended-task",
+      });
+      const tools = createPiAgentTools(ctx);
+      // The tool is not even presented; proving a forged argument cannot
+      // re-introduce it would need the execution boundary, which is covered
+      // in tool-registry.test.ts. Here we prove the schema is absent.
+      expect(tools.find(t => t.name === "send_document")).toBeUndefined();
+    });
+  });
 });

@@ -13,12 +13,13 @@ describe("scheduled project orchestration (#1516)", () => {
   let reviewStoreMod: typeof import("../../components/project-acceptance/project-review-store.js");
   let projectRunnerMod: typeof import("../../components/tasks/scheduled-project-runner.js");
   let ScheduledRunCoordinator: typeof import("../../components/tasks/scheduled-run-coordinator.js").ScheduledRunCoordinator;
+  let toolRegistryMod: typeof import("../../components/transport/tool-registry.js");
 
   beforeEach(async () => {
     vi.resetModules();
     home = join(tmpdir(), `abtars-scheduled-project-${Date.now()}-${Math.random().toString(36).slice(2)}`);
     mkdirSync(home, { recursive: true });
-    vi.doMock("../../paths.js", () => ({ abtarsHome: () => home }));
+    vi.doMock("../../paths.js", () => ({ abtarsHome: () => home, abmindHome: () => join(home, "..", "abmind-test") }));
     board = await import("../../components/tasks/kanban-board.js");
     ({ deliverCard } = await import("../../components/tasks/kanban-delivery.js"));
     ({ CronQueue } = await import("../../components/tasks/task-queue.js"));
@@ -27,6 +28,7 @@ describe("scheduled project orchestration (#1516)", () => {
     reviewStoreMod = await import("../../components/project-acceptance/project-review-store.js");
     projectRunnerMod = await import("../../components/tasks/scheduled-project-runner.js");
     ScheduledRunCoordinator = (await import("../../components/tasks/scheduled-run-coordinator.js")).ScheduledRunCoordinator;
+    toolRegistryMod = await import("../../components/transport/tool-registry.js");
   });
 
   afterEach(() => {
@@ -97,6 +99,27 @@ describe("scheduled project orchestration (#1516)", () => {
 
     // The Orc writes the final artifact and the review accepts the project.
     writeFileSync(artifactPath, "# Brief\n" + "line\n".repeat(30));
+
+    // #1663: the scheduled Orc cannot deliver directly. A forged
+    // authorizationMode argument does not help; the trusted unattended mode
+    // comes from the durable task-sourced root and the shared execution
+    // boundary denies before any platform callback.
+    const sendSpy = vi.fn().mockResolvedValue(9999);
+    toolRegistryMod.setSendDocument(sendSpy as never);
+    for (let i = 0; i < 2; i++) {
+      const attempt = await toolRegistryMod.executeToolCall("send_document", {
+        path: artifactPath,
+        caption: `Daily Briefing ${i}`,
+        authorizationMode: "interactive", // forged — must be ignored
+      }, {
+        userId: "test",
+        authorizationMode: "unattended-task",
+      });
+      const parsed = JSON.parse(attempt) as { reason?: string };
+      expect(parsed.reason).toBe("unattended_scheduled_delivery");
+    }
+    expect(sendSpy).not.toHaveBeenCalled();
+
     const store = new reviewStoreMod.ProjectReviewStore();
     store.settleAcceptance(rootId, "case-e2e", { synthesis: "briefing synthesized" }, "briefing synthesized", undefined, "rd_e2e");
     nerve.fire("card:done", rootId);
@@ -121,10 +144,16 @@ describe("scheduled project orchestration (#1516)", () => {
       announce: vi.fn().mockResolvedValue(undefined),
       chatIdFor: vi.fn().mockReturnValue("42"),
     };
+    // #1663: repeated delivery polling claims and sends exactly once.
     await deliverCard(done[0]!, deps);
+    await deliverCard(board.kanbanGetCard(rootId)!, deps);
+    await deliverCard(board.kanbanGetCard(rootId)!, deps);
     expect(deps.sendDocument).toHaveBeenCalledOnce();
     expect(board.kanbanGetCard(rootId)!.status).toBe("delivered");
     expect(board.kanbanGetCard(rootId)!.delivery_attempts).toBe(1);
+    expect(board.kanbanGetCard(rootId)!.delivery_result).toBe("sent");
+    // The direct unattended attempts never produced a platform send.
+    expect(sendSpy).not.toHaveBeenCalled();
   });
 
   it("never settles success or delivers when the project accepts but the artifact is stale", async () => {
@@ -175,5 +204,33 @@ describe("scheduled project orchestration (#1516)", () => {
     expect(history).not.toContain('"outcome":"success"');
     const failed = board.kanbanList("failed");
     expect(failed.some(c => c.id === rootId)).toBe(true);
+  });
+
+  // #1663: a non-accepting Orc decision (blocked/repair/needs_input) must
+  // never unlock delivery — the root is not done and no platform send can
+  // happen, even under repeated polling.
+  it("never delivers when the Orc decision is blocked instead of accepted", async () => {
+    const rootId = board.kanbanEnqueue("blocked-project", "agent", undefined, { type: "O", max_agents: 2 });
+    board.kanbanRunning(rootId);
+    const store = new reviewStoreMod.ProjectReviewStore();
+    reviewStoreMod.initializeProjectSupervision(store, rootId, "contract-blocked");
+    expect(store.blockProject(rootId, "control: blocked decision")).toBe(true);
+
+    const failedCard = board.kanbanGetCard(rootId)!;
+    expect(failedCard.status).toBe("failed");
+    expect(failedCard.delivery_result).toBeNull();
+
+    const deps = {
+      sendMessage: vi.fn().mockResolvedValue("sent" as const),
+      sendDocument: vi.fn().mockResolvedValue("sent" as const),
+      announce: vi.fn().mockResolvedValue(undefined),
+      chatIdFor: vi.fn().mockReturnValue("42"),
+    };
+    await deliverCard(board.kanbanGetCard(rootId)!, deps);
+    await deliverCard(board.kanbanGetCard(rootId)!, deps);
+    expect(deps.sendDocument).not.toHaveBeenCalled();
+    expect(deps.sendMessage).not.toHaveBeenCalled();
+    expect(board.kanbanGetCard(rootId)!.status).toBe("failed");
+    expect(board.kanbanGetCard(rootId)!.delivery_attempts).toBe(0);
   });
 });
