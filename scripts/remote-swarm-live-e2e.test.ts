@@ -1071,6 +1071,37 @@ describe("evidence writer", () => {
   });
 });
 
+describe("receiver-side delegate", () => {
+  it("routes the receiver delegate through the tmux port as a quoted curl command", async () => {
+    const { createHttpDelegatePort } = await import("./remote-swarm-live-e2e.ts");
+    const root = tmpdirFixture();
+    try {
+      const { profile } = makeProfile();
+      let captured: CommandArg[] | null = null;
+      const fakeReceiverPort: CommandPort = {
+        run: async (argv) => {
+          captured = argv;
+          return { ok: true, exitCode: 0, stdout: JSON.stringify({ ok: true, decision: "accepted", request_id: "r1", contribution_ref: "help_x" }), stderr: "", timedOut: false };
+        },
+      };
+      const delegate = createHttpDelegatePort(profile, fakeReceiverPort);
+      const result = await delegate({ peer: "peer-r", goal: "a goal with spaces", request_id: "r1" }, "receiver");
+      expect(result.ok).toBe(true);
+      expect(result.decision).toBe("accepted");
+      expect(captured).not.toBeNull();
+      const argv = captured ?? [];
+      expect(argv[0]?.text).toBe("curl");
+      expect(argv.map((a) => a.text).join(" ")).toContain("https://127.0.0.1:17101/v1/orc/delegate");
+      const dashD = argv.find((a) => a.text === "-d");
+      const payloadArg = argv[argv.indexOf(dashD ?? { text: "-d" }) + 1];
+      expect(payloadArg?.quote).toBe(true);
+      expect(JSON.parse(payloadArg?.text ?? "{}")).toEqual({ peer: "peer-r", goal: "a goal with spaces", request_id: "r1" });
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+});
+
 describe("helpers", () => {
   it("builds unique run ids and markers", () => {
     const runId = buildRunId(new Date(1_700_000_000_000));

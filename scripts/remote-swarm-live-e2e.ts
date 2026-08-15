@@ -428,29 +428,57 @@ function httpsPostJson(port: number, path: string, body: unknown): Promise<{ sta
   });
 }
 
-export function createHttpDelegatePort(profile: RemoteSwarmLiveProfileV1): HttpDelegatePort {
+export function createHttpDelegatePort(profile: RemoteSwarmLiveProfileV1, receiverPort?: CommandPort): HttpDelegatePort {
   return async (body, node) => {
-    const port = node === "requester" ? profile.requester.agentApiPort : profile.receiver.agentApiPort;
-    if (!port) throw new Error(`agentApiPort is not configured for ${node}`);
-    const response = await httpsPostJson(port, "/v1/orc/delegate", body);
-    let parsed: Record<string, unknown>;
-    try {
-      parsed = JSON.parse(response.body) as Record<string, unknown>;
-    } catch {
-      return { ok: false, decision: "error", error: `delegate route returned non-JSON (HTTP ${response.status})` };
+    if (node === "requester") {
+      const port = profile.requester.agentApiPort;
+      if (!port) throw new Error("agentApiPort is not configured for requester");
+      const response = await httpsPostJson(port, "/v1/orc/delegate", body);
+      return parseDelegateResponse(response.status, response.body);
     }
-    const decision = typeof parsed.decision === "string" ? parsed.decision : "error";
-    return {
-      ok: parsed.ok === true,
-      decision,
-      projectCardId: typeof parsed.project_card_id === "number" ? parsed.project_card_id : undefined,
-      proxyCardId: typeof parsed.proxy_card_id === "number" ? parsed.proxy_card_id : undefined,
-      requestId: typeof parsed.request_id === "string" ? parsed.request_id : undefined,
-      contributionRef: typeof parsed.contribution_ref === "string" ? parsed.contribution_ref : undefined,
-      reasonCode: typeof parsed.reason_code === "string" ? parsed.reason_code : undefined,
-      reason: typeof parsed.reason === "string" ? parsed.reason : undefined,
-      error: typeof parsed.error === "string" ? parsed.error : undefined,
-    };
+    // The receiver's delegate route is loopback-only, so the request must
+    // originate on the receiver host through the approved tmux channel.
+    const port = profile.receiver.agentApiPort;
+    if (!port) throw new Error("agentApiPort is not configured for receiver");
+    if (!receiverPort) throw new Error("receiver command port is required for receiver-side delegation");
+    const receiver = profile.receiver;
+    const payload = JSON.stringify(body);
+    const result = await receiverPort.run([
+      { text: "curl", quote: false },
+      { text: "-sk", quote: false },
+      { text: "-X", quote: false },
+      { text: "POST", quote: false },
+      { text: `https://127.0.0.1:${port}/v1/orc/delegate`, quote: false },
+      { text: "-H", quote: false },
+      { text: "Content-Type:application/json", quote: false },
+      { text: "-d", quote: false },
+      { text: payload, quote: true },
+    ], { timeoutMs: 120_000, cwd: receiver.workdir });
+    if (!result.ok) {
+      return { ok: false, decision: "error", error: `receiver delegate curl failed: ${result.stderr.slice(0, 500)}` };
+    }
+    return parseDelegateResponse(200, result.stdout);
+  };
+}
+
+function parseDelegateResponse(status: number, rawBody: string): DelegateResponse {
+  let parsed: Record<string, unknown>;
+  try {
+    parsed = JSON.parse(rawBody) as Record<string, unknown>;
+  } catch {
+    return { ok: false, decision: "error", error: `delegate route returned non-JSON (HTTP ${status}): ${rawBody.slice(0, 300)}` };
+  }
+  const decision = typeof parsed.decision === "string" ? parsed.decision : "error";
+  return {
+    ok: parsed.ok === true,
+    decision,
+    projectCardId: typeof parsed.project_card_id === "number" ? parsed.project_card_id : undefined,
+    proxyCardId: typeof parsed.proxy_card_id === "number" ? parsed.proxy_card_id : undefined,
+    requestId: typeof parsed.request_id === "string" ? parsed.request_id : undefined,
+    contributionRef: typeof parsed.contribution_ref === "string" ? parsed.contribution_ref : undefined,
+    reasonCode: typeof parsed.reason_code === "string" ? parsed.reason_code : undefined,
+    reason: typeof parsed.reason === "string" ? parsed.reason : undefined,
+    error: typeof parsed.error === "string" ? parsed.error : undefined,
   };
 }
 
@@ -1626,7 +1654,7 @@ async function main(): Promise<void> {
 
   const requesterPort = new LocalCommandPort();
   const receiverPort = new TmuxCommandPort({ session: profile.receiver.exec.kind === "tmux" ? profile.receiver.exec.session : "remote" });
-  const delegate = createHttpDelegatePort(profile);
+  const delegate = createHttpDelegatePort(profile, receiverPort);
   const orcCall = profile.tui?.socketPath ? new TuiOrcClient({ socketPath: profile.tui.socketPath }) : null;
   if (args.profile === "full" && orcCall === null) {
     throw new Error("the full profile requires a requester TUI socket (profile.tui.socketPath)");
