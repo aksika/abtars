@@ -433,6 +433,8 @@ describe("PiCodingSessionService #1635 — turn lifecycle", () => {
     const abmind = buildChildEnv(h.config, { id: "s", ownerPrincipalId: "u", executionGeneration: 1 }, "abmind");
     expect(abmind["ABMIND_HOOKS_DISABLED"]).toBeUndefined();
     expect(abmind["ABMIND_USER_ID"]).toBe("u");
+    expect(abmind["ABMIND_PARENT_EXECUTION_ID"]).toBe("pi-run-s-gen-1");
+    expect(abmind["ABMIND_AUTOMATIC_WRITE_OWNER"]).toBeUndefined();
   });
 
   it("endSession ends the durable row and the envelope, preserving the transcript", async () => {

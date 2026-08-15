@@ -165,8 +165,8 @@ const DANGEROUS_NODE_VARS = ["NODE_OPTIONS", "NODE_PATH", "NODE_DEBUG", "NODE_EX
  *
  * #1635 — `memoryMode: "none"` (interactive coding sessions) structurally
  * disables abmind: the disable flag is set and the three ABMIND correlation
- * variables are omitted. `/pi run` (default "abmind") keeps its byte-identical
- * existing environment.
+ * variables are omitted. `/pi run` (default "abmind") receives the two active
+ * correlation variables.
  */
 export function buildChildEnv(
   config: PiExecutorConfig,
@@ -189,7 +189,6 @@ export function buildChildEnv(
   }
   env["ABMIND_USER_ID"] = run.ownerPrincipalId;
   env["ABMIND_PARENT_EXECUTION_ID"] = `pi-run-${run.id}-gen-${run.executionGeneration}`;
-  env["ABMIND_AUTOMATIC_WRITE_OWNER"] = "abmind-pi-plugin";
   return env;
 }
 
