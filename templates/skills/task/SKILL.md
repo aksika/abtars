@@ -98,7 +98,14 @@ abtars-task remove <id>         # Delete a task
 abtars-task pause <id>          # Pause a task
 abtars-task resume <id>         # Resume a paused task
 abtars-task history <id>        # Show run history
+abtars-task validate [path]     # Dry-run check of tasks.json (default: live file)
 ```
+
+`abtars-task validate` checks a whole `tasks.json` before it goes live: invalid
+entries, duplicate IDs, missing `taskFile` and `report.requires.files` paths,
+and orphaned task package directories. It prints one JSON result, exits `0`
+when clean and `1` otherwise, and never changes files or task state. Run it
+after any manual edit of `~/.abtars/tasks/tasks.json`.
 
 Or via Telegram: `/tasks` (list), `/task run <id>` (trigger), `/task pause <id>`, `/task resume <id>`.
 

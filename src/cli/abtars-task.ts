@@ -3,6 +3,7 @@ import { readEntries as dbReadEntries, writeEntry, removeEntry as dbRemoveEntry 
 import { readState, updateState, removeState } from "../components/tasks/task-state-store.js";
 import { recentRuns } from "../components/tasks/task-history-store.js";
 import { validateTaskId, type ScheduledTask, type SystemTaskAction, SYSTEM_ACTIONS } from "../components/tasks/task-types.js";
+import { validateTaskFile } from "../components/tasks/task-validator.js";
 
 export function readEntries(): ScheduledTask[] {
   return dbReadEntries();
@@ -208,6 +209,12 @@ function showHistory(id: string): void {
   console.log(JSON.stringify({ ok: true, id, label: label.slice(0, 80), runs }));
 }
 
+function validate(path: string | undefined): void {
+  const result = validateTaskFile(path);
+  console.log(JSON.stringify(result));
+  if (!result.ok) process.exit(1);
+}
+
 export function main(argv: string[] = process.argv): void {
   if (argv.includes('--help')) {
     console.log(`abtars-task — schedule time-based reminders and tasks.
@@ -218,7 +225,8 @@ Usage:
   abtars-task remove <id>
   abtars-task pause <id>
   abtars-task resume <id>
-  abtars-task history <id>`);
+  abtars-task history <id>
+  abtars-task validate [path]`);
     process.exit(0);
   }
 
@@ -256,8 +264,16 @@ Usage:
       showHistory(id);
       break;
     }
+    case "validate": {
+      if (args.length > 2) {
+        console.log(JSON.stringify({ ok: false, error: "Usage: abtars-task validate [path]" }));
+        process.exit(1);
+      }
+      validate(args[1]);
+      break;
+    }
     default:
-      console.log(JSON.stringify({ ok: false, error: "Usage: abtars-task <add|list|remove|pause|resume|history> [args]" }));
+      console.log(JSON.stringify({ ok: false, error: "Usage: abtars-task <add|list|remove|pause|resume|history|validate> [args]" }));
       process.exit(1);
   }
 }

@@ -1,10 +1,10 @@
 import { existsSync, lstatSync, accessSync, mkdirSync, readFileSync, constants as fsConstants } from "node:fs";
 import { resolve, join, dirname } from "node:path";
-import { homedir } from "node:os";
 import { spawnSync } from "node:child_process";
 import { abtarsHome } from "../../paths.js";
 import { localDate } from "../../utils/date.js";
 import { logTaskTrace } from "./task-log-ctx.js";
+import { resolveTaskContractPath } from "./task-paths.js";
 import type { ScheduledTask } from "./task-types.js";
 import type { ToolExecutionScope } from "./task-package.js";
 
@@ -45,15 +45,6 @@ function substituteToday(raw: string): string {
   return raw.replace(/\{today\}/g, localDate());
 }
 
-function resolvePath(raw: string, taskId: string): string {
-  let p = raw.replace(/^~/, homedir());
-  p = substituteToday(p);
-  if (!p.startsWith("/")) {
-    p = join(abtarsHome(), "workspace", taskId, p);
-  }
-  return resolve(p);
-}
-
 function isBeneathApprovedRoot(resolved: string): boolean {
   for (const root of ALLOWED_ROOTS) {
     if (resolved.startsWith(root + "/") || resolved === root) return true;
@@ -75,7 +66,7 @@ export function preflightTask(
     return { ok: true };
   }
 
-  const resolvedArtifact = resolvePath(contract.artifact, taskId);
+  const resolvedArtifact = resolveTaskContractPath(contract.artifact, taskId);
   if (!isBeneathApprovedRoot(resolvedArtifact)) {
     return { ok: false, category: "definition_failed", code: "artifact_path_invalid", safeDetail: `artifact path escapes approved workspace: ${resolvedArtifact}` };
   }
@@ -90,7 +81,7 @@ export function preflightTask(
 
   const requiredFiles: Array<{ configured: string; resolved: string }> = [];
   for (const f of contract.requires.files) {
-    const resolved = resolvePath(f, taskId);
+    const resolved = resolveTaskContractPath(f, taskId);
     if (!existsSync(resolved)) {
       return { ok: false, category: "definition_failed", code: "required_file_missing", safeDetail: `required file not found: ${f}` };
     }

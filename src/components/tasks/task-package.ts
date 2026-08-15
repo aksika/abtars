@@ -1,9 +1,9 @@
 import { existsSync, readFileSync, readdirSync, mkdirSync } from "node:fs";
-import { resolve, join, dirname, basename } from "node:path";
-import { homedir } from "node:os";
+import { join, dirname, basename } from "node:path";
 import { logTrace } from "../logger.js";
 import { abtarsHome } from "../../paths.js";
 import { localDate } from "../../utils/date.js";
+import { resolveTaskFilePath } from "./task-paths.js";
 
 const TAG = "task-package";
 
@@ -19,7 +19,7 @@ export interface TaskPackageError {
 }
 
 export function loadTaskPackage(taskFile: string): TaskPackageResult | TaskPackageError {
-  const filePath = resolve(taskFile.replace(/^~/, homedir()));
+  const filePath = resolveTaskFilePath(taskFile);
   if (!existsSync(filePath)) {
     return { ok: false, error: `Task file not found: ${filePath}` };
   }

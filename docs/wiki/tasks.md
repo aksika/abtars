@@ -67,7 +67,19 @@ abtars-task remove <id>
 abtars-task pause <id>
 abtars-task resume <id>
 abtars-task history <id>
+abtars-task validate [path]   # dry-run check of tasks.json (default: the live file)
 ```
+
+`abtars-task validate` reads the given tasks.json (or `~/.abtars/tasks/tasks.json`
+when no path is given) and reports every problem as a single JSON value: invalid
+entries, duplicate IDs, missing task files, missing required report files, and
+orphaned task package directories. It exits `0` when the file is clean and `1`
+otherwise, and never modifies files or task state — it is a safe pre-deploy
+check after hand-editing `tasks.json`.
+
+To validate a staged tree, point `HOME` and `ABTARS_HOME` at that tree's root
+before running the command, so `~`-relative paths and the task package root
+match the staged layout.
 
 ## Task file structure
 

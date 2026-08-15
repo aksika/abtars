@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { mkdtempSync, rmSync, mkdirSync } from "node:fs";
+import { mkdtempSync, rmSync, mkdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -34,6 +34,9 @@ describe("abtars-task", () => {
     console.log = (...a: unknown[]) => logs.push(a.map(String).join(" "));
     try {
       mod.main(["node", "abtars-task", ...args]);
+    } catch {
+      // exit-driven aborts are captured via the process.exit stub; keep the
+      // already-printed output available to the caller.
     } finally {
       console.log = origLog;
     }
@@ -158,5 +161,100 @@ describe("abtars-task", () => {
       process.exit = origExit;
     }
     expect(exitCode).toBe(1);
+  });
+
+  describe("validate", () => {
+    function writeDefaultTasks(entries: unknown[]): void {
+      mkdirSync(join(tmpDir, ".abtars", "tasks"), { recursive: true });
+      writeFileSync(join(tmpDir, ".abtars", "tasks", "tasks.json"), JSON.stringify(entries, null, 2), "utf-8");
+    }
+
+    it("validates the default live path and prints a single ok JSON value", async () => {
+      const pkgDir = join(tmpDir, ".abtars", "tasks", "valid-one");
+      mkdirSync(pkgDir, { recursive: true });
+      writeFileSync(join(pkgDir, "TASK.md"), "# TASK");
+      writeDefaultTasks([
+        {
+          id: "valid-one",
+          kind: "agent",
+          agent: "task",
+          delivery: "announce",
+          schedule: "0 9 * * *",
+          prompt: "do the thing",
+          taskFile: join(pkgDir, "TASK.md"),
+          interaction: { mode: "oneshot" },
+          orchestration: { maxAgents: 1 },
+          enabled: true,
+          priority: "medium",
+        },
+      ]);
+
+      const out = await run(["validate"]);
+      const parsed = JSON.parse(out);
+      expect(parsed.ok).toBe(true);
+      expect(parsed.findings).toEqual([]);
+      expect(parsed.path).toBe(join(tmpDir, ".abtars", "tasks", "tasks.json"));
+      expect(parsed.summary).toEqual({ entryCount: 1, validEntryCount: 1, findingCount: 0 });
+    });
+
+    it("validates an explicit path resolved from the working directory", async () => {
+      const candidate = join(tmpDir, "candidate.json");
+      writeFileSync(candidate, "[]", "utf-8");
+      const out = await run(["validate", candidate]);
+      const parsed = JSON.parse(out);
+      expect(parsed.ok).toBe(true);
+      expect(parsed.path).toBe(candidate);
+      expect(parsed.summary.entryCount).toBe(0);
+    });
+
+    it("aggregates failure findings and exits 1", async () => {
+      writeDefaultTasks([
+        { id: "bad-entry", kind: "agent", agent: "task", delivery: "announce", prompt: "x", interaction: { mode: "oneshot" }, orchestration: { maxAgents: 1 } },
+      ]);
+      const origExit = process.exit;
+      let exitCode: number | undefined;
+      process.exit = ((code?: number) => { exitCode = code; throw new Error("exit"); }) as never;
+      let out = "";
+      try {
+        out = await run(["validate"]);
+      } finally {
+        process.exit = origExit;
+      }
+      expect(exitCode).toBe(1);
+      const parsed = JSON.parse(out);
+      expect(parsed.ok).toBe(false);
+      expect(parsed.findings.map(f => f.code)).toEqual(["entry_invalid"]);
+      expect(parsed.findings[0].entryId).toBe("bad-entry");
+    });
+
+    it("exits 1 when the default file is missing", async () => {
+      const origExit = process.exit;
+      let exitCode: number | undefined;
+      process.exit = ((code?: number) => { exitCode = code; throw new Error("exit"); }) as never;
+      let out = "";
+      try {
+        out = await run(["validate"]);
+      } finally {
+        process.exit = origExit;
+      }
+      expect(exitCode).toBe(1);
+      expect(JSON.parse(out).findings[0].code).toBe("file_missing");
+    });
+
+    it("rejects more than one positional path", async () => {
+      const origExit = process.exit;
+      let exitCode: number | undefined;
+      process.exit = ((code?: number) => { exitCode = code; throw new Error("exit"); }) as never;
+      let out = "";
+      try {
+        out = await run(["validate", "a.json", "b.json"]);
+      } finally {
+        process.exit = origExit;
+      }
+      expect(exitCode).toBe(1);
+      const parsed = JSON.parse(out);
+      expect(parsed.ok).toBe(false);
+      expect(parsed.error).toContain("Usage: abtars-task validate");
+    });
   });
 });
