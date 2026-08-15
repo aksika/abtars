@@ -9,8 +9,9 @@ import { readEnv } from "./doctor-render.js";
 import { getPiVersion } from "./pi-version-access.js";
 import { describeSoulInputs } from "../../components/soul-input-manifest.js";
 import { readSnapshot } from "../../components/runtime-health-snapshot.js";
+import { readSecretResult } from "../../components/secrets.js";
 import { KANBAN_STALE_CANDIDATE_MS } from "../../components/executor-progress.js";
-import type { ProbeResult, DoctorOutputV2, SnapshotTrust, RuntimeHealthSnapshotV1 } from "./doctor-types.js";
+import type { ProbeResult, ProbeStatus, EvidenceLevel, DoctorOutputV2, SnapshotTrust, RuntimeHealthSnapshotV1 } from "./doctor-types.js";
 import { truncate } from "./doctor-types.js";
 
 const home = abtarsHome();
@@ -50,45 +51,129 @@ function ago(ms: number): string {
 
 // ── Body Probes ──
 
+// #1258: platform credentials resolve through the same effective source the
+// bridge uses — an already-present non-empty process.env override (operator /
+// service manager), then the secrets policy layer. Credential-shaped
+// config/.env assignments are NOT an input: #1354 makes the secret store
+// authoritative for provider credentials and forbids plaintext .env use.
+// Stale TELEGRAM_TOKEN / DISCORD_TOKEN aliases are not runtime configuration
+// and do not configure a platform.
+const PLATFORM_TIMEOUT_MS = 5000;
+
+type PlatformName = "telegram" | "discord";
+
+interface PlatformDescriptor {
+  name: PlatformName;
+  canonical: string;
+  buildRequest: (token: string) => { url: string; headers: Record<string, string> };
+}
+
+const PLATFORMS: readonly PlatformDescriptor[] = [
+  {
+    name: "telegram",
+    canonical: "TELEGRAM_BOT_TOKEN",
+    // The credential necessarily appears in Telegram's fixed getMe URL path.
+    buildRequest: (token) => ({ url: `https://api.telegram.org/bot${token}/getMe`, headers: {} }),
+  },
+  {
+    name: "discord",
+    canonical: "DISCORD_BOT_TOKEN",
+    buildRequest: (token) => ({ url: "https://discord.com/api/v10/users/@me", headers: { Authorization: `Bot ${token}` } }),
+  },
+];
+
+function resolvePlatformCredential(canonical: string): import("../../components/secrets.js").SecretReadResult {
+  const override = process.env[canonical];
+  if (override !== undefined && override.length > 0) return { status: "available", value: override };
+  return readSecretResult(canonical);
+}
+
+/** Verify one platform's identity endpoint; never lets a credential or raw
+ *  provider error escape into a ProbeResult. */
+async function verifyPlatform(p: PlatformDescriptor, token: string): Promise<ProbeResult> {
+  let request: { url: string; headers: Record<string, string> };
+  try {
+    request = p.buildRequest(token);
+  } catch {
+    return { name: p.name, status: "failed", evidence: "filesystem", detail: "request build failed", ms: 0 };
+  }
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), PLATFORM_TIMEOUT_MS);
+  try {
+    const res = await fetch(request.url, { headers: request.headers, signal: controller.signal });
+    if (res.ok) return { name: p.name, status: "ok", evidence: "reachable", detail: "verified", ms: 0 };
+    // Authoritative authentication rejection: 401/403 for either provider;
+    // Telegram 404 too, because the credential is part of its fixed getMe route.
+    if (res.status === 401 || res.status === 403 || (p.name === "telegram" && res.status === 404)) {
+      return { name: p.name, status: "failed", evidence: "reachable", detail: "invalid token", ms: 0 };
+    }
+    return { name: p.name, status: "warning", evidence: "reachable", detail: `http ${res.status}`, ms: 0 };
+  } catch {
+    // Timeout (AbortError), network rejection, or DNS failure — bounded,
+    // value-free detail. The abort signal may carry the URL (with Telegram's
+    // token); it is never stringified into the result.
+    return { name: p.name, status: "warning", evidence: "reachable", detail: "unreachable", ms: 0 };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 async function probePlatforms(): Promise<ProbeResult> {
-  const env = readEnv();
-  const results: Array<{ name: string; status: "ok" | "warning" | "failed" | "skipped"; detail: string }> = [];
+  try {
+    const results: ProbeResult[] = [];
+    let requestsAttempted = 0;
+    let unreadableSecrets = 0;
 
-  if (env.get("TELEGRAM_BOT_TOKEN") || env.get("TELEGRAM_TOKEN")) {
-    const tok = env.get("TELEGRAM_BOT_TOKEN") ?? env.get("TELEGRAM_TOKEN") ?? "";
-    try {
-      const controller = new AbortController();
-      const timeout = setTimeout(() => controller.abort(), 15000);
-      const res = await fetch(`https://api.telegram.org/bot${tok}/getMe`, { signal: controller.signal });
-      clearTimeout(timeout);
-      if (res.ok) results.push({ name: "telegram", status: "ok", detail: "verified" });
-      else if (res.status === 401 || res.status === 403) results.push({ name: "telegram", status: "failed", detail: "invalid token" });
-      else results.push({ name: "telegram", status: "warning", detail: `http ${res.status}` });
-    } catch { results.push({ name: "telegram", status: "warning", detail: "unreachable" }); }
+    for (const platform of PLATFORMS) {
+      const cred = resolvePlatformCredential(platform.canonical);
+      if (cred.status === "missing") continue; // absent platform — excluded from aggregation
+      if (cred.status === "unreadable") {
+        // Configured-but-broken: never collapse into "no platform configured".
+        unreadableSecrets++;
+        results.push({
+          name: platform.name,
+          status: "failed",
+          evidence: "filesystem",
+          detail: "credential unreadable",
+          remediation: `Reinstall the credential in the secret store: ~/.abtars/secret/${platform.canonical}`,
+          ms: 0,
+        });
+        continue;
+      }
+      requestsAttempted++;
+      results.push(await verifyPlatform(platform, cred.value));
+    }
+
+    if (results.length === 0) {
+      return { name: "platforms", status: "skipped", evidence: "configuration", detail: "no platform configured", ms: 0 };
+    }
+
+    const status: ProbeStatus = results.some(r => r.status === "failed")
+      ? "failed"
+      : results.some(r => r.status === "warning")
+        ? "warning"
+        : "ok";
+    const evidence: EvidenceLevel = requestsAttempted > 0
+      ? "reachable"
+      : unreadableSecrets > 0
+        ? "filesystem"
+        : "configuration";
+    // Only the aggregate result is rendered, so per-platform remediations are
+    // surfaced on it (bounded, value-free — names the canonical secret path).
+    const remediations = results.flatMap(r => r.remediation ? [r.remediation] : []);
+
+    return {
+      name: "platforms",
+      status,
+      evidence,
+      detail: results.map(r => `${r.name}: ${r.status}${r.detail ? ` (${r.detail})` : ""}`).join(", "),
+      ...(remediations.length > 0 ? { remediation: remediations.join("; ") } : {}),
+      ms: 0,
+    };
+  } catch {
+    // Sanitize every path: timedProbe() renders an escaped error verbatim.
+    return { name: "platforms", status: "failed", evidence: "filesystem", detail: "platform probe failed", ms: 0 };
   }
-
-  if (env.get("DISCORD_BOT_TOKEN") || env.get("DISCORD_TOKEN")) {
-    const tok = env.get("DISCORD_BOT_TOKEN") ?? env.get("DISCORD_TOKEN") ?? "";
-    try {
-      const controller = new AbortController();
-      const timeout = setTimeout(() => controller.abort(), 15000);
-      const res = await fetch("https://discord.com/api/v10/users/@me", {
-        headers: { Authorization: `Bot ${tok}` },
-        signal: controller.signal,
-      });
-      clearTimeout(timeout);
-      if (res.ok) results.push({ name: "discord", status: "ok", detail: "verified" });
-      else if (res.status === 401 || res.status === 403) results.push({ name: "discord", status: "failed", detail: "invalid token" });
-      else results.push({ name: "discord", status: "warning", detail: `http ${res.status}` });
-    } catch { results.push({ name: "discord", status: "warning", detail: "unreachable" }); }
-  }
-
-
-  if (results.length === 0) return { name: "platforms", status: "skipped", evidence: "configuration", detail: "no platform configured", ms: 0 };
-
-  const failed = results.filter(r => r.status === "failed");
-  const status = failed.length > 0 ? "failed" : results.every(r => r.status === "ok") ? "ok" : "ok";
-  return { name: "platforms", status, evidence: "reachable", detail: results.map(r => `${r.name}: ${r.status}${r.detail ? ` (${r.detail})` : ""}`).join(", "), ms: 0 };
 }
 
 async function probeDashboard(): Promise<ProbeResult> {
@@ -498,7 +583,10 @@ export async function runAllProbes(): Promise<DoctorOutputV2> {
 
   const [body, heart, brain, soul, tribe] = await Promise.all([
     Promise.all([
-      timedProbe("platforms", "configuration", () => probePlatforms().then(r => ({ ...r, evidence: "reachable" as const }))),
+      // #1258: no unconditional evidence override — the platform probe owns
+      // its evidence (configuration / filesystem / reachable) so a
+      // configuration-only result survives unchanged.
+      timedProbe("platforms", "configuration", probePlatforms),
       timedProbe("dashboard", "reachable", probeDashboard),
       timedProbe("security", "configuration", probeSecurity),
       timedProbe("watchdog", "runtime", probeWatchdog),

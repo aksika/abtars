@@ -2,6 +2,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { mkdtempSync, rmSync, mkdirSync, writeFileSync, chmodSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
+import { randomBytes } from "node:crypto";
 
 let tmpDir: string;
 let mockPgrepOutput: string = "";
@@ -258,4 +259,230 @@ describe("doctor tribe probes (#1439)", () => {
       expect(["configuration", "filesystem", "executable", "reachable", "runtime", "authenticated"]).toContain(p.evidence);
     }
   }, 15_000);
+});
+
+describe("doctor platform probes use effective credentials (#1258)", () => {
+  const ORIG_FETCH = globalThis.fetch;
+
+  let fetchMock: ReturnType<typeof vi.fn>;
+
+  beforeEach(() => {
+    fetchMock = vi.fn();
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+  });
+
+  afterEach(() => {
+    globalThis.fetch = ORIG_FETCH;
+    delete process.env["TELEGRAM_BOT_TOKEN"];
+    delete process.env["DISCORD_BOT_TOKEN"];
+    vi.useRealTimers();
+  });
+
+  function fakeResponse(status: number): Response {
+    return { ok: status >= 200 && status < 300, status } as unknown as Response;
+  }
+
+  function installSecretsKey(): void {
+    writeFileSync(join(tmpDir, "config", "abtars.key"), randomBytes(32).toString("hex"), { mode: 0o600 });
+  }
+
+  function writePlaintextSecret(name: string, value: string): void {
+    mkdirSync(join(tmpDir, "secret"), { recursive: true });
+    writeFileSync(join(tmpDir, "secret", name), value, { mode: 0o600 });
+  }
+
+  async function writeEncryptedSecret(name: string, value: string): Promise<void> {
+    installSecretsKey();
+    const { writeSecret, clearSecretCache } = await import("../../components/secrets.js");
+    writeSecret(name, value);
+    // Drop the value cache so the doctor read must decrypt from disk.
+    clearSecretCache();
+  }
+
+  function platformsProbe(result: { layers: { body: Array<{ name: string; status: string; evidence: string; detail: string; remediation?: string }> } }): { name: string; status: string; evidence: string; detail: string; remediation?: string } {
+    const probe = result.layers.body.find(r => r.name === "platforms");
+    if (!probe) throw new Error("platforms probe missing");
+    return probe;
+  }
+
+  it("discovers and verifies an encrypted Telegram secret from the secret store", async () => {
+    installSecretsKey();
+    await writeEncryptedSecret("TELEGRAM_BOT_TOKEN", "encrypted-tg-fixture");
+    fetchMock.mockResolvedValue(fakeResponse(200));
+
+    const { runAllProbes } = await import("./doctor-probes.js");
+    const result = await runAllProbes();
+    const p = platformsProbe(result);
+
+    expect(p.status).toBe("ok");
+    expect(p.evidence).toBe("reachable");
+    expect(p.detail).toContain("telegram: ok");
+    expect(fetchMock.mock.calls.length).toBe(1);
+    expect(String(fetchMock.mock.calls[0]?.[0])).toMatch(/^https:\/\/api\.telegram\.org\/bot/);
+    expect(String(fetchMock.mock.calls[0]?.[0])).toContain("/getMe");
+  });
+
+  it("reads a legacy plaintext secret file from the store", async () => {
+    writePlaintextSecret("TELEGRAM_BOT_TOKEN", "legacy-plaintext-tg-fixture");
+    fetchMock.mockResolvedValue(fakeResponse(200));
+
+    const { runAllProbes } = await import("./doctor-probes.js");
+    const result = await runAllProbes();
+    expect(platformsProbe(result).status).toBe("ok");
+  });
+
+  it("a process-env override wins over the stored secret value", async () => {
+    writePlaintextSecret("TELEGRAM_BOT_TOKEN", "stored-tg-value");
+    process.env["TELEGRAM_BOT_TOKEN"] = "override-tg-value";
+    // 200 only when the request carries the override — a stored-value request
+    // would get 401 and fail the probe.
+    fetchMock.mockImplementation((url: unknown) =>
+      Promise.resolve(String(url).includes("override-tg-value") ? fakeResponse(200) : fakeResponse(401)));
+
+    const { runAllProbes } = await import("./doctor-probes.js");
+    const result = await runAllProbes();
+    expect(platformsProbe(result).status).toBe("ok");
+  });
+
+  it("verifies Discord through the bot authorization header", async () => {
+    await writeEncryptedSecret("DISCORD_BOT_TOKEN", "discord-encrypted-fixture");
+    // 200 only when the authorization header is Bot-formatted — a missing or
+    // malformed header would get 401.
+    fetchMock.mockImplementation((_url: unknown, opts: unknown) =>
+      Promise.resolve((opts as { headers?: Record<string, string> }).headers?.["Authorization"]?.startsWith("Bot ")
+        ? fakeResponse(200)
+        : fakeResponse(401)));
+
+    const { runAllProbes } = await import("./doctor-probes.js");
+    const result = await runAllProbes();
+    const p = platformsProbe(result);
+    expect(p.status).toBe("ok");
+    expect(p.detail).toContain("discord: ok");
+  });
+
+  it("ignores credential-shaped .env assignments and stale token aliases", async () => {
+    writeFileSync(join(tmpDir, "config", ".env"), [
+      "TELEGRAM_BOT_TOKEN=env-should-never-configure",
+      "DISCORD_BOT_TOKEN=env-should-never-configure-2",
+      "TELEGRAM_TOKEN=stale-alias",
+      "DISCORD_TOKEN=stale-alias-2",
+    ].join("\n"));
+
+    const { runAllProbes } = await import("./doctor-probes.js");
+    const result = await runAllProbes();
+    const p = platformsProbe(result);
+    expect(p.status).toBe("skipped");
+    expect(p.detail).toBe("no platform configured");
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("reports no platform configured [configuration] — never [reachable] — when no credential exists", async () => {
+    const { runAllProbes } = await import("./doctor-probes.js");
+    const result = await runAllProbes();
+    const p = platformsProbe(result);
+    expect(p.status).toBe("skipped");
+    expect(p.evidence).toBe("configuration");
+
+    const { renderHuman } = await import("./doctor-render.js");
+    const human = renderHuman(result);
+    const platformLine = human.split("\n").find(l => l.includes("platforms")) ?? "";
+    expect(platformLine).toContain("~ platforms — no platform configured [configuration]");
+    expect(platformLine).not.toContain("[reachable]");
+  });
+
+  it("an undecryptable canonical secret fails with value-free remediation instead of a config skip", async () => {
+    installSecretsKey();
+    writePlaintextSecret("TELEGRAM_BOT_TOKEN", "ENC:" + Buffer.from("undecryptable-tg-sentinel").toString("base64"));
+
+    const { runAllProbes } = await import("./doctor-probes.js");
+    const result = await runAllProbes();
+    const p = platformsProbe(result);
+    expect(p.status).toBe("failed");
+    expect(p.evidence).toBe("filesystem");
+    expect(p.detail).toContain("telegram: failed");
+    expect(p.detail).toContain("credential unreadable");
+    expect(p.remediation).toContain("~/.abtars/secret/TELEGRAM_BOT_TOKEN");
+    expect(JSON.stringify(p)).not.toContain("undecryptable-tg-sentinel");
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("an authoritative 401 rejection fails with invalid token and exits non-zero", async () => {
+    await writeEncryptedSecret("TELEGRAM_BOT_TOKEN", "invalid-tg-fixture");
+    fetchMock.mockResolvedValue(fakeResponse(401));
+
+    const { runAllProbes } = await import("./doctor-probes.js");
+    const result = await runAllProbes();
+    const p = platformsProbe(result);
+    expect(p.status).toBe("failed");
+    expect(p.evidence).toBe("reachable");
+    expect(p.detail).toContain("invalid token");
+    const { computeExitCode } = await import("./doctor-render.js");
+    expect(computeExitCode(result)).toBe(1);
+  });
+
+  it("telegram 404 counts as an invalid token (credential is part of the getMe route)", async () => {
+    await writeEncryptedSecret("TELEGRAM_BOT_TOKEN", "notfound-tg-fixture");
+    fetchMock.mockResolvedValue(fakeResponse(404));
+
+    const { runAllProbes } = await import("./doctor-probes.js");
+    const result = await runAllProbes();
+    const p = platformsProbe(result);
+    expect(p.status).toBe("failed");
+    expect(p.detail).toContain("invalid token");
+  });
+
+  it("network failures warn as unreachable and never leak a credential from the provider error", async () => {
+    await writeEncryptedSecret("TELEGRAM_BOT_TOKEN", "network-tg-fixture");
+    // The provider error itself carries the credential in its message — it
+    // must be sanitized before any doctor output.
+    fetchMock.mockRejectedValue(new TypeError("fetch failed: https://api.telegram.org/botnetwork-tg-fixture/getMe"));
+
+    const { runAllProbes } = await import("./doctor-probes.js");
+    const result = await runAllProbes();
+    const p = platformsProbe(result);
+    expect(p.status).toBe("warning");
+    expect(p.evidence).toBe("reachable");
+    expect(p.detail).toContain("unreachable");
+    expect(JSON.stringify(p)).not.toContain("network-tg-fixture");
+  });
+
+  it("enforces the 5-second bound with fake time and leaves no pending timer after abort or success", async () => {
+    await writeEncryptedSecret("TELEGRAM_BOT_TOKEN", "timeout-tg-fixture");
+    fetchMock.mockImplementation((_url: unknown, opts: unknown) =>
+      new Promise((_resolve, reject) => {
+        (opts as { signal: AbortSignal }).signal.addEventListener("abort", () =>
+          reject(Object.assign(new Error("The operation was aborted"), { name: "AbortError" })));
+      }));
+
+    vi.useFakeTimers();
+    const { runAllProbes } = await import("./doctor-probes.js");
+
+    const abortedRun = runAllProbes();
+    await vi.advanceTimersByTimeAsync(5000);
+    const abortedResult = await abortedRun;
+    expect(platformsProbe(abortedResult).status).toBe("warning");
+    expect(platformsProbe(abortedResult).detail).toContain("unreachable");
+    expect(vi.getTimerCount()).toBe(0);
+
+    fetchMock.mockResolvedValue(fakeResponse(200));
+    const okResult = await runAllProbes();
+    expect(platformsProbe(okResult).status).toBe("ok");
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("mixes filesystem and reachable outcomes, keeping per-platform detail as the source of truth", async () => {
+    installSecretsKey();
+    writePlaintextSecret("TELEGRAM_BOT_TOKEN", "ENC:" + Buffer.from("mixed-tg-sentinel").toString("base64"));
+    await writeEncryptedSecret("DISCORD_BOT_TOKEN", "mixed-discord-fixture");
+    fetchMock.mockResolvedValue(fakeResponse(200));
+
+    const { runAllProbes } = await import("./doctor-probes.js");
+    const result = await runAllProbes();
+    const p = platformsProbe(result);
+    expect(p.status).toBe("failed");
+    expect(p.evidence).toBe("reachable");
+    expect(p.detail).toContain("telegram: failed (credential unreadable)");
+    expect(p.detail).toContain("discord: ok");
+    expect(fetchMock.mock.calls.length).toBe(1);
+  });
 });
