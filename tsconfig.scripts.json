@@ -5,7 +5,11 @@
         "declaration": false,
         "declarationMap": false,
         "sourceMap": false,
-        "rootDir": "."
+        "rootDir": ".",
+        "allowImportingTsExtensions": true,
+        "types": [
+            "node"
+        ]
     },
     "include": [
         "src/**/*.ts",

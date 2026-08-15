@@ -22,7 +22,8 @@
     "test:extended": "vitest --run --dir src/tests/integration && vitest --run src/tests/e2e src/components/peer-transport/remote-pi-integration.test.ts src/tests/recovery-e2e.test.ts src/tests/sleep-integration.test.ts src/tests/recovery-redesign.test.ts && npm run test:e2e:pi -- --profile full",
     "test:all": "vitest --run",
     "test:report-pipeline-e2e": "tsx scripts/report-pipeline-e2e.ts",
-    "test:abmind-local-probe": "tsx scripts/abmind-local-e2e-probe.ts"
+    "test:abmind-local-probe": "tsx scripts/abmind-local-e2e-probe.ts",
+    "test:e2e:remote-live": "vitest --run scripts/remote-swarm-live-e2e.test.ts"
   },
   "engines": {
     "node": ">=22.19.0"
