@@ -7,8 +7,8 @@
  * filename versions abtars' RPC interpretation; the Pi compatibility policy
  * stays the existing pinned-installation preflight.
  */
-import { join } from "node:path";
-import { realpathSync, lstatSync } from "node:fs";
+import { isAbsolute, join, relative } from "node:path";
+import { accessSync, constants, realpathSync, lstatSync } from "node:fs";
 import { abtarsRoot } from "../../paths.js";
 
 /** Protocol version of the Worker/Orc extension RPC contract. */
@@ -33,8 +33,12 @@ export type WorkerOrcExtensionResolution =
  */
 export function resolveWorkerOrcExtensionPath(): WorkerOrcExtensionResolution {
   try {
-    const templatesRoot = join(abtarsRoot(), "templates");
-    const canonicalTemplates = realpathSync(templatesRoot);
+    const releaseRoot = realpathSync(abtarsRoot());
+    const canonicalTemplates = realpathSync(join(releaseRoot, "templates"));
+    const templatesRelativeToRelease = relative(releaseRoot, canonicalTemplates);
+    if (isAbsolute(templatesRelativeToRelease) || templatesRelativeToRelease.startsWith("..")) {
+      return { ok: false, error: `${WORKER_ORC_EXTENSION_FILE} is outside the active release` };
+    }
     const candidate = join(canonicalTemplates, WORKER_ORC_EXTENSION_DIR, WORKER_ORC_EXTENSION_FILE);
     // The candidate is under the canonical (symlink-resolved) templates root;
     // an escape is only possible if the templates tree itself is a symlink
@@ -44,10 +48,16 @@ export function resolveWorkerOrcExtensionPath(): WorkerOrcExtensionResolution {
     if (stat.isSymbolicLink()) {
       return { ok: false, error: `${WORKER_ORC_EXTENSION_FILE} must be a regular file, not a symlink` };
     }
+    accessSync(candidate, constants.R_OK);
     if (!stat.isFile() || stat.size <= 0) {
       return { ok: false, error: `${WORKER_ORC_EXTENSION_FILE} is missing or not a readable regular file` };
     }
-    return { ok: true, path: realpathSync(candidate) };
+    const canonicalCandidate = realpathSync(candidate);
+    const candidateRelativeToTemplates = relative(canonicalTemplates, canonicalCandidate);
+    if (isAbsolute(candidateRelativeToTemplates) || candidateRelativeToTemplates.startsWith("..")) {
+      return { ok: false, error: `${WORKER_ORC_EXTENSION_FILE} is outside the active release` };
+    }
+    return { ok: true, path: canonicalCandidate };
   } catch {
     return { ok: false, error: `${WORKER_ORC_EXTENSION_FILE} is missing in the active release` };
   }

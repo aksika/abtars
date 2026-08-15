@@ -148,6 +148,78 @@ describe("SupervisedPiCommunication (#1643)", () => {
     expect(fx.channel.channelRead(fx.rootCardId)).toHaveLength(0);
   });
 
+  it("accepts a later Pi generation when the Worker retry generation resets", async () => {
+    const fx = await makeFixture();
+    const firstAttempt = fx.workerStore.getAttempt(fx.attemptId)!;
+    expect(fx.workerStore.failAttempt(fx.attemptId)).toBe(true);
+
+    // #1638 retries create a new Worker attempt whose claim generation starts
+    // at 1, while the single subordinate Pi run advances to generation 2.
+    const oldClaim = fx.piStore.listWorkspaceClaims().find(c => c.runId === fx.runId)!;
+    expect(fx.piStore.releaseWorkspaceClaim({
+      canonicalPath: oldClaim.canonicalPath,
+      runId: fx.runId,
+      generation: fx.generation,
+    })).toMatchObject({ released: true });
+    expect(fx.piStore.casTransition(fx.runId, ["starting"], "interrupted", {
+      resumeCapability: "available",
+    }, fx.generation)).toBe(true);
+    const resumed = fx.piStore.queueSupervisedGeneration({
+      runId: fx.runId,
+      expectedGeneration: fx.generation,
+      newSessionId: "s-resumed",
+      sessionFile: undefined,
+      continuity: "fresh",
+    });
+    expect(resumed.committed).toBe(true);
+    expect(resumed.newGeneration).toBe(fx.generation + 1);
+    const claim = fx.piStore.claimSupervisedGeneration({
+      runId: fx.runId,
+      expectedGeneration: resumed.newGeneration!,
+      canonicalPath: "/tmp/worker-orc-resumed",
+    });
+    expect(claim.kind).toBe("claimed");
+    expect(fx.piStore.casTransition(fx.runId, ["starting"], "running", {}, resumed.newGeneration)).toBe(true);
+
+    const retryAttemptId = `${fx.attemptId}-retry`;
+    fx.workerStore.insertAttempt({
+      id: retryAttemptId,
+      card_id: firstAttempt.card_id,
+      contract_id: firstAttempt.contract_id,
+      ordinal: firstAttempt.ordinal + 1,
+      executor_kind: "pi",
+      executor_id: "pi-coding",
+      status: "pending",
+      started_at: new Date().toISOString(),
+    });
+    expect(fx.workerStore.lifecycleTransition(retryAttemptId, ["pending"], "claimed")).toBe(true);
+    expect(fx.workerStore.lifecycleTransition(retryAttemptId, ["claimed"], "starting")).toBe(true);
+    expect(fx.workerStore.bindExecutorResource({
+      attemptId: retryAttemptId,
+      expectedAttemptGeneration: 1,
+      executorKind: "pi",
+      resourceId: fx.runId,
+      resourceGeneration: resumed.newGeneration!,
+      continuity: "fresh",
+    })).toBe("bound");
+    expect(fx.workerStore.lifecycleTransition(retryAttemptId, ["starting"], "running")).toBe(true);
+
+    const outcome = fx.port.onToolStart(tellStart(fx, {
+      piGeneration: resumed.newGeneration!,
+      toolCallId: "tc-retry",
+    }));
+    expect(outcome).toBe("posted");
+    expect(fx.channel.channelRead(fx.rootCardId)).toHaveLength(1);
+    expect(fx.channel.channelRead(fx.rootCardId)[0]!.source_ref).toContain(":2:tc-retry");
+    expect(fx.workerStore.getAttemptsForCard(firstAttempt.card_id)).toHaveLength(2);
+  });
+
+  it("rejects an overlong tool-call identity instead of truncating its dedup key", async () => {
+    const fx = await makeFixture();
+    expect(fx.port.onToolStart(tellStart(fx, { toolCallId: "x".repeat(129) }))).toBe("ignored");
+    expect(fx.channel.channelRead(fx.rootCardId)).toHaveLength(0);
+  });
+
   it("ignores an event whose Worker attempt is already terminal", async () => {
     const fx = await makeFixture();
     fx.workerStore.failAttempt(fx.attemptId);

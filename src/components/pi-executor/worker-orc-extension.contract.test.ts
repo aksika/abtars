@@ -92,6 +92,14 @@ describe("worker-orc-v1.ts extension contract (#1643)", () => {
     rmSync(tmp, { recursive: true, force: true });
   });
 
+  it("rejects whitespace-only tell_orc input before claiming submission", async () => {
+    const tools = await loadTools();
+    const { definition } = tools.get("tell_orc")!;
+    const toolResult = await definition.execute("tc-space", { message: "   " }, undefined, undefined, {} as never);
+    expect(toolResult.isError).toBe(true);
+    expect(toolResult.details).toEqual({ protocol: 1, kind: "tell_orc", submitted: false });
+  });
+
   it("ask_orc emits exactly one input request titled Ask Orc with NO timeout", async () => {
     const tools = await loadTools();
     const { definition } = tools.get("ask_orc")!;
@@ -111,5 +119,21 @@ describe("worker-orc-v1.ts extension contract (#1643)", () => {
     expect(requests[0]!.opts).toBeUndefined();
     expect(toolResult.content[0]).toEqual({ type: "text", text: "Orc answered; continue with the answer above." });
     expect(toolResult.details).toEqual({ protocol: 1, kind: "ask_orc" });
+  });
+
+  it("rejects whitespace-only ask_orc input without opening the UI", async () => {
+    const tools = await loadTools();
+    const { definition } = tools.get("ask_orc")!;
+    let inputCalls = 0;
+    const toolResult = await definition.execute(
+      "ac-space",
+      { question: "   " },
+      undefined,
+      undefined,
+      { ui: { input: async () => { inputCalls += 1; return "never"; } } } as never,
+    );
+    expect(inputCalls).toBe(0);
+    expect(toolResult.isError).toBe(true);
+    expect(toolResult.details).toEqual({ protocol: 1, kind: "ask_orc", submitted: false });
   });
 });

@@ -2137,6 +2137,11 @@ timeoutHandle = setTimeout(() => {
 
 resultPromise.then(result => {
   if (timeoutHandle) clearTimeout(timeoutHandle);
-  process.stdout.write("LOCAL_SWARM_RESULT=" + JSON.stringify(result) + "\n");
-  process.exit(result.ok ? 0 : 1);
+  // When stdout is a pipe (as it is from the Vitest parent), an immediate
+  // process.exit can discard this final acceptance record before the pipe has
+  // flushed. Keep the marker observable, then force-exit with the intended
+  // status once the write callback confirms the pipe accepted it.
+  process.stdout.write("LOCAL_SWARM_RESULT=" + JSON.stringify(result) + "\n", () => {
+    process.exit(result.ok ? 0 : 1);
+  });
 });

@@ -234,6 +234,25 @@ describe("PiRuntimeHost.launch extensionPaths (#1643)", () => {
     expect(fake.FakeClient.instances).toHaveLength(0);
     rmSync(root, { recursive: true, force: true });
   });
+
+  it("fails BEFORE spawn when an explicit extension path is a symlink", async () => {
+    const root = mkdtempSync(join(tmpdir(), "worc-host-symlink-"));
+    const wsPath = join(root, "ws");
+    mkdirSync(wsPath, { recursive: true });
+    const outside = join(root, "outside.ts");
+    const ext = join(root, "ext.ts");
+    writeFileSync(outside, "export default () => {};\n", "utf-8");
+    symlinkSync(outside, ext);
+    const host = new PiRuntimeHost(makeConfig(wsPath));
+    const outcome = await host.launch({
+      workspaceAlias: "repo-a",
+      envIdentity: { id: "r1", ownerPrincipalId: "u", executionGeneration: 1 },
+      extensionPaths: [ext],
+    });
+    expect(outcome.ok).toBe(false);
+    expect(fake.FakeClient.instances).toHaveLength(0);
+    rmSync(root, { recursive: true, force: true });
+  });
 });
 
 describe("PiExecutor supervised-only extension loading (#1643)", () => {

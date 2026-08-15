@@ -15,7 +15,7 @@
 import { SupervisedPiRpcClient } from "./pi-rpc-client.js";
 import { buildChildEnv, buildTrustArgs, resolveAndValidateWorkspace, validatePersistedSession, validateSessionFile, type PiExecutorConfig, type SessionProof } from "./config.js";
 import { basename } from "node:path";
-import { statSync } from "node:fs";
+import { accessSync, constants, lstatSync } from "node:fs";
 
 /** Memory mode for a Pi child process. `none` disables abmind hooks and
  * correlation env (#1635 R5); the default keeps `/pi run`'s existing env. */
@@ -24,7 +24,8 @@ export type PiMemoryMode = "none" | "abmind";
 /** Bounded pre-spawn check: regular readable file (rejects symlinks). */
 function isRegularReadableFile(path: string): boolean {
   try {
-    const stat = statSync(path);
+    const stat = lstatSync(path);
+    accessSync(path, constants.R_OK);
     return stat.isFile() && !stat.isSymbolicLink() && stat.size > 0;
   } catch {
     return false;

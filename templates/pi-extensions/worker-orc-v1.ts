@@ -23,7 +23,7 @@ const PROTOCOL = 1;
 
 function boundedString(value: unknown, maxLength: number): string {
   const text = typeof value === "string" ? value.trim() : "";
-  return text.length > maxLength ? text.slice(0, maxLength) : text;
+  return text.length > maxLength ? "" : text;
 }
 
 export default function workerOrcExtension(pi: ExtensionAPI): void {
@@ -42,6 +42,13 @@ export default function workerOrcExtension(pi: ExtensionAPI): void {
     }),
     async execute(_toolCallId, { message }) {
       const body = boundedString(message, 1000);
+      if (!body) {
+        return {
+          content: [{ type: "text", text: "Error: message must contain non-whitespace text within 1000 characters." }],
+          details: { protocol: PROTOCOL, kind: "tell_orc", submitted: false },
+          isError: true,
+        };
+      }
       return {
         content: [{ type: "text", text: "Notification submitted to Orc; continue working." }],
         details: { protocol: PROTOCOL, kind: "tell_orc", submitted: true, characters: body.length },
@@ -64,6 +71,13 @@ export default function workerOrcExtension(pi: ExtensionAPI): void {
     }),
     async execute(_toolCallId, { question }, _signal, _onUpdate, ctx) {
       const body = boundedString(question, 4000);
+      if (!body) {
+        return {
+          content: [{ type: "text", text: "Error: question must contain non-whitespace text within 4000 characters." }],
+          details: { protocol: PROTOCOL, kind: "ask_orc", submitted: false },
+          isError: true,
+        };
+      }
       // No timeout is deliberate: the supervised host settles the run through
       // the input-suspension lifecycle upon receiving this request. The
       // post-await result is unreachable under supervision but keeps the

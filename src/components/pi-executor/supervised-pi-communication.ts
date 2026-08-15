@@ -27,6 +27,7 @@ const MAX_TELL_MESSAGE = 1000;
 /** Bounded channel field contract. */
 const MAX_SOURCE_REF = 200;
 const MAX_FROM_LABEL = 80;
+const MAX_TOOL_CALL_ID = 128;
 
 export type SupervisedCommunicationOutcome = "posted" | "duplicate" | "ignored" | "unavailable";
 
@@ -63,7 +64,7 @@ export class SupervisedPiCommunication implements SupervisedPiCommunicationPort 
       return this._onToolStart(input);
     } catch {
       // A communication failure must never throw into the Pi event loop.
-      return "ignored";
+      return input.toolName === TELL_ORC_TOOL_NAME ? "unavailable" : "ignored";
     }
   }
 
@@ -83,12 +84,19 @@ export class SupervisedPiCommunication implements SupervisedPiCommunicationPort 
     if (!run) return "ignored";
     if (run.origin !== "supervised") return "ignored";
     if (run.executionGeneration !== input.piGeneration) return "ignored";
-    if (TERMINAL_RUN_STATUSES.has(run.status)) return "ignored";
+    if (TERMINAL_RUN_STATUSES.has(run.status) || (run.status !== "starting" && run.status !== "running")) return "ignored";
 
     // 3. Live Worker attempt binding at the exact generation, not terminal.
     const attempt = this.workerStore.getAttemptForExecutorResource("pi", input.runId, input.piGeneration);
-    if (!attempt || attempt.generation !== input.piGeneration) return "ignored";
-    if (this.workerStore.isAttemptTerminal(attempt.lifecycle)) return "ignored";
+    if (!attempt) return "ignored";
+    // Worker claim generations are scoped to each worker_attempt and normally
+    // restart at 1. Pi execution generations belong to the single subordinate
+    // run and increment across #1638 retries, so they must not be compared
+    // directly. The reverse binding lookup above is the exact cross-store
+    // generation fence.
+    const binding = this.workerStore.getExecutorResourceBinding(attempt.id);
+    if (!binding || binding.resourceId !== input.runId || binding.resourceGeneration !== input.piGeneration) return "ignored";
+    if (attempt.lifecycle !== "starting" && attempt.lifecycle !== "running") return "ignored";
 
     // 4. Child card lineage: the attempt's card must be a W child and resolve
     //    a root project card.
@@ -108,8 +116,11 @@ export class SupervisedPiCommunication implements SupervisedPiCommunicationPort 
 
     // 6. Durable once-only post to the ROOT project card. Worker identity is
     //    typed channel provenance, not an ad-hoc text prefix.
-    const sourceRef = `pi-orc:v${WORKER_ORC_EXTENSION_PROTOCOL}:${input.runId}:${input.piGeneration}:${input.toolCallId}`
-      .slice(0, MAX_SOURCE_REF);
+    if (typeof input.toolCallId !== "string") return "ignored";
+    const toolCallId = input.toolCallId.trim();
+    if (!toolCallId || toolCallId.length > MAX_TOOL_CALL_ID) return "ignored";
+    const sourceRef = `pi-orc:v${WORKER_ORC_EXTENSION_PROTOCOL}:${input.runId}:${input.piGeneration}:${toolCallId}`;
+    if (sourceRef.length > MAX_SOURCE_REF) return "ignored";
     return channelPostOnce({
       cardId: rootCardId,
       from: `Worker:${String(attempt.card_id).slice(0, MAX_FROM_LABEL)}`,
