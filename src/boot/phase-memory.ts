@@ -116,8 +116,16 @@ async function buildLocalClient(mod: typeof import("abmind"), socketPath?: strin
   if (socketPath) {
     const { AbmindClient, LocalTransport } = mod;
     const client = new AbmindClient(new LocalTransport(socketPath));
-    await client.negotiate();
-    return client;
+    try {
+      await client.negotiate();
+      return client;
+    } catch (err) {
+      // The client owns a Unix socket before negotiation succeeds — close it
+      // so a failed negotiation cannot leak socket/reconnect resources.
+      // Reused by `abtars doctor` through createMemoryRuntimeFromEndpoint.
+      await client.close().catch(() => {});
+      throw err;
+    }
   }
   const { getMemoryClient } = mod;
   const mem = await getMemoryClient(true) as import("abmind").AbmindClient;

@@ -14,6 +14,32 @@ const pgrepRef = vi.hoisted(() => ({ current: "" }));
 const spawnRef = vi.hoisted(() => ({ current: [] as Array<{ cmd: string; behavior: () => any }> }));
 const origSpawnRef = vi.hoisted(() => ({ current: null as any }));
 
+// #1662: the mind probe's endpoint boundary (resolver + factory) is mocked so
+// every runAllProbes() call stays hermetic — no real abmind package discovery,
+// daemon negotiation, or WSS network attempt. The mock factories re-register
+// per resetModules(), so the captured module references (and their error
+// classes) are always the fresh instances the probe sees.
+const mindEndpointRef = vi.hoisted(() => ({ current: null as any }));
+const mindFactoryRef = vi.hoisted(() => ({ current: null as any }));
+const phaseMemoryRef = vi.hoisted(() => ({ current: null as any }));
+
+vi.mock("../../boot/phase-memory.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../../boot/phase-memory.js")>();
+  phaseMemoryRef.current = actual;
+  return {
+    ...actual,
+    createMemoryRuntimeFromEndpoint: (endpoint: unknown, home: string) => mindFactoryRef.current(endpoint, home),
+  };
+});
+
+vi.mock("../../components/abmind-endpoint-config.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../../components/abmind-endpoint-config.js")>();
+  return {
+    ...actual,
+    resolveAbmindEndpoint: (configDir: string) => mindEndpointRef.current(configDir),
+  };
+});
+
 vi.mock("node:os", async (importOriginal) => {
   const actual = await importOriginal<typeof import("node:os")>();
   return { ...actual, homedir: () => homedirRef.current };
@@ -49,6 +75,12 @@ beforeEach(() => {
   mkdirSync(join(tmpDir, "kanban"), { recursive: true });
   process.env["ABTARS_HOME"] = tmpDir;
   spawnRef.current = [];
+  // #1662 defaults: absent-config local default endpoint, and the factory
+  // rejects as if no abmind package were installed — deterministic, no real
+  // daemon interaction for unrelated probes. Individual tests override. The
+  // error class is resolved lazily so it is the fresh post-reset instance.
+  mindEndpointRef.current = () => ({ mode: "local", source: "default" });
+  mindFactoryRef.current = async () => { throw new phaseMemoryRef.current.AbmindModuleMissingError(); };
   vi.resetModules();
 });
 
@@ -484,5 +516,171 @@ describe("doctor platform probes use effective credentials (#1258)", () => {
     expect(p.detail).toContain("telegram: failed (credential unreadable)");
     expect(p.detail).toContain("discord: ok");
     expect(fetchMock.mock.calls.length).toBe(1);
+  });
+});
+
+describe("doctor mind probe is endpoint health, not package availability (#1662)", () => {
+  type MindResult = { status: string; evidence: string; detail: string; remediation?: string };
+
+  async function mindProbe(): Promise<MindResult> {
+    const { runAllProbes } = await import("./doctor-probes.js");
+    const result = await runAllProbes();
+    const probe = result.layers.soul.find(r => r.name === "mind");
+    if (!probe) throw new Error("mind probe missing");
+    return probe;
+  }
+
+  function recallRuntime(overrides: Record<string, unknown> = {}): any {
+    const supports = (capability: string) => capability === "recall";
+    return { supports, ...overrides };
+  }
+
+  function fakeLocalClient(): { close: ReturnType<typeof vi.fn> } {
+    return { close: vi.fn().mockResolvedValue(undefined) };
+  }
+
+  it("a rejected endpoint factory renders mind as failed with no green line (escaped regression)", async () => {
+    mindFactoryRef.current = async () => { throw new phaseMemoryRef.current.MemoryEndpointUnavailableError("endpoint_unavailable", "fixture"); };
+    const { runAllProbes, } = await import("./doctor-probes.js");
+    const result = await runAllProbes();
+    const mind = result.layers.soul.find(r => r.name === "mind")!;
+
+    expect(mind.status).toBe("failed");
+    expect(mind.evidence).toBe("reachable");
+    expect(mind.detail).toBe("abmind endpoint unavailable");
+
+    const { renderHuman } = await import("./doctor-render.js");
+    const human = renderHuman(result);
+    const mindLine = human.split("\n").find(l => l.includes("mind")) ?? "";
+    expect(mindLine).toContain("✗ mind");
+    expect(mindLine).not.toContain("✓ mind");
+    expect(mindLine).toContain("[reachable]");
+  });
+
+  it("a negotiated recall-capable local endpoint reports endpoint readiness and closes the client once", async () => {
+    const client = fakeLocalClient();
+    mindFactoryRef.current = async () => ({
+      mode: "local",
+      client,
+      runtime: recallRuntime(),
+      abmindModule: null,
+    });
+
+    const mind = await mindProbe();
+    expect(mind.status).toBe("ok");
+    expect(mind.evidence).toBe("runtime");
+    expect(mind.detail).toBe("abmind endpoint ready (local)");
+    expect(client.close).toHaveBeenCalledTimes(1);
+  });
+
+  it("negotiation without the recall capability maps to runtime incompatibility and still closes", async () => {
+    const client = fakeLocalClient();
+    mindFactoryRef.current = async () => ({
+      mode: "local",
+      client,
+      runtime: recallRuntime({ supports: () => false }),
+      abmindModule: null,
+    });
+
+    const mind = await mindProbe();
+    expect(mind.status).toBe("failed");
+    expect(mind.evidence).toBe("runtime");
+    expect(mind.detail).toBe("abmind endpoint incompatible");
+    expect(client.close).toHaveBeenCalledTimes(1);
+  });
+
+  it("MEMORY=none skips without resolving the endpoint, importing, or connecting", async () => {
+    process.env["MEMORY"] = "none";
+    const resolveSpy = vi.fn();
+    mindEndpointRef.current = resolveSpy;
+    const factorySpy = vi.fn();
+    mindFactoryRef.current = factorySpy;
+
+    try {
+      const mind = await mindProbe();
+      expect(mind.status).toBe("skipped");
+      expect(mind.evidence).toBe("configuration");
+      expect(mind.detail).toBe("memory disabled");
+      expect(resolveSpy).not.toHaveBeenCalled();
+      expect(factorySpy).not.toHaveBeenCalled();
+    } finally {
+      delete process.env["MEMORY"];
+    }
+  });
+
+  it("MEMORY from the .env file disables the probe while process.env wins over it", async () => {
+    // .env-only: memory disabled → skipped.
+    writeFileSync(join(tmpDir, "config", ".env"), "MEMORY=none\n");
+    const factorySpy = vi.fn();
+    mindFactoryRef.current = factorySpy;
+    expect((await mindProbe()).status).toBe("skipped");
+
+    // process.env override: memory expected → probe proceeds (no skip).
+    process.env["MEMORY"] = "abmind";
+    const mind = await mindProbe();
+    expect(mind.status).not.toBe("skipped");
+    expect(factorySpy).toHaveBeenCalled();
+    delete process.env["MEMORY"];
+  });
+
+  it("invalid endpoint configuration maps to a bounded configuration failure", async () => {
+    // Fresh post-reset import — the same class instance the probe's instanceof sees.
+    const { AbmindEndpointConfigError } = await import("../../components/abmind-endpoint-config.js");
+    mindEndpointRef.current = () => {
+      throw new AbmindEndpointConfigError(
+        "credentials_unsafe",
+        "/home/user/.abtars/config/abmind.json is a symlink",
+      );
+    };
+    const factorySpy = vi.fn();
+    mindFactoryRef.current = factorySpy;
+
+    const mind = await mindProbe();
+    expect(mind.status).toBe("failed");
+    expect(mind.evidence).toBe("configuration");
+    expect(mind.detail).toBe("abmind endpoint config rejected (credentials_unsafe)");
+    expect(factorySpy).not.toHaveBeenCalled();
+    // The raw reason (credential paths) must never escape into output.
+    expect(JSON.stringify(mind)).not.toContain("symlink");
+    expect(JSON.stringify(mind)).not.toContain("/home/user");
+  });
+
+  it("a missing local abmind package maps to an executable failure, not a skip", async () => {
+    mindFactoryRef.current = async () => { throw new phaseMemoryRef.current.AbmindModuleMissingError(); };
+
+    const mind = await mindProbe();
+    expect(mind.status).toBe("failed");
+    expect(mind.evidence).toBe("executable");
+    expect(mind.detail).toBe("abmind package unavailable");
+  });
+
+  it("a wss descriptor rides the shared factory path without a local module and reports wss readiness", async () => {
+    const wssEndpoint = {
+      mode: "wss",
+      source: "explicit",
+      profileName: "primary",
+      profile: {
+        url: "wss://memory.example.invalid/ws",
+        peerId: "abtars-test",
+        signingKeyFile: "/tmp/key.pem",
+        serverCertSha256: "a".repeat(64),
+      },
+    };
+    mindEndpointRef.current = () => wssEndpoint;
+    const client = fakeLocalClient();
+    const factorySpy = vi.fn().mockResolvedValue({
+      mode: "wss",
+      client,
+      runtime: recallRuntime(),
+      abmindModule: null,
+    });
+    mindFactoryRef.current = factorySpy;
+
+    const mind = await mindProbe();
+    expect(mind.status).toBe("ok");
+    expect(mind.evidence).toBe("runtime");
+    expect(mind.detail).toBe("abmind endpoint ready (wss)");
+    expect(factorySpy).toHaveBeenCalledWith(wssEndpoint, tmpDir);
+    expect(client.close).toHaveBeenCalledTimes(1);
   });
 });

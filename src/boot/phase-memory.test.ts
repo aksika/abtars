@@ -256,4 +256,27 @@ describe("createMemoryRuntimeFromEndpoint", () => {
     expect(closeSpy).toHaveBeenCalled();
     closeSpy.mockRestore();
   });
+
+  it("an explicit-local negotiation failure closes the partial client exactly once", async () => {
+    const close = vi.fn().mockResolvedValue(undefined);
+    const client = {
+      negotiate: vi.fn().mockRejectedValue(new Error("socket connect failed")),
+      close,
+    };
+    class FakeTransport {}
+    class FakeAbmindClient {
+      constructor() { return client; }
+    }
+    const fakeModule = {
+      AbmindClient: FakeAbmindClient,
+      LocalTransport: FakeTransport,
+    };
+    mockLoadAbmind.mockResolvedValue(fakeModule);
+
+    const endpoint = { mode: "local", source: "explicit", socketPath: join(factoryHome, "memory.sock") };
+    await expect(createMemoryRuntimeFromEndpoint(endpoint, factoryHome)).rejects.toThrow("socket connect failed");
+
+    expect(client.negotiate).toHaveBeenCalledTimes(1);
+    expect(close).toHaveBeenCalledTimes(1);
+  });
 });

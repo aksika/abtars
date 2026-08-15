@@ -11,6 +11,8 @@ import { describeSoulInputs } from "../../components/soul-input-manifest.js";
 import { readSnapshot } from "../../components/runtime-health-snapshot.js";
 import { readSecretResult } from "../../components/secrets.js";
 import { KANBAN_STALE_CANDIDATE_MS } from "../../components/executor-progress.js";
+import { createMemoryRuntimeFromEndpoint, AbmindModuleMissingError, MemoryEndpointUnavailableError, type MemoryRuntimeFactoryResult } from "../../boot/phase-memory.js";
+import { resolveAbmindEndpoint, AbmindEndpointConfigError, type ResolvedAbmindEndpoint } from "../../components/abmind-endpoint-config.js";
 import type { ProbeResult, ProbeStatus, EvidenceLevel, DoctorOutputV2, SnapshotTrust, RuntimeHealthSnapshotV1 } from "./doctor-types.js";
 import { truncate } from "./doctor-types.js";
 
@@ -563,14 +565,59 @@ async function probeSoul(): Promise<ProbeResult> {
   return { name: "soul", status, evidence: "filesystem", detail: truncate(issues.join("; ")), ms: 0 };
 }
 
+// #1662: package availability is not service health. The mind probe follows
+// boot's production memory boundary (phase-memory): effective MEMORY provider,
+// the configured endpoint (local or WSS), negotiation, and the required recall
+// capability. A stopped daemon renders as failed — never a green "abmind
+// loaded (in-process)" line. No daemon is started/restarted here, no service
+// manager is invoked, and no SQLite or in-process memory owner is opened.
 async function probeMind(): Promise<ProbeResult> {
+  // Non-secret MEMORY provider: operator process.env wins over the .env file,
+  // matching boot's effective resolution. Any value other than "none" means
+  // memory is expected (phase-config: memoryEnabled = provider !== "none").
+  const env = readEnv();
+  const memoryProvider = process.env["MEMORY"] ?? env.get("MEMORY");
+  if (memoryProvider === "none") {
+    return { name: "mind", status: "skipped", evidence: "configuration", detail: "memory disabled", ms: 0 };
+  }
+
+  const configDir = join(home, "config");
+  let endpoint: ResolvedAbmindEndpoint;
   try {
-    const { loadAbmind } = await import("../../utils/abmind-lazy.js");
-    const mod = await loadAbmind();
-    if (!mod) return { name: "mind", status: "skipped", evidence: "runtime", detail: "abmind not installed", ms: 0 };
-    return { name: "mind", status: "ok", evidence: "runtime", detail: "abmind loaded (in-process)", ms: 0 };
-  } catch {
-    return { name: "mind", status: "skipped", evidence: "runtime", detail: "abmind load failed", ms: 0 };
+    endpoint = resolveAbmindEndpoint(configDir);
+  } catch (err) {
+    // Bounded configuration failure: the raw reason can carry credential
+    // paths or permission detail — only the typed reason code escapes.
+    const code = err instanceof AbmindEndpointConfigError ? err.code : "config_invalid";
+    return { name: "mind", status: "failed", evidence: "configuration", detail: `abmind endpoint config rejected (${code})`, ms: 0 };
+  }
+
+  let factoryResult: MemoryRuntimeFactoryResult | null = null;
+  try {
+    factoryResult = await createMemoryRuntimeFromEndpoint(endpoint, home);
+    if (!factoryResult.runtime.supports("recall")) {
+      return { name: "mind", status: "failed", evidence: "runtime", detail: "abmind endpoint incompatible", ms: 0 };
+    }
+    return { name: "mind", status: "ok", evidence: "runtime", detail: `abmind endpoint ready (${factoryResult.mode})`, ms: 0 };
+  } catch (err) {
+    if (err instanceof AbmindModuleMissingError) {
+      return { name: "mind", status: "failed", evidence: "executable", detail: "abmind package unavailable", remediation: "Install abmind: npm install -g abmind", ms: 0 };
+    }
+    if (err instanceof MemoryEndpointUnavailableError) {
+      return { name: "mind", status: "failed", evidence: "reachable", detail: "abmind endpoint unavailable", ms: 0 };
+    }
+    // Negotiation succeeded but the endpoint lacked the core recall path — the
+    // factory's capability assertion throws this stable, bounded marker.
+    if (err instanceof Error && err.message.includes("negotiation did not advertise core memory capabilities")) {
+      return { name: "mind", status: "failed", evidence: "runtime", detail: "abmind endpoint incompatible", ms: 0 };
+    }
+    return { name: "mind", status: "failed", evidence: "reachable", detail: "abmind endpoint unavailable", ms: 0 };
+  } finally {
+    // Doctor owns no persistent memory connection — release whatever the
+    // factory left open so no socket/reconnect resources survive the probe.
+    if (factoryResult) {
+      try { await factoryResult.client.close(); } catch { /* best-effort */ }
+    }
   }
 }
 
