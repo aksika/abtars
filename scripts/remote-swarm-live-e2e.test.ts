@@ -79,6 +79,7 @@ function makeProfile(overrides: Partial<RemoteSwarmLiveProfileV1> = {}, root = t
     requester,
     receiver,
     receiverPeerName: "peer-r",
+    requesterPeerName: "peer-q",
     receiverWorkspaceAlias: "e2e-disposable",
     evidenceRoot: join(root, "evidence"),
     ...overrides,

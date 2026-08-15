@@ -1200,7 +1200,7 @@ export async function runFull(ctx: ScenarioContext): Promise<RemoteSwarmScenario
     ctx.tracked.requestIds.push(requestId);
     const alias = ctx.profile.receiverWorkspaceAlias;
 
-    const receiverPreflight = await ctx.probes.run({ version: 1, role: "receiver", runId: ctx.runId, command: "preflight", peer: ctx.profile.receiverPeerName, requirePiAlias: alias }, 120_000);
+    const receiverPreflight = await ctx.probes.run({ version: 1, role: "receiver", runId: ctx.runId, command: "preflight", peer: ctx.profile.requesterPeerName, requirePiAlias: alias }, 120_000);
     if (receiverPreflight.kind !== "preflight") throw new Error("receiver preflight probe returned unexpected kind");
     if (!receiverPreflight.value.capabilities.piExecutorConfigured || !receiverPreflight.value.capabilities.workspaceAliasPresent) {
       throw new Error("receiver lacks the disposable workspace alias or Pi executor configuration");
@@ -1400,7 +1400,7 @@ async function restartReceiver(ctx: ScenarioContext): Promise<void> {
   ], { timeoutMs: 300_000, cwd: node.workdir });
   if (!result.ok && !result.timedOut) throw new Error(`abtars restart failed on receiver: ${result.stderr.slice(0, 300)}`);
   await pollUntil("receiver-started", async () => {
-    const preflight = await ctx.probes.run({ version: 1, role: "receiver", runId: ctx.runId, command: "preflight", peer: ctx.profile.receiverPeerName }, 120_000);
+    const preflight = await ctx.probes.run({ version: 1, role: "receiver", runId: ctx.runId, command: "preflight", peer: ctx.profile.requesterPeerName }, 120_000);
     if (preflight.kind !== "preflight") return null;
     if (!preflight.value.bridge.running || !preflight.value.bridge.heartbeatFresh) return null;
     return preflight;
@@ -1623,7 +1623,7 @@ async function preflightNodes(ctx: ScenarioContext): Promise<void> {
   }, 120_000);
   const receiver = await ctx.probes.run({
     version: 1, role: "receiver", runId: ctx.runId, command: "preflight",
-    expectedCommit: ctx.expectedCommit, peer: ctx.profile.receiverPeerName,
+    expectedCommit: ctx.expectedCommit, peer: ctx.profile.requesterPeerName,
   }, 120_000);
   if (requester.kind !== "preflight" || receiver.kind !== "preflight") throw new Error("preflight probes returned unexpected kinds");
   const rq = requester.value;

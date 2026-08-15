@@ -77,6 +77,7 @@ export interface RemoteSwarmLiveProfileV1 {
   requester: LiveNodeProfileV1;
   receiver: LiveNodeProfileV1;
   receiverPeerName: string;
+  requesterPeerName: string;
   receiverWorkspaceAlias: string;
   evidenceRoot: string;
   deadlines?: { foundationMinutes?: number; fullMinutes?: number };
@@ -561,11 +562,13 @@ export function isSafeArgvToken(token: string): boolean {
 export function validateProfile(raw: unknown): ValidationResult<RemoteSwarmLiveProfileV1> {
   const obj = expectObject(raw);
   if (!obj.ok) return obj;
-  const allow = rejectUnknownFields(obj.value, ["version", "requester", "receiver", "receiverPeerName", "receiverWorkspaceAlias", "evidenceRoot", "deadlines", "tui"]);
+  const allow = rejectUnknownFields(obj.value, ["version", "requester", "receiver", "receiverPeerName", "requesterPeerName", "receiverWorkspaceAlias", "evidenceRoot", "deadlines", "tui"]);
   if (!allow.ok) return allow;
   if (obj.value.version !== 1) return fail("unsupported profile version (expected 1)");
   const receiverPeerName = expectString(obj.value.receiverPeerName, "receiverPeerName", { min: 1, max: CONTRACT_BOUNDS.peerName });
   if (!receiverPeerName.ok) return receiverPeerName;
+  const requesterPeerName = expectString(obj.value.requesterPeerName, "requesterPeerName", { min: 1, max: CONTRACT_BOUNDS.peerName });
+  if (!requesterPeerName.ok) return requesterPeerName;
   const receiverWorkspaceAlias = expectString(obj.value.receiverWorkspaceAlias, "receiverWorkspaceAlias", { min: 1, max: CONTRACT_BOUNDS.workspaceAlias, pattern: /^[a-z][a-z0-9_.\-]{0,63}$/ });
   if (!receiverWorkspaceAlias.ok) return receiverWorkspaceAlias;
   const evidenceRoot = expectString(obj.value.evidenceRoot, "evidenceRoot", { min: 1, max: 512 });
@@ -621,6 +624,7 @@ export function validateProfile(raw: unknown): ValidationResult<RemoteSwarmLiveP
       requester: requester.value,
       receiver: receiver.value,
       receiverPeerName: receiverPeerName.value,
+      requesterPeerName: requesterPeerName.value,
       receiverWorkspaceAlias: receiverWorkspaceAlias.value,
       evidenceRoot: evidenceRoot.value,
       deadlines: Object.keys(deadlines).length > 0 ? deadlines : undefined,
