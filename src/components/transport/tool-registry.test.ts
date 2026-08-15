@@ -732,6 +732,16 @@ describe("send_document — #1663 unattended scheduled execution denial", () => 
     expect(sendSpy).not.toHaveBeenCalled();
   });
 
+  it("denies delivery when scheduled provenance is unverified", async () => {
+    const result = await executeToolCall("send_document", { path: "/tmp/report.md" }, {
+      userId: "test",
+      authorizationMode: "unverified",
+    });
+    const parsed = JSON.parse(result) as { reason?: string };
+    expect(parsed.reason).toBe("unattended_scheduled_delivery");
+    expect(sendSpy).not.toHaveBeenCalled();
+  });
+
   it("a forged authorizationMode tool argument cannot override the trusted context", async () => {
     const result = await executeToolCall("send_document", {
       path: "/tmp/report.md",
@@ -762,4 +772,3 @@ describe("send_document — #1663 unattended scheduled execution denial", () => 
     expect(sendSpy).toHaveBeenCalledOnce();
   });
 });
-

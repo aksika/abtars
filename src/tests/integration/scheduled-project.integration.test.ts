@@ -210,7 +210,7 @@ describe("scheduled project orchestration (#1516)", () => {
   // never unlock delivery — the root is not done and no platform send can
   // happen, even under repeated polling.
   it("never delivers when the Orc decision is blocked instead of accepted", async () => {
-    const rootId = board.kanbanEnqueue("blocked-project", "agent", undefined, { type: "O", max_agents: 2 });
+    const rootId = board.kanbanEnqueue("blocked-project", "agent", undefined, { type: "O", maxAgents: 2 });
     board.kanbanRunning(rootId);
     const store = new reviewStoreMod.ProjectReviewStore();
     reviewStoreMod.initializeProjectSupervision(store, rootId, "contract-blocked");

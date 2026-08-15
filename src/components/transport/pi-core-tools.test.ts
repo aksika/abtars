@@ -274,6 +274,15 @@ describe("createPiAgentTools", () => {
       expect(tools.find(t => t.name === "send_document")).toBeUndefined();
     });
 
+    it("hides send_document when scheduled provenance is unverified", () => {
+      const tools = createPiAgentTools(makeContext({
+        sandboxPolicy: ownerWithSend(),
+        sessionType: "T",
+        authorizationMode: "unverified",
+      }));
+      expect(tools.find(t => t.name === "send_document")).toBeUndefined();
+    });
+
     it("keeps send_document for an interactive execution with the same sandbox", () => {
       const tools = createPiAgentTools(makeContext({
         sandboxPolicy: ownerWithSend(),

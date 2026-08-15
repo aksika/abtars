@@ -36,8 +36,9 @@ export interface ToolExecutionContext {
   sessionType?: import("../spin-types.js").SessionType;
   /** #1552: late-bound memory-tool dependencies (runtime + quota). */
   memoryToolDeps?: import("../memory-store-quota.js").MemoryToolDependenciesHolder;
-  /** #1629: trusted tool authorization mode (from Spin via the Pi tool context).
-   *  Never read from tool arguments — missing values fail closed to interactive. */
+  /** #1629/#1663: trusted tool authorization mode (from Spin via the Pi tool
+   *  context). Never read from tool arguments. `unverified` is reserved for a
+   *  card-backed execution whose scheduled provenance could not be confirmed. */
   authorizationMode?: import("../action-gate.js").ToolAuthorizationMode;
   /** #1660: active execution id — sealed handles bind to it and expire with it. */
   executionId?: string;
@@ -69,10 +70,13 @@ export interface ToolAvailabilityContext {
  * select or override it.
  */
 export function checkToolAvailability(toolName: string, context: ToolAvailabilityContext): import("../tool-sandbox.js").CheckResult {
-  if (toolName === "send_document" && context.authorizationMode === "unattended-task") {
+  if (
+    toolName === "send_document"
+    && (context.authorizationMode === "unattended-task" || context.authorizationMode === "unverified")
+  ) {
     return {
       allowed: false,
-      reason: "Tool 'send_document' is unavailable during unattended scheduled execution; delivery is owned by scheduled settlement",
+      reason: "Tool 'send_document' is unavailable during unattended or unverified scheduled execution; delivery is owned by scheduled settlement",
     };
   }
   return { allowed: true };
@@ -1036,7 +1040,7 @@ export async function executeToolCall(name: string, args: Record<string, unknown
   // never touch delivery claims, delivery_ready, card status, or settlement.
   const availability = checkToolAvailability(name, context ?? {});
   if (!availability.allowed) {
-    auditDeny(name, undefined, "unattended-task", availability.reason!);
+    auditDeny(name, undefined, context?.authorizationMode ?? "unknown", availability.reason!);
     return JSON.stringify({
       error: `Tool '${name}' is not available in this session`,
       reason: "unattended_scheduled_delivery",

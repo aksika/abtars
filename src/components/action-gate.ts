@@ -37,12 +37,14 @@ export interface AuthRequest {
 export type NotifyFn = (text: string, buttons: Array<{ text: string; data: string }>) => Promise<void>;
 
 /**
- * #1629: trusted tool-authorization mode derived by Spin from durable Kanban
- * provenance. `unattended-task` is only ever set by bridge code for execution
- * whose durable root card has `source === "task"`; every other path fails
- * closed to `interactive`. The model can never supply or override it.
+ * #1629/#1663: trusted tool-authorization mode derived by Spin from durable
+ * Kanban provenance. `unattended-task` is only ever set by bridge code for an
+ * execution whose durable root card has `source === "task"`. A card-backed
+ * execution whose provenance cannot be verified is `unverified`; it must not
+ * receive unattended grants or non-idempotent scheduled-delivery access. The
+ * model can never supply or override the mode.
  */
-export type ToolAuthorizationMode = "interactive" | "unattended-task";
+export type ToolAuthorizationMode = "interactive" | "unattended-task" | "unverified";
 
 export interface AuthRequestOptions {
   /** Defaults to interactive behavior when omitted or invalid. */

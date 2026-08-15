@@ -1910,26 +1910,29 @@ export class Spin {
 }
 
 /**
- * #1629: Resolve the trusted tool-authorization mode for the current Spin
- * execution from durable Kanban provenance. Only a successfully read durable
- * root with `source === "task"` selects `unattended-task`; missing cards,
- * unreadable/cyclic/deep ancestry, missing or unknown source all fail closed
- * to `interactive`. The result is per execution and never stored on the
- * reusable session.
+ * #1629/#1663: Resolve the trusted tool-authorization mode for the current
+ * Spin execution from durable Kanban provenance. Only a successfully read
+ * durable root with `source === "task"` selects `unattended-task`; a card-backed
+ * execution with missing or unreadable/cyclic/deep ancestry is `unverified`.
+ * A known non-task root and a prompt-only execution remain `interactive`. The
+ * result is per execution and never stored on the reusable session.
  */
 export function resolveToolAuthorizationMode(cardId: number | undefined): import("./action-gate.js").ToolAuthorizationMode {
   if (cardId === undefined) return "interactive";
   try {
     const rootId = resolveRootId(cardId);
-    if (rootId === undefined) return "interactive";
-    return kanbanGetCard(rootId)?.source === "task"
+    if (rootId === undefined) return "unverified";
+    const rootCard = kanbanGetCard(rootId);
+    if (!rootCard) return "unverified";
+    return rootCard.source === "task"
       ? "unattended-task"
       : "interactive";
   } catch (err) {
     // A provenance read failure must never turn into unattended authority or
-    // escape before Spin's execution try/catch. Fail closed for this run.
+    // allow a non-idempotent delivery side effect. Keep the run alive with an
+    // explicitly unverified mode so restricted tools fail closed.
     logWarn(TAG, `Unable to resolve tool authorization provenance for card ${cardId}: ${err instanceof Error ? err.message : String(err)}`);
-    return "interactive";
+    return "unverified";
   }
 }
 

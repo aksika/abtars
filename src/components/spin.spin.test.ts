@@ -1202,28 +1202,28 @@ describe("spin() — #1629 tool authorization provenance", () => {
     expect(contexts[0]?.authorizationMode).toBe("interactive");
   });
 
-  it("missing root card → interactive (fails closed)", async () => {
+  it("missing root card → unverified (fails closed for restricted side effects)", async () => {
     const contexts = captureRuntime();
     const cardId = kanbanEnqueue("ghost card", "task");
     _cards.delete(cardId); // root unreadable
     await spin1629.spin({ type: "T", cardId, prompt: "run", await: true, userId: "aksika", platform: "background" });
-    expect(contexts[0]?.authorizationMode).toBe("interactive");
+    expect(contexts[0]?.authorizationMode).toBe("unverified");
   });
 
-  it("unreadable/cyclic ancestry → interactive (fails closed)", async () => {
+  it("unreadable/cyclic ancestry → unverified (fails closed for restricted side effects)", async () => {
     const contexts = captureRuntime();
     resolveRootImpl = () => undefined;
     const cardId = kanbanEnqueue("cyclic card", "task");
     await spin1629.spin({ type: "T", cardId, prompt: "run", await: true, userId: "aksika", platform: "background" });
-    expect(contexts[0]?.authorizationMode).toBe("interactive");
+    expect(contexts[0]?.authorizationMode).toBe("unverified");
   });
 
-  it("provenance resolver failure → interactive (fails closed)", async () => {
+  it("provenance resolver failure → unverified (fails closed for restricted side effects)", async () => {
     const contexts = captureRuntime();
     resolveRootImpl = () => { throw new Error("kanban read failed"); };
     const cardId = kanbanEnqueue("unreadable card", "task");
     await spin1629.spin({ type: "T", cardId, prompt: "run", await: true, userId: "aksika", platform: "background" });
-    expect(contexts[0]?.authorizationMode).toBe("interactive");
+    expect(contexts[0]?.authorizationMode).toBe("unverified");
   });
 
   it("unknown root source → interactive", async () => {
