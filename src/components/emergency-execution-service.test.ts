@@ -241,6 +241,23 @@ describe("EmergencyExecutionService", () => {
       expect(h.service.status().kind).toBe("ready");
     });
 
+    it("rejects a concurrent turn that races before the running state is observed", async () => {
+      let resolvePrompt!: (value: string) => void;
+      const h = makeHarness({}, { sendPrompt: vi.fn(() => new Promise<string>(r => { resolvePrompt = r; })) });
+      await activate(h);
+
+      // Both requests observe ready before either serialized claim runs.
+      const first = h.service.handleInbound(makeMsg({ text: "first" }), h.adapter);
+      const second = h.service.handleInbound(makeMsg({ text: "second" }), h.adapter);
+      await vi.waitFor(() => expect(h.service.status().kind).toBe("running"));
+      resolvePrompt("done");
+      await Promise.all([first, second]);
+
+      expect(h.transport.sendPrompt).toHaveBeenCalledTimes(1);
+      expect(h.sent.some(s => s.text.includes("already running"))).toBe(true);
+      expect(h.service.status().kind).toBe("ready");
+    });
+
     it("unrelated slash commands pass through", async () => {
       const h = makeHarness();
       const result = await h.service.handleInbound(makeMsg({ text: "/status" }), h.adapter);

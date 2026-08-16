@@ -33,6 +33,22 @@ export class AcpRawClient {
       stdio: ["pipe", "pipe", "pipe"],
       env: this.env,
     });
+    const child = this.child;
+    let childFailureHandled = false;
+
+    // A failed spawn emits `error` without guaranteeing an `exit` event.
+    // Reject pending requests and notify the owner so raw-mode activation does
+    // not leave an unhandled ChildProcess error behind.
+    child.once("error", (error) => {
+      if (childFailureHandled) return;
+      childFailureHandled = true;
+      const normalized = error instanceof Error ? error : new Error(String(error));
+      logWarn(TAG, `CLI failed to spawn: ${normalized.message}`);
+      for (const [, p] of this.pending) p.reject(normalized);
+      this.pending.clear();
+      if (this.child === child) this.child = null;
+      this.onExit?.(null, null);
+    });
 
     this.child.stdout!.on("data", (d: Buffer) => {
       this.buf += d.toString();
@@ -58,12 +74,14 @@ export class AcpRawClient {
       logDebug(TAG, `[stderr] ${d.toString().trim()}`);
     });
 
-    this.child.on("exit", (code, signal) => {
+    child.on("exit", (code, signal) => {
+      if (childFailureHandled) return;
+      childFailureHandled = true;
       logWarn(TAG, `CLI exited (code=${code}, signal=${signal})`);
       // Reject all pending
       for (const [, p] of this.pending) p.reject(new Error(`CLI exited (code=${code})`));
       this.pending.clear();
-      this.child = null;
+      if (this.child === child) this.child = null;
       this.onExit?.(code, signal);
     });
   }

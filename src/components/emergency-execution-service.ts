@@ -304,7 +304,23 @@ export class EmergencyExecutionService {
       this.state = { kind: "running", owner, generation };
       return { generation, transport };
     });
-    if (!claim) return "handled";
+    if (!claim) {
+      // The message may have raced another owner turn between the read-only
+      // admission check above and this serialized claim.  Do not silently
+      // consume it: preserve the one-in-flight contract with the same bounded
+      // response used by the fast path (or fail closed if control changed the
+      // state while this message was waiting).
+      const current = this.state;
+      const reason = current.kind === "running"
+        ? "One emergency request is already running — wait for it to finish."
+        : current.kind === "starting"
+          ? "Emergency mode is still activating — try again shortly."
+          : current.kind === "stopping"
+            ? "Emergency mode is shutting down."
+            : "Emergency mode is unavailable — try again shortly.";
+      await this.safeReply(adapter, msg, reason);
+      return "handled";
+    }
 
     const { generation, transport } = claim;
     const requestId = randomBytes(6).toString("hex");

@@ -59,6 +59,7 @@ import type { OutputObserver } from "../../components/session-output-feed.js";
 import { logInfo, logDebug, logWarn, logError, logTrace } from "../logger.js";
 import { writeRestartReason } from "../transport/bridge-lock-transport.js";
 import { TransportStateMachine } from "./transport-state.js";
+import { revokeSealedSession } from "./sealed-acp-bridge.js";
 
 const TAG = "acp";
 
@@ -237,50 +238,67 @@ export class AcpTransport implements IKiroTransport {
       stdio: ["pipe", "pipe", "pipe"],
       env: cleanEnv,
     });
+    const thisProcess = this.agent;
+
+    // A failed spawn emits `error` instead of (or before) `exit`.  Keep that
+    // event owned by the transport and race it with ACP initialization; an
+    // ENOENT must reject the activation cleanly rather than becoming an
+    // unhandled ChildProcess error or leaving initialization hanging.
+    let rejectChildFailure!: (error: Error) => void;
+    const childFailure = new Promise<never>((_, reject) => {
+      rejectChildFailure = reject;
+    });
+    let childFailureHandled = false;
+    const handleChildFailure = (error: Error): void => {
+      rejectChildFailure(error);
+      if (childFailureHandled || this.agent !== thisProcess) return;
+      childFailureHandled = true;
+      this.agent = null;
+      this.client = null;
+      // #160: reject all in-flight operations immediately.
+      if (this.inFlight.size > 0) {
+        const count = this.inFlight.size;
+        for (const entry of this.inFlight) entry.reject(error);
+        this.inFlight.clear();
+        logWarn(this.tag, `rejected ${count} in-flight ACP op(s) due to child failure`);
+      }
+      this.sm.childExited();
+      this.toolMeta = null;
+      if (this.sm.state === "reinitializing" && this.autoReinit) {
+        logWarn(this.tag, "Unexpected kiro-cli failure — auto-reinitializing in 5s");
+        setTimeout(() => {
+          this.initialize()
+            .then(() => this.sm.reinitSucceeded())
+            .catch(e => { logError(this.tag, "Auto-reinit failed", e); this.sm.reinitFailed(); });
+        }, 5000);
+      }
+    };
+    thisProcess.once("error", (error) => {
+      const normalized = error instanceof Error ? error : new Error(String(error));
+      logWarn(this.tag, `kiro-cli failed to spawn: ${normalized.message}`);
+      handleChildFailure(normalized);
+    });
 
     // Track child PID for cleanup on next boot (#921)
-    if (this.agent.pid) {
-      import("./bridge-lock-transport.js").then(({ trackAcpPid }) => trackAcpPid(this.agent!.pid!)).catch(() => {});
+    if (thisProcess.pid) {
+      import("./bridge-lock-transport.js").then(({ trackAcpPid }) => trackAcpPid(thisProcess.pid!)).catch(() => {});
     }
 
-    if (!this.agent.stdin || !this.agent.stdout) {
+    if (!thisProcess.stdin || !thisProcess.stdout) {
       throw new Error("Failed to create ACP stdio pipes");
     }
 
-    this.agent.stderr?.on("data", (chunk: Buffer) => {
+    thisProcess.stderr?.on("data", (chunk: Buffer) => {
       logDebug(this.tag, `[stderr] ${chunk.toString().trim()}`);
     });
 
-    const thisProcess = this.agent;
-    this.agent.on("exit", (code, signal) => {
+    thisProcess.on("exit", (code, signal) => {
       logWarn(this.tag, `kiro-cli exited (code=${code}, signal=${signal})`);
-      if (this.agent === thisProcess) {
-        this.agent = null;
-        this.client = null;
-        // #160: reject all in-flight operations immediately
-        if (this.inFlight.size > 0) {
-          const err = new AcpExitError(code, signal);
-          const count = this.inFlight.size;
-          for (const entry of this.inFlight) entry.reject(err);
-          this.inFlight.clear();
-          logWarn(this.tag, `rejected ${count} in-flight ACP op(s) due to child exit`);
-        }
-        // #188: state machine handles reinit
-        this.sm.childExited();
-        this.toolMeta = null;
-        if (this.sm.state === "reinitializing" && this.autoReinit) {
-          logWarn(this.tag, "Unexpected kiro-cli exit — auto-reinitializing in 5s");
-          setTimeout(() => {
-            this.initialize()
-              .then(() => this.sm.reinitSucceeded())
-              .catch(e => { logError(this.tag, "Auto-reinit failed", e); this.sm.reinitFailed(); });
-          }, 5000);
-        }
-      }
+      handleChildFailure(new AcpExitError(code, signal));
     });
 
-    const input = Writable.toWeb(this.agent.stdin);
-    const output = Readable.toWeb(this.agent.stdout) as unknown as ReadableStream<Uint8Array>;
+    const input = Writable.toWeb(thisProcess.stdin);
+    const output = Readable.toWeb(thisProcess.stdout) as unknown as ReadableStream<Uint8Array>;
     const stream = ndJsonStream(input, output);
 
     // #7554 workaround: kiro-cli interprets idle stdin as EOF. Periodic empty writes keep pipe alive.
@@ -319,11 +337,13 @@ export class AcpTransport implements IKiroTransport {
     );
 
     logDebug(this.tag, "Initializing ACP connection");
-    const initResult = await this.client.initialize({
+    const client = this.client;
+    if (!client) throw new Error("ACP client unavailable after spawn");
+    const initResult = await Promise.race([client.initialize({
       protocolVersion: PROTOCOL_VERSION,
       clientCapabilities: {},
       clientInfo: { name: "abtars", version: "1.0.0" },
-    });
+    }), childFailure]);
     logInfo(this.tag, `ACP initialized (agent: ${initResult.agentInfo?.name ?? "unknown"})`);
     this.onReady?.();
   }
@@ -842,14 +862,13 @@ export class AcpTransport implements IKiroTransport {
   }
 
   /** #1468: revoke exactly the sealed session tokens this instance created. */
-  private async revokeOwnedSealedSessions(): Promise<void> {
+  private revokeOwnedSealedSessions(): void {
     if (this.sealedSessionKeys.size === 0) return;
     const keys = [...this.sealedSessionKeys];
     this.sealedSessionKeys.clear();
-    try {
-      const { revokeSealedSession } = await import("./sealed-acp-bridge.js");
-      for (const key of keys) revokeSealedSession(key);
-    } catch { /* bridge may not be wired */ }
+    for (const key of keys) {
+      try { revokeSealedSession(key); } catch { /* bridge may not be wired */ }
+    }
   }
 
   private async getOrCreateSession(sessionKey: string): Promise<string> {

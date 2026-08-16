@@ -8,9 +8,13 @@ vi.mock("../env-schema.js", () => ({ getEnv: () => ({ promptTimeoutSec: 180, wat
 vi.mock("../transport/bridge-lock-transport.js", () => ({ writeRestartReason: vi.fn() }));
 vi.mock("../hooks/hook-system.js", () => ({ hasHooks: () => false, fire: vi.fn() }));
 
-const revokeSealedSession = vi.fn();
-const revokeAllSealedSessions = vi.fn();
-vi.mock("./sealed-acp-bridge.js", () => ({ revokeSealedSession, revokeAllSealedSessions }));
+const sealedBridgeMocks = vi.hoisted(() => ({
+  revokeSealedSession: vi.fn(),
+  revokeAllSealedSessions: vi.fn(),
+}));
+vi.mock("./sealed-acp-bridge.js", () => sealedBridgeMocks);
+
+const { revokeSealedSession, revokeAllSealedSessions } = sealedBridgeMocks;
 
 import { AcpTransport, AcpExitError, ModelNotFoundError } from "./acp-transport.js";
 
