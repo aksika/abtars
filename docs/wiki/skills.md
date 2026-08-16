@@ -79,3 +79,46 @@ Each skill has a `.stats.json` sidecar tracking how often it's used:
 ```
 /skill          Reload the skill catalog (picks up new/changed files)
 ```
+
+## Declaring npm dependencies (optional)
+
+Any skill — bundled (`core/`), agent-created (`self/`), operator-provided
+(`custom/`), or marketplace (`downloaded/`) — may declare npm runtime
+dependencies for its `scripts/` helpers in `scripts/package.json`:
+
+```json
+{
+  "type": "module",
+  "dependencies": {
+    "example-runtime-package": "1.2.3"
+  }
+}
+```
+
+- **Absent or empty declarations are no-ops.** A skill without
+  `scripts/package.json`, without a `dependencies` key, or with
+  `"dependencies": {}` needs no preparation.
+- **Exact semantic versions only** (`MAJOR.MINOR.PATCH`, optionally with a
+  prerelease/build suffix). Ranges, tags, aliases, and git/file/URL/workspace
+  sources are rejected before anything is installed.
+- Dependencies are installed centrally in `~/.abtars/node_modules` — never in
+  per-skill folders. Scripts nested under `~/.abtars/skills/.../scripts`
+  resolve them through Node's parent-directory lookup.
+- Preparation happens only at controlled lifecycle boundaries: **release
+  deploy** (before activation — a failure aborts the release and leaves the
+  previous release untouched), **boot**, and **explicit `/skill reload`**.
+  It never happens while a model executes a skill.
+- The shared dependency root keeps one direct version per package. Two skills
+  declaring the same package at different exact versions are a conflict — the
+  affected skills are excluded (catalog reload) or the deploy is aborted.
+- A `## Dependencies` section in SKILL.md is optional human/model guidance
+  (probes, manual repair). It must agree with the manifest; the manifest is
+  the installation authority.
+- `devDependencies`, `peerDependencies`, and other manifest fields are not
+  runtime declarations.
+- **Verification:** `/skill list` shows skipped skills with their reasons.
+  Errors name the skill source, manifest, package/version, bounded process
+  output, and a copyable repair command of the form
+  `npm install --prefix ~/.abtars --no-save --package-lock=false --no-audit --no-fund <name>@<version>`.
+- Declared-but-unprepared skills never enter the catalog until they verify —
+  re-run `/skill reload` (or deploy) to retry at the controlled boundary.

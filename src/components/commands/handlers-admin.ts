@@ -108,7 +108,7 @@ export async function handleSkills(text: string, ctx: CommandContext): Promise<b
 
   if (text.includes("reload")) {
     const { reloadCatalog } = await import("../../capabilities/hotskills/index.js");
-    const count = reloadCatalog();
+    const count = await reloadCatalog();
     await ctx.reply(`Reloaded — ${count} skills available.`);
     return true;
   }

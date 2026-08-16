@@ -10,7 +10,7 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { mkdtempSync, rmSync, mkdirSync, writeFileSync, readFileSync } from "node:fs";
+import { mkdtempSync, rmSync, mkdirSync, writeFileSync, readFileSync, chmodSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { SkillWatcher } from "./skill-watcher.js";
@@ -236,12 +236,109 @@ requires: node
     });
   });
 
-  // ── Injection-safety guard preserved ──────────────────────────────────
+  // ── Existing behavior preserved ──────────────────────────────────────
 
   describe("existing behavior preserved", () => {
     it("generates a valid catalog header even with zero skills", () => {
       watcher.generateCatalog();
       expect(readCatalog()).toMatch(/^# Skills Catalog\n/);
+    });
+  });
+
+  // ── #1542 declared dependency gate ───────────────────────────────────
+
+  const FAKE_NPM = `#!/usr/bin/env node
+const fs = require("node:fs");
+const path = require("node:path");
+const args = process.argv.slice(2);
+if (process.env.FAKE_NPM_LOG) {
+  fs.appendFileSync(process.env.FAKE_NPM_LOG, JSON.stringify(args) + "\\n");
+}
+const prefix = args[args.indexOf("--prefix") + 1];
+for (const pin of args.filter(a => !a.startsWith("-"))) {
+  const at = pin.lastIndexOf("@");
+  const name = pin.slice(0, at);
+  const version = pin.slice(at + 1);
+  const dir = path.join(prefix, "node_modules", name);
+  fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(path.join(dir, "package.json"), JSON.stringify({ name, version, type: "module", exports: { ".": "./index.js" } }));
+  fs.writeFileSync(path.join(dir, "index.js"), "export const VALUE = 1;\\n");
+}
+`;
+
+  describe("#1542 declared dependency gate", () => {
+    let fakeNpm: string;
+
+    function writeDeclaringSkill(name: string, deps: Record<string, string>): string {
+      const dir = join(skillsDir, "self", name);
+      mkdirSync(join(dir, "scripts"), { recursive: true });
+      writeFileSync(join(dir, "SKILL.md"), `---\nname: ${name}\ndescription: Declares npm deps\n---\n`);
+      writeFileSync(join(dir, "scripts", "package.json"), JSON.stringify({ type: "module", dependencies: deps }, null, 2));
+      return dir;
+    }
+
+    beforeEach(() => {
+      fakeNpm = join(tmpDir, "fake-npm");
+      writeFileSync(fakeNpm, FAKE_NPM);
+      chmodSync(fakeNpm, 0o755);
+      process.env.ABTARS_HOME = tmpDir;
+      process.env.ABTARS_SKILL_NPM_BIN = fakeNpm;
+    });
+
+    afterEach(() => {
+      delete process.env.ABTARS_HOME;
+      delete process.env.ABTARS_SKILL_NPM_BIN;
+      delete process.env.FAKE_NPM_LOG;
+    });
+
+    it("prepares declared dependencies on the async path and admits the skill", async () => {
+      writeDeclaringSkill("needy", { "fixture-pkg": "1.2.3" });
+      writeSkill("plain", `---
+name: plain
+description: No deps
+---
+`, "self");
+      const count = await watcher.prepareAndGenerateCatalog();
+      expect(count).toBe(2);
+      const catalog = readCatalog();
+      expect(catalog).toContain("- [self] needy:");
+      expect(catalog).toContain("- [self] plain:");
+      const installed = JSON.parse(readFileSync(join(tmpDir, "node_modules", "fixture-pkg", "package.json"), "utf-8")) as { version: string };
+      expect(installed.version).toBe("1.2.3");
+    });
+
+    it("re-running preparation does not invoke npm again", async () => {
+      const log = join(tmpDir, "npm.log");
+      process.env.FAKE_NPM_LOG = log;
+      writeDeclaringSkill("needy", { "fixture-pkg": "1.2.3" });
+      await watcher.prepareAndGenerateCatalog();
+      const first = readFileSync(log, "utf-8");
+      await watcher.prepareAndGenerateCatalog();
+      expect(readFileSync(log, "utf-8")).toBe(first);
+    });
+
+    it("reports declared-but-unprepared dependencies on the sync path", () => {
+      writeDeclaringSkill("needy", { "fixture-pkg": "1.2.3" });
+      watcher.generateCatalog();
+      const catalog = readCatalog();
+      expect(catalog).not.toContain("- [self] needy:");
+      const info = watcher.skills.find(s => s.name === "needy");
+      expect(info?.skipped).toContain("run /skill reload");
+    });
+
+    it("admits a skill whose declared dependency is already prepared (sync path)", () => {
+      const dir = writeDeclaringSkill("needy", { "fixture-pkg": "1.2.3" });
+      mkdirSync(join(tmpDir, "node_modules", "fixture-pkg"), { recursive: true });
+      writeFileSync(join(tmpDir, "node_modules", "fixture-pkg", "package.json"), JSON.stringify({
+        name: "fixture-pkg",
+        version: "1.2.3",
+        type: "module",
+        exports: { ".": "./index.js" },
+      }));
+      writeFileSync(join(tmpDir, "node_modules", "fixture-pkg", "index.js"), "export const V = 1;\n");
+      void dir;
+      watcher.generateCatalog();
+      expect(readCatalog()).toContain("- [self] needy:");
     });
   });
 });

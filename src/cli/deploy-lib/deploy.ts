@@ -241,6 +241,25 @@ export async function deployActivation(
     if (preflightCode !== 0) return preflightCode;
   }
 
+  // ── Step 2.5: Skill dependency preparation (#1542) ────────────────────
+  // Validate + prepare declared dependencies for the staged core skills
+  // (templates/skills/*, which will replace runtime skills/core) and every
+  // preserved user-owned runtime skill, BEFORE the first activation mutation.
+  // Failure aborts the release — the previous active release and release
+  // history remain unchanged. reconcile()/restore stay synchronous and
+  // network-free; installation only happens at this controlled boundary.
+  const { prepareDeploySkillDependencies } = await import("../../components/skill-dependencies.js");
+  try {
+    const prep = await prepareDeploySkillDependencies(join(staged.stagedPath, "templates"), paths.home);
+    if (prep.installed.length > 0) {
+      process.stdout.write(`✓ skill deps prepared (${prep.installed.map(p => `${p.name}@${p.version}`).join(", ")})\n`);
+    }
+  } catch (err) {
+    process.stderr.write(`x ${err instanceof Error ? err.message : String(err)}\n`);
+    process.stderr.write(`x Skill dependency preparation failed — release not activated; previous release and history unchanged.\n`);
+    return 1;
+  }
+
   // ── Step 3: Deploy to releases dir + repoint symlink ────────────────
   mkdirSync(paths.releasesDir, { recursive: true });
   const releaseDir = join(paths.releasesDir, staged.commit || staged.version);

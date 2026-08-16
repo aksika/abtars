@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 
 const TIMEOUT = 60000;
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync, existsSync, readFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync, existsSync, readFileSync, chmodSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { runLaunchctlBootstrap, deployActivation } from "./deploy.js";
@@ -174,6 +174,105 @@ describe("deployActivation — health unhealthy (Linux)", () => {
     expect(code).toBe(0);
     const state = JSON.parse(readFileSync(join(tmp, "deploy.state"), "utf-8")) as Record<string, unknown>;
     expect(state.status).toBe("unhealthy");
+  });
+});
+
+// ── Skill dependency preparation during activation (#1542) ─────────────────
+
+const FAKE_NPM = `#!/usr/bin/env node
+const fs = require("node:fs");
+const path = require("node:path");
+const args = process.argv.slice(2);
+if (process.env.FAKE_NPM_LOG) {
+  fs.appendFileSync(process.env.FAKE_NPM_LOG, JSON.stringify(args) + "\\n");
+}
+const prefix = args[args.indexOf("--prefix") + 1];
+if (process.env.FAKE_NPM_FAIL === "1") { console.error("fake npm: forced failure"); process.exit(1); }
+for (const pin of args.filter(a => !a.startsWith("-"))) {
+  const at = pin.lastIndexOf("@");
+  const name = pin.slice(0, at);
+  const version = pin.slice(at + 1);
+  const dir = path.join(prefix, "node_modules", name);
+  fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(path.join(dir, "package.json"), JSON.stringify({ name, version, type: "module", exports: { ".": "./index.js" } }));
+  fs.writeFileSync(path.join(dir, "index.js"), "export const VALUE = 1;\\n");
+}
+`;
+
+describe("deployActivation — #1542 skill dependency preparation", () => {
+  let fakeNpm: string;
+
+  function seedStagedSkill(name: string, deps: Record<string, string>): void {
+    const dir = join(tmp, "staged", "templates", "skills", name);
+    mkdirSync(join(dir, "scripts"), { recursive: true });
+    writeFileSync(join(dir, "SKILL.md"), `---\nname: ${name}\ndescription: staged fixture skill\n---\n`);
+    writeFileSync(join(dir, "scripts", "package.json"), JSON.stringify({ type: "module", dependencies: deps }, null, 2));
+  }
+
+  beforeEach(() => {
+    fakeNpm = join(tmp, "fake-npm");
+    writeFileSync(fakeNpm, FAKE_NPM);
+    chmodSync(fakeNpm, 0o755);
+    process.env.ABTARS_SKILL_NPM_BIN = fakeNpm;
+  });
+
+  afterEach(() => {
+    delete process.env.ABTARS_SKILL_NPM_BIN;
+    delete process.env.FAKE_NPM_LOG;
+    delete process.env.FAKE_NPM_FAIL;
+  });
+
+  it("prepares staged core dependencies before activation and admits the skill", { timeout: TIMEOUT }, async () => {
+    Object.defineProperty(process, "platform", { value: "darwin", configurable: true, writable: true });
+    const log = join(tmp, "npm.log");
+    process.env.FAKE_NPM_LOG = log;
+    seedStagedSkill("fixture-skill", { "fixture-pkg": "1.2.3" });
+    const healthMock = makeHealthMock();
+    const bootstrapFn: BootstrapFn = () => ({ ok: true });
+
+    const code = await deployActivation({ staged, channel: "npm", repoRoot: tmp }, bootstrapFn, healthMock.fn);
+
+    expect(code).toBe(0);
+    // Declared exact pin installed under the dependency root.
+    const installed = JSON.parse(readFileSync(join(tmp, "node_modules", "fixture-pkg", "package.json"), "utf-8")) as { version: string };
+    expect(installed.version).toBe("1.2.3");
+    // Reconcile copied staged core into the runtime tree.
+    expect(existsSync(join(tmp, "skills", "core", "fixture-skill", "SKILL.md"))).toBe(true);
+    // Exactly one npm invocation with exact name@version argv.
+    const argv = JSON.parse(readFileSync(log, "utf-8").trim()) as string[];
+    expect(argv).toContain("fixture-pkg@1.2.3");
+  });
+
+  it("aborts before any activation mutation when a staged declaration is invalid", { timeout: TIMEOUT }, async () => {
+    Object.defineProperty(process, "platform", { value: "darwin", configurable: true, writable: true });
+    seedStagedSkill("bad-skill", { "fixture-pkg": "^1.2.3" });
+    const healthMock = makeHealthMock();
+    const bootstrapFn: BootstrapFn = () => ({ ok: true });
+
+    const code = await deployActivation({ staged, channel: "npm", repoRoot: tmp }, bootstrapFn, healthMock.fn);
+
+    expect(code).toBe(1);
+    // No release dir, no history mutation, no repointed symlink, no npm work.
+    expect(existsSync(join(releasesTmp, "abc1234"))).toBe(false);
+    expect(readFileSync(join(releasesTmp, "history.json"), "utf-8")).toContain("prev-version");
+    expect(existsSync(join(releasesTmp, "current"))).toBe(false);
+    expect(existsSync(join(tmp, "node_modules"))).toBe(false);
+    expect(healthMock.calls).toHaveLength(0);
+  });
+
+  it("aborts before activation when npm fails, leaving release/history unchanged", { timeout: TIMEOUT }, async () => {
+    Object.defineProperty(process, "platform", { value: "darwin", configurable: true, writable: true });
+    process.env.FAKE_NPM_FAIL = "1";
+    seedStagedSkill("needy-skill", { "fixture-pkg": "1.2.3" });
+    const healthMock = makeHealthMock();
+    const bootstrapFn: BootstrapFn = () => ({ ok: true });
+
+    const code = await deployActivation({ staged, channel: "npm", repoRoot: tmp }, bootstrapFn, healthMock.fn);
+
+    expect(code).toBe(1);
+    expect(existsSync(join(releasesTmp, "abc1234"))).toBe(false);
+    expect(readFileSync(join(releasesTmp, "history.json"), "utf-8")).toContain("prev-version");
+    expect(healthMock.calls).toHaveLength(0);
   });
 });
 

@@ -12,6 +12,8 @@ import { join, basename, dirname, resolve } from "node:path";
 import { execFileSync } from "node:child_process";
 import { homedir } from "node:os";
 import { logInfo, logWarn } from "./logger.js";
+import { abtarsHome } from "../paths.js";
+import { discoverSkillCandidates, readonlyDependencyStatus } from "./skill-dependencies.js";
 
 import type { ISkillSlot } from "./skeleton.js";
 
@@ -44,13 +46,48 @@ export class SkillWatcher implements ISkillSlot {
   private binaryCache = new Map<string, boolean>();
   /** Cached skill list from last generateCatalog() call. */
   private _skillCache: SkillInfo[] = [];
+  /**
+   * Dependency-eligibility status from the last async preparation
+   * (#1542). Skill name -> skip reasons (empty/absent = no dependency gate).
+   */
+  private _dependencyStatus = new Map<string, string[]>();
 
   constructor(private skillsDir: string, private catalogPath: string) {}
 
   /** Get cached skill info (populated after generateCatalog). */
   get skills(): readonly SkillInfo[] { return this._skillCache; }
 
-  /** Generate skills_catalog.md from all skill files. Called on startup + when skills change. */
+  /**
+   * Async catalog preparation (#1542): validate and prepare declared skill
+   * dependencies (no-op for absent/empty declarations) BEFORE generating the
+   * catalog, then admit only ready skills. Called at boot and on explicit
+   * /skill reload — the controlled lifecycle boundaries for npm work.
+   */
+  async prepareAndGenerateCatalog(): Promise<number> {
+    try {
+      const { discoverSkillCandidates, prepareSkillDependencies } = await import("./skill-dependencies.js");
+      const candidates = discoverSkillCandidates(this.skillsDir);
+      const result = await prepareSkillDependencies(candidates, { mode: "per-skill" });
+      this._dependencyStatus = new Map<string, string[]>();
+      for (const c of result.ready) this._dependencyStatus.set(c.name, []);
+      for (const s of result.skipped) {
+        this._dependencyStatus.set(s.skill.name, s.reasons);
+        logWarn(TAG, `Skill "${s.skill.name}" (${s.skill.source}) skipped: ${s.reasons.join("; ")}`);
+      }
+    } catch (err) {
+      // Preparation must never take the catalog down — degraded catalog only.
+      logAndSwallow(TAG, "prepareSkillDependencies", err);
+      this._dependencyStatus = new Map();
+    }
+    return this.generateCatalog();
+  }
+
+  /**
+   * Generate skills_catalog.md from all skill files. Called on startup + when
+   * skills change. Synchronous and network-free: skills whose declared npm
+   * dependencies are not yet prepared are listed as skipped with the reason,
+   * so the read-only path can never hide a missing dependency.
+   */
   generateCatalog(): number {
     const files = this.scanMdFiles(this.skillsDir);
     const entries: string[] = [];
@@ -72,6 +109,19 @@ export class SkillWatcher implements ISkillSlot {
         }
       }
       const group = this.getSourceDir(filepath).split("/")[0] ?? "core";
+      let depReasons = this._dependencyStatus.get(header.name);
+      if (depReasons === undefined) {
+        // No async preparation for this skill — read-only re-check (#1542):
+        // report declared-but-unprepared dependencies without invoking npm.
+        const match = discoverSkillCandidates(this.skillsDir).find(c => c.name === header.name);
+        depReasons = match ? readonlyDependencyStatus(abtarsHome(), match) : [];
+      }
+      if (depReasons.length > 0) {
+        const reason = `npm deps: ${depReasons.join("; ")}`;
+        skipped.push(`${header.name} (${reason})`);
+        cache.push({ name: header.name, group, skipped: reason });
+        continue;
+      }
       if (header.requires) {
         const { eligible, missing } = this.checkEligibility(header.requires);
         if (!eligible) {

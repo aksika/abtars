@@ -78,6 +78,42 @@ Use the exact keys `bins`, `npm`, `env`, and `files`. Do not use `packages`. Kee
 
 Files produced **when a skill runs** belong in `~/.abtars/workspace/<skill-name>/`. Authoring files such as SKILL.md, scripts, references, and skill.json remain in `~/.abtars/skills/self/<skill-name>/`.
 
+## Declaring npm dependencies (optional)
+
+If a Node script needs a third-party package, declare it in
+`scripts/package.json` with an **exact** semantic version:
+
+```json
+{
+  "type": "module",
+  "dependencies": {
+    "example-runtime-package": "1.2.3"
+  }
+}
+```
+
+Rules:
+
+- **Exact versions only** — `MAJOR.MINOR.PATCH` (optionally with a valid
+  prerelease/build suffix). Ranges (`^1.2.3`), tags, aliases, and
+  git/file/URL/workspace sources are rejected.
+- Missing `scripts/package.json`, a manifest without `dependencies`, or
+  `"dependencies": {}` all mean zero dependencies — no work.
+- Dependencies are installed centrally in `~/.abtars/node_modules` at
+  **deploy**, **boot**, or **`/skill reload`** — never while a skill runs.
+  Nested scripts resolve them through Node's parent-directory lookup.
+- The shared dependency root holds one direct version per package. Two skills
+  declaring the same package at different exact versions conflict; keep every
+  skill on the same pin.
+- Add a `## Dependencies` section in SKILL.md describing the prerequisite,
+  a quick probe, and manual repair steps for humans/models. It must agree with
+  the machine-readable manifest — the manifest is the installation authority.
+- To verify what a skill declares and whether it is prepared, use
+  `/skill list` (skipped skills show the reason) or run the recovery command
+  shown in the error: `npm install --prefix ~/.abtars --no-save
+  --package-lock=false --no-audit --no-fund <name>@<version>`.
+
+
 ## Interactive skills
 
 Create a persistent conversational (K-session) skill only when later user turns must continue the same bounded workflow. In addition to SKILL.md, add a strict `skill.json`:
