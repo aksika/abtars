@@ -1078,7 +1078,9 @@ export async function runFoundation(ctx: ScenarioContext): Promise<RemoteSwarmSc
     const inboundRequestId = `${baseRequestId}-norelay-inbound`;
     const inboundGoal = `${runMarker(ctx.runId)} Reply with exactly the single word: ok. Do nothing else.`;
     const inbound = await ctx.delegate(
-      { peer: ctx.profile.receiverPeerName, goal: inboundGoal, request_id: inboundRequestId, priority: "MEDIUM" },
+      // The receiver originates this delegation back to the requester, so the
+      // peer name is the requester's, not the receiver's.
+      { peer: ctx.profile.requesterPeerName, goal: inboundGoal, request_id: inboundRequestId, priority: "MEDIUM" },
       "receiver",
     );
     if (!inbound.ok || inbound.decision !== "accepted") {

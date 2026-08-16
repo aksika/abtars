@@ -109,6 +109,34 @@ describe("OrcProjectRunStore", () => {
     expect(run!.state).toBe("dispatching");
   });
 
+  it("never dispatches a second run while a global turn is in flight (#1664)", () => {
+    seedProject(store, 30);
+    seedProject(store, 31);
+    const claim30 = store.claimIntent(makeInput({ projectCardId: 30 }), "local_peer", "inst_1");
+    const claim31 = store.claimIntent(makeInput({ projectCardId: 31 }), "local_peer", "inst_1");
+    expect(claim30.kind).toBe("claimed");
+    expect(claim31.kind).toBe("claimed");
+    if (claim30.kind !== "claimed" || claim31.kind !== "claimed") return;
+
+    const first = store.pump();
+    expect(first).not.toBeNull();
+    // A concurrent pump (another reconciler wake) must not violate the
+    // global single-turn UNIQUE index — it leaves the second run scheduled.
+    expect(() => store.pump()).not.toThrow();
+    const secondRun = store.getLiveRunForProject(31);
+    expect(secondRun?.state).toBe("scheduled");
+
+    // Once the in-flight turn binds and releases, the next pump promotes the
+    // waiting run.
+    expect(store.bindExecution(claim30.context, "sess_30", "exec_30").ok).toBe(true);
+    expect(store.pump()).toBeNull();
+    expect(store.release({ ...claim30.context, sessionId: "sess_30", executionId: "exec_30" }, "completed")).toBe(true);
+    const promoted = store.pump();
+    expect(promoted).not.toBeNull();
+    expect(store.getRun(promoted!)?.state).toBe("dispatching");
+    void claim31;
+  });
+
   it("binds execution and transitions to running", () => {
     seedProject(store, 5);
     const claim = store.claimIntent(makeInput({ projectCardId: 5 }), "local_peer", "inst_1");

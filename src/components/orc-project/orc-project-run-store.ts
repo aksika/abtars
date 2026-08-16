@@ -158,9 +158,17 @@ export class OrcProjectRunStore {
 
       if (!eligible) return null;
 
+      // Global single-turn semantics: only one run may be dispatching/running
+      // at a time (idx_one_global_orc_turn). A concurrent pump may have just
+      // claimed the slot; flipping this run anyway would violate the partial
+      // UNIQUE index and crash the whole bridge as an unhandled rejection.
+      // Leave the run scheduled and let a later pump pick it up.
       const result = this.db.prepare(`
         UPDATE orc_project_runs SET state = 'dispatching', updated_at = ?
         WHERE id = ? AND state = 'scheduled'
+          AND NOT EXISTS (
+            SELECT 1 FROM orc_project_runs WHERE state IN ('dispatching', 'running')
+          )
       `).run(new Date().toISOString(), eligible.id);
 
       if (result.changes === 0) return null;
