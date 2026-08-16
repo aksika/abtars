@@ -5,7 +5,7 @@ import {
   kanbanFail,
   kanbanGetCard, kanbanGetChildren, kanbanRunningProjectIds, kanbanStrandedQueuedProjectIds,
   kanbanQueuedDispatchOrder, kanbanPromoteDueRetry, kanbanTransition, sqliteNow, KANBAN_TERMINAL_STATUSES,
-  isUnblocked, cascadeFail, type KanbanCard,
+  isUnblocked, cascadeFail, resolveRootId, type KanbanCard,
 } from "./tasks/kanban-board.js";
 import { logInfo, logWarn, logError } from "./logger.js";
 import {
@@ -39,6 +39,8 @@ import type { AttemptLifecycle, AttemptRow } from "./worker-supervision-store.js
 import type { WorkerAcceptanceContractV1 } from "./worker-contract.js";
 import { acceptancePassed } from "./worker-contract.js";
 import type { ToolExecutionScope } from "./tasks/task-package.js";
+import { RetryService } from "./retry/retry-service.js";
+import { LocalExecutorCatalog, providerForAdapter } from "./retry/local-executor-catalog.js";
 
 const TAG = "reconciler";
 
@@ -845,9 +847,7 @@ function handleRepairState(projectId: number, supervision: ProjectSupervisionRow
     }
     const contractRow2 = reviewStore.getContractByProjectCardId(projectId);
     const rootContract = contractRow2 ? JSON.parse(contractRow2.contract_json) as { criteria: Array<{ id: string; description: string }> } : null;
-    const rootCardId = (() => {
-      try { return require("./tasks/kanban-board.js").resolveRootId(projectId) ?? projectId; } catch { return projectId; }
-    })();
+    const rootCardId = resolveRootId(projectId) ?? projectId;
     const children = kanbanGetChildren(projectId);
     const supervisionService = new WorkerSupervisionService();
     for (const item of items) {
@@ -1782,10 +1782,7 @@ function handleSupervisedRetry(card: KanbanCard, lifecycle: AttemptLifecycle): v
   }
 }
 
-function buildRetryService(): import("./retry/retry-service.js").RetryService {
-  const { RetryService } = require("./retry/retry-service.js") as typeof import("./retry/retry-service.js");
-  const { LocalExecutorCatalog } = require("./retry/local-executor-catalog.js") as typeof import("./retry/local-executor-catalog.js");
-  const { providerForAdapter } = require("./retry/local-executor-catalog.js") as typeof import("./retry/local-executor-catalog.js");
+function buildRetryService(): RetryService {
   const catalog = new LocalExecutorCatalog({
     spinProvider: providerForAdapter(workerAdapter(), AGENT_EXECUTOR_ID),
   });
@@ -1947,7 +1944,7 @@ export function startReconciler(): void {
 }
 
 function leaseWake(cardId: number): void {
-  const card = require("./tasks/kanban-board.js").kanbanGetCard(cardId) as { parent_id?: number } | undefined;
+  const card = kanbanGetCard(cardId) as { parent_id?: number } | undefined;
   if (card?.parent_id) wakeCard(card.parent_id);
   requestReconcile(cardId);
 }
@@ -1959,7 +1956,6 @@ function registerExecutorLeaseSource(): void {
     logWarn(TAG, "Lease source not registered — lifecycle wake scheduler unavailable");
     return;
   }
-  const { ExecutorLeaseStore: StoreWithHook } = require("./executor-lease-store.js") as typeof import("./executor-lease-store.js");
   scheduler.register({
     id: "executor-lease",
     listDueItems: () => new ExecutorLeaseStore().getEvaluationSchedule()
@@ -1970,9 +1966,9 @@ function registerExecutorLeaseSource(): void {
       }
     },
   });
-  StoreWithHook.onLeaseChanged = () => {
+  ExecutorLeaseStore.onLeaseChanged = () => {
     scheduler.sourceChanged("executor-lease");
-    const cardId = StoreWithHook.lastChangedCardId;
+    const cardId = ExecutorLeaseStore.lastChangedCardId;
     if (cardId !== undefined) projectRunProgress(cardId);
   };
   // Registration is a source mutation: immediate scan + re-arm.

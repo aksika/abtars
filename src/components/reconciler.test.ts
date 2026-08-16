@@ -39,6 +39,7 @@ const kanbanRunningProjectIdsMock = vi.fn().mockReturnValue([]);
 const kanbanStrandedQueuedProjectIdsMock = vi.fn().mockReturnValue([]);
 const kanbanQueuedDispatchOrderMock = vi.fn().mockReturnValue([]);
 const kanbanPromoteDueRetryMock = vi.fn().mockReturnValue(false);
+const resolveRootIdMock = vi.fn().mockReturnValue(undefined);
 vi.mock("./tasks/kanban-board.js", () => ({
   kanbanFail: kanbanFailMock,
   kanbanComplete: kanbanCompleteMock,
@@ -49,6 +50,7 @@ vi.mock("./tasks/kanban-board.js", () => ({
   kanbanStrandedQueuedProjectIds: kanbanStrandedQueuedProjectIdsMock,
   kanbanQueuedDispatchOrder: kanbanQueuedDispatchOrderMock,
   kanbanPromoteDueRetry: kanbanPromoteDueRetryMock,
+  resolveRootId: resolveRootIdMock,
   KANBAN_TERMINAL_STATUSES: ["done", "delivered", "failed"],
   isUnblocked: isUnblockedMock,
   cascadeFail: cascadeFailMock,
@@ -269,8 +271,9 @@ let reviewStoreMock: {
   setState: ReturnType<typeof vi.fn>;
 };
 
-beforeEach(async () => {
+  beforeEach(async () => {
   vi.clearAllMocks();
+  resolveRootIdMock.mockReturnValue(undefined);
   quarantineState = {
     quarantined: new Set(),
     recorded: [],
@@ -1581,6 +1584,50 @@ describe("Reconciler — #1546 scheduled-root driver", () => {
       undefined,
       { authority: { projectCardId: 1, projectGeneration: 1, scheduledRunId: "run-1" } },
     );
+  });
+
+  it("#1554: repair root resolution uses resolveRootId() directly — no Vitest fallback branch", async () => {
+    // A repair round on a child card (1) whose ancestor root is card 7. The
+    // spawned repair Worker contract must carry the RESOLVED root (7), never
+    // the fallback projectId (1) that the deleted require/catch branch used
+    // under Vitest.
+    const claims: Array<{ projectCardId: number; goal: string }> = [];
+    fakeCoordinator(claims);
+    setupExecutingProject();
+    resolveRootIdMock.mockReturnValue(7);
+    let repairState: "repair_planned" | "repairing" = "repair_planned";
+    reviewStoreMock.getSupervision.mockImplementation(() => supervision({ state: repairState }));
+    reviewStoreMock.stateTransition.mockImplementation((_projectId: number, fromStates: string[], nextState: string) => {
+      if (!fromStates.includes(repairState)) return false;
+      repairState = nextState as "repair_planned" | "repairing";
+      return true;
+    });
+    reviewStoreMock.getLatestDecisionForProject.mockReturnValue({
+      id: "rd_root_1",
+      review_case_id: "rc_1",
+      decision_json: JSON.stringify({
+        action: "repair",
+        repair: {
+          items: [
+            { id: "r1", affected_criterion_ids: ["c1"], strategy: "rework", required_evidence: "synthesis", capabilities: [], budget: { max_tokens: 1000 } },
+          ],
+        },
+      }),
+      decision_digest: "d",
+      created_at: new Date().toISOString(),
+    });
+    reviewStoreMock.getContractByProjectCardId.mockReturnValue({
+      id: "pc_root_1",
+      contract_json: JSON.stringify({ schema_version: 2, criteria: [{ id: "c1", description: "d" }] }),
+    });
+    kanbanGetChildrenMock.mockReturnValue([]);
+
+    mod.requestReconcile(1);
+    await flush();
+
+    expect(resolveRootIdMock).toHaveBeenCalledWith(1);
+    expect(spawnChildMock).toHaveBeenCalledTimes(1);
+    expect(spawnChildMock.mock.calls[0]?.[1]?.contract?.provenance?.root_card_id).toBe(7);
   });
 });
 
