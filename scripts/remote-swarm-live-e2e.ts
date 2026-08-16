@@ -473,7 +473,7 @@ export function createHttpDelegatePort(profile: RemoteSwarmLiveProfileV1, receiv
     const payload = JSON.stringify(body);
     const script = [
       "const https=require(\"node:https\");",
-      "const body=process.argv[2];",
+      "const body=process.argv[1];",
       `const req=https.request({host:"127.0.0.1",port:${port},path:"/v1/orc/delegate",method:"POST",rejectUnauthorized:false,headers:{"Content-Type":"application/json","Content-Length":Buffer.byteLength(body)}},res=>{let d=\"\";res.on(\"data\",c=>d+=c);res.on(\"end\",()=>console.log(\"REMOTE_SWARM_DELEGATE=\"+d))});`,
       "req.on(\"error\",e=>{console.error(\"REMOTE_SWARM_DELEGATE_ERROR=\"+e.message);process.exit(1)});",
       "req.end(body)",
