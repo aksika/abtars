@@ -1366,18 +1366,17 @@ async function dispatchOnePass(): Promise<void> {
   const queued = kanbanQueuedDispatchOrder();
   for (const card of queued) {
     if (_shutdownRequested) return;
-    if (process.env.SWARM_DISPATCH_TRACE === "1") console.error(`[dispatch-trace] visiting card=${card.id} status=${card.status} parent=${card.parent_id ?? "none"} blocked_by=${card.blocked_by ?? "none"}`);
 
-    if (!isUnblocked(card)) { if (process.env.SWARM_DISPATCH_TRACE === "1") console.error(`[dispatch-trace] card=${card.id} SKIP isUnblocked`); continue; }
-    if (card.parent_id == null) { if (process.env.SWARM_DISPATCH_TRACE === "1") console.error(`[dispatch-trace] card=${card.id} SKIP no parent`); continue; }
+    if (!isUnblocked(card)) continue;
+    if (card.parent_id == null) continue;
     const projectId = card.parent_id;
 
     const project = kanbanGetCard(projectId);
-    if (!project || project.status !== "running") { if (process.env.SWARM_DISPATCH_TRACE === "1") console.error(`[dispatch-trace] card=${card.id} SKIP project not running (${project?.status})`); continue; }
+    if (!project || project.status !== "running") continue;
 
     const supSvc = new WorkerSupervisionService();
     const hasContract = supSvc.cardHasContract(card.id);
-    if (!hasContract) { if (process.env.SWARM_DISPATCH_TRACE === "1") console.error(`[dispatch-trace] card=${card.id} SKIP no contract`); continue; }
+    if (!hasContract) continue;
 
     const latestAttempt = store.getLatestAttempt(card.id);
     // #1644: a terminal attempt whose card was never transitioned (executor-
@@ -1387,8 +1386,7 @@ async function dispatchOnePass(): Promise<void> {
     // #1656: a `completed` lifecycle means the executor finished, not that
     // acceptance passed. The exact-contract predicate decides the W card:
     // a completed envelope whose criteria did not all pass fails the card.
-    if (!latestAttempt) { if (process.env.SWARM_DISPATCH_TRACE === "1") console.error(`[dispatch-trace] card=${card.id} SKIP no attempt`); continue; }
-    if (process.env.SWARM_DISPATCH_TRACE === "1") console.error(`[dispatch-trace] card=${card.id} attempt=${latestAttempt.id} lifecycle=${latestAttempt.lifecycle} executor=${latestAttempt.executor_kind}/${latestAttempt.executor_id}`);
+    if (!latestAttempt) continue;
     if (store.isAttemptTerminal(latestAttempt.lifecycle)) {
       if (card.status === "queued" || card.status === "running") {
         if (latestAttempt.lifecycle === "completed") {
@@ -1406,10 +1404,10 @@ async function dispatchOnePass(): Promise<void> {
       }
       continue;
     }
-    if (latestAttempt.lifecycle !== "pending") { if (process.env.SWARM_DISPATCH_TRACE === "1") console.error(`[dispatch-trace] card=${card.id} SKIP lifecycle ${latestAttempt.lifecycle}`); continue; }
+    if (latestAttempt.lifecycle !== "pending") continue;
 
     const executor = dispatchExecutor(latestAttempt.executor_kind, latestAttempt.executor_id);
-    if (!executor) { if (process.env.SWARM_DISPATCH_TRACE === "1") console.error(`[dispatch-trace] card=${card.id} SKIP no executor`);
+    if (!executor) {
       // #1638: a coding (Pi) attempt with no live Pi service is a runtime
       // eligibility failure — settle through the normal Worker start-failure
       // path with bounded evidence. Never leave the attempt pending because
@@ -1441,10 +1439,8 @@ async function dispatchOnePass(): Promise<void> {
       capacity = { adapter: executor.adapter, max: snapshot.max };
       capacities.set(capacityKey, capacity);
     }
-    if (capacity.max <= 0) { if (process.env.SWARM_DISPATCH_TRACE === "1") console.error(`[dispatch-trace] card=${card.id} SKIP zero capacity`); continue; }
-    const activeCount = store.getActiveAttemptCountForExecutor(executor.kind, executor.id);
-    if (activeCount >= capacity.max) { if (process.env.SWARM_DISPATCH_TRACE === "1") console.error(`[dispatch-trace] card=${card.id} SKIP active ${activeCount} >= max ${capacity.max}`); continue; }
-    if (process.env.SWARM_DISPATCH_TRACE === "1") console.error(`[dispatch-trace] card=${card.id} DISPATCH (active ${activeCount}/${capacity.max})`);
+    if (capacity.max <= 0) continue;
+    if (store.getActiveAttemptCountForExecutor(executor.kind, executor.id) >= capacity.max) continue;
 
     if (latestAttempt.source_attempt_id) {
       if (latestAttempt.earliest_claim_at && new Date(latestAttempt.earliest_claim_at).getTime() > Date.now()) {
