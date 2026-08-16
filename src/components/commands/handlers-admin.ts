@@ -216,69 +216,8 @@ export async function handleMcp(_text: string, ctx: CommandContext): Promise<boo
 
 
 export async function handleHelp(_text: string, ctx: CommandContext): Promise<boolean> {
-  const cmds = [
-    "/reset — Reload transport + fresh session",
-    "/reset default — Restore transport.default.json + fresh session",
-    "/compact — Compact context window (summarize + fresh session)",
-    "/status — Operational health (PID, uptime, platforms, context)",
-    "/software — Version info, deploy date, npm check, rollback",
-    "/software update [pull|deploy] — Pull & build from git",
-    "/software update npm — Update from npm registry",
-    "/software rollback <version|slot> — Roll back to previous version or slot (1-3)",
-    "/update — Alias for /software update pull",
-    "/update abmind — Update abmind from dev (pull + build + install)",
-    "/model — Model configuration (provider, context, fallbacks)",
-    "/model set <name> — Switch model",
-    "/doctor — Deep probe all subsystems",
-    "/doctor fix — Run safe auto-repairs",
-    "/doctor fix-full — Full repair (+ FTS rebuild, WAL checkpoint)",
-    "/mcp — MCP server status",
-    "/hooks — List configured hooks",
-    "/stop, /ctrlc — Stop current response",
-    "/wait [msg] — Inject message mid-run (non-interrupting)",
-    "/continue — Nudge model to continue after failure",
-    "/usage — Token usage & cost this session",
-    "/memory — Memory storage statistics",
-    "/heartbeat — Heartbeat diagnostics (tasks, last tick)",
-    "/models — Model, transport & agent status (legacy)",
-    "/models change — Switch model/provider (any agent)",
-    "/models quick <model> — Instant switch on same provider",
-    "/emergency — Activate emergency fast path (ACP hailMary); /model restore to exit",
-    "/tasks — Scheduled tasks",
-    "/tasks log <id> — Last 5 runs for a task",
-    "/task run <id> — Manually fire a task",
-    "/task pause <id> — Pause / /task resume <id> — Resume",
-    "/todo — Todo list",
-    "/facts — Core knowledge (user profile + agent notes)",
-    "/skills — List active/skipped skills",
-    "/session — List sessions",
-    "/session new [browse|code|task] — New session",
-    "/session <#> — Switch / /session end [#] — End / /session kill <#> — Kill",
-    "/nlm — Knowledge base (list/create/sources/query)",
-    "/restart — Restart bridge",
-    "/sleep — Sleep status / /sleep resume / /sleep now",
-    "/whoami — Your user info & clearance",
-    "/effort — Reasoning effort (off/low/medium/high/xhigh)",
-    "/thinking show|hide — Show or hide model reasoning in chat",
-    "/kanban — Kanban board",
-    "/project unquarantine <id> — Clear reconcile quarantine for a project",
-    "/tribe — Peer status (Orc + enrolled peers)",
-    "/pi run --workspace <alias> <goal> — Start a Pi coding run",
-    "/pi status <runId> — Pi run status",
-    "/pi steer <runId> <text> — Steer a Pi run",
-    "/pi compact <runId> [instructions] — Native Pi compaction of a coding run",
-    "/pi cancel <runId> — Cancel a Pi run",
-    "/pi resume <runId> — Resume a Pi run",
-    "/coding — Interactive Pi coding session (resume most recent)",
-    "/coding new <alias> — New interactive coding session",
-    "/coding status — List coding sessions",
-    "/coding off — Leave coding mode",
-    "/coding end — End coding session (transcript preserved)",
-  ];
-  if (ctx.platform === "telegram") {
-    cmds.push("/full — Raw output, TTS disabled", "/short — Clean responses (default)", "/healing — Toggle self-healer on/off");
-  }
-  cmds.push("/help — Show this help");
+  const { getHelpEntries } = await import("../command-registry.js");
+  const cmds = getHelpEntries(ctx.platform);
   await ctx.reply(`📋 Available commands:\n\n${cmds.join("\n")}`);
   return true;
 }

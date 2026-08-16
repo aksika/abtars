@@ -1,101 +1,22 @@
 /**
  * Unified command handlers for all platforms (Telegram, Discord).
  * Split from the original monolithic command-handlers.ts.
+ *
+ * Built-in routes are installed from the canonical COMMAND_DEFINITIONS list —
+ * no hand-written registrations, so dispatch, authorization, menus, and /help
+ * cannot drift apart.
  */
 
 export type { Reply, CommandContext, CommandHandler, Platform } from "./types.js";
 export { registerCommand, handleCommand, triggerNewSession, triggerResetSession } from "./registry.js";
 import { registerExact, registerPrefix } from "./registry.js";
-import {
-  handleNewReset, handleCompact,
-  handleStatus, handleDoctor, handleStop, handleWait, handleRestart,
-  handleFull, handleShort, handleHealing, handleFacts,
-  handleTasksList, handleTasksTrigger, handleTasksLog, handleTaskPause, handleKanban,
-  handleChannel, handleTodo, handleProjectUnquarantine,
-  handleEmergencyAlias, handleModels, handleHeartbeat, handleEffort, handleThinking, handleContinue, handleRoute,
-  handleMemory, handleNlm,
-  handleSleep, handleSleepSub, handleHelp, handleSkills,
-  handleHooks, handleMcp, handleUsers, handleUsage, handleOpenRouter, handleWhoami,
-  handleSoftware, handleTribe, handleMetrics,
-} from "./handlers.js";
-import { handleSession } from "./session-handler.js";
-import { handleCoding } from "./handlers-coding.js";
-import {
-  handlePiRun, handlePiStatus, handlePiList, handlePiReply,
-  handlePiSteer, handlePiCancel, handlePiResume, handlePiCompact,
-} from "./handlers-pi.js";
+import { COMMAND_DEFINITIONS } from "../command-registry.js";
 
-// ── Exact-match commands ────────────────────────────────────────────────────
-registerExact("/reset", handleNewReset);
-registerExact("/compact", handleCompact);
-registerExact("/status", handleStatus);
-registerExact("/doctor", handleDoctor);
-registerExact("/health", handleDoctor);
-registerExact("/stop", handleStop);
-registerExact("/ctrlc", handleStop);
-registerExact("/wait", handleWait);
-registerExact("/steer", handleWait);
-registerExact("/restart", handleRestart);
-registerExact("/full", handleFull);
-registerExact("/short", handleShort);
-registerExact("/healing", handleHealing);
-registerPrefix("/healing ", handleHealing);
-registerExact("/software", handleSoftware);
-registerExact("/update", handleSoftware);
-registerExact("/facts", handleFacts);
-registerExact("/tasks", handleTasksList);
-registerExact("/task", handleTasksList);
-registerExact("/todo", handleTodo);
-registerExact("/kanban", handleKanban);
-registerPrefix("/kanban ", handleKanban);
-registerExact("/channel", handleChannel);
-registerPrefix("/channel ", handleChannel);
-registerExact("/memory", handleMemory);
-registerExact("/heartbeat", handleHeartbeat);
-registerExact("/models", handleModels);
-registerExact("/model", handleModels);
-registerExact("/change", (_, ctx) => handleModels("/model change", ctx));
-registerExact("/effort", handleEffort);
-registerExact("/thinking", handleThinking);
-registerExact("/continue", handleContinue);
-registerExact("/emergency", handleEmergencyAlias);
-registerExact("/route", handleRoute);
-registerExact("/help", handleHelp);
-registerExact("/users", handleUsers);
-registerExact("/skills", handleSkills);
-registerExact("/skill", handleSkills);
-registerExact("/sleep", handleSleep);
-registerExact("/mcp", handleMcp);
-registerExact("/hooks", handleHooks);
-registerExact("/usage", handleUsage);
-registerExact("/openrouter", handleOpenRouter);
-registerExact("/whoami", handleWhoami);
-registerExact("/tribe", handleTribe);
-registerExact("/metrics", handleMetrics);
-registerExact("/session", handleSession);
-registerExact("/coding", handleCoding);
-registerPrefix("/coding ", handleCoding);
-
-// ── Prefix-match commands ───────────────────────────────────────────────────
-registerPrefix("/session ", handleSession);
-registerPrefix("/tasks run ", handleTasksTrigger);
-registerPrefix("/task run ", handleTasksTrigger);
-registerPrefix("/tasks log ", handleTasksLog);
-registerPrefix("/task log ", handleTasksLog);
-registerPrefix("/nlm", handleNlm);
-registerPrefix("/sleep ", handleSleepSub);
-registerPrefix("/usage ", handleUsage);
-registerPrefix("/task pause ", handleTaskPause);
-registerPrefix("/task resume ", handleTaskPause);
-registerPrefix("/tasks pause ", handleTaskPause);
-registerPrefix("/tasks resume ", handleTaskPause);
-registerPrefix("/project unquarantine ", handleProjectUnquarantine);
-registerPrefix("/pi run ", handlePiRun);
-registerPrefix("/pi status ", handlePiStatus);
-registerPrefix("/pi get ", handlePiStatus);
-registerPrefix("/pi list", handlePiList);
-registerPrefix("/pi reply ", handlePiReply);
-registerPrefix("/pi steer ", handlePiSteer);
-registerPrefix("/pi cancel ", handlePiCancel);
-registerPrefix("/pi compact ", handlePiCompact);
-registerPrefix("/pi resume ", handlePiResume);
+for (const def of COMMAND_DEFINITIONS) {
+  const options = { allowNonMaster: def.access === "all" };
+  if (def.kind === "exact") {
+    registerExact(def.match, def.handler, options);
+  } else {
+    registerPrefix(def.match, def.handler, options);
+  }
+}

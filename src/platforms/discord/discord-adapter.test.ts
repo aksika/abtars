@@ -6,10 +6,11 @@ import type { IKiroTransport } from "../../components/transport/kiro-transport.j
 
 // Mock discord.js client
 let capturedReactionHandler: Function | null = null;
+let capturedDiscordApi: Record<string, ReturnType<typeof vi.fn>> | null = null;
 
 vi.mock("./discord-api.js", () => ({
   DiscordApi: vi.fn(function () {
-    return {
+    const api = {
       connect: vi.fn().mockResolvedValue(undefined),
       disconnect: vi.fn(),
       sendMessage: vi.fn().mockResolvedValue(undefined),
@@ -19,6 +20,8 @@ vi.mock("./discord-api.js", () => ({
       registerCommands: vi.fn().mockResolvedValue(undefined),
       botUserId: null,
     };
+    capturedDiscordApi = api;
+    return api;
   }),
 }));
 
@@ -153,6 +156,19 @@ describe("DiscordAdapter", () => {
 
     it("registers reaction handler on start", () => {
       expect(capturedReactionHandler).toBeTypeOf("function");
+    });
+
+    it("registerCommands payload equals the registry Discord projection", async () => {
+      const { getPlatformCommands } = await import("../../components/command-registry.js");
+      const expected = getPlatformCommands("discord");
+      expect(capturedDiscordApi?.registerCommands).toHaveBeenCalledWith(expected);
+      const payload = capturedDiscordApi!.registerCommands.mock.calls[0]![0] as Array<{ name: string }>;
+      const names = payload.map(c => c.name);
+      expect(new Set(names).size).toBe(names.length);
+      expect(payload.find(c => c.name === "pi")).toBeUndefined();
+      for (const tgOnly of ["full", "short", "healing"]) {
+        expect(payload.find(c => c.name === tgOnly)).toBeUndefined();
+      }
     });
 
     it("buffers reaction signal from authorized user", async () => {

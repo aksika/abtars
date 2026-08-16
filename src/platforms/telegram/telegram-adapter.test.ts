@@ -8,9 +8,11 @@ import { BOOT_GREETING_TOKEN, type InternalBootMetadata } from "../../types/plat
 import type { ManagedSession } from "../../components/spin-types.js";
 
 // Mock TelegramApi
+let capturedApi: Record<string, ReturnType<typeof vi.fn>> | null = null;
+
 vi.mock("./telegram-api.js", () => ({
   TelegramApi: vi.fn(function () {
-    return {
+    const api = {
       getMe: vi.fn().mockResolvedValue({ username: "testbot" }),
       setMyCommands: vi.fn().mockResolvedValue(undefined),
       sendMessage: vi.fn().mockResolvedValue(1),
@@ -22,6 +24,8 @@ vi.mock("./telegram-api.js", () => ({
       answerCallbackQuery: vi.fn().mockResolvedValue(undefined),
       getUpdates: vi.fn().mockResolvedValue([]),
     };
+    capturedApi = api;
+    return api;
   }),
 }));
 
@@ -176,6 +180,19 @@ describe("TelegramAdapter", () => {
   it("start initializes bot and poller", async () => {
     await adapter.start();
     // If no error, start succeeded (getMe + setMyCommands + poller.start called)
+  });
+
+  it("setMyCommands payload equals the registry Telegram projection", async () => {
+    const { getPlatformCommands } = await import("../../components/command-registry.js");
+    await adapter.start();
+    const expected = getPlatformCommands("telegram").map(c => ({ command: c.name, description: c.description }));
+    expect(capturedApi?.setMyCommands).toHaveBeenCalledWith(expected);
+    const payload = (capturedApi!.setMyCommands.mock.calls[0]![0] as Array<{ command: string }>);
+    const names = payload.map(c => c.command);
+    expect(new Set(names).size).toBe(names.length);
+    expect(payload).toContainEqual({ command: "full", description: "Raw output, TTS disabled" });
+    expect(payload).toContainEqual({ command: "healing", description: "Toggle self-healer on/off" });
+    expect(payload.find(c => c.command === "pi")).toBeUndefined();
   });
 
   it("stop is safe to call without start", () => {

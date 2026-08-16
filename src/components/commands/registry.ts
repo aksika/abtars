@@ -1,4 +1,3 @@
-import { resetAndPrepare } from "../message-pipeline.js";
 import { logAndSwallow } from "../log-and-swallow.js";
 import type { CommandContext, CommandHandler } from "./types.js";
 
@@ -8,21 +7,24 @@ const exactCommands: Record<string, CommandHandler> = {};
 const prefixCommands: Array<{ prefix: string; handler: CommandHandler }> = [];
 const KNOWN_COMMANDS = new Set<string>();
 
-const NON_MASTER_COMMANDS = new Set([
-  "/status", "/help", "/whoami", "/doctor", "/software", "/update",
-  "/models", "/model", "/skills", "/skill", "/facts", "/tasks", "/task",
-  "/usage", "/openrouter", "/session", "/hooks", "/memory", "/kanban",
-  "/heartbeat", "/reset", "/stop", "/ctrlc", "/coding",
-]);
+/** Roots callable by non-master users; derived from CommandDefinition.access. */
+const NON_MASTER_COMMANDS = new Set<string>();
 
-export function registerExact(name: string, handler: CommandHandler): void {
-  exactCommands[name] = handler;
-  KNOWN_COMMANDS.add(name);
+export interface RegisterOptions {
+  allowNonMaster?: boolean;
 }
 
-export function registerPrefix(prefix: string, handler: CommandHandler): void {
+export function registerExact(name: string, handler: CommandHandler, options: RegisterOptions = {}): void {
+  exactCommands[name] = handler;
+  KNOWN_COMMANDS.add(name);
+  if (options.allowNonMaster) NON_MASTER_COMMANDS.add(name);
+}
+
+export function registerPrefix(prefix: string, handler: CommandHandler, options: RegisterOptions = {}): void {
   prefixCommands.push({ prefix, handler });
-  KNOWN_COMMANDS.add(prefix.split(" ")[0]!);
+  const root = prefix.split(" ")[0]!;
+  KNOWN_COMMANDS.add(root);
+  if (options.allowNonMaster) NON_MASTER_COMMANDS.add(root);
 }
 
 /** Register an additional exact-match command (used by capability system). */
@@ -80,6 +82,7 @@ export async function triggerNewSession(ctx: CommandContext, reason = "new-sessi
     await fireHook("SessionEnd", { event: "SessionEnd", timestamp: new Date().toISOString(), sessionKey: ctx.sessionKey, platform: ctx.platform, userId: ctx.userId, reason }).catch(err => logAndSwallow(TAG, "fireHook session", err));
   }
   await ctx.idleSave.save(ctx.sessionKey, ctx.chatId);
+  const { resetAndPrepare } = await import("../message-pipeline.js");
   await resetAndPrepare({
     transport: ctx.transport, sessionKey: ctx.sessionKey,
     reason, conversationBuffer: ctx.conversationBuffer, bufKey: ctx.bufKey,
@@ -100,6 +103,7 @@ export async function triggerResetSession(ctx: CommandContext): Promise<void> {
   const { clearTransportCache } = await import("../transport-config.js");
   clearTransportCache();
   if (ctx.rebuildTransport) await ctx.rebuildTransport();
+  const { resetAndPrepare } = await import("../message-pipeline.js");
   await resetAndPrepare({
     transport: ctx.transport, sessionKey: ctx.sessionKey,
     reason: "reset-transport", conversationBuffer: ctx.conversationBuffer, bufKey: ctx.bufKey,

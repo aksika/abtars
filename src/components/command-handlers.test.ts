@@ -132,4 +132,69 @@ describe("command-handlers", () => {
     expect(mcporterCalls).toHaveLength(0);
   });
 
+  it("/project bare root replies with usage", async () => {
+    const ctx = makeCtx();
+    const handled = await handleCommand("/project", ctx);
+    expect(handled).toBe(true);
+    expect(ctx.reply).toHaveBeenCalledWith(expect.stringContaining("Usage: /project unquarantine"));
+  });
+
+  it("/project unquarantine with invalid id replies with usage", async () => {
+    const ctx = makeCtx();
+    const handled = await handleCommand("/project unquarantine 0", ctx);
+    expect(handled).toBe(true);
+    expect(ctx.reply).toHaveBeenCalledWith("Usage: /project unquarantine <id>");
+  });
+
+  it("/session new routes to the session handler", async () => {
+    const createSession = vi.fn().mockReturnValue({ shortIndex: 2, id: "s2", sessionKey: "k" });
+    const greetSession = vi.fn();
+    const ctx = makeCtx({
+      sessionManager: { ...(makeCtx().sessionManager as object), createSession, greetSession } as any,
+    });
+    const handled = await handleCommand("/session new code", ctx);
+    expect(handled).toBe(true);
+    expect(createSession).toHaveBeenCalledWith("test", "telegram", "C");
+  });
+
+  it("aliases still route to their canonical handlers", async () => {
+    const ctx = makeCtx();
+    expect(await handleCommand("/ctrlc", ctx)).toBe(true);
+    expect(ctx.transport.sendInterrupt).toHaveBeenCalled();
+    expect(await handleCommand("/model", ctx)).toBe(true);
+    expect(await handleCommand("/health", ctx)).toBe(true);
+    expect(ctx.reply).toHaveBeenCalled();
+  });
+
+  it("/help on telegram includes telegram-only lines", async () => {
+    const ctx = makeCtx();
+    await handleCommand("/help", ctx);
+    const reply = (ctx.reply as ReturnType<typeof vi.fn>).mock.calls[0]![0] as string;
+    expect(reply).toContain("/full — Raw output, TTS disabled");
+    expect(reply).toContain("/help — Show this help");
+  });
+
+  it("/help on discord excludes telegram-only lines", async () => {
+    const ctx = makeCtx({ platform: "discord" as const });
+    await handleCommand("/help", ctx);
+    const reply = (ctx.reply as ReturnType<typeof vi.fn>).mock.calls[0]![0] as string;
+    expect(reply).not.toContain("/full — Raw output, TTS disabled");
+    expect(reply).not.toContain("/healing — Toggle self-healer on/off");
+    expect(reply).toContain("/help — Show this help");
+  });
+
+  it("non-master users are denied master-only commands but allowed non-master roots", async () => {
+    setUserRegistryOverride({
+      users: [{ userId: "guest-1", role: "guest", maxClass: 0, tools: [], platforms: { telegram: 999 } }],
+      byPlatformId: new Map([["telegram:999", { userId: "guest-1", role: "guest", maxClass: 0, tools: [], platforms: { telegram: 999 } }]]),
+      byUserId: new Map([["guest-1", { userId: "guest-1", role: "guest", maxClass: 0, tools: [], platforms: { telegram: 999 } }]]),
+    } as any);
+    const ctx = makeCtx({ userId: "guest-1" });
+    await handleCommand("/todo", ctx);
+    expect(ctx.reply).toHaveBeenCalledWith("⛔ Owner-only command.");
+    (ctx.reply as ReturnType<typeof vi.fn>).mockClear();
+    expect(await handleCommand("/status", ctx)).toBe(true);
+    expect(ctx.reply).toHaveBeenCalled();
+  });
+
 });

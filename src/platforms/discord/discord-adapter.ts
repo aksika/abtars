@@ -8,7 +8,7 @@ import { DiscordApi } from "./discord-api.js";
 import { DiscordPoller } from "./discord-poller.js";
 import { SecurityGate } from "../../components/security-gate.js";
 import { loadUsers } from "../../components/user-registry.js";
-import { BOT_COMMANDS } from "../../components/command-registry.js";
+import { getPlatformCommands } from "../../components/command-registry.js";
 import { ResponseFormatter } from "../../components/response-formatter.js";
 import { formatReactionSignal } from "../../components/reactions.js";
 
@@ -68,7 +68,7 @@ export class DiscordAdapter implements PlatformAdapter {
     await this.poller.start();
 
     // Register slash commands (idempotent)
-    await this.api.registerCommands([...BOT_COMMANDS]).catch(err =>
+    await this.api.registerCommands(getPlatformCommands("discord")).catch(err =>
       logWarn(TAG, `Slash command registration failed: ${err instanceof Error ? err.message : String(err)}`),
     );
   }

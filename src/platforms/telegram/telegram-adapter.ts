@@ -1,4 +1,4 @@
-import { BOT_COMMANDS } from "../../components/command-registry.js";
+import { getPlatformCommands } from "../../components/command-registry.js";
 import { abtarsHome } from "../../paths.js";
 /**
  * Telegram platform adapter — wraps TelegramApi, TelegramPoller, SecurityGate.
@@ -97,7 +97,7 @@ export class TelegramAdapter implements PlatformAdapter {
     this.botUsername = botInfo.username?.toLowerCase() ?? "";
     logInfo(TAG, `🤖 Bot: @${botInfo.username}`);
 
-    await this.api.setMyCommands(BOT_COMMANDS.map(c => ({ command: c.name, description: c.description })))
+    await this.api.setMyCommands(getPlatformCommands("telegram").map(c => ({ command: c.name, description: c.description })))
       .catch((err) => logWarn(TAG, `setMyCommands failed: ${err instanceof Error ? err.message : String(err)}`));
 
     // #1635 — register the adapter for interactive coding projection + inline
