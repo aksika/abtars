@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
-import { mkdirSync, rmSync, existsSync, writeFileSync, readFileSync } from "node:fs";
+import { mkdirSync, rmSync, existsSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 
@@ -134,9 +134,11 @@ describe("scheduled project orchestration (#1516)", () => {
     expect(done[0]!.delivery_ready).toBe(1);
     expect(existsSync(done[0]!.result_path!)).toBe(true);
 
-    const history = readFileSync(join(home, "tasks", "task-history.jsonl"), "utf8");
-    expect(history).toContain('"outcome":"success"');
-    expect(history).toContain(`"kanbanCardId":${rootId}`);
+    const historyStore = await import("../../components/tasks/task-history-store.js");
+    const evs = historyStore.recentRuns("brief-task", 5);
+    expect(evs).toHaveLength(1);
+    expect(evs[0]!.outcome).toBe("success");
+    expect(evs[0]!.kanbanCardId).toBe(rootId);
 
     const deps = {
       sendMessage: vi.fn().mockResolvedValue("sent" as const),
@@ -199,9 +201,10 @@ describe("scheduled project orchestration (#1516)", () => {
 
     await waitForIdle(queue);
 
-    const history = readFileSync(join(home, "tasks", "task-history.jsonl"), "utf8");
-    expect(history).toContain('"outcome":"failed"');
-    expect(history).not.toContain('"outcome":"success"');
+    const historyStore = await import("../../components/tasks/task-history-store.js");
+    const evs = historyStore.recentRuns("stale-task", 5);
+    expect(evs.some(e => e.outcome === "failed")).toBe(true);
+    expect(evs.filter(e => e.outcome === "success")).toHaveLength(0);
     const failed = board.kanbanList("failed");
     expect(failed.some(c => c.id === rootId)).toBe(true);
   });

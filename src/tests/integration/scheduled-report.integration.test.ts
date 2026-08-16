@@ -89,9 +89,11 @@ describe("scheduled report acceptance (#1502 Task 12)", () => {
     expect(board.kanbanGetCard(done[0]!.id)!.status).toBe("delivered");
     expect(board.kanbanGetCard(done[0]!.id)!.delivery_attempts).toBe(1);
 
-    const history = readFileSync(join(home, "tasks", "task-history.jsonl"), "utf8");
-    expect(history).toContain('"outcome":"success"');
-    expect(history).toContain('"kanbanCardId":1');
+    const historyStore = await import("../../components/tasks/task-history-store.js");
+    const evs = historyStore.recentRuns("report-task", 5);
+    expect(evs).toHaveLength(1);
+    expect(evs[0]!.outcome).toBe("success");
+    expect(evs[0]!.kanbanCardId).toBe(1);
     logger.flushLogs();
     const logPath = logger.getLogFile();
     const logs = existsSync(logPath) ? readFileSync(logPath, "utf8") : "";

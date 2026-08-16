@@ -13,6 +13,7 @@ import { logWarn, logDebug, redactSecrets } from "../logger.js";
 import { logSwarmTrace } from "../swarm-trace.js";
 import { isValidSessionType } from "../spin-profiles.js";
 import { initTaskStateSchema } from "./task-state-schema.js";
+import { initTaskHistorySchema } from "./task-history-schema.js";
 
 // better-sqlite3 is external (native module, resolved from ~/.local/lib/node_modules/)
 type SqliteDb = { prepare(sql: string): any; exec(sql: string): void; pragma(s: string): void; transaction<T>(fn: () => T): () => T };
@@ -173,6 +174,9 @@ function db(): SqliteDb | null {
     // #1601: durable scheduled-run state lives in the same shared database.
     // Idempotent DDL + one-time JSON migration, inside the same open path.
     initTaskStateSchema(wrapTaskDatabase(_db));
+    // #1568: bounded, indexed run-history table. After task-state init because
+    // the retention exclusion queries task_runs.
+    initTaskHistorySchema(wrapTaskDatabase(_db));
   } catch {
     logWarn("kanban", "better-sqlite3 not available — kanban features disabled (run: abtars deps install)");
     _db = null;

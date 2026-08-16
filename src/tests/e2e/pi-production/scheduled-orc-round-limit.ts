@@ -100,6 +100,7 @@ function readBridgeHomeEvidence(ctx: PiAcceptanceContext, providerSummaries: Pro
 
   // #1601: durable run state now lives in the shared task database
   // (task_runs rows); the legacy task-state.json is migrated once at boot.
+  // #1568: the terminal event lives in the bounded task_run_history table.
   const dbPath = join(home, "kanban", "kanban.db");
   if (existsSync(dbPath)) {
     try {
@@ -113,6 +114,11 @@ function readBridgeHomeEvidence(ctx: PiAcceptanceContext, providerSummaries: Pro
         evidence.cardId = run?.card_id ?? undefined;
         evidence.phase = run?.phase;
 
+        // Terminal outcome through the same durable SQL evidence the bridge
+        // reads; a settled run carries a task_run_history row.
+        const terminal = db.prepare("SELECT outcome FROM task_run_history WHERE task_id = ? ORDER BY finished_at DESC, run_id DESC LIMIT 1").get(SCHEDULED_TASK_ID) as { outcome?: string } | undefined;
+        evidence.terminalOutcome = terminal?.outcome;
+
         if (evidence.cardId !== undefined) {
           const sup = db.prepare("SELECT state FROM project_supervision WHERE project_card_id = ?").get(evidence.cardId) as { state?: string } | undefined;
           evidence.supervisionState = sup?.state;
@@ -125,15 +131,6 @@ function readBridgeHomeEvidence(ctx: PiAcceptanceContext, providerSummaries: Pro
     } catch {
       // db unavailable in the test process — provider evidence still stands
     }
-  }
-
-  const historyPath = join(home, "tasks", "task-history.jsonl");
-  if (existsSync(historyPath)) {
-    const rows = readFileSync(historyPath, "utf-8").split("\n").filter(Boolean).map((l) => {
-      try { return JSON.parse(l) as { taskId?: string; outcome?: string }; } catch { return null; }
-    }).filter((r): r is { taskId?: string; outcome?: string } => r !== null);
-    const terminal = rows.find((r) => r.taskId === SCHEDULED_TASK_ID);
-    evidence.terminalOutcome = terminal?.outcome;
   }
 
   // Round-limit class: the scheduled request stream saw two toolCall rounds.
