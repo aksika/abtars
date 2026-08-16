@@ -33,13 +33,16 @@ Remote deploy flow: `/update pull` → `/update deploy`
 1. Resolve source (git fetch + staleness check, or npm package)
 2. Build into app.staging/ (esbuild bundle + external deps + copy abmind)
 3. Validate: entry point exists at app.staging/bundle/abtars.js
-4. Config snapshot: rotate 3 slots, copy config/ → config/.pre-update/
-5. Atomic swap: rm app.prev/, mv app/ → app.prev/, mv app.staging/ → app/
-6. Post-swap: refresh scripts, bin wrappers, skills, config seeds, doctor --fix
-7. Write restart sentinel (status: "pending")
-8. Restart bridge (USR1 to watchdog or cold restart)
-9. Health probe: poll bridge.lock for 60s (fresh lastHeartbeat)
-10. On failure: auto-rollback (swap app/ ↔ app.prev/, re-restart)
+4. Skill dependency gate: validate and prepare exact dependencies for staged core
+   skills plus preserved user skills before activation; failure leaves the
+   previous release active
+5. Config snapshot: rotate 3 slots, copy config/ → config/.pre-update/
+6. Atomic swap: rm app.prev/, mv app/ → app.prev/, mv app.staging/ → app/
+7. Post-swap: refresh scripts, bin wrappers, skills, config seeds, doctor --fix
+8. Write restart sentinel (status: "pending")
+9. Restart bridge (USR1 to watchdog or cold restart)
+10. Health probe: poll bridge.lock for 60s (fresh lastHeartbeat)
+11. On failure: auto-rollback (swap app/ ↔ app.prev/, re-restart)
 ```
 
 ## Directory layout

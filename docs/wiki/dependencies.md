@@ -23,7 +23,36 @@ There is no `deps check` — use `deps list`, which shows install status for eve
 | `youtube` | `youtube-transcript` | YouTube transcript fetching |
 | `image` | `jimp` | Image processing |
 
-All npm groups install under `~/.local/lib/node_modules/` — no sudo, no system paths. Daemon mode wires `NODE_PATH` automatically; simple mode needs the manual export documented in [Installation](./install.md).
+These CLI-managed npm groups install under `~/.local/lib/node_modules/` — no
+sudo, no system paths. Daemon mode wires `NODE_PATH` automatically; simple mode
+needs the manual export documented in [Installation](./install.md).
+
+## Skill script dependencies
+
+Skill scripts use a separate, generic dependency contract. Any skill under
+`core/`, `self/`, `custom/`, or `downloaded/` may declare exact npm versions in
+`scripts/package.json`:
+
+```json
+{
+  "type": "module",
+  "dependencies": {
+    "example-runtime-package": "1.2.3"
+  }
+}
+```
+
+Absent or empty `dependencies` means no preparation. Non-empty declarations are
+validated and installed centrally under `~/.abtars/node_modules/`, then checked
+from a nested skill-script path. This is distinct from `abtars deps`: skill
+dependencies are prepared automatically at release deploy (before activation),
+boot, and explicit `/skill reload`. They are never installed while a model is
+executing a skill.
+
+Exact semantic versions are required. A shared package may have only one direct
+version; conflicting skill declarations exclude the affected skills on reload
+or abort deployment before activation. See [Skills](./skills.md#declaring-npm-dependencies-optional)
+for the declaration and recovery details.
 
 `pi` (the coding-agent CLI/AI/TUI bundle) is managed through the same `deps install|update|remove pi` commands but is a separate external distribution with its own compatibility check — see [Pi Executor](./pi-executor.md).
 

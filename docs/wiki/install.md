@@ -34,13 +34,17 @@ Step 3 automatically clones source, builds, deploys, and starts the bridge (daem
 | Step | What happens |
 |------|-------------|
 | `npm install -g abtars@alpha abmind@alpha` | Installs CLI tools globally |
-| `abtars deps install all` | Installs optional npm package groups (native, twitter, pdf, youtube, image) |
+| `abtars deps install all` | Installs optional CLI npm package groups (native, twitter, pdf, youtube, image) |
 | `abtars install` | Creates config, clones source, builds, deploys release, starts bridge |
 | `abmind install` | Creates `~/.abmind/`, initializes memory DB, sets encryption (discovers user from abtars) |
 
 ### System dependencies (optional)
 
 `abtars deps` manages optional npm package groups (`native`, `twitter`, `pdf`, `youtube`, `image`, `pi`) and system binaries (`ollama`, `bwrap`, `lightpanda`). See [Dependencies](./dependencies.md) for the full command reference, group table, and the native-deps adoption/collision behavior shared with abmind.
+
+Dependencies declared by skill scripts are separate. Deploy, boot, and
+`/skill reload` prepare them under `~/.abtars/node_modules/`; `abtars deps
+install all` is not required for a skill's declared package.
 
 ```bash
 abtars deps list          # shows every group + install status
@@ -117,7 +121,8 @@ If `abtars` still behaves like the old version after updating, a stale `npm inst
 ~/.abtars/
 ├── config/              # .env, transport.json, users.json, peers.json
 ├── secret/              # API keys (encrypted at rest after first boot)
-├── skills/              # core/ + custom/
+├── skills/              # core/ + self/ + custom/ + downloaded/
+├── node_modules/        # exact packages declared by skill scripts
 ├── logs/                # bridge-YYYY-MM-DD.log, watchdog.log
 └── app -> releases/current  # symlink to active release
 

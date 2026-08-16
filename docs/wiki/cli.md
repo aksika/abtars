@@ -114,7 +114,7 @@ Manage the systemd/launchd service.
 
 ### deps
 
-Manage optional npm package groups (native, twitter, pdf, youtube, image, pi) and system binaries (ollama, bwrap, lightpanda). See [Dependencies](./dependencies.md) for the full reference.
+Manage optional CLI npm package groups (native, twitter, pdf, youtube, image, pi) and system binaries (ollama, bwrap, lightpanda). Skill-script dependencies are lifecycle-managed separately; see [Dependencies](./dependencies.md#skill-script-dependencies).
 
 | Subcommand | Description |
 |------------|-------------|
