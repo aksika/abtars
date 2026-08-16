@@ -190,8 +190,8 @@
     "maxOutput": 65536,
     "rank": 3,
     "cost": {
-      "input": 3e-7,
-      "output": 0.0000025
+      "input": 3e-07,
+      "output": 2.5e-06
     },
     "transports": [
       "openrouter"
@@ -203,8 +203,8 @@
     "maxOutput": 16384,
     "rank": 3,
     "cost": {
-      "input": 6.3e-8,
-      "output": 2.1e-7
+      "input": 6.3e-08,
+      "output": 2.1e-07
     },
     "transports": [
       "openrouter"
@@ -216,8 +216,8 @@
     "maxOutput": 131072,
     "rank": 2,
     "cost": {
-      "input": 9e-8,
-      "output": 1.8e-7
+      "input": 9e-08,
+      "output": 1.8e-07
     },
     "transports": [
       "openrouter"
@@ -255,8 +255,8 @@
     "maxOutput": 131072,
     "rank": 1,
     "cost": {
-      "input": 4.35e-7,
-      "output": 8.7e-7
+      "input": 4.35e-07,
+      "output": 8.7e-07
     },
     "transports": [
       "openrouter"
@@ -320,7 +320,7 @@
     "transports": [
       "openrouter"
     ],
-    "description": "Tencent Hy3 (295B MoE, 21B active, 192 experts top-8). Reasoning support (high/low/none). Free via OpenRouter — single provider: Novita (99.9%% uptime, 44 tok/s p50, 262K maxOut).",
+    "description": "Tencent Hy3 (295B MoE, 21B active, 192 experts top-8). Reasoning support (high/low/none). Free via OpenRouter \u2014 single provider: Novita (99.9%% uptime, 44 tok/s p50, 262K maxOut).",
     "validatedAt": "2026-07-10",
     "status": "alive",
     "providers": {
@@ -610,8 +610,8 @@
     "maxOutput": 8192,
     "rank": 1,
     "cost": {
-      "input": 1.05e-7,
-      "output": 2.8e-7
+      "input": 1.05e-07,
+      "output": 2.8e-07
     },
     "transports": [
       "openrouter"
@@ -624,8 +624,8 @@
     "maxOutput": 8192,
     "rank": 1,
     "cost": {
-      "input": 3e-7,
-      "output": 0.0000012
+      "input": 3e-07,
+      "output": 1.2e-06
     },
     "transports": [
       "openrouter"
@@ -638,8 +638,8 @@
     "maxOutput": 8192,
     "rank": 1,
     "cost": {
-      "input": 5.32e-7,
-      "output": 0.000001672
+      "input": 5.32e-07,
+      "output": 1.672e-06
     },
     "transports": [
       "openrouter"
@@ -652,8 +652,8 @@
     "maxOutput": 16384,
     "rank": 1,
     "cost": {
-      "input": 0.000005,
-      "output": 0.000025
+      "input": 5e-06,
+      "output": 2.5e-05
     },
     "transports": [
       "openrouter"
@@ -666,8 +666,8 @@
     "maxOutput": 16384,
     "rank": 1,
     "cost": {
-      "input": 0.000005,
-      "output": 0.000025
+      "input": 5e-06,
+      "output": 2.5e-05
     },
     "transports": [
       "openrouter"
@@ -680,8 +680,8 @@
     "maxOutput": 8192,
     "rank": 2,
     "cost": {
-      "input": 2e-7,
-      "output": 0.00000115
+      "input": 2e-07,
+      "output": 1.15e-06
     },
     "transports": [
       "openrouter"
@@ -694,8 +694,8 @@
     "maxOutput": 16384,
     "rank": 1,
     "cost": {
-      "input": 0.000003,
-      "output": 0.000015
+      "input": 3e-06,
+      "output": 1.5e-05
     },
     "transports": [
       "openrouter"
@@ -708,8 +708,8 @@
     "maxOutput": 16384,
     "rank": 1,
     "cost": {
-      "input": 0.000005,
-      "output": 0.00003
+      "input": 5e-06,
+      "output": 3e-05
     },
     "transports": [
       "openrouter"
@@ -722,8 +722,8 @@
     "maxOutput": 65536,
     "rank": 1,
     "cost": {
-      "input": 5e-7,
-      "output": 0.000003
+      "input": 5e-07,
+      "output": 3e-06
     },
     "transports": [
       "openrouter"
@@ -736,8 +736,8 @@
     "maxOutput": 16384,
     "rank": 1,
     "cost": {
-      "input": 0.000002,
-      "output": 0.00001
+      "input": 2e-06,
+      "output": 1e-05
     },
     "transports": [
       "openrouter"
@@ -750,8 +750,8 @@
     "maxOutput": 65536,
     "rank": 1,
     "cost": {
-      "input": 1e-7,
-      "output": 4e-7
+      "input": 1e-07,
+      "output": 4e-07
     },
     "transports": [
       "openrouter"
@@ -764,8 +764,8 @@
     "maxOutput": 8192,
     "rank": 1,
     "cost": {
-      "input": 4.35e-7,
-      "output": 8.7e-7
+      "input": 4.35e-07,
+      "output": 8.7e-07
     },
     "transports": [
       "openrouter"
@@ -778,8 +778,8 @@
     "maxOutput": 131072,
     "rank": 2,
     "cost": {
-      "input": 3.6e-8,
-      "output": 1.8e-7
+      "input": 3.6e-08,
+      "output": 1.8e-07
     },
     "transports": [
       "openrouter"
@@ -810,5 +810,253 @@
     "transports": [
       "openrouter"
     ]
+  },
+  "inclusionai/ling-2.6-1t:free": {
+    "contextWindow": 262144,
+    "maxOutput": 16384,
+    "rank": 2,
+    "cost": {
+      "input": 0,
+      "output": 0
+    },
+    "transports": [
+      "openrouter"
+    ],
+    "description": "InclusionAI Ling 2.6 1T. Free OpenRouter. 262K context.",
+    "validatedAt": "2026-04-24"
+  },
+  "deepseek-v4-flash": {
+    "contextWindow": 1000000,
+    "maxOutput": 384000,
+    "rank": 2,
+    "cost": {
+      "input": 1.4e-07,
+      "output": 2.8e-07
+    },
+    "transports": [
+      "opencode-go"
+    ],
+    "status": "alive"
+  },
+  "deepseek-v4-pro": {
+    "contextWindow": 1000000,
+    "maxOutput": 384000,
+    "rank": 1,
+    "cost": {
+      "input": 4.35e-07,
+      "output": 8.7e-07
+    },
+    "transports": [
+      "opencode-go"
+    ],
+    "status": "alive"
+  },
+  "mimo-v2.5": {
+    "contextWindow": 1000000,
+    "maxOutput": 128000,
+    "rank": 1,
+    "cost": {
+      "input": 1.4e-07,
+      "output": 2.8e-07
+    },
+    "transports": [
+      "opencode-go"
+    ],
+    "status": "alive"
+  },
+  "mimo-v2.5-pro": {
+    "contextWindow": 1048576,
+    "maxOutput": 128000,
+    "rank": 1,
+    "cost": {
+      "input": 4.35e-07,
+      "output": 8.7e-07
+    },
+    "transports": [
+      "opencode-go"
+    ],
+    "status": "alive"
+  },
+  "minimax-m3": {
+    "contextWindow": 1000000,
+    "maxOutput": 131072,
+    "rank": 1,
+    "cost": {
+      "input": 3e-07,
+      "output": 1.2e-06
+    },
+    "transports": [
+      "opencode-go"
+    ],
+    "status": "alive"
+  },
+  "minimax-m2.7": {
+    "contextWindow": 204800,
+    "maxOutput": 131072,
+    "rank": 2,
+    "cost": {
+      "input": 3e-07,
+      "output": 1.2e-06
+    },
+    "transports": [
+      "opencode-go"
+    ],
+    "status": "alive"
+  },
+  "kimi-k2.6": {
+    "contextWindow": 262144,
+    "maxOutput": 65536,
+    "rank": 2,
+    "cost": {
+      "input": 9.499999999999999e-07,
+      "output": 4e-06
+    },
+    "transports": [
+      "opencode-go"
+    ],
+    "status": "alive"
+  },
+  "kimi-k2.7-code": {
+    "contextWindow": 262144,
+    "maxOutput": 262144,
+    "rank": 2,
+    "cost": {
+      "input": 9.499999999999999e-07,
+      "output": 4e-06
+    },
+    "transports": [
+      "opencode-go"
+    ],
+    "status": "alive"
+  },
+  "kimi-k3": {
+    "contextWindow": 1048576,
+    "maxOutput": 131072,
+    "rank": 1,
+    "cost": {
+      "input": 3e-06,
+      "output": 1.5e-05
+    },
+    "transports": [
+      "opencode-go"
+    ],
+    "status": "alive"
+  },
+  "glm-5.1": {
+    "contextWindow": 202752,
+    "maxOutput": 32768,
+    "rank": 1,
+    "cost": {
+      "input": 1.4e-06,
+      "output": 4.4e-06
+    },
+    "transports": [
+      "opencode-go"
+    ],
+    "status": "alive"
+  },
+  "glm-5.2": {
+    "contextWindow": 1000000,
+    "maxOutput": 131072,
+    "rank": 1,
+    "cost": {
+      "input": 1.4e-06,
+      "output": 4.4e-06
+    },
+    "transports": [
+      "opencode-go"
+    ],
+    "status": "alive"
+  },
+  "qwen3.6-plus": {
+    "contextWindow": 1000000,
+    "maxOutput": 65536,
+    "rank": 2,
+    "cost": {
+      "input": 5e-07,
+      "output": 3e-06
+    },
+    "transports": [
+      "opencode-go"
+    ],
+    "status": "alive"
+  },
+  "qwen3.7-plus": {
+    "contextWindow": 1000000,
+    "maxOutput": 65536,
+    "rank": 2,
+    "cost": {
+      "input": 4.0000000000000003e-07,
+      "output": 1.6000000000000001e-06
+    },
+    "transports": [
+      "opencode-go"
+    ],
+    "status": "alive"
+  },
+  "qwen3.7-max": {
+    "contextWindow": 1000000,
+    "maxOutput": 65536,
+    "rank": 1,
+    "cost": {
+      "input": 2.5e-06,
+      "output": 7.5e-06
+    },
+    "transports": [
+      "opencode-go"
+    ],
+    "status": "alive"
+  },
+  "hy3": {
+    "contextWindow": 256000,
+    "maxOutput": 64000,
+    "rank": 2,
+    "cost": {
+      "input": 1.4e-07,
+      "output": 5.8e-07
+    },
+    "transports": [
+      "opencode-go"
+    ],
+    "status": "alive"
+  },
+  "grok-4.5": {
+    "contextWindow": 500000,
+    "maxOutput": 500000,
+    "rank": 1,
+    "cost": {
+      "input": 2e-06,
+      "output": 6e-06
+    },
+    "transports": [
+      "opencode-go"
+    ],
+    "status": "alive"
+  },
+  "deepseek-v4-flash:free": {
+    "contextWindow": 1000000,
+    "maxOutput": 384000,
+    "rank": 2,
+    "cost": {
+      "input": 0.0,
+      "output": 0.0
+    },
+    "transports": [
+      "tokenharbor"
+    ],
+    "status": "alive"
+  },
+  "mimo-v2.5:free": {
+    "contextWindow": 1000000,
+    "maxOutput": 128000,
+    "rank": 1,
+    "cost": {
+      "input": 0.0,
+      "output": 0.0
+    },
+    "transports": [
+      "tokenharbor"
+    ],
+    "status": "alive"
   }
 }
