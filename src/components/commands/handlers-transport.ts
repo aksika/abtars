@@ -124,10 +124,17 @@ export async function handleModels(text: string, ctx: CommandContext): Promise<b
 
   const arg = text.replace(/^\/(models?)\s*/i, "").trim().toLowerCase();
 
-  // #1447: embedded Pi has no private emergency engine. #1468 owns the
-  // dedicated emergency path; #1467 only defines the global ACP hailMary entry.
+  // #1468: the early emergency router (recovery handler + first pipeline
+  // middleware) claims /emergency and the hailmary aliases. This branch is a
+  // defensive fallback only when neither router is wired (isolated caller) —
+  // it reports the live service snapshot, never a second activation path.
   if (arg === "emergency" || arg === "hailmary") {
-    await ctx.reply("❌ Emergency execution is unavailable until #1468. Normal transport switching is available with /route pi-ai or /route acp.");
+    const state = ctx.emergencyExecution?.status();
+    if (state && state.kind !== "inactive") {
+      await ctx.reply(`Emergency mode is ${state.kind}${state.owner ? ` (owner ${state.owner.userId})` : ""}. Send a text message in the owning chat, or /model restore to exit.`);
+    } else {
+      await ctx.reply("❌ Emergency execution is unavailable in this context — the emergency router is not wired here.");
+    }
     return true;
   }
 
@@ -398,6 +405,9 @@ export async function handleModels(text: string, ctx: CommandContext): Promise<b
   if (ctx.hailMary) {
     lines.push(`hailMary: ${ctx.hailMary.model} `);
   }
+  // #1468: live emergency state from the service snapshot.
+  const emergency = ctx.emergencyExecution?.describeForOperator();
+  if (emergency) lines.push(emergency);
   lines.push("\nUse /models change to switch.");
   await ctx.reply(lines.join("\n"));
   return true;

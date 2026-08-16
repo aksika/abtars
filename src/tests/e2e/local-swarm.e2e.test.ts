@@ -52,7 +52,10 @@ function readTrace(root: string): string[] {
 async function runChild(root: string, scenario: string): Promise<{ result?: LocalSwarmResultV2; stdout: string; stderr: string; trace: string[] }> {
   const home = join(root, "abtars-home");
   const runner = join(process.cwd(), "src/tests/e2e/local-swarm-runner.ts");
-  const child = spawn(process.execPath, ["--import", "tsx", runner], {
+  // #1468 Gate B: the pi-load-guard preload makes any Pi runtime module load
+  // throw inside the child. Enabled only for the emergency scenario.
+  const guard = join(process.cwd(), "src/tests/e2e/pi-load-guard.ts");
+  const child = spawn(process.execPath, ["--import", "tsx", "--import", guard, runner], {
     env: {
       PATH: process.env["PATH"] ?? "",
       HOME: root,
@@ -61,6 +64,7 @@ async function runChild(root: string, scenario: string): Promise<{ result?: Loca
       LOG_FORMAT: "json",
       ABTARS_LOG_LEVEL: "trace",
       SCENARIO: scenario,
+      PI_LOAD_GUARD: scenario === "emergency_gate_b" ? "1" : "",
       NODE_PATH: process.env["NODE_PATH"] ?? (process.env["HOME"] ? join(process.env["HOME"], ".local/lib/node_modules") : ""),
     },
     stdio: ["ignore", "pipe", "pipe"],
@@ -304,6 +308,21 @@ describe("Local Swarm E2E", () => {
       expect(ss.retryRunStatus).toBe("completed");
       expect(result.terminal.projectState).toBe("accepted");
       expect(result.counts.outboundDeliveries).toBe(1);
+    });
+  }, CHILD_TIMEOUT_MS + 10_000);
+
+  it("emergency_gate_b (#1468): transportless boot activates /emergency through the recovery boundary, serves exactly one ACP response with zero Pi load, Spin sessions, memory writes, or orphan children", async () => {
+    await runScenario("emergency_gate_b", (result) => {
+      expect(result.ok).toBe(true);
+      const ss = result.scenarioSpecific as Record<string, unknown>;
+      expect(ss).toBeDefined();
+      expect(ss.deliveries).toBeGreaterThan(0);
+      expect(ss.acks).toBe(1); // exactly one delivered ACP response
+      expect(ss.busyRejected).toBe(true); // no second queue authority
+      expect(ss.sessionsCreated).toBe(0); // zero Spin sessions
+      expect(ss.memoryWrites).toBe(0); // zero automatic abmind activity
+      expect(ss.orphanAcpChild).toBe(false); // no orphan ACP process/session
+      expect(ss.restoredQueuing).toBe(true); // degraded behavior unchanged after restore
     });
   }, CHILD_TIMEOUT_MS + 10_000);
 });

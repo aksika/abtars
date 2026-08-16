@@ -98,6 +98,7 @@ export const commandMiddleware: Middleware = async (ctx, next) => {
     loadedCapabilities: deps.loadedCapabilities,
     selfHealerTask: deps.selfHealerTask,
     hailMary: deps.hailMary,
+    emergencyExecution: deps.emergencyExecution,
     rebuildTransport: deps.rebuildTransport,
     phaseHealth: deps.phaseHealth,
     registry: deps.registry,

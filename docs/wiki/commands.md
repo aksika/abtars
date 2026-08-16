@@ -25,7 +25,7 @@ All commands work on Telegram and Discord unless noted otherwise.
 | `/models restore` | Undo last model/provider switch |
 | `/models default` | Factory reset (transport.default.json) |
 | `/models health reset` | Reset model health buckets |
-| `/models emergency` | 🚨 Activate paid hailMary model |
+| `/models emergency` | Activate the emergency ACP fast path (hailMary) |
 | `/emergency` | Shortcut for `/models emergency` |
 
 ## Status & Diagnostics

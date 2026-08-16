@@ -243,7 +243,7 @@ export async function handleHelp(_text: string, ctx: CommandContext): Promise<bo
     "/models — Model, transport & agent status (legacy)",
     "/models change — Switch model/provider (any agent)",
     "/models quick <model> — Instant switch on same provider",
-    "/emergency — Emergency execution unavailable until #1468 (global ACP hailMary config)",
+    "/emergency — Activate emergency fast path (ACP hailMary); /model restore to exit",
     "/tasks — Scheduled tasks",
     "/tasks log <id> — Last 5 runs for a task",
     "/task run <id> — Manually fire a task",

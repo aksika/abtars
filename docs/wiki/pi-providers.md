@@ -52,7 +52,7 @@ The `/model` Telegram command uses Pi's catalog to populate the picker with cost
 ## Fallback and Emergency
 
 - Fallback/rotation stays abTARS's own — Pi classifies errors, abTARS decides which model to retry with
-- `/emergency` (hailMary) always runs on the L0 reptile floor — never through pi-ai
+- `/emergency` (hailMary) is a dedicated ACP fast path — it never enters pi-ai or the normal message pipeline
 - ACP transport is untouched (Pi has no ACP path)
 
 ## What stays the same

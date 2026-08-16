@@ -50,10 +50,10 @@ Switches professor to the specified model on the current provider.
 ## Emergency Mode
 
 ```
-/model emergency
+/emergency
 ```
 
-Activates the paid `hailMary` model (configured in transport.json). Never auto-triggered — manual operator decision only. Clears on `/model restore`, `/model default`, or `/reset`.
+Activates a dedicated ACP client running the `hailMary` model configured in transport.json. It works even when the normal transport failed to boot: the early recovery boundary offers every message to the emergency path first, and the full pipeline runs the same service as its first middleware. Activation is owner-only (master role). While active, plain text from the owning conversation goes straight to the dedicated ACP client — no session selection, prompts, hooks, memory, or compaction. Exit with `/model restore`. Interrupt an in-flight response with `/stop` or `/ctrlc`. Voice/image/document input is not supported in emergency mode (bounded text-only reply).
 
 ## Fallback Behavior
 

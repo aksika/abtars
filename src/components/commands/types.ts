@@ -44,6 +44,8 @@ export interface CommandContext {
   loadedCapabilities?: PipelineDeps["loadedCapabilities"];
   selfHealerTask?: { enabled: boolean; resetCircuitBreaker?: () => void; pausedRules?: () => number } | null;
   hailMary?: PipelineDeps["hailMary"];
+  /** #1468: live emergency state for status/help rendering. */
+  emergencyExecution?: PipelineDeps["emergencyExecution"];
   rebuildTransport?: PipelineDeps["rebuildTransport"];
   phaseHealth?: PipelineDeps["phaseHealth"];
   registry?: PipelineDeps["registry"];

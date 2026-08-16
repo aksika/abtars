@@ -90,6 +90,10 @@ export class Bridge {
     await step("memory", async () => {
       await this.ctx.memoryRuntime.close().catch(() => {});
     });
+    // #1468: emergency teardown happens after platforms stop accepting new
+    // messages and before normal transport teardown. The service fences
+    // delivery synchronously before awaiting interrupt/process cleanup.
+    await step("emergency", () => this.ctx.emergencyExecution?.shutdown());
     await step("transport", () => this.ctx.transport?.destroy());
     await step("snapshot", () => { const { removeSnapshot } = require("./components/runtime-health-snapshot.js"); removeSnapshot(); });
     this.ctx.sessionManager.clearAll();

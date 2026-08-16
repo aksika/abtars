@@ -67,6 +67,9 @@ export async function handleStatus(_text: string, ctx: CommandContext): Promise<
       heartbeatIntervalMs: Math.max(60, parseInt(process.env["HEARTBEAT_INTERVAL_SEC"] ?? "60", 10)) * 1000,
     });
     let text = renderChatStatus(view);
+    // #1468: live emergency state from the service snapshot (not transport casts).
+    const emergency = ctx.emergencyExecution?.describeForOperator();
+    if (emergency) text += `\n\n${emergency}`;
     // #255: append sanitized env dump on /status full
     if (_text.trim().toLowerCase() === "full") {
       const { envDump } = await import("../env-schema.js");

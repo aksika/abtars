@@ -113,6 +113,13 @@ export interface BootCtx {
   sleepHandle: SleepHandle | null;
   modelHealthRegistry: ModelHealthRegistry | null;
   hailMary: (ResolvedHailMary & { apiKey?: string }) | null;
+  /**
+   * #1468: boot-owned emergency execution service. Constructed at the early
+   * platform/recovery composition boundary (phase-platforms-connect) and
+   * reused by the full pipeline through PipelineDeps. Independent of Spin,
+   * memory readiness, and the normal transport.
+   */
+  emergencyExecution: import("../components/emergency-execution-service.js").EmergencyExecutionService | null;
   selfHealerTask: { enabled: boolean } | null;
   dashboardServer: IDashboardSlot | null;
   agentApiServer: AgentApiServer | null;
@@ -221,6 +228,7 @@ export function createBootCtx(overrides: Partial<BootCtx> = {}): BootCtx {
     sleepHandle: null,
     modelHealthRegistry: null,
     hailMary: null,
+    emergencyExecution: null,
     selfHealerTask: null,
     dashboardServer: null,
     agentApiServer: null,

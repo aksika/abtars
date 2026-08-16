@@ -49,7 +49,7 @@ import type { RunningJob } from "./tasks/task-queue.js";
 import type { InboundMessage, PlatformAdapter, DeliveryCorrelation } from "../types/platform.js";
 import { BOOT_GREETING_TOKEN } from "../types/platform.js";
 import { updateBridgeLockField } from "./transport/bridge-lock-transport.js";
-import { createMessageContext, runPipeline, voiceMiddleware, sessionSelectionMiddleware, commandMiddleware, pausedGuardMiddleware, busyGuardMiddleware } from "./pipeline/index.js";
+import { createMessageContext, runPipeline, voiceMiddleware, sessionSelectionMiddleware, commandMiddleware, pausedGuardMiddleware, busyGuardMiddleware, emergencyRouteMiddleware } from "./pipeline/index.js";
 import { codingRouteMiddleware } from "./pipeline/coding-route.js";
 import { releaseBusy } from "./pipeline/busy-guard.js";
 import { hasHooks, fire as fireHook } from "./hooks/hook-system.js";
@@ -195,6 +195,11 @@ export interface PipelineDeps extends TransportDeps, MemoryDeps, VoiceDeps {
   loadedCapabilities?: string[];
   selfHealerTask?: { enabled: boolean } | null;
   hailMary?: (ResolvedHailMary & { apiKey?: string }) | null;
+  /**
+   * #1468: boot-owned emergency execution service. First in the middleware
+   * list; the service itself never touches Spin, memory, or this transport.
+   */
+  emergencyExecution?: import("./emergency-execution-service.js").EmergencyExecutionService | null;
   /** Rebuild professor transport in place (used by /reset to pick up provider changes). */
   rebuildTransport?: () => Promise<void>;
   /** Boot-time phase health (#331). */
@@ -219,12 +224,16 @@ export async function handleInboundMessage(
   adapter: PlatformAdapter,
   deps: PipelineDeps,
 ): Promise<void> {
-  // Run early middleware (voice → select → coding-route → commands → paused → busy guard)
+  // Run early middleware (emergency → voice → select → coding-route →
+  // commands → paused → busy guard)
   // #1635: codingRouteMiddleware sits between session selection and commands so
   // coding-owned controls are claimed before the generic handlers, busy guards,
   // and BeforeMessage see them.
+  // #1468: emergencyRouteMiddleware is FIRST — it claims emergency activation/
+  // restore/interrupt controls and active-owner turns before voice, session
+  // selection, coding routing, commands, guards, and BeforeMessage.
   const ctx = createMessageContext(msg, adapter, deps);
-  await runPipeline(ctx, [voiceMiddleware, sessionSelectionMiddleware, codingRouteMiddleware, commandMiddleware, pausedGuardMiddleware, busyGuardMiddleware]);
+  await runPipeline(ctx, [emergencyRouteMiddleware, voiceMiddleware, sessionSelectionMiddleware, codingRouteMiddleware, commandMiddleware, pausedGuardMiddleware, busyGuardMiddleware]);
   if (ctx.handled) return;
 
   // --- BeforeMessage hook ---

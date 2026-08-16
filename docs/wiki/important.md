@@ -14,7 +14,7 @@ Discord receives less continuous testing than Telegram.
 
 Extensively tested with **API-style providers** (ollama, OpenRouter) and **CLI transports** (Kiro CLI). This combination delivers the most stable and predictable results.
 
-For best results, use intelligent paid models (e.g. Claude, GPT-4o, Gemini Pro via OpenRouter). Free-tier models frequently hit rate limits or produce inconsistent output. abTARS handles this with a sophisticated fallback and resilience system — leaky-bucket health tracking, progressive backoff, automatic provider rotation — plus a stable `/emergency` mode that guarantees a working model is always available regardless of upstream failures.
+For best results, use intelligent paid models (e.g. Claude, GPT-4o, Gemini Pro via OpenRouter). Free-tier models frequently hit rate limits or produce inconsistent output. abTARS handles this with a sophisticated fallback and resilience system — leaky-bucket health tracking, progressive backoff, automatic provider rotation — plus a manual `/emergency` fast path (ACP hailMary) that operators can activate when the normal transport is unavailable.
 
 ### Operating System
 

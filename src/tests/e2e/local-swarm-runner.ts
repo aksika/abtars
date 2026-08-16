@@ -2082,6 +2082,156 @@ async function runPiAskOrc(): Promise<LocalSwarmResult> {
   };
 }
 
+// ── Emergency Gate B (#1468) ─────────────────────────────────────────────────
+
+/**
+ * Proves the shipped emergency fast path at its production boundary: normal
+ * response transport unavailable (transportless boot), Pi runtime packages
+ * unavailable (pi-load-guard makes any load throw and fail the child), and a
+ * deterministic fake ACP CLI as the only external fixture. Real: degraded
+ * recovery routing, emergency service lifecycle, schema-v3 config loading,
+ * dedicated ACP client, and platform delivery.
+ */
+async function runEmergencyGateB(): Promise<LocalSwarmResult> {
+  const { mkdirSync, writeFileSync, existsSync, readFileSync } = await import("node:fs");
+  const { join } = await import("node:path");
+  const { createBootCtx } = await import("../../boot/context.js");
+  const { createRecoveryHandler } = await import("../../boot/phase-platforms-connect.js");
+  const { createEmergencyExecutionService } = await import("../../components/emergency-execution-service.js");
+
+  const home = validatedAbtarsHome;
+  const workingDir = join(home, "workspace", "emergency");
+  mkdirSync(workingDir, { recursive: true });
+
+  // Deterministic fake — the ACP CLI/protocol boundary. Production config
+  // loading, recovery dispatch, service lifecycle, and delivery stay real.
+  const fakeCli = join(process.cwd(), "src/tests/e2e/fake-kiro-cli.js");
+  if (!existsSync(fakeCli)) fail("emergency_gate_b", "FAKE_CLI_MISSING", fakeCli);
+
+  writeFileSync(join(home, "config", "transport.json"), JSON.stringify({
+    schemaVersion: 3,
+    activeRoute: "acp",
+    routes: { acp: { agents: { main: { model: "fake-main-model", provider: "fake-acp" } } } },
+    providers: { "fake-acp": { transport: "acp", cli: fakeCli } },
+    hailMary: { route: "acp", model: "fake-emergency-model", provider: "fake-acp" },
+  }, null, 2));
+
+  // Transportless boot: ctx.transport stays null, pipelineDeps never runs —
+  // the recovery handler is the only inbound boundary, exactly like a degraded
+  // boot after normal transport initialization failed.
+  const ctx = createBootCtx({
+    config: { transport: { workingDir } } as never,
+    phaseHealth: new Map([["transport", { status: "failed", error: "test fixture: no normal transport" }]]),
+  });
+  ctx.emergencyExecution = createEmergencyExecutionService(workingDir);
+  const emergencyService = ctx.emergencyExecution;
+
+  const recovery = createRecoveryHandler(ctx);
+
+  const deliveries: string[] = [];
+  const adapter = {
+    sendMessage: async (_channelId: string, text: string) => { deliveries.push(text); return "sent"; },
+    sendDocument: async () => "sent",
+    chunkResponse: (text: string) => (text.length <= 120 ? [text] : [text.slice(0, 120), text.slice(120)]),
+    sendTyping: async () => {},
+  } as unknown as import("../../types/platform.js").PlatformAdapter;
+
+  const msg = (text: string): import("../../types/platform.js").InboundMessage => ({
+    platform: "telegram",
+    channelId: "200",
+    userId: "test-master",
+    senderId: "test-master",
+    senderName: "Test Master",
+    text,
+    timestamp: Date.now(),
+    isGroup: false,
+    isVoice: false,
+  });
+
+  // 1. Activate through the production recovery routing.
+  await recovery.handle(msg("/emergency"), adapter);
+  if (emergencyService.status().kind !== "ready") {
+    fail("emergency_gate_b", "ACTIVATION_FAILED", deliveries.join(" | "));
+  }
+  emitCheckpoint("emergency_activated", { model: emergencyService.describeForOperator() ?? "" });
+
+  // 2. One plain-text turn → exactly one deterministic ACP response. A second
+  //    concurrent turn must be rejected busy (fake CLI delays 300ms).
+  const firstTurn = recovery.handle(msg("hello emergency"), adapter);
+  await eventually("emergency-running", () => (emergencyService.status().kind === "running" ? true : null), 5000);
+  const secondTurn = recovery.handle(msg("second turn while running"), adapter);
+  await firstTurn;
+  await secondTurn;
+  const ackDeliveries = deliveries.filter(d => d.startsWith("EMERGENCY_ACK"));
+  if (ackDeliveries.length !== 1) {
+    fail("emergency_gate_b", "NOT_EXACTLY_ONE_RESPONSE", `acks=${ackDeliveries.length} all=${deliveries.join("|")}`);
+  }
+  const busyRejected = deliveries.some(d => d.includes("already running"));
+  emitCheckpoint("emergency_turn_delivered", { acks: ackDeliveries.length, busyRejected });
+
+  // 3. No Spin session was ever created; no memory files were ever written.
+  const { spin } = await import("../../components/spin.js");
+  if (spin.listAllSessions().length !== 0) {
+    fail("emergency_gate_b", "SPIN_SESSION_CREATED", `${spin.listAllSessions().length} session(s)`);
+  }
+  if (existsSync(join(home, "memory", "memory.db"))) {
+    fail("emergency_gate_b", "MEMORY_WRITE", "memory.db exists after emergency turn");
+  }
+
+  // 4. Interrupt and restore through the recovery routing.
+  await recovery.handle(msg("/stop"), adapter);
+  if (emergencyService.status().kind !== "ready") {
+    fail("emergency_gate_b", "INTERRUPT_FAILED", emergencyService.status().kind);
+  }
+  await recovery.handle(msg("/model restore"), adapter);
+  if (emergencyService.status().kind !== "inactive") {
+    fail("emergency_gate_b", "RESTORE_FAILED", emergencyService.status().kind);
+  }
+
+  // 5. Shutdown cleanup — no orphan ACP child may survive. SIGTERM delivery
+  //    is asynchronous, so poll: a live child after 5s is an orphan.
+  await emergencyService.shutdown();
+  const pidFile = join(home, "run", "fake-kiro-cli.pid");
+  if (existsSync(pidFile)) {
+    const pid = parseInt(readFileSync(pidFile, "utf8"), 10);
+    await eventually("acp-child-gone", () => {
+      try { process.kill(pid, 0); return null; } catch { return true; }
+    }, 5000);
+  }
+
+  // 6. After restore, ordinary traffic keeps the unchanged degraded behavior
+  //    (queued by the recovery handler — never sent to ACP).
+  const queuedBefore = (recovery as { messageQueue: unknown[] }).messageQueue.length;
+  await recovery.handle(msg("after restore"), adapter);
+  const queuedAfter = (recovery as { messageQueue: unknown[] }).messageQueue.length;
+  if (queuedAfter !== queuedBefore + 1) {
+    fail("emergency_gate_b", "RESTORE_ROUTING_CHANGED", `queued ${queuedBefore} → ${queuedAfter}`);
+  }
+
+  return {
+    schemaVersion: 2,
+    ok: true,
+    scenario,
+    scenarioId,
+    childCardIds: [],
+    peakActiveWorkers: 0,
+    counts: {
+      workerContracts: 0, workerAttempts: 0, workerResults: 0,
+      reviewCases: 0, reviewDecisions: 0, outboundDeliveries: 0,
+    },
+    terminal: {},
+    scenarioSpecific: {
+      deliveries: deliveries.length,
+      acks: ackDeliveries.length,
+      busyRejected,
+      sessionsCreated: 0,
+      memoryWrites: 0,
+      orphanAcpChild: false,
+      restoredQueuing: true,
+    },
+  };
+}
+
 // ── Main dispatch ────────────────────────────────────────────────────────────
 
 async function main(): Promise<void> {
@@ -2127,6 +2277,9 @@ async function main(): Promise<void> {
         break;
       case "pi_ask_orc":
         result = await runPiAskOrc();
+        break;
+      case "emergency_gate_b":
+        result = await runEmergencyGateB();
         break;
       default:
         result = await runHappyPath();

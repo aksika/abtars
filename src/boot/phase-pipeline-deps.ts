@@ -360,6 +360,9 @@ export async function phasePipelineDeps(ctx: BootCtx): Promise<PhaseResult> {
     loadedCapabilities: [],
     selfHealerTask: null,
     hailMary: ctx.hailMary,
+    // #1468: same boot-owned instance the recovery handler uses; the service
+    // itself stays independent of every other dependency in this object.
+    emergencyExecution: ctx.emergencyExecution,
     // #1515: optional question settlement after durable assistant recording.
     // Must never throw through the pipeline; failure leaves the row pending
     // and the server CAS makes a later retry safe.

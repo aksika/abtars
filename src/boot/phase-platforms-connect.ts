@@ -15,11 +15,27 @@ import type { InboundMessage } from "../types/platform.js";
 /**
  * Minimal recovery handler — works without transport/memory/pipeline.
  * Handles read-only + recovery commands only. User messages get queued.
+ *
+ * #1468: every inbound message is offered to the boot-owned emergency
+ * execution service first; only a "pass" reaches the degraded behaviors below.
+ * Exported for the child-process E2E portfolio, which drives the production
+ * recovery routing with real service lifecycle and platform delivery.
  */
-function createRecoveryHandler(ctx: BootCtx) {
+export function createRecoveryHandler(ctx: BootCtx) {
   const messageQueue: Array<{ msg: InboundMessage; adapter: any }> = [];
 
   async function handle(msg: InboundMessage, adapter: any): Promise<void> {
+    // #1468: emergency fast path first — claimed controls and owner turns
+    // never queue behind the recovery handler.
+    if (ctx.emergencyExecution) {
+      try {
+        if ((await ctx.emergencyExecution.handleInbound(msg, adapter)) === "handled") return;
+      } catch (err) {
+        // A service fault must never wedge the recovery boundary.
+        logError("recovery", `Emergency handler failed (content-free): ${err instanceof Error ? err.message : String(err)}`);
+      }
+    }
+
     const text = msg.text?.trim() ?? "";
     if (!text.startsWith("/")) {
       // Not a command — queue for later (busyGuard will handle once pipeline wires)
@@ -36,12 +52,24 @@ function createRecoveryHandler(ctx: BootCtx) {
           const icon = h.status === "ok" ? "✓" : h.status === "failed" ? "✗" : "»";
           lines.push(`  ${icon} ${name}${h.error ? ` — ${h.error}` : ""}`);
         }
+        // #1468: live emergency state from the service snapshot.
+        const emergency = ctx.emergencyExecution?.describeForOperator();
+        if (emergency) lines.push(`  ${emergency}`);
         await adapter.sendMessage(msg.channelId, lines.join("\n"));
         return;
       }
-      case "/help":
-        await adapter.sendMessage(msg.channelId, "⚠️ Degraded mode. Available: /status, /help, /restart, /update");
+      case "/help": {
+        // #1468: advertise the emergency path when hailMary is configurable —
+        // help rendering never initializes ACP.
+        let emergencyHint = "";
+        try {
+          const { loadTransportStructured, resolveHailMary } = await import("../components/transport-config.js");
+          const loadResult = loadTransportStructured();
+          if (loadResult.ok && resolveHailMary(loadResult.config)) emergencyHint = ", /emergency";
+        } catch { /* non-fatal */ }
+        await adapter.sendMessage(msg.channelId, `⚠️ Degraded mode. Available: /status, /help, /restart, /update${emergencyHint}`);
         return;
+      }
       case "/restart":
         await adapter.sendMessage(msg.channelId, "♻️ Restarting...");
         setTimeout(() => process.exit(0), 500);
@@ -68,6 +96,13 @@ function createRecoveryHandler(ctx: BootCtx) {
 
 export async function phasePlatformsConnect(ctx: BootCtx): Promise<PhaseResult> {
   const { config, platforms, registry, platformAdapters } = ctx;
+  // #1468: the boot-owned emergency service is created at the early
+  // platform/recovery composition boundary — before the recovery handler
+  // accepts any message — and reused by the full pipeline via PipelineDeps.
+  if (!ctx.emergencyExecution) {
+    const { createEmergencyExecutionService } = await import("../components/emergency-execution-service.js");
+    ctx.emergencyExecution = createEmergencyExecutionService(config.transport.workingDir);
+  }
   const recovery = createRecoveryHandler(ctx);
   // Store recovery queue on ctx for phasePipelineDeps to drain
   (ctx as any)._recoveryQueue = recovery.messageQueue;

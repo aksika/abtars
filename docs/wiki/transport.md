@@ -75,7 +75,7 @@ Each active route supports an ordered `fallbacks` array. When the primary model 
 
 1. Try fallback 1, 2, 3, ... N (in order)
 2. Skip models with full health buckets (rate-limited, auth failed)
-3. If all exhausted → error. The global ACP-only `hailMary` descriptor is reserved for the #1468 emergency path.
+3. If all exhausted → error. The global ACP-only `hailMary` descriptor powers the manual `/emergency` fast path (a dedicated ACP client outside the normal pipeline).
 
 Fallbacks must use providers compatible with their route. ACP assignments use one ACP provider; `pi-ai` assignments use API providers.
 

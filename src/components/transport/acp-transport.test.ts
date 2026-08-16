@@ -8,6 +8,10 @@ vi.mock("../env-schema.js", () => ({ getEnv: () => ({ promptTimeoutSec: 180, wat
 vi.mock("../transport/bridge-lock-transport.js", () => ({ writeRestartReason: vi.fn() }));
 vi.mock("../hooks/hook-system.js", () => ({ hasHooks: () => false, fire: vi.fn() }));
 
+const revokeSealedSession = vi.fn();
+const revokeAllSealedSessions = vi.fn();
+vi.mock("./sealed-acp-bridge.js", () => ({ revokeSealedSession, revokeAllSealedSessions }));
+
 import { AcpTransport, AcpExitError, ModelNotFoundError } from "./acp-transport.js";
 
 describe("AcpTransport", () => {
@@ -15,10 +19,72 @@ describe("AcpTransport", () => {
 
   beforeEach(() => {
     transport = new AcpTransport("/usr/bin/kiro-cli", "/tmp/work");
+    revokeSealedSession.mockClear();
+    revokeAllSealedSessions.mockClear();
   });
 
   afterEach(() => {
     transport.destroy();
+  });
+
+  describe("instance-owned sealed session revocation (#1468)", () => {
+    it("destroy revokes only the keys this instance created, never revoke-all", async () => {
+      (transport as any).sealedSessionKeys = new Set(["owner-key-1", "owner-key-2"]);
+
+      transport.destroy();
+      await vi.waitFor(() => expect(revokeSealedSession).toHaveBeenCalledWith("owner-key-1"));
+
+      expect(revokeSealedSession).toHaveBeenCalledWith("owner-key-2");
+      expect(revokeAllSealedSessions).not.toHaveBeenCalled();
+      expect((transport as any).sealedSessionKeys.size).toBe(0);
+    });
+
+    it("initialize revokes only this instance's keys", async () => {
+      (transport as any).sealedSessionKeys = new Set(["boot-key"]);
+      (transport as any).agent = null;
+      (transport as any).client = null;
+      (transport as any).sm = { childExited: vi.fn(), reinitSucceeded: vi.fn(), reinitFailed: vi.fn() };
+
+      // abort before spawn — no CLI available in this unit test
+      await expect(transport.initialize()).rejects.toThrow();
+      await vi.waitFor(() => expect(revokeSealedSession).toHaveBeenCalledWith("boot-key"));
+
+      expect(revokeAllSealedSessions).not.toHaveBeenCalled();
+    });
+
+    it("session expiry invalidates and forgets its own key only", async () => {
+      const map = (transport as any).sessions as Map<string, string>;
+      map.set("expiring-key", "sess-expired");
+      (transport as any).sealedSessionKeys.add("expiring-key");
+      (transport as any).sealedSessionKeys.add("other-key");
+      (transport as any).client = {
+        prompt: vi.fn().mockRejectedValue({ code: -32603, message: "No session found" }),
+      };
+
+      await expect((transport as any).promptWithRetry("sess-expired", "hi", 0)).rejects.toThrow();
+      await vi.waitFor(() => expect(revokeSealedSession).toHaveBeenCalledWith("expiring-key"));
+
+      expect(map.has("expiring-key")).toBe(false);
+      expect((transport as any).sealedSessionKeys.has("expiring-key")).toBe(false);
+      // An unrelated key owned by the same instance is untouched
+      expect((transport as any).sealedSessionKeys.has("other-key")).toBe(true);
+    });
+
+    it("two transports revoke disjoint key sets — destroying one leaves the other's tokens valid", async () => {
+      const other = new AcpTransport("/usr/bin/kiro-cli", "/tmp/work");
+      try {
+        (transport as any).sealedSessionKeys = new Set(["normal-key"]);
+        (other as any).sealedSessionKeys = new Set(["emergency-key"]);
+
+        transport.destroy();
+        await vi.waitFor(() => expect(revokeSealedSession).toHaveBeenCalledWith("normal-key"));
+
+        expect(revokeSealedSession).not.toHaveBeenCalledWith("emergency-key");
+        expect((other as any).sealedSessionKeys).toEqual(new Set(["emergency-key"]));
+      } finally {
+        other.destroy();
+      }
+    });
   });
 
   describe("session map", () => {

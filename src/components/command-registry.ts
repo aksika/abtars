@@ -25,7 +25,7 @@ export const BOT_COMMANDS: readonly BotCommand[] = [
   { name: "stop", description: "Stop current response" },
   { name: "wait", description: "Inject message mid-run (non-interrupting)" },
   { name: "update", description: "Update: git | alpha | stable" },
-  { name: "emergency", description: "Emergency fast path (ACP hailMary; pending #1468)" },
+  { name: "emergency", description: "Emergency fast path (ACP hailMary)" },
   { name: "heartbeat", description: "Heartbeat diagnostics" },
   { name: "memory", description: "Memory stats" },
   { name: "skills", description: "List active skills" },

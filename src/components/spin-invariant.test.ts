@@ -11,6 +11,9 @@
  *  - acp-transport.ts / direct-api-transport.ts / kiro-transport.ts
  *    (transport machinery — sendPrompt is the protocol method, not a model turn
  *    from a caller; it's invoked by spin()'s persistent path)
+ *  - emergency-execution-service.ts (#1468 — the structural fast path calls
+ *    its dedicated AcpTransport.sendPrompt() directly by design; it never
+ *    enters Spin, prompt building, hooks, memory, or compaction)
  *  - subagent-runtime.ts (transports cached here; sendPrompt called by spin()
  *    via the runtime.complete + runtime.session paths)
  *  - idle-save.ts (`/chat save` slash command — a write to the ACP subprocess
@@ -35,6 +38,8 @@ const ALLOWLIST = new Set([
   "src/components/transport/kiro-transport.ts",
   // SubagentRuntime — transports cached here, called via runtime.complete / runtime.session
   "src/components/subagent-runtime.ts",
+  // #1468 structural emergency fast path — dedicated ACP client, direct call
+  "src/components/emergency-execution-service.ts",
   // /chat save slash command — not a model turn
   "src/components/idle-save.ts",
   // Defensive fallback when sessionManager not wired
