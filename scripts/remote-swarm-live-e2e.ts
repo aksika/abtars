@@ -141,6 +141,29 @@ function validateArgs(argv: CommandArg[]): string[] {
   return out;
 }
 
+/**
+ * Build the tmux command-line tokens: bare safe tokens stay raw, quoted
+ * tokens are wrapped in single-quote escaping. The result is one injection-
+ * safe shell line.
+ */
+function buildTmuxTokens(argv: CommandArg[]): string[] {
+  const out: string[] = [];
+  for (const arg of argv) {
+    if (arg.text.length === 0 || arg.text.length > bounds.argvToken * 8) {
+      throw new Error(`command argument rejected: exceeds bounds`);
+    }
+    if (arg.quote) {
+      out.push(quoteArg(arg.text));
+    } else {
+      if (!isSafeArgvToken(arg.text)) {
+        throw new Error(`command argument rejected as unsafe: ${JSON.stringify(arg.text.slice(0, 80))} (len=${arg.text.length})`);
+      }
+      out.push(arg.text);
+    }
+  }
+  return out;
+}
+
 const MAX_PORT_OUTPUT_BYTES = 256 * 1024;
 
 function boundedAppend(existing: string, chunk: string): string {
@@ -219,7 +242,9 @@ export class TmuxCommandPort implements CommandPort {
   }
 
   private async capture(timeoutMs: number): Promise<string> {
-    const result = await this.tmux(["capture-pane", "-t", this.session, "-p", "-S", "-2000"], timeoutMs);
+    // -J rejoins pane rows that were wrapped at the terminal width, so long
+    // single-line probe JSON survives capture intact.
+    const result = await this.tmux(["capture-pane", "-t", this.session, "-p", "-J", "-S", "-2000"], timeoutMs);
     return result.ok ? result.output : "";
   }
 
@@ -236,7 +261,7 @@ export class TmuxCommandPort implements CommandPort {
   }
 
   private async execute(argv: CommandArg[], opts: { timeoutMs: number; cwd?: string }): Promise<PortResult> {
-    const tokens = validateArgs(argv);
+    const tokens = buildTmuxTokens(argv);
     const nonce = randomUUID().slice(0, 8);
     const begin = `RSM_BEGIN_${nonce}`;
     const end = `RSM_END_${nonce}`;

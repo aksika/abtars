@@ -619,6 +619,40 @@ describe("tmux command port", () => {
     const firstResult = await first;
     expect(firstResult.ok).toBe(true);
   });
+
+  it("captures long single-line output intact and requests -J rejoin", async () => {
+    const root = tmpdirFixture();
+    const fake = join(root, "fake-tmux-args.sh");
+    const captured = join(root, "captured-args.txt");
+    const lines = [
+      "#!/usr/bin/env bash",
+      'DIR="$(cd "$(dirname "$0")" && pwd)"',
+      'STATE="$DIR/tmux-state.txt"',
+      'if [ "$1" = "send-keys" ]; then',
+      '  shift; shift 2',
+      '  text="$1"',
+      '  { echo "LINE:$text"; sh -c "$text" 2>&1; } >> "$STATE"',
+      'elif [ "$1" = "capture-pane" ]; then',
+      `  echo "$*" >> "${captured}"`,
+      '  if [ -f "$STATE" ]; then cat "$STATE"; fi',
+      'fi',
+    ];
+    writeFileSync(fake, lines.join("\n") + "\n");
+    chmodSync(fake, 0o755);
+    const port = new TmuxCommandPort({ session: "rs-test", pollMs: 30, tmuxBin: fake });
+    const longLine = `{"payload":"${"x".repeat(900)}"}`;
+    const result = await port.run([{ text: "echo", quote: false }, { text: longLine, quote: true }], { timeoutMs: 10_000, cwd: root });
+    expect(result.ok).toBe(true);
+    expect(result.stdout).toBe(longLine);
+    const args = readFileSync(captured, "utf-8").split("\n")[0] ?? "";
+    expect(args).toContain("-J");
+  });
+
+  it("accepts a commit whose deployed short sha is a prefix of the expectation", () => {
+    const runId = "rs-prefix";
+    const preflight = preflightFixture("requester", runId, { build: { manifestPresent: true, commit: "689da60", branch: null, version: "0.4.1-alpha.0-689da60", source: "dev", matchesExpected: true } });
+    expect(validateNodeResult({ kind: "preflight", value: preflight }, "requester", runId).ok).toBe(true);
+  });
 });
 
 // ── Real probe against fixture databases ─────────────────────────────────────

@@ -189,7 +189,11 @@ function preflight(args: ParsedArgs): RemoteSwarmNodePreflightV1 {
     matchesExpected: false,
   };
   if (args.command.expectedCommit && build.commit) {
-    build.matchesExpected = build.commit.toLowerCase().startsWith(args.command.expectedCommit.toLowerCase());
+    const expected = args.command.expectedCommit.toLowerCase();
+    const actual = build.commit.toLowerCase();
+    // Deployments record short SHAs of varying length; either side may be
+    // the shorter prefix.
+    build.matchesExpected = actual.startsWith(expected) || expected.startsWith(actual);
   }
 
   const heartbeatFresh = lock !== null && typeof lock.lastHeartbeat === "number"
