@@ -20,6 +20,7 @@ import { phaseDashboard } from "./phase-dashboard.js";
 import { phaseAgentApi } from "./phase-agent-api.js";
 import { phasePiExecutor } from "./phase-pi-executor.js";
 import { phaseSessionControl } from "./phase-session-control.js";
+import { phaseReconciler } from "./phase-reconciler.js";
 
 // phaseShutdown is special (takes bridge arg) — wired separately in startBridge()
 
@@ -47,5 +48,11 @@ export const BOOT_NODES: BootNode[] = [
   { name: "dashboard",    deps: ["heartbeat"],               optionalDeps: ["transport"], optional: true, run: phaseDashboard },
   { name: "agentApi",     deps: ["pipelineDeps"],            optional: true,  run: phaseAgentApi },
   { name: "piExecutor",   deps: ["pipelineDeps", "heartbeat"], optionalDeps: ["memory"], optional: true, run: phasePiExecutor },
+  // #1554: the Reconciler owns the bridge-generation lifecycle. It requires
+  // the pipeline (scheduler + projection ports) and heartbeat, and awaits
+  // optional Pi-executor composition so Pi attempts are inspected only after
+  // the Pi service exists. BootGraph awaits optional deps regardless of their
+  // success status, so phaseReconciler never races the Pi phase.
+  { name: "reconciler",   deps: ["pipelineDeps", "heartbeat"], optionalDeps: ["piExecutor"], optional: false, run: phaseReconciler },
   { name: "sessionControl", deps: ["memory"], optionalDeps: ["piExecutor"], optional: true, run: phaseSessionControl },
 ];

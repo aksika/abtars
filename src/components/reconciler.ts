@@ -15,8 +15,7 @@ import {
 import { logSwarmTrace } from "./swarm-trace.js";
 import { WorkerSupervisionService } from "./worker-supervision-service.js";
 import { WorkerSupervisionStore } from "./worker-supervision-store.js";
-import { SpinWorkerAdapter } from "./spin-worker-adapter.js";
-import type { SwarmExecutorAdapter, ExecutionClaim } from "./swarm-executor-types.js";
+import type { SwarmExecutorAdapter, ExecutionClaim, ExecutionObservation } from "./swarm-executor-types.js";
 import { resolveSchedulingPolicy, deriveDeadline } from "./swarm-dispatch-policy.js";
 import { resolveAndValidateWorkspace } from "./pi-executor/config.js";
 import { LeaseReconciliationService } from "./executor-lease-reconciler.js";
@@ -38,11 +37,132 @@ import type { PiRunService } from "./pi-executor/pi-run-service.js";
 import type { AttemptLifecycle, AttemptRow } from "./worker-supervision-store.js";
 import type { WorkerAcceptanceContractV1 } from "./worker-contract.js";
 import { acceptancePassed } from "./worker-contract.js";
-import type { ToolExecutionScope } from "./tasks/task-package.js";
 import { RetryService } from "./retry/retry-service.js";
 import { LocalExecutorCatalog, providerForAdapter } from "./retry/local-executor-catalog.js";
+import type { OrcOwnershipReleasedV1 } from "./orc-project/orc-project-contracts.js";
 
 const TAG = "reconciler";
+
+// ── Public types (#1554) ─────────────────────────────────────────────────────
+
+/** Complete, generation-owned Reconciler dependency set. */
+export interface ReconcilerDeps {
+  readonly generationId: string;
+  readonly coordinator: OrcProjectCoordinator;
+  readonly wakeScheduler: LifecycleWakeScheduler;
+  readonly workerAdapter: SwarmExecutorAdapter;
+  readonly piService: PiRunService | null;
+  readonly createPiAdapter: (service: PiRunService) => SwarmExecutorAdapter;
+  readonly getQuarantineStore: () => ReconcileQuarantineStore;
+  readonly projectRunProgress: (cardId: number) => void;
+  readonly failureCascade?: (entryId: string, diagnostic: TaskFailureDiagnosticV1) => void;
+}
+
+export type RecoveryAttemptResult =
+  | {
+      readonly kind: "process_bound";
+      readonly attemptId: string;
+      readonly cardId: number;
+      readonly outcome: "settled" | "already_resolved";
+    }
+  | {
+      readonly kind: "inspectable";
+      readonly attemptId: string;
+      readonly cardId: number;
+      readonly executorKind: ExecutorKind;
+      readonly executorId: string;
+      readonly observation: ExecutionObservation;
+    }
+  | {
+      readonly kind: "unresolved";
+      readonly attemptId: string;
+      readonly cardId: number;
+      readonly executorKind: ExecutorKind;
+      readonly executorId: string;
+      readonly reason: "executor_unavailable" | "inspection_failed" | "observation_unknown";
+      readonly detail?: string;
+    };
+
+export interface ReconcilerRecoveryReport {
+  readonly generationId: string;
+  readonly attempts: readonly RecoveryAttemptResult[];
+  readonly recoveredProjectIds: readonly number[];
+}
+
+export interface ReconcilerHandle {
+  readonly generationId: string;
+  readonly recovery: ReconcilerRecoveryReport;
+  stop(): Promise<void>;
+}
+
+// ── One explicit bridge-generation runtime (#1554) ──────────────────────────
+
+type ReconcilerPhase = "starting" | "running" | "closing" | "stopped";
+
+interface ReconcilerGeneration {
+  readonly id: string;
+  phase: ReconcilerPhase;
+  readonly deps: ReconcilerDeps;
+  readonly cardStates: Map<number, CardReconcilerState>;
+  readonly dispatchPump: DispatchPumpState;
+  readonly inFlight: Set<Promise<void>>;
+  readonly pendingProjectWakes: Set<number>;
+  readonly disposers: Array<() => void>;
+  recovery: ReconcilerRecoveryReport | null;
+  stopPromise: Promise<void> | null;
+  onLeaseChanged: (() => void) | null;
+}
+
+let activeGeneration: ReconcilerGeneration | null = null;
+
+/** #1554: a generation owns its work while it is the active, running one. */
+function isActive(generation: ReconcilerGeneration): boolean {
+  return activeGeneration?.id === generation.id && generation.phase === "running";
+}
+
+/** #1554: rate-limited fail-closed diagnostic for the request façade. */
+const _lastFacadeWarnAt = new Map<string, number>();
+function boundedFacadeLog(entry: string, detail: string): void {
+  const now = Date.now();
+  const last = _lastFacadeWarnAt.get(entry) ?? 0;
+  if (now - last < 5000) return;
+  _lastFacadeWarnAt.set(entry, now);
+  logWarn(TAG, `${entry} unavailable — no running Reconciler generation (${detail})`);
+}
+
+/**
+ * #1554: terminal work tracker. The handled promise never rejects: the work
+ * rejection is contained by `containFailure` (quarantine for card passes,
+ * logging for dispatch), and the cleanup chain is failure-safe. Never use a
+ * floating `finally()` — it creates a second promise that rejects with the
+ * original error.
+ */
+function track(
+  generation: ReconcilerGeneration,
+  work: () => Promise<void>,
+  containFailure: (error: unknown) => void,
+): void {
+  const handled = Promise.resolve()
+    .then(work)
+    .catch((error: unknown) => safeContain(containFailure, error));
+  generation.inFlight.add(handled);
+  void handled.then(
+    () => generation.inFlight.delete(handled),
+    (error: unknown) => {
+      generation.inFlight.delete(handled);
+      emergencyContainmentLog(undefined, error);
+    },
+  );
+}
+
+/** Non-throwing containment wrapper — the boundary handler itself must never escape. */
+function safeContain(containFailure: (error: unknown) => void, error: unknown): void {
+  try {
+    containFailure(error);
+  } catch (containmentError) {
+    emergencyContainmentLog(undefined, containmentError);
+  }
+}
 
 function projectMutationAuthority(projectCardId: number, projectGeneration: number): ProjectMutationAuthority {
   const root = kanbanGetCard(projectCardId);
@@ -55,43 +175,25 @@ function projectMutationAuthority(projectCardId: number, projectGeneration: numb
   };
 }
 
-let _shutdownRequested = false;
-
-let _piService: PiRunService | null = null;
-let _workerAdapter: SwarmExecutorAdapter | null = null;
-
-export function setPiService(service: PiRunService | null): void {
-  _piService = service;
-}
-
-export function setWorkerAdapter(adapter: SwarmExecutorAdapter | null): void {
-  _workerAdapter = adapter;
-}
-
-function workerAdapter(): SwarmExecutorAdapter {
-  return _workerAdapter ??= new SpinWorkerAdapter();
-}
-
-function dispatchExecutor(executorKind: ExecutorKind, executorId: string): { kind: "agent" | "pi"; id: string; adapter: SwarmExecutorAdapter } | undefined {
+function dispatchExecutor(generation: ReconcilerGeneration, executorKind: ExecutorKind, executorId: string): { kind: "agent" | "pi"; id: string; adapter: SwarmExecutorAdapter } | undefined {
   // #1637: one durable executor identity — the attempt column is the
   // canonical vocabulary (agent | pi | remote). Dispatch executes the stored
   // identity unchanged; it never substitutes a synonym.
   if (executorKind === "agent") {
-    return { kind: "agent", id: executorId, adapter: workerAdapter() };
+    return { kind: "agent", id: executorId, adapter: generation.deps.workerAdapter };
   }
-  if (executorKind === "pi" && _piService) {
-    const { PiExecutorAdapter } = require("./pi-executor-adapter.js") as typeof import("./pi-executor-adapter.js");
-    return { kind: "pi", id: executorId, adapter: new PiExecutorAdapter(_piService.executor, new WorkerSupervisionStore()) };
+  if (executorKind === "pi" && generation.deps.piService) {
+    return { kind: "pi", id: executorId, adapter: generation.deps.createPiAdapter(generation.deps.piService) };
   }
   return undefined;
 }
 
-export function requestShutdown(): void {
-  _shutdownRequested = true;
+/** #1554: read-only access to the active generation's Orc coordinator. */
+export function getActiveOrcCoordinator(): OrcProjectCoordinator | null {
+  return activeGeneration?.deps.coordinator ?? null;
 }
 
 import { OrcProjectCoordinator } from "./orc-project/orc-project-coordinator.js";
-import { loadPeerConfig } from "./peer-config.js";
 
 import {
   MAX_STARTED_CONTRACT_AUTHORING_TURNS,
@@ -99,75 +201,11 @@ import {
   MIN_AUTHORING_CLAIM_INTERVAL_MS,
 } from "./orc-project/orc-project-contracts.js";
 
-let _orcCoordinator: OrcProjectCoordinator | null = null;
-
-// #1628: project IDs whose Orc runs were superseded by boot recovery. Woken
-// in startReconciler AFTER listener registration — the event path cannot
-// cover boot-time supersession because listeners do not exist yet.
-let _bootRecoveredProjectIds: number[] = [];
-
 // #1604 R2: coverage-round bounds. MAX_COVERAGE_ROUNDS is the absolute ceiling
 // on coverage turns; COVERAGE_ROUND_GRACE_MS bounds only the non-scheduled
 // legacy dispatch path, whose claim is not durably observable.
 const MAX_COVERAGE_ROUNDS = 3;
 const COVERAGE_ROUND_GRACE_MS = 60_000;
-
-export function setOrcCoordinator(c: OrcProjectCoordinator | null): void {
-  _orcCoordinator = c;
-}
-
-export function getOrcCoordinator(): OrcProjectCoordinator | null {
-  return _orcCoordinator;
-}
-
-/**
- * #1516: Get the shared Orc coordinator, initializing it (and its boot
- * recovery) on first use. The scheduled-project runner calls this so its
- * goal-bearing claim races ahead of the Reconciler's generic authoring goal.
- */
-export function getOrCreateOrcCoordinator(): OrcProjectCoordinator | null {
-  if (_orcCoordinator) return _orcCoordinator;
-  try {
-    const peerName = loadPeerConfig().self.name;
-    _orcCoordinator = new OrcProjectCoordinator({
-      ownerPeer: peerName,
-      startPort: async (context, goal) => {
-        // #1656: every scheduled Orc turn reconstructs the bound execution
-        // scope from project supervision. A scheduled root missing its binding
-        // fails closed — no model turn begins with a lost workspace.
-        const project = kanbanGetCard(context.projectCardId);
-        const isScheduledRoot = project?.source === "task" && project.source_id != null && project.source_id.length > 0;
-        let executionScope: ToolExecutionScope | undefined;
-        if (isScheduledRoot) {
-          executionScope = new ProjectReviewStore().getWorkspaceScope(context.projectCardId);
-          if (!executionScope) {
-            throw new Error(`scheduled project #${context.projectCardId} has no bound workspace — refusing to start Orc turn`);
-          }
-        } else {
-          // Non-scheduled roots keep their explicitly supplied/session scope.
-          executionScope = new ProjectReviewStore().getWorkspaceScope(context.projectCardId) ?? undefined;
-        }
-        await spin.spin({
-          type: "O",
-          goal,
-          sessionId: context.sessionId,
-          cardId: context.projectCardId,
-          settlementOwner: "spin",
-          source: "agent",
-          orcContext: context,
-          executionScope,
-        });
-      },
-    });
-    logInfo(TAG, "Orc coordinator initialized");
-    // #1628: store the boot-recovery result; the wake happens in
-    // startReconciler after the listeners are registered.
-    _bootRecoveredProjectIds = _orcCoordinator.bootRecovery();
-  } catch (err) {
-    logWarn(TAG, `Failed to initialize Orc coordinator: ${err instanceof Error ? err.message : String(err)}`);
-  }
-  return _orcCoordinator;
-}
 
 /**
  * #1516: Public project-abort boundary. Terminalizes all non-terminal Worker
@@ -175,6 +213,11 @@ export function getOrCreateOrcCoordinator(): OrcProjectCoordinator | null {
  * failed) is never touched — late cancellation cannot clobber settled state.
  */
 export async function abortProjectById(projectId: number, reason: string): Promise<void> {
+  const generation = activeGeneration;
+  if (!generation || generation.phase !== "running") {
+    boundedFacadeLog("abortProjectById", `project ${projectId}`);
+    return;
+  }
   const card = kanbanGetCard(projectId);
   if (!card) return;
   if (card.status === "done" || card.status === "delivered" || card.status === "failed") {
@@ -182,17 +225,13 @@ export async function abortProjectById(projectId: number, reason: string): Promi
     return;
   }
   const children = kanbanGetChildren(projectId);
-  await abortProject(projectId, children, reason);
+  await abortProject(generation, projectId, children, reason);
 }
 
-function scheduleOrcReview(projectId: number, generation: number, caseId: string, requestId: string): void {
-  if (_orcCoordinator) {
-    const result = _orcCoordinator.scheduleReview(projectId, generation, caseId);
-    if (result.kind === "claimed" || result.kind === "idempotent") {
-      try { (new ProjectReviewStore()).bumpReviewRequestAttempt(requestId); } catch {}
-    }
-  } else {
-    legacyOrcReviewDispatch(projectId, generation, caseId, requestId);
+function scheduleOrcReview(generation: ReconcilerGeneration, projectId: number, projectGeneration: number, caseId: string, requestId: string): void {
+  const result = generation.deps.coordinator.scheduleReview(projectId, projectGeneration, caseId);
+  if (result.kind === "claimed" || result.kind === "idempotent") {
+    try { (new ProjectReviewStore()).bumpReviewRequestAttempt(requestId); } catch {}
   }
 }
 
@@ -201,25 +240,6 @@ function legacyOrcDispatch(goal: string, cardId: number): void {
     spin.dispatch({ type: "O", goal, source: "agent", cardId, settlementOwner: "spin" });
   } catch (err) {
     logWarn(TAG, `Failed to dispatch Orc — ${err instanceof Error ? err.message : String(err)}`);
-  }
-}
-
-function legacyOrcReviewDispatch(projectId: number, generation: number, caseId: string, requestId: string): void {
-  // #1620: review_project is run-bound. If the durable coordinator was not
-  // initialized when this legacy path was entered, initialize it here rather
-  // than starting an unbound Spin turn that can never use the review tool.
-  const coordinator = getOrCreateOrcCoordinator();
-  if (!coordinator) {
-    logWarn(TAG, `Failed to dispatch Orc review for project ${projectId}: durable Orc coordinator unavailable`);
-    return;
-  }
-  try {
-    const result = coordinator.scheduleReview(projectId, generation, caseId);
-    if (result.kind === "claimed" || result.kind === "idempotent") {
-      try { (new ProjectReviewStore()).bumpReviewRequestAttempt(requestId); } catch {}
-    }
-  } catch (err) {
-    logWarn(TAG, `Failed to dispatch Orc review — ${err instanceof Error ? err.message : String(err)}`);
   }
 }
 
@@ -242,47 +262,41 @@ const CONTRACT_AUTHORING_UNSTARTABLE = "contract_authoring_unstartable";
  * Returns a discriminated result so callers can distinguish a deferred
  * (busy) claim from an owned one.
  */
-function scheduleContractAuthoringOrSettle(projectId: number): AuthoringScheduleResult {
-  if (!_orcCoordinator) {
-    logWarn(TAG, `Project ${projectId}: Orc coordinator unavailable while authoring contract — settling as last resort`);
-    settleProjectLastResort(projectId);
-    return { kind: "unavailable" };
-  }
-
+function scheduleContractAuthoringOrSettle(generation: ReconcilerGeneration, projectId: number): AuthoringScheduleResult {
   const reviewStore = new ProjectReviewStore();
-  const runStore = _orcCoordinator.getStore();
+  const runStore = generation.deps.coordinator.getStore();
   const supervision = reviewStore.getSupervision(projectId);
   if (!supervision) {
     logWarn(TAG, `Project ${projectId}: no supervision while authoring contract — settling as last resort`);
-    settleProjectLastResort(projectId);
+    settleProjectLastResortFor(generation, projectId);
     return { kind: "unavailable" };
   }
-  const generation = supervision.generation;
+  const projectGeneration = supervision.generation;
 
-  const startedTurns = runStore.countStartedAuthoringTurns(projectId, generation);
+  const startedTurns = runStore.countStartedAuthoringTurns(projectId, projectGeneration);
   if (startedTurns >= MAX_STARTED_CONTRACT_AUTHORING_TURNS) {
     logWarn(TAG, `Project ${projectId}: ${startedTurns} started authoring turns — settling ${CONTRACT_AUTHORING_EXHAUSTED}`);
     settleAuthoringExhausted(projectId, reviewStore, runStore, CONTRACT_AUTHORING_EXHAUSTED);
     return { kind: "settled", blockerClass: CONTRACT_AUTHORING_EXHAUSTED };
   }
 
-  const unstartableTurns = runStore.countConsecutiveUnstartableAuthoringTurns(projectId, generation);
+  const unstartableTurns = runStore.countConsecutiveUnstartableAuthoringTurns(projectId, projectGeneration);
   if (unstartableTurns >= MAX_CONSECUTIVE_UNSTARTABLE_AUTHORING_TURNS) {
     logWarn(TAG, `Project ${projectId}: ${unstartableTurns} consecutive pre-start failures — settling ${CONTRACT_AUTHORING_UNSTARTABLE}`);
     settleAuthoringExhausted(projectId, reviewStore, runStore, CONTRACT_AUTHORING_UNSTARTABLE);
     return { kind: "settled", blockerClass: CONTRACT_AUTHORING_UNSTARTABLE };
   }
 
-  const lastClaimAt = runStore.lastAuthoringClaimAt(projectId, generation);
+  const lastClaimAt = runStore.lastAuthoringClaimAt(projectId, projectGeneration);
   if (lastClaimAt && Date.now() - Date.parse(lastClaimAt) < MIN_AUTHORING_CLAIM_INTERVAL_MS) {
     logWarn(TAG, `Project ${projectId}: authoring claim within interval — deferring (last claim ${lastClaimAt})`);
     return { kind: "deferred", reason: "claim_interval" };
   }
 
-  const result = _orcCoordinator.scheduleContractAuthoring(projectId);
+  const result = generation.deps.coordinator.scheduleContractAuthoring(projectId);
   if (result.kind === "not_actionable") {
     logWarn(TAG, `Project ${projectId}: contract-authoring claim not actionable (${result.reason}) — settling as last resort`);
-    settleProjectLastResort(projectId);
+    settleProjectLastResortFor(generation, projectId);
     return { kind: "unavailable" };
   }
   if (result.kind === "busy") {
@@ -338,29 +352,28 @@ interface CardReconcilerState {
 // ── #1664: reconcile error boundary / poison quarantine ─────────────────────
 
 /**
- * One lazily constructed module-local quarantine store, reused by the boundary.
- * The accessor is only ever called inside a safe helper: construction executes
- * DDL and can throw, and a throwing construction must fail open, never become a
- * second unhandled rejection.
+ * #1554: generation-owned quarantine accessor. The accessor is only ever
+ * called inside a safe helper: construction executes DDL and can throw, and a
+ * throwing construction must fail open, never become a second unhandled
+ * rejection.
  */
-let _quarantineStore: ReconcileQuarantineStore | null = null;
-function quarantineStore(): ReconcileQuarantineStore {
-  return _quarantineStore ??= new ReconcileQuarantineStore();
+function quarantineStore(generation: ReconcilerGeneration): ReconcileQuarantineStore {
+  return generation.deps.getQuarantineStore();
 }
 
-function safeIsQuarantined(cardId: number): boolean {
+function safeIsQuarantined(generation: ReconcilerGeneration, cardId: number): boolean {
   try {
-    return quarantineStore().isQuarantined(cardId);
+    return quarantineStore(generation).isQuarantined(cardId);
   } catch (err) {
     logError(TAG, `Quarantine lookup failed for card ${cardId} — failing open, bridge stays alive`, err);
     return false;
   }
 }
 
-function safeRecordReconcileFailure(cardId: number, err: unknown): void {
+function safeRecordReconcileFailure(generation: ReconcilerGeneration, cardId: number, err: unknown): void {
   logError(TAG, `Card ${cardId}: reconcile pass failed — recording for quarantine`, err);
   try {
-    const row = quarantineStore().recordFailure(cardId, reconcileErrorSignature(err), new Date().toISOString());
+    const row = quarantineStore(generation).recordFailure(cardId, reconcileErrorSignature(err), new Date().toISOString());
     if (row.quarantinedAt) {
       logError(TAG, `Card ${cardId}: quarantined after ${row.failureCount} consecutive reconcile failures (${row.errorSignature})`);
     }
@@ -369,9 +382,9 @@ function safeRecordReconcileFailure(cardId: number, err: unknown): void {
   }
 }
 
-function safeClearFailures(cardId: number): void {
+function safeClearFailures(generation: ReconcilerGeneration, cardId: number): void {
   try {
-    quarantineStore().clearFailures(cardId);
+    quarantineStore(generation).clearFailures(cardId);
   } catch (err) {
     logError(TAG, `Card ${cardId}: failed to clear quarantine record after successful pass`, err);
   }
@@ -394,11 +407,9 @@ function emergencyContainmentLog(cardId: number | undefined, err: unknown): void
   } catch { /* nothing left to do */ }
 }
 
-const _states = new Map<number, CardReconcilerState>();
-
-function getState(cardId: number): CardReconcilerState {
-  let s = _states.get(cardId);
-  if (!s) { s = { running: false, dirty: false }; _states.set(cardId, s); }
+function getState(generation: ReconcilerGeneration, cardId: number): CardReconcilerState {
+  let s = generation.cardStates.get(cardId);
+  if (!s) { s = { running: false, dirty: false }; generation.cardStates.set(cardId, s); }
   return s;
 }
 
@@ -407,37 +418,44 @@ function getState(cardId: number): CardReconcilerState {
  * was accepted: a coalesced wake is accepted, only a known quarantine returns
  * false. Store lookup failure logs a bounded infrastructure error and fails
  * open — the pass still runs behind the terminal boundary.
+ *
+ * #1554: starting-state wakes are queued by project id and flushed after the
+ * generation reaches running; closing/stopped wakes are discarded.
  */
-function wakeCard(cardId: number): boolean {
-  if (safeIsQuarantined(cardId)) {
+function wakeCard(generation: ReconcilerGeneration, cardId: number): boolean {
+  if (generation.phase === "starting") {
+    generation.pendingProjectWakes.add(cardId);
+    return true;
+  }
+  if (generation.phase !== "running") return false;
+  if (safeIsQuarantined(generation, cardId)) {
     logWarn(TAG, `Card ${cardId}: wake ignored — quarantined after repeated reconcile failures`);
     return false;
   }
-  const s = getState(cardId);
+  const s = getState(generation, cardId);
   if (s.running) { s.dirty = true; return true; }
   s.running = true;
   s.dirty = false;
-  queueMicrotask(() => runReconcileBehindBoundary(cardId));
+  track(generation, () => runReconcileBehindBoundary(generation, cardId), (err: unknown) => safeRecordReconcileFailure(generation, cardId, err));
   return true;
 }
 
 /** #1664: terminal, non-throwing handler for a scheduled reconcile pass. */
-function runReconcileBehindBoundary(cardId: number): void {
-  void reconcileCard(cardId)
+function runReconcileBehindBoundary(generation: ReconcilerGeneration, cardId: number): Promise<void> {
+  return reconcileCard(generation, cardId)
     .then(
-      () => safeClearFailures(cardId),
-      (err: unknown) => safeRecordReconcileFailure(cardId, err),
-    )
-    .catch((boundaryError: unknown) => emergencyContainmentLog(cardId, boundaryError));
+      () => safeClearFailures(generation, cardId),
+      (err: unknown) => safeRecordReconcileFailure(generation, cardId, err),
+    );
 }
 
-async function reconcileCard(cardId: number): Promise<void> {
-  const s = getState(cardId);
+async function reconcileCard(generation: ReconcilerGeneration, cardId: number): Promise<void> {
+  const s = getState(generation, cardId);
   try {
     do {
       s.dirty = false;
-      if (_shutdownRequested) return;
-      await deriveAction(cardId);
+      if (!isActive(generation)) return;
+      await deriveAction(generation, cardId);
     } while (s.dirty);
   } finally {
     s.running = false;
@@ -505,7 +523,7 @@ function isProjectReconcileEligible(project: KanbanCard): boolean {
   return false;
 }
 
-async function deriveAction(cardId: number): Promise<void> {
+async function deriveAction(generation: ReconcilerGeneration, cardId: number): Promise<void> {
   if (cardId <= 0) return;
   const card = kanbanGetCard(cardId);
   if (!card) return;
@@ -515,22 +533,22 @@ async function deriveAction(cardId: number): Promise<void> {
     // they are a scheduled project whose retry is due. Queued+future and
     // unrelated roots remain no-ops or on their existing path.
     if (card.status === "running") {
-      await reconcileProject(cardId);
+      await reconcileProject(generation, cardId);
       return;
     }
     if (card.status === "queued" && isScheduledProjectRoot(card) && isRetryDue(card)) {
-      await reconcileProject(cardId);
+      await reconcileProject(generation, cardId);
       return;
     }
     // #1618: peer/CLI supervised roots are event-woken (admission fires
     // card:queued after commit) and reconcile without a scheduled retry gate.
     if (card.status === "queued" && isSupervisedRootIdentity(card) && !isScheduledRootIdentity(card)) {
-      await reconcileProject(cardId);
+      await reconcileProject(generation, cardId);
       return;
     }
   }
 
-  await reconcileChildCard(card);
+  await reconcileChildCard(generation, card);
 }
 
 const RESUMPTIVE_ATTEMPT_LIFECYCLES = new Set<AttemptLifecycle>(["pending", "claimed", "starting", "running", "cancel_requested"]);
@@ -650,13 +668,10 @@ function inspectProjectOwnership(projectId: number, supervision: ProjectSupervis
  * #1546: the running root's no-owner path. Only a non-terminal project with no
  * resumable owner and no claimable continuation reaches last-resort settlement.
  */
-function claimOrcContinuation(projectId: number, _supervision: ProjectSupervisionRow, reviewStore: ProjectReviewStore, project: KanbanCard): "owned" | "settled" {
-  const coordinator = getOrCreateOrcCoordinator();
-  if (!coordinator) {
-    logWarn(TAG, `Project ${projectId}: Orc coordinator unavailable — settling as last resort`);
-    settleProjectLastResort(projectId);
-    return "settled";
-  }
+function claimOrcContinuation(generation: ReconcilerGeneration, projectId: number, _supervision: ProjectSupervisionRow, reviewStore: ProjectReviewStore, project: KanbanCard): "owned" | "settled" {
+  // #1554: the coordinator is a mandatory generation dependency; a running
+  // generation always has one.
+  const coordinator = generation.deps.coordinator;
   // The goal is the root card's durable goal when available,
   // otherwise a bounded continuation instruction naming the card and run.
   const goal = project.goal && project.goal.trim().length > 0
@@ -687,12 +702,12 @@ function claimOrcContinuation(projectId: number, _supervision: ProjectSupervisio
         const retry = coordinator.scheduleScheduledProject(projectId, goal);
         if (retry.kind === "claimed" || retry.kind === "idempotent" || retry.kind === "busy") return "owned";
       }
-      settleProjectLastResort(projectId);
+      settleProjectLastResortFor(generation, projectId);
       return "settled";
     }
     case "not_actionable":
       logWarn(TAG, `Project ${projectId}: scheduled continuation not actionable (${result.reason}) — settling as last resort`);
-      settleProjectLastResort(projectId);
+      settleProjectLastResortFor(generation, projectId);
       return "settled";
   }
 }
@@ -705,7 +720,7 @@ function claimOrcContinuation(projectId: number, _supervision: ProjectSupervisio
  * waits for the absolute run deadline. `appendRunOnce` in the settler is the
  * single dedupe authority: a concurrent waiter settle returns duplicate/late.
  */
-export function settleProjectLastResort(projectId: number): void {
+function settleProjectLastResortFor(generation: ReconcilerGeneration, projectId: number): void {
   const card = kanbanGetCard(projectId);
   if (!card) return;
   const matched = findActiveScheduledRun(card);
@@ -713,7 +728,7 @@ export function settleProjectLastResort(projectId: number): void {
   const reason = "no scheduled Orc continuation owner after restart";
   // The freeze must not prevent the exactly-once settle: even if a child
   // cancellation rejects, the occurrence still settles through the settler.
-  void abortProject(projectId, children, reason, { skipRootFail: true })
+  void abortProject(generation, projectId, children, reason, { skipRootFail: true })
     .catch((err) => logWarn(TAG, `last-resort abort for project ${projectId} failed — ${err instanceof Error ? err.message : String(err)}`))
     .then(() => {
     if (!matched) {
@@ -741,13 +756,35 @@ export function settleProjectLastResort(projectId: number): void {
         diagnostic: makeTaskFailure("interruption", "restart_interrupted", "executing", "scheduled project continuation unavailable after restart", "none"),
         detail: "reconcileProject: no durable owner and no claimable scheduled Orc continuation",
         cardId: projectId,
-        onFailure: _failureCascade,
+        onFailure: generation.deps.failureCascade,
       });
       logInfo(TAG, `Project ${projectId}: settled run ${matched.run.runId} as restart_interrupted (last resort)`);
     } catch (err) {
       logWarn(TAG, `Project ${projectId}: last-resort settlement failed — ${err instanceof Error ? err.message : String(err)}`);
     }
   });
+}
+
+/** #1554: public last-resort boundary — fail closed without a running generation. */
+export function requestLastResortSettlement(projectId: number): void {
+  const generation = activeGeneration;
+  if (!generation || generation.phase !== "running") {
+    boundedFacadeLog("requestLastResortSettlement", `project ${projectId}`);
+    return;
+  }
+  settleProjectLastResortFor(generation, projectId);
+}
+
+/**
+ * #1554: public last-resort boundary — fail closed without a running generation.
+ */
+export function settleProjectLastResort(projectId: number): void {
+  const generation = activeGeneration;
+  if (!generation || generation.phase !== "running") {
+    boundedFacadeLog("settleProjectLastResort", `project ${projectId}`);
+    return;
+  }
+  settleProjectLastResortFor(generation, projectId);
 }
 
 function findActiveScheduledRun(card: KanbanCard): { entry: import("./tasks/task-types.js").ScheduledTask; run: import("./tasks/task-state-store.js").ActiveTaskRun } | undefined {
@@ -831,7 +868,7 @@ function hasRepairWorkerForItem(
   return false;
 }
 
-function handleRepairState(projectId: number, supervision: ProjectSupervisionRow, reviewStore: ProjectReviewStore): BranchResult {
+function handleRepairState(generation: ReconcilerGeneration, projectId: number, supervision: ProjectSupervisionRow, reviewStore: ProjectReviewStore): BranchResult {
   const authority = projectMutationAuthority(projectId, supervision.generation);
   if (supervision.state === "repair_planned") {
     const decision = reviewStore.getLatestDecisionForProject(projectId);
@@ -897,7 +934,7 @@ function handleRepairState(projectId: number, supervision: ProjectSupervisionRow
       return "none";
     }
     // recoverable child rows — Reconciler/Worker dispatcher owns
-    requestWorkerDispatch();
+    requestWorkerDispatchFor(generation);
     return "owned";
   }
   return "none";
@@ -908,9 +945,9 @@ function handleRepairState(projectId: number, supervision: ProjectSupervisionRow
  * Reconciler case creation (crash recovery); `review_requested`/`reviewing`
  * dispatch through the existing review request, never a fresh authoring claim.
  */
-async function handleReviewState(projectId: number, supervision: ProjectSupervisionRow, reviewStore: ProjectReviewStore): Promise<void> {
+async function handleReviewState(generation: ReconcilerGeneration, projectId: number, supervision: ProjectSupervisionRow, reviewStore: ProjectReviewStore): Promise<void> {
   if (supervision.state === "review_ready" && !reviewStore.getLatestOpenCase(projectId)) {
-    await createReviewCase(projectId, supervision, reviewStore, 0);
+    await createReviewCase(generation, projectId, supervision, reviewStore, 0);
     return;
   }
   const openCase = reviewStore.getLatestOpenCase(projectId);
@@ -920,9 +957,9 @@ async function handleReviewState(projectId: number, supervision: ProjectSupervis
     const authority = projectMutationAuthority(projectId, supervision.generation);
     const { id: rrId } = reviewStore.insertReviewRequest(projectId, openCase.id, supervision.generation, undefined, authority);
     if (!rrId) return;
-    scheduleOrcReview(projectId, supervision.generation, openCase.id, rrId);
+    scheduleOrcReview(generation, projectId, supervision.generation, openCase.id, rrId);
   } else if (existingReq.status === "pending") {
-    scheduleOrcReview(projectId, supervision.generation, openCase.id, existingReq.id);
+    scheduleOrcReview(generation, projectId, supervision.generation, openCase.id, existingReq.id);
   } else if (existingReq.status === "abandoned") {
     logWarn(TAG, `Project ${projectId}: review request abandoned — settling blocked`);
     const authority = projectMutationAuthority(projectId, supervision.generation);
@@ -954,7 +991,7 @@ async function handleReviewState(projectId: number, supervision: ProjectSupervis
  * coverage turn runs; the non-scheduled legacy dispatch is bounded by
  * COVERAGE_ROUND_GRACE_MS instead, since it creates no observable claim.
  */
-function runCoverageGate(projectId: number, supervision: ProjectSupervisionRow, reviewStore: ProjectReviewStore): "blocked" | "waiting" | "reviewable" {
+function runCoverageGate(generation: ReconcilerGeneration, projectId: number, supervision: ProjectSupervisionRow, reviewStore: ProjectReviewStore): "blocked" | "waiting" | "reviewable" {
   const authority = projectMutationAuthority(projectId, supervision.generation);
   const coverage = readProjectCriterionCoverage(projectId);
 
@@ -1014,7 +1051,7 @@ function runCoverageGate(projectId: number, supervision: ProjectSupervisionRow, 
     logInfo(TAG, `Project ${projectId}: coverage round claimed by another wake — waiting`);
     return "waiting";
   }
-  dispatchCoverageRound(projectId, uncovered);
+  dispatchCoverageRound(generation, projectId, uncovered);
   return "waiting";
 }
 
@@ -1076,15 +1113,11 @@ function settleCoverageBlocked(
 }
 
 /** #1604/#1605: dispatch the Orc coverage turn — coordinator for supervised roots, legacy dispatch otherwise. */
-function dispatchCoverageRound(projectId: number, uncovered: readonly string[]): void {
+function dispatchCoverageRound(generation: ReconcilerGeneration, projectId: number, uncovered: readonly string[]): void {
   const goal = `[COVERAGE GAP] Supervised project #${projectId}: delegated root criteria ${uncovered.join(", ")} have no Worker mapped to them. Spawn a Worker to map any that should be delegated, or leave the gap for the imminent quality review if it cannot or should not be covered (e.g. the evidence came from another lane, or the criterion is being covered by Orc synthesis). Never spawn a Worker for Orc-owned criteria. Do not re-author the contract. Do not write the final report artifact yet.`;
   const card = kanbanGetCard(projectId);
   if (card && isSupervisedRootIdentity(card)) {
-    const coordinator = getOrCreateOrcCoordinator();
-    if (!coordinator) {
-      logWarn(TAG, `Project ${projectId}: Orc coordinator unavailable for coverage round — waiting for the next wake`);
-      return;
-    }
+    const coordinator = generation.deps.coordinator;
     const claim = coordinator.scheduleScheduledProject(projectId, goal);
     if (claim.kind === "claimed" || claim.kind === "idempotent" || claim.kind === "busy") {
       logInfo(TAG, `Project ${projectId}: coverage round dispatched to scheduled Orc (${uncovered.join(", ")})`);
@@ -1111,10 +1144,10 @@ function dispatchCoverageRound(projectId: number, uncovered: readonly string[]):
  * gate, and `claimCoverageRound` pins `state = 'executing'`, so a gap there
  * could never be claimed and would stall recovery forever.
  */
-async function createReviewCase(projectId: number, supervision: ProjectSupervisionRow, reviewStore: ProjectReviewStore, roundOffset: 0 | 1 = 1): Promise<void> {
+async function createReviewCase(generation: ReconcilerGeneration, projectId: number, supervision: ProjectSupervisionRow, reviewStore: ProjectReviewStore, roundOffset: 0 | 1 = 1): Promise<void> {
   const authority = projectMutationAuthority(projectId, supervision.generation);
   if (supervision.state === "executing") {
-    const coverageGate = runCoverageGate(projectId, supervision, reviewStore);
+    const coverageGate = runCoverageGate(generation, projectId, supervision, reviewStore);
     if (coverageGate === "waiting" || coverageGate === "blocked") return;
   }
 
@@ -1152,7 +1185,7 @@ async function createReviewCase(projectId: number, supervision: ProjectSupervisi
   });
   logInfo(TAG, `Project ${projectId}: review ready — case ${caseId} created, request ${reviewRequestId} (gen=${supervision.generation}, round=${nextRound})`);
   logSwarmTrace({ event: "review_case_created", project: projectId, card: projectId, reviewCase: caseId, reason: "all_children_terminal", generation: supervision.generation });
-  scheduleOrcReview(projectId, supervision.generation, caseId, reviewRequestId);
+  scheduleOrcReview(generation, projectId, supervision.generation, caseId, reviewRequestId);
 }
 
 /**
@@ -1163,7 +1196,7 @@ async function createReviewCase(projectId: number, supervision: ProjectSupervisi
  * settles the occurrence as a last resort. State transitions made during one
  * pass are followed by a fresh durable read before selecting the next owner.
  */
-async function reconcileProject(projectId: number): Promise<void> {
+async function reconcileProject(generation: ReconcilerGeneration, projectId: number): Promise<void> {
   let project = kanbanGetCard(projectId);
   if (!project) return;
   if (!isProjectReconcileEligible(project)) return;
@@ -1179,7 +1212,7 @@ async function reconcileProject(projectId: number): Promise<void> {
       const contract = JSON.parse(contractRow.contract_json) as { limits?: { hard_deadline_at?: string } };
       const configuredDeadline = contract.limits?.hard_deadline_at ? Date.parse(contract.limits.hard_deadline_at) : NaN;
       if (Number.isFinite(configuredDeadline) && now > configuredDeadline) {
-        await abortProject(projectId, kanbanGetChildren(projectId), "configured hard deadline exceeded");
+        await abortProject(generation, projectId, kanbanGetChildren(projectId), "configured hard deadline exceeded");
         return;
       }
     } catch (err) {
@@ -1193,22 +1226,22 @@ async function reconcileProject(projectId: number): Promise<void> {
       reviewStore.ensureAwaitingContract(projectId);
       logInfo(TAG, `Project ${projectId}: awaiting contract — dispatching Orc authoring turn`);
       if (isScheduledRootIdentity(project)) {
-        const owned = scheduleContractAuthoringOrSettle(projectId);
+        const owned = scheduleContractAuthoringOrSettle(generation, projectId);
         if (project.status === "queued" && (owned.kind === "claimed" || owned.kind === "idempotent")) kanbanPromoteDueRetry(projectId);
       } else if (isSupervisedRootIdentity(project)) {
         // #1618: peer/CLI supervised roots use the same durable Orc coordinator.
-        scheduleContractAuthoringOrSettle(projectId);
+        scheduleContractAuthoringOrSettle(generation, projectId);
       } else {
         legacyOrcDispatch(`Define acceptance contract for project #${projectId}; call define_project_contract with project_card_id=${projectId}`, projectId);
       }
     } else if (supervision.state === "awaiting_contract") {
       logInfo(TAG, `Project ${projectId}: still awaiting contract — waking Orc`);
       if (isScheduledRootIdentity(project)) {
-        const owned = scheduleContractAuthoringOrSettle(projectId);
+        const owned = scheduleContractAuthoringOrSettle(generation, projectId);
         if (project.status === "queued" && (owned.kind === "claimed" || owned.kind === "idempotent")) kanbanPromoteDueRetry(projectId);
       } else if (isSupervisedRootIdentity(project)) {
         // #1618: peer/CLI supervised roots use the same durable Orc coordinator.
-        scheduleContractAuthoringOrSettle(projectId);
+        scheduleContractAuthoringOrSettle(generation, projectId);
       } else {
         legacyOrcDispatch(`Define acceptance contract for project #${projectId}; call define_project_contract with project_card_id=${projectId}`, projectId);
       }
@@ -1232,11 +1265,11 @@ async function reconcileProject(projectId: number): Promise<void> {
   if (supervision.state === "awaiting_contract") {
     logInfo(TAG, `Project ${projectId}: still awaiting contract — waking Orc`);
     if (isScheduledRootIdentity(project)) {
-      const owned = scheduleContractAuthoringOrSettle(projectId);
+      const owned = scheduleContractAuthoringOrSettle(generation, projectId);
       if (project.status === "queued" && (owned.kind === "claimed" || owned.kind === "idempotent")) kanbanPromoteDueRetry(projectId);
     } else if (isSupervisedRootIdentity(project)) {
       // #1618: peer/CLI supervised roots use the same durable Orc coordinator.
-      scheduleContractAuthoringOrSettle(projectId);
+      scheduleContractAuthoringOrSettle(generation, projectId);
     } else {
       legacyOrcDispatch(`Define acceptance contract for project #${projectId}; call define_project_contract with project_card_id=${projectId}`, projectId);
       if (project.status === "queued") kanbanPromoteDueRetry(projectId);
@@ -1255,7 +1288,7 @@ async function reconcileProject(projectId: number): Promise<void> {
     if (supervision.state === "accepted" || supervision.state === "blocked") return;
 
     if (project.max_tokens != null && (project.tokens_used ?? 0) >= project.max_tokens) {
-      await abortProject(projectId, kanbanGetChildren(projectId), `budget exceeded (${project.tokens_used}/${project.max_tokens} tokens)`);
+      await abortProject(generation, projectId, kanbanGetChildren(projectId), `budget exceeded (${project.tokens_used}/${project.max_tokens} tokens)`);
       return;
     }
 
@@ -1264,7 +1297,7 @@ async function reconcileProject(projectId: number): Promise<void> {
       // A crash between the Orc claim and the card write leaves queued+due,
       // which the next wake observes as already owned and promotes.
       if (inspectProjectOwnership(projectId, supervision, reviewStore) === "none") {
-        if (claimOrcContinuation(projectId, supervision, reviewStore, project) === "settled") return;
+        if (claimOrcContinuation(generation, projectId, supervision, reviewStore, project) === "settled") return;
       }
       if (!kanbanPromoteDueRetry(projectId)) return; // lost the conditional race — next wake re-reads
       continue;
@@ -1279,7 +1312,7 @@ async function reconcileProject(projectId: number): Promise<void> {
       case "orc_claim":
         return; // existing live Orc row owns the project
       case "review":
-        await handleReviewState(projectId, supervision, reviewStore);
+        await handleReviewState(generation, projectId, supervision, reviewStore);
         return;
       case "input": {
         const result = handleInputState(projectId, supervision, reviewStore);
@@ -1287,12 +1320,12 @@ async function reconcileProject(projectId: number): Promise<void> {
         return; // pending input owned by the input dispatcher
       }
       case "repair": {
-        const result = handleRepairState(projectId, supervision, reviewStore);
+        const result = handleRepairState(generation, projectId, supervision, reviewStore);
         if (result === "transitioned" || result === "none") continue;
         return; // recoverable children owned by the Worker path
       }
       case "executing_terminal_children":
-        await createReviewCase(projectId, supervision, reviewStore, 1);
+        await createReviewCase(generation, projectId, supervision, reviewStore, 1);
         return;
       case "none":
         // #1546/#1618: the Orc continuation claim and last-resort settlement
@@ -1303,25 +1336,20 @@ async function reconcileProject(projectId: number): Promise<void> {
         // At most one correlated claim per wake: the coordinator's live row
         // (or a re-derived owner) is re-read on the next wake. The queued
         // branch promotes first and continues so the state owner still runs.
-        if (claimOrcContinuation(projectId, supervision, reviewStore, project) === "settled") return;
+        if (claimOrcContinuation(generation, projectId, supervision, reviewStore, project) === "settled") return;
         return; // the claim (or its re-derived owner) now owns the project
     }
   }
 }
 
-function dispatchPendingReviewRequests(): number {
+function dispatchPendingReviewRequests(generation: ReconcilerGeneration): number {
   const store = new ProjectReviewStore();
   const pending = store.getPendingReviewRequests();
   let dispatched = 0;
   for (const req of pending) {
-    if (_orcCoordinator) {
-      const result = _orcCoordinator.scheduleReview(req.project_card_id, req.generation, req.review_case_id);
-      if (result.kind === "claimed" || result.kind === "idempotent") {
-        try { store.bumpReviewRequestAttempt(req.id); } catch {}
-        dispatched++;
-      }
-    } else {
-      legacyOrcReviewDispatch(req.project_card_id, req.generation, req.review_case_id, req.id);
+    const result = generation.deps.coordinator.scheduleReview(req.project_card_id, req.generation, req.review_case_id);
+    if (result.kind === "claimed" || result.kind === "idempotent") {
+      try { store.bumpReviewRequestAttempt(req.id); } catch {}
       dispatched++;
     }
   }
@@ -1330,8 +1358,8 @@ function dispatchPendingReviewRequests(): number {
 
 // ── #1405: Pi executor lane ──────────────────────────────────────────────────
 
-function reconcilePiCard(card: KanbanCard): void {
-  const svc = _piService;
+function reconcilePiCard(generation: ReconcilerGeneration, card: KanbanCard): void {
+  const svc = generation.deps.piService;
   if (!svc) {
     logWarn(TAG, `Pi card ${card.id} queued but Pi service not available`);
     return;
@@ -1380,9 +1408,9 @@ function reconcilePiCard(card: KanbanCard): void {
   });
 }
 
-async function reconcileChildCard(card: KanbanCard): Promise<void> {
+async function reconcileChildCard(generation: ReconcilerGeneration, card: KanbanCard): Promise<void> {
   if (card.type === "pi") {
-    reconcilePiCard(card);
+    reconcilePiCard(generation, card);
     return;
   }
 
@@ -1395,18 +1423,18 @@ async function reconcileChildCard(card: KanbanCard): Promise<void> {
   if (card.status === "queued") {
     if (!isUnblocked(card)) return;
     if (latestAttempt && latestAttempt.lifecycle === "pending") {
-      requestWorkerDispatch();
+      requestWorkerDispatchFor(generation);
     }
     return;
   }
 
   if (card.status === "failed" && latestAttempt) {
-    handleSupervisedRetry(card, latestAttempt.lifecycle);
+    handleSupervisedRetry(generation, card, latestAttempt.lifecycle);
     return;
   }
 
   if (latestAttempt && !isTerminal(latestAttempt.lifecycle)) {
-    evaluateLease(card);
+    evaluateLease(generation, card);
     return;
   }
 
@@ -1415,20 +1443,27 @@ async function reconcileChildCard(card: KanbanCard): Promise<void> {
   }
 }
 
-export function requestWorkerDispatch(): void {
-  dispatchPumpState.dirty = true;
-  if (!dispatchPumpState.running) {
-    dispatchPumpState.running = true;
+/** #1554: internal pump entry for a captured generation. */
+function requestWorkerDispatchFor(generation: ReconcilerGeneration): void {
+  const pump = generation.dispatchPump;
+  pump.dirty = true;
+  if (!pump.running) {
+    pump.running = true;
     // #1664: logged terminal handler, not a silent swallow. The pump is
     // re-entered by the next requestWorkerDispatch() and a persistent failure
     // stays visible in the log. No quarantine here: the pass spans all projects,
     // so a throw cannot be attributed to one card.
-    queueMicrotask(() => {
-      void runWorkerDispatch()
-        .catch((err: unknown) => safeLogDispatchFailure(err))
-        .catch((boundaryError: unknown) => emergencyContainmentLog(undefined, boundaryError));
-    });
+    track(generation, () => runWorkerDispatch(generation), (err: unknown) => safeLogDispatchFailure(err));
   }
+}
+
+export function requestWorkerDispatch(): void {
+  const generation = activeGeneration;
+  if (!generation || generation.phase !== "running") {
+    boundedFacadeLog("requestWorkerDispatch", "no work scheduled");
+    return;
+  }
+  requestWorkerDispatchFor(generation);
 }
 
 interface DispatchPumpState {
@@ -1436,28 +1471,26 @@ interface DispatchPumpState {
   dirty: boolean;
 }
 
-const dispatchPumpState: DispatchPumpState = { running: false, dirty: false };
-
-async function runWorkerDispatch(): Promise<void> {
+async function runWorkerDispatch(generation: ReconcilerGeneration): Promise<void> {
   try {
     do {
-      dispatchPumpState.dirty = false;
-      if (_shutdownRequested) return;
-      await dispatchOnePass();
-    } while (dispatchPumpState.dirty);
+      generation.dispatchPump.dirty = false;
+      if (!isActive(generation)) return;
+      await dispatchOnePass(generation);
+    } while (generation.dispatchPump.dirty);
   } finally {
-    dispatchPumpState.running = false;
+    generation.dispatchPump.running = false;
   }
 }
 
-async function dispatchOnePass(): Promise<void> {
+async function dispatchOnePass(generation: ReconcilerGeneration): Promise<void> {
   const store = new WorkerSupervisionStore();
   const capacities = new Map<string, { adapter: SwarmExecutorAdapter; max: number }>();
   const rootDeadlines = new Map<number, string | undefined>();
 
   const queued = kanbanQueuedDispatchOrder();
   for (const card of queued) {
-    if (_shutdownRequested) return;
+    if (!isActive(generation)) return;
 
     if (!isUnblocked(card)) continue;
     if (card.parent_id == null) continue;
@@ -1492,13 +1525,13 @@ async function dispatchOnePass(): Promise<void> {
         } else {
           kanbanFail(card.id, `worker ${latestAttempt.lifecycle}`);
         }
-        dispatchPumpState.dirty = true;
+        generation.dispatchPump.dirty = true;
       }
       continue;
     }
     if (latestAttempt.lifecycle !== "pending") continue;
 
-    const executor = dispatchExecutor(latestAttempt.executor_kind, latestAttempt.executor_id);
+    const executor = dispatchExecutor(generation, latestAttempt.executor_kind, latestAttempt.executor_id);
     if (!executor) {
       // #1638: a coding (Pi) attempt with no live Pi service is a runtime
       // eligibility failure — settle through the normal Worker start-failure
@@ -1656,7 +1689,7 @@ async function dispatchOnePass(): Promise<void> {
         } else {
           kanbanFail(card.id, `worker ${afterStart.lifecycle}`);
         }
-        dispatchPumpState.dirty = true;
+        generation.dispatchPump.dirty = true;
       }
     } else if (observation.kind === "deferred" && observation.provesNoStart === true) {
       // #1638: proven-no-start contention (Pi capacity/workspace busy). The
@@ -1704,31 +1737,30 @@ function isTerminal(lc: AttemptLifecycle): boolean {
   return lc === "completed" || lc === "failed" || lc === "cancelled" || lc === "timed_out";
 }
 
-function evaluateLease(card: KanbanCard): void {
+function evaluateLease(generation: ReconcilerGeneration, card: KanbanCard): void {
   try {
     const supStore = new WorkerSupervisionStore();
     const latestAttempt = supStore.getLatestAttempt(card.id);
     if (!latestAttempt) return;
 
     const adapterResolver = (executorKind: ExecutorKind, _executorId: string) => {
-      if (executorKind === "agent") return workerAdapter();
+      if (executorKind === "agent") return generation.deps.workerAdapter;
       if (executorKind === "pi") {
-        const svc = _piService;
+        const svc = generation.deps.piService;
         if (!svc) return undefined;
-        const { PiExecutorAdapter } = require("./pi-executor-adapter.js") as typeof import("./pi-executor-adapter.js");
-        return new PiExecutorAdapter(svc.executor, new WorkerSupervisionStore());
+        return generation.deps.createPiAdapter(svc);
       }
       return undefined;
     };
 
     const service = new LeaseReconciliationService(adapterResolver);
     service.evaluateAndAct(latestAttempt.id, card.id);
-    scheduleLeaseEvaluations();
+    scheduleLeaseEvaluations(generation);
   } catch (err) {
     logWarn(TAG, `lease evaluation failed for card ${card.id}: ${err}`);
   }
 }
-function handleSupervisedRetry(card: KanbanCard, lifecycle: AttemptLifecycle): void {
+function handleSupervisedRetry(generation: ReconcilerGeneration, card: KanbanCard, lifecycle: AttemptLifecycle): void {
   if (lifecycle !== "failed" && lifecycle !== "cancelled" && lifecycle !== "timed_out") return;
 
   try {
@@ -1739,7 +1771,7 @@ function handleSupervisedRetry(card: KanbanCard, lifecycle: AttemptLifecycle): v
       return;
     }
 
-    const retryService = buildRetryService();
+    const retryService = buildRetryService(generation);
 
     const result = retryService.reduceTerminalAttempt(latestAttempt.id, card.id);
     if ("error" in result) {
@@ -1754,10 +1786,10 @@ function handleSupervisedRetry(card: KanbanCard, lifecycle: AttemptLifecycle): v
         const acceptResult = retryService.acceptAutomaticRetry(latestAttempt.id, card.id);
         if (acceptResult.kind === "created") {
           logInfo(TAG, `Auto-retry card ${card.id}: attempt ${latestAttempt.ordinal} -> ${acceptResult.targetAttemptId} (${classification.primary})`);
-          wakeCard(card.id);
+          wakeCard(generation, card.id);
         } else if (acceptResult.kind === "idempotent") {
           logInfo(TAG, `Auto-retry already scheduled for card ${card.id}: target ${acceptResult.targetAttemptId}`);
-          wakeCard(card.id);
+          wakeCard(generation, card.id);
         } else {
           logWarn(TAG, `Auto-retry failed for card ${card.id}: ${acceptResult.kind} — leaving card failed`);
         }
@@ -1782,9 +1814,9 @@ function handleSupervisedRetry(card: KanbanCard, lifecycle: AttemptLifecycle): v
   }
 }
 
-function buildRetryService(): RetryService {
+function buildRetryService(generation: ReconcilerGeneration): RetryService {
   const catalog = new LocalExecutorCatalog({
-    spinProvider: providerForAdapter(workerAdapter(), AGENT_EXECUTOR_ID),
+    spinProvider: providerForAdapter(generation.deps.workerAdapter, AGENT_EXECUTOR_ID),
   });
   return new RetryService({ executorCatalog: catalog });
 }
@@ -1794,7 +1826,7 @@ function getLatestAttemptInfo(cardId: number): AttemptRow | undefined {
   return store.getLatestAttempt(cardId);
 }
 
-async function abortProject(projectId: number, children: KanbanCard[], reason: string, opts?: { skipRootFail?: boolean }): Promise<void> {
+async function abortProject(generation: ReconcilerGeneration, projectId: number, children: KanbanCard[], reason: string, opts?: { skipRootFail?: boolean }): Promise<void> {
   logWarn(TAG, `ABORT project ${projectId}: ${reason}`);
   // Freeze supervision before cancelling child executors. Late Orc review
   // results must not be able to move an aborted project back to accepted.
@@ -1830,7 +1862,7 @@ async function abortProject(projectId: number, children: KanbanCard[], reason: s
       stableReason: `project_abort: ${reason}`,
     });
     if (settlement.kind === "settled" || settlement.kind === "replayed") {
-      const executor = dispatchExecutor(attempt.executor_kind, attempt.executor_id);
+      const executor = dispatchExecutor(generation, attempt.executor_kind, attempt.executor_id);
       if (executor) {
         await executor.adapter.cancel({
           attemptId: attempt.id,
@@ -1851,25 +1883,48 @@ async function abortProject(projectId: number, children: KanbanCard[], reason: s
   // event (proved by the focused exactly-once settlement test).
 }
 
-// ── Public API ───────────────────────────────────────────────────────────────
+// ── Public API (#1554: generation-captured request façade) ──────────────────
 
+/**
+ * #1554: request entry points capture the active generation synchronously and
+ * fail closed without scheduling side effects when no running generation
+ * exists. Starting-state wakes are queued; closing/stopped wakes are dropped.
+ */
 export function requestReconcile(cardId: number): void {
-  wakeCard(cardId);
+  const generation = activeGeneration;
+  if (!generation) { boundedFacadeLog("requestReconcile", `card ${cardId}`); return; }
+  if (generation.phase === "starting") { generation.pendingProjectWakes.add(cardId); return; }
+  if (generation.phase !== "running") { boundedFacadeLog("requestReconcile", `card ${cardId}`); return; }
+  wakeCard(generation, cardId);
 }
 
 export function requestReconcileForProject(cardId: number): void {
+  const generation = activeGeneration;
+  if (!generation) { boundedFacadeLog("requestReconcileForProject", `card ${cardId}`); return; }
+  if (generation.phase === "starting") { generation.pendingProjectWakes.add(cardId); return; }
+  if (generation.phase !== "running") { boundedFacadeLog("requestReconcileForProject", `card ${cardId}`); return; }
   const card = kanbanGetCard(cardId);
   if (card?.parent_id) {
-    wakeCard(card.parent_id);
+    wakeCard(generation, card.parent_id);
   }
-  wakeCard(cardId);
+  wakeCard(generation, cardId);
 }
 
 export function retryPendingReviewRequests(): number {
-  return dispatchPendingReviewRequests();
+  const generation = activeGeneration;
+  if (!generation || generation.phase !== "running") {
+    boundedFacadeLog("retryPendingReviewRequests", "no work scheduled");
+    return 0;
+  }
+  return dispatchPendingReviewRequests(generation);
 }
 
 export function scanActiveProjects(): number {
+  const generation = activeGeneration;
+  if (!generation || generation.phase !== "running") {
+    boundedFacadeLog("scanActiveProjects", "no work scheduled");
+    return 0;
+  }
   // #1628: union running roots with stranded queued roots — a queued root
   // with no live Orc run (project 63's state) is otherwise never rediscovered.
   // #1664: quarantined cards are not re-woken at boot; the returned count is
@@ -1882,7 +1937,7 @@ export function scanActiveProjects(): number {
   const skipped: number[] = [];
   let woken = 0;
   for (const projectId of projectIds) {
-    if (wakeCard(projectId)) woken += 1;
+    if (wakeCard(generation, projectId)) woken += 1;
     else skipped.push(projectId);
   }
   if (skipped.length > 0) logWarn(TAG, `Skipped ${skipped.length} quarantined project(s): ${skipped.join(", ")}`);
@@ -1899,180 +1954,313 @@ export function answerInputRequest(requestId: string, response: string): boolean
   return answered;
 }
 
-function scheduleLeaseEvaluations(): void {
-  getWakeScheduler()?.sourceChanged("executor-lease");
+function scheduleLeaseEvaluations(generation: ReconcilerGeneration): void {
+  generation.deps.wakeScheduler.sourceChanged("executor-lease");
 }
 
-let _reconcilerStarted = false;
-
-export function startReconciler(): void {
-  if (_reconcilerStarted) {
-    logInfo(TAG, "Reconciler already started — skipping duplicate init");
-    return;
+/**
+ * #1554: start one bridge-generation Reconciler runtime.
+ *
+ * Transactional startup: on any unexpected throw, the disposers/close path
+ * runs, the active slot is cleared if owned, and the failure is rethrown so
+ * BootGraph attributes it to the reconciler phase.
+ */
+export async function startReconciler(deps: ReconcilerDeps): Promise<ReconcilerHandle> {
+  if (activeGeneration) {
+    throw new Error(`Reconciler already active (generation ${activeGeneration.id}) — duplicate start rejected`);
   }
-  _reconcilerStarted = true;
+  if (!deps.coordinator || !deps.wakeScheduler || !deps.workerAdapter || !deps.createPiAdapter || !deps.getQuarantineStore || !deps.projectRunProgress) {
+    throw new Error("Reconciler start rejected: incomplete dependency set");
+  }
 
-  getOrCreateOrcCoordinator();
+  const generation: ReconcilerGeneration = {
+    id: deps.generationId,
+    phase: "starting",
+    deps,
+    cardStates: new Map(),
+    dispatchPump: { running: false, dirty: false },
+    inFlight: new Set(),
+    pendingProjectWakes: new Set(),
+    disposers: [],
+    recovery: null,
+    stopPromise: null,
+    onLeaseChanged: null,
+  };
+  activeGeneration = generation;
 
-  // #1510: Boot recovery — terminalize process-bound attempts from dead bridge
-  runBootRecovery();
+  try {
+    // 3. Named Nerve listeners with exact removal functions.
+    const onQueued = (cardId: number) => requestReconcileForProject(cardId);
+    const onDone = (cardId: number) => requestReconcileForProject(cardId);
+    const onFailed = (cardId: number) => requestReconcileForProject(cardId);
+    nerve.on("card:queued", onQueued);
+    nerve.on("card:done", onDone);
+    nerve.on("card:failed", onFailed);
+    generation.disposers.push(() => {
+      nerve.off("card:queued", onQueued);
+      nerve.off("card:done", onDone);
+      nerve.off("card:failed", onFailed);
+    });
 
-  // #1539: executor-lease due source on the lifecycle wake scheduler.
-  registerExecutorLeaseSource();
+    // 4. Coordinator ownership-release subscription (returns its disposer).
+    const onOwnershipReleased = (event: OrcOwnershipReleasedV1): void => {
+      if (generation.phase === "starting") {
+        generation.pendingProjectWakes.add(event.projectCardId);
+        return;
+      }
+      if (event.intentKind !== "contract_authoring") { requestReconcile(event.projectCardId); return; }
+      requestReconcileForProject(event.projectCardId);
+    };
+    generation.disposers.push(deps.coordinator.onOwnershipReleased(onOwnershipReleased));
 
-  nerve.on("card:queued", (cardId: number) => requestReconcileForProject(cardId));
-  nerve.on("card:done", (cardId: number) => requestReconcileForProject(cardId));
-  nerve.on("card:failed", (cardId: number) => requestReconcileForProject(cardId));
+    // 5. Executor-lease due source (returns its scheduler disposer).
+    generation.disposers.push(registerExecutorLeaseSource(generation));
 
-  // #1628: event-owned Orc recovery. Every committed ownership relinquishment
-  // wakes its project, so a failed authoring turn, a turn that completed
-  // without a contract, a startPort failure, or an in-process supersession is
-  // re-claimed without depending on card:queued ordering.
-  _orcCoordinator?.onOwnershipReleased((event) => {
-    if (event.intentKind !== "contract_authoring") { requestReconcile(event.projectCardId); return; }
-    requestReconcileForProject(event.projectCardId);
-  });
+    // 6. Static lease-changed hook — retain the exact callback identity so
+    // stop can clear it only when still owned by this generation.
+    const onLeaseChanged = (): void => {
+      deps.wakeScheduler.sourceChanged("executor-lease");
+      const cardId = ExecutorLeaseStore.lastChangedCardId;
+      if (cardId !== undefined) projectRunProgress(generation, cardId);
+    };
+    generation.onLeaseChanged = onLeaseChanged;
+    ExecutorLeaseStore.onLeaseChanged = onLeaseChanged;
 
-  // #1628: boot handoff — wake the projects whose runs boot recovery
-  // superseded, now that the listeners above exist.
-  for (const projectId of _bootRecoveredProjectIds) requestReconcileForProject(projectId);
-  _bootRecoveredProjectIds = [];
+    // 7. Coordinator boot recovery exactly once. Events received while
+    // starting only queue project ids; wakes flush after running.
+    const coordinatorRecovered = deps.coordinator.bootRecovery();
 
-  const count = scanActiveProjects();
+    // 8. Supervised-attempt recovery — exhaustive, awaited, per-attempt
+    // isolated. Builds the immutable report.
+    const report = await runAttemptRecovery(generation, coordinatorRecovered);
+    generation.recovery = report;
 
-  logInfo(TAG, `Reconciler started — recovered ${count} running project(s)`);
+    // 9. Active-project scan queues into pendingProjectWakes while starting;
+    // the flush below runs the quarantine-aware wake path after running.
+    const activeIds = [...new Set([...kanbanRunningProjectIds(), ...kanbanStrandedQueuedProjectIds()])];
+
+    // 10. Running — then flush the deduplicated/sorted union of coordinator
+    // recovery ids, queued startup wakes, and the active-project scan.
+    generation.phase = "running";
+    const wakeIds = [...new Set([...coordinatorRecovered, ...generation.pendingProjectWakes, ...activeIds])].sort((a, b) => a - b);
+    generation.pendingProjectWakes.clear();
+    let count = 0;
+    const skipped: number[] = [];
+    for (const projectId of wakeIds) {
+      if (wakeCard(generation, projectId)) count += 1;
+      else skipped.push(projectId);
+    }
+    if (skipped.length > 0) logWarn(TAG, `Skipped ${skipped.length} quarantined project(s): ${skipped.join(", ")}`);
+    logInfo(TAG, `Reconciler started — recovered ${count} running project(s)`);
+
+    // 11. Freeze/expose the report.
+    return {
+      generationId: generation.id,
+      recovery: Object.freeze({
+        generationId: report.generationId,
+        attempts: Object.freeze([...report.attempts]),
+        recoveredProjectIds: Object.freeze([...report.recoveredProjectIds]),
+      }),
+      stop: () => stopGeneration(generation),
+    };
+  } catch (err) {
+    // Roll back: dispose listeners/source/hook, clear the slot if owned,
+    // mark stopped, rethrow so BootGraph attributes failure to "reconciler".
+    try { await stopGeneration(generation); } catch { /* best effort */ }
+    throw err;
+  }
 }
 
-function leaseWake(cardId: number): void {
+/**
+ * #1554: idempotent, generation-fenced stop. Synchronous transition to
+ * `closing` blocks new work; disposers run exactly once; the static lease hook
+ * is cleared only when reference-equal to this generation's callback; then the
+ * tracked in-flight set is awaited until empty before local state is cleared.
+ */
+function stopGeneration(generation: ReconcilerGeneration): Promise<void> {
+  if (generation.stopPromise) return generation.stopPromise;
+  generation.stopPromise = (async () => {
+    if (generation.phase === "stopped") return;
+    generation.phase = "closing";
+    for (const dispose of generation.disposers.splice(0)) {
+      try { dispose(); } catch (err) { logWarn(TAG, `disposer failed during Reconciler stop: ${err instanceof Error ? err.message : String(err)}`); }
+    }
+    generation.disposers.length = 0;
+    if (generation.onLeaseChanged && ExecutorLeaseStore.onLeaseChanged === generation.onLeaseChanged) {
+      ExecutorLeaseStore.onLeaseChanged = undefined;
+    }
+    generation.onLeaseChanged = null;
+    // New work cannot enter after the closing transition; wait for the work
+    // already scheduled to quiesce (including #1664 failure recording and
+    // success cleanup).
+    await Promise.allSettled([...generation.inFlight]);
+    generation.cardStates.clear();
+    generation.dispatchPump.running = false;
+    generation.dispatchPump.dirty = false;
+    generation.pendingProjectWakes.clear();
+    generation.recovery = null;
+    if (activeGeneration === generation) activeGeneration = null;
+    generation.phase = "stopped";
+  })();
+  return generation.stopPromise;
+}
+
+function leaseWake(generation: ReconcilerGeneration, cardId: number): void {
   const card = kanbanGetCard(cardId) as { parent_id?: number } | undefined;
-  if (card?.parent_id) wakeCard(card.parent_id);
+  if (card?.parent_id) wakeCard(generation, card.parent_id);
   requestReconcile(cardId);
 }
 
-/** #1539: register the executor-lease due source with the wake scheduler. */
-function registerExecutorLeaseSource(): void {
-  const scheduler = getWakeScheduler();
-  if (!scheduler) {
-    logWarn(TAG, "Lease source not registered — lifecycle wake scheduler unavailable");
-    return;
-  }
-  scheduler.register({
+/** #1539: register the executor-lease due source; returns the scheduler disposer. */
+function registerExecutorLeaseSource(generation: ReconcilerGeneration): () => void {
+  const scheduler = generation.deps.wakeScheduler;
+  const disposer = scheduler.register({
     id: "executor-lease",
     listDueItems: () => new ExecutorLeaseStore().getEvaluationSchedule()
       .map(s => ({ key: `lease:${s.attemptId}`, dueAt: new Date(s.nextEvaluationAt).getTime() })),
     wakeDue: (_now: number) => {
       for (const s of new ExecutorLeaseStore().getDueSnapshots()) {
-        leaseWake(s.cardId);
+        leaseWake(generation, s.cardId);
       }
     },
   });
-  ExecutorLeaseStore.onLeaseChanged = () => {
-    scheduler.sourceChanged("executor-lease");
-    const cardId = ExecutorLeaseStore.lastChangedCardId;
-    if (cardId !== undefined) projectRunProgress(cardId);
-  };
   // Registration is a source mutation: immediate scan + re-arm.
   scheduler.sourceChanged("executor-lease");
-}
-
-let _wakeScheduler: LifecycleWakeScheduler | null = null;
-
-export function setWakeScheduler(scheduler: LifecycleWakeScheduler | null): void {
-  _wakeScheduler = scheduler;
-}
-
-export function getWakeScheduler(): LifecycleWakeScheduler | null {
-  return _wakeScheduler;
+  return disposer;
 }
 
 /** #1539: project lease milestones into the owning scheduled run's progress. */
-let _runProgressBridge: ((cardId: number) => void) | null = null;
-export function setRunProgressBridge(bridge: ((cardId: number) => void) | null): void {
-  _runProgressBridge = bridge;
-}
-
-/** #1588: the failure cascade callback, wired from boot for last-resort settlements. */
-let _failureCascade: ((entryId: string, diagnostic: TaskFailureDiagnosticV1) => void) | undefined;
-export function setFailureCascade(fn: ((entryId: string, diagnostic: TaskFailureDiagnosticV1) => void) | undefined): void {
-  _failureCascade = fn;
-}
-function projectRunProgress(cardId: number): void {
+function projectRunProgress(generation: ReconcilerGeneration, cardId: number): void {
   try {
-    _runProgressBridge?.(cardId);
+    generation.deps.projectRunProgress(cardId);
   } catch (err) {
     logWarn(TAG, `run progress bridge failed for card ${cardId}: ${err instanceof Error ? err.message : String(err)}`);
   }
 }
 
-function runBootRecovery(): void {
-  try {
-    const store = new WorkerSupervisionStore();
-    const active = store.getActiveSupervisedAttempts();
-    if (active.length === 0) {
-      logInfo(TAG, "Boot recovery: no active attempts to recover");
-      return;
-    }
+/**
+ * #1554: exhaustive, truthful boot recovery. Every active supervised attempt
+ * read at the snapshot is accounted for in the returned report; per-attempt
+ * inspection errors are isolated and represented, never propagated.
+ */
+async function runAttemptRecovery(generation: ReconcilerGeneration, coordinatorRecovered: number[]): Promise<ReconcilerRecoveryReport> {
+  const store = new WorkerSupervisionStore();
+  const active = store.getActiveSupervisedAttempts()
+    .slice()
+    .sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
+  if (active.length === 0) {
+    logInfo(TAG, "Boot recovery: no active attempts to recover");
+  }
 
-    let recovered = 0;
-    for (const attempt of active) {
-      const policy = resolveSchedulingPolicy(attempt.executor_kind);
-      if (policy.recovery === "process_bound") {
-        const bootResult = store.terminalSettlement({
-          attemptId: attempt.id,
-          expectedGeneration: attempt.generation || 1,
-          desiredState: "timed_out",
-          stableReason: "bridge_restart",
-        });
-        if (bootResult.kind === "settled" || bootResult.kind === "budget_violation") {
-          logSwarmTrace({ event: "recovery_settled", card: attempt.card_id, attempt: attempt.id, generation: attempt.generation, reason: "bridge_restart" });
-          const card = kanbanGetCard(attempt.card_id);
-          if (card) kanbanFail(card.id, "bridge_restart");
-        }
+  const results: RecoveryAttemptResult[] = [];
+  let recovered = 0;
+  for (const attempt of active) {
+    const policy = resolveSchedulingPolicy(attempt.executor_kind);
+    if (policy.recovery === "process_bound") {
+      const bootResult = store.terminalSettlement({
+        attemptId: attempt.id,
+        expectedGeneration: attempt.generation || 1,
+        desiredState: "timed_out",
+        stableReason: "bridge_restart",
+      });
+      if (bootResult.kind === "settled" || bootResult.kind === "budget_violation") {
+        logSwarmTrace({ event: "recovery_settled", card: attempt.card_id, attempt: attempt.id, generation: attempt.generation, reason: "bridge_restart" });
+        const card = kanbanGetCard(attempt.card_id);
+        if (card) kanbanFail(card.id, "bridge_restart");
         recovered++;
-      } else if (policy.recovery === "inspectable") {
-        const adapter = resolveAdapterForRecovery(attempt.executor_kind, attempt.executor_id);
-        if (adapter) {
-          const claim: ExecutionClaim = {
+      }
+      results.push({
+        kind: "process_bound",
+        attemptId: attempt.id,
+        cardId: attempt.card_id,
+        outcome: bootResult.kind === "settled" || bootResult.kind === "budget_violation" ? "settled" : "already_resolved",
+      });
+      continue;
+    }
+    if (policy.recovery === "inspectable") {
+      const adapter = resolveAdapterForRecovery(generation, attempt.executor_kind, attempt.executor_id);
+      if (!adapter) {
+        results.push({
+          kind: "unresolved",
+          attemptId: attempt.id,
+          cardId: attempt.card_id,
+          executorKind: attempt.executor_kind,
+          executorId: attempt.executor_id,
+          reason: "executor_unavailable",
+        });
+        continue;
+      }
+      const claim: ExecutionClaim = {
+        attemptId: attempt.id,
+        cardId: attempt.card_id,
+        contractId: attempt.contract_id,
+        executorKind: attempt.executor_kind as "agent" | "pi",
+        executorId: attempt.executor_id,
+        generation: attempt.generation || 1,
+        claimedAt: attempt.claimed_at ?? attempt.started_at,
+        hardDeadlineAt: attempt.hard_deadline_at ?? undefined,
+      };
+      try {
+        const observation = await adapter.inspect(claim);
+        if (observation.kind === "terminal") {
+          store.terminalSettlement({
+            attemptId: attempt.id,
+            expectedGeneration: attempt.generation || 1,
+            desiredState: observation.lifecycle as "completed" | "failed" | "cancelled" | "timed_out",
+            stableReason: "recovery_inspection_terminal",
+          });
+        } else if (observation.kind === "unknown") {
+          results.push({
+            kind: "unresolved",
             attemptId: attempt.id,
             cardId: attempt.card_id,
-            contractId: attempt.contract_id,
-            executorKind: attempt.executor_kind as "agent" | "pi",
+            executorKind: attempt.executor_kind,
             executorId: attempt.executor_id,
-            generation: attempt.generation || 1,
-            claimedAt: attempt.claimed_at ?? attempt.started_at,
-            hardDeadlineAt: attempt.hard_deadline_at ?? undefined,
-          };
-          adapter.inspect(claim).then(observation => {
-            if (observation.kind === "terminal") {
-              store.terminalSettlement({
-                attemptId: attempt.id,
-                expectedGeneration: attempt.generation || 1,
-                desiredState: observation.lifecycle as "completed" | "failed" | "cancelled" | "timed_out",
-                stableReason: "recovery_inspection_terminal",
-              });
-            }
-          }).catch(err => {
-            logWarn(TAG, `Boot recovery inspection failed for ${attempt.id}: ${err instanceof Error ? err.message : String(err)}`);
+            reason: "observation_unknown",
+            detail: String(observation.message ?? "").slice(0, 200),
           });
-          logSwarmTrace({ event: "recovery_inspect", card: attempt.card_id, attempt: attempt.id, reason: "inspectable_attempt" });
+          continue;
         }
+        results.push({
+          kind: "inspectable",
+          attemptId: attempt.id,
+          cardId: attempt.card_id,
+          executorKind: attempt.executor_kind,
+          executorId: attempt.executor_id,
+          observation,
+        });
+        logSwarmTrace({ event: "recovery_inspect", card: attempt.card_id, attempt: attempt.id, reason: "inspectable_attempt" });
+      } catch (err) {
+        const bounded = (err instanceof Error ? err.message : String(err)).slice(0, 200);
+        logWarn(TAG, `Boot recovery inspection failed for ${attempt.id}: ${bounded}`);
+        results.push({
+          kind: "unresolved",
+          attemptId: attempt.id,
+          cardId: attempt.card_id,
+          executorKind: attempt.executor_kind,
+          executorId: attempt.executor_id,
+          reason: "inspection_failed",
+          detail: bounded,
+        });
       }
     }
-    if (recovered > 0) {
-      logInfo(TAG, `Boot recovery: settled ${recovered} process-bound attempt(s)`);
-    }
-  } catch (err) {
-    logWarn(TAG, `Boot recovery error: ${err instanceof Error ? err.message : String(err)}`);
   }
+  if (recovered > 0) {
+    logInfo(TAG, `Boot recovery: settled ${recovered} process-bound attempt(s)`);
+  }
+  return {
+    generationId: generation.id,
+    attempts: results,
+    recoveredProjectIds: [...new Set(coordinatorRecovered)].sort((a, b) => a - b),
+  };
 }
 
-function resolveAdapterForRecovery(executorKind: ExecutorKind, _executorId: string): SwarmExecutorAdapter | undefined {
-  if (executorKind === "agent") return workerAdapter();
+function resolveAdapterForRecovery(generation: ReconcilerGeneration, executorKind: ExecutorKind, _executorId: string): SwarmExecutorAdapter | undefined {
+  if (executorKind === "agent") return generation.deps.workerAdapter;
   if (executorKind === "pi") {
-    const svc = _piService;
+    const svc = generation.deps.piService;
     if (!svc) return undefined;
-    const { PiExecutorAdapter } = require("./pi-executor-adapter.js") as typeof import("./pi-executor-adapter.js");
-    return new PiExecutorAdapter(svc.executor, new WorkerSupervisionStore());
+    return generation.deps.createPiAdapter(svc);
   }
   return undefined;
 }

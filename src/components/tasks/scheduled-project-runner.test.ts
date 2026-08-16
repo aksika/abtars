@@ -28,7 +28,9 @@ beforeEach(async () => {
   mod = await import("./scheduled-project-runner.js");
 });
 
-afterEach(() => {
+afterEach(async () => {
+  await activeHandle?.stop();
+  activeHandle = null;
   rmSync(TEST_HOME, { recursive: true, force: true });
 });
 
@@ -36,9 +38,35 @@ function makeControl(ref: string): import("../execution-control.js").ExecutionCo
   return createExecutionSupervisor({ maxConcurrent: {} }).open({ executionRef: ref, type: "T" });
 }
 
-function fakeCoordinator(): Array<{ projectCardId: number; goal: string }> {
+let activeHandle: import("../reconciler.js").ReconcilerHandle | null = null;
+
+/** #1554: start a real generation over the tmpdir stores with a scripted coordinator. */
+async function startGeneration(coordinator: unknown): Promise<void> {
+  const { LifecycleWakeScheduler } = await import("../lifecycle-wake-scheduler.js");
+  const { SpinWorkerAdapter } = await import("../spin-worker-adapter.js");
+  const { ReconcileQuarantineStore } = await import("../reconcile-quarantine-store.js");
+  await activeHandle?.stop();
+  activeHandle = null;
+  const scheduler = new LifecycleWakeScheduler();
+  activeHandle = await reconciler.startReconciler({
+    generationId: `runner-test-${Date.now()}`,
+    coordinator: coordinator as never,
+    wakeScheduler: scheduler,
+    workerAdapter: new SpinWorkerAdapter(),
+    piService: null,
+    createPiAdapter: (() => ({ kind: "pi", capacity: async () => ({ available: 0, max: 0 }), start: async () => ({ kind: "start_failed", reason: "unavailable", retryable: false }), cancel: async () => ({ kind: "cancelled", attemptId: "" }), inspect: async () => ({ kind: "running", lifecycle: "running" }) })) as never,
+    getQuarantineStore: () => new ReconcileQuarantineStore(),
+    projectRunProgress: () => {},
+  } as never);
+  await scheduler.start();
+}
+
+async function fakeCoordinator(): Promise<Array<{ projectCardId: number; goal: string }>> {
   const claims: Array<{ projectCardId: number; goal: string }> = [];
-  reconciler.setOrcCoordinator({
+  await startGeneration({
+    getStore: () => ({ countStartedAuthoringTurns: () => 0, countConsecutiveUnstartableAuthoringTurns: () => 0, lastAuthoringClaimAt: () => null, lastAuthoringFailureCode: () => null }),
+    bootRecovery: () => [] as number[],
+    onOwnershipReleased: () => () => {},
     scheduleScheduledProject(projectCardId: number, goal: string) {
       claims.push({ projectCardId, goal });
       // a real claim is durable — the shared driver observes the live row
@@ -50,6 +78,10 @@ function fakeCoordinator(): Array<{ projectCardId: number; goal: string }> {
         );
       } catch { /* best effort — the driver still observes the claim result */ }
       return { kind: "claimed", context: { runId: "or_test", projectCardId } };
+    },
+    scheduleContractAuthoring(projectCardId: number) {
+      claims.push({ projectCardId, goal: "contract_authoring" });
+      return { kind: "claimed", context: { runId: "or_authoring", projectCardId } };
     },
   } as never);
   return claims;
@@ -106,7 +138,7 @@ async function seedReservation(entryId = "daily-ai", runId = "daily-ai_1"): Prom
 
 describe("scheduled-project-runner #1516", () => {
   it("admits one root O card with the durable cap and resolves accepted synthesis", async () => {
-    const claims = fakeCoordinator();
+    const claims = await fakeCoordinator();
     await seedReservation();
     const control = makeControl("spr-accept");
     const request = makeRequest({ executionControl: control });
@@ -141,7 +173,7 @@ describe("scheduled-project-runner #1516", () => {
   });
 
   it("rejects with the blocked reason when the project is blocked", async () => {
-    fakeCoordinator();
+    await fakeCoordinator();
     await seedReservation();
     const pending = mod.scheduledProjectRunner(makeRequest());
     const root = kanban.kanbanList("*")[0]!;
@@ -154,7 +186,7 @@ describe("scheduled-project-runner #1516", () => {
   });
 
   it("#1588: a lane completing past its hard deadline yields supervision/lane_late_completion with full lane facts", async () => {
-    fakeCoordinator();
+    await fakeCoordinator();
     await seedReservation();
     const pending = mod.scheduledProjectRunner(makeRequest());
     const root = kanban.kanbanList("*")[0]!;
@@ -211,7 +243,7 @@ describe("scheduled-project-runner #1516", () => {
   });
 
   it("#1588: an unevidenceable lane reports criterion_unevidenced before the lane outcome", async () => {
-    fakeCoordinator();
+    await fakeCoordinator();
     await seedReservation();
     const pending = mod.scheduledProjectRunner(makeRequest());
     const root = kanban.kanbanList("*")[0]!;
@@ -256,7 +288,7 @@ describe("scheduled-project-runner #1516", () => {
   });
 
   it("aborts the project and rejects when the scheduled deadline is already exceeded", async () => {
-    fakeCoordinator();
+    await fakeCoordinator();
     await seedReservation();
     const pending = mod.scheduledProjectRunner(makeRequest({ deadlineAt: Date.now() - 1000 }));
 
@@ -266,7 +298,7 @@ describe("scheduled-project-runner #1516", () => {
   });
 
   it("aborts the project and rejects on execution-control cancellation", async () => {
-    fakeCoordinator();
+    await fakeCoordinator();
     await seedReservation();
     const control = makeControl("spr-cancel");
     const pending = mod.scheduledProjectRunner(makeRequest({ executionControl: control }));
@@ -287,7 +319,7 @@ describe("scheduled-project-runner #1516", () => {
   it("#1600 reads terminal project evidence before honoring a deadline cancellation", async () => {
     vi.useFakeTimers();
     try {
-      fakeCoordinator();
+      await fakeCoordinator();
       await seedReservation();
       const control = makeControl("spr-pre-kill-terminal");
       const pending = mod.scheduledProjectRunner(makeRequest({ executionControl: control }));
@@ -316,7 +348,7 @@ describe("scheduled-project-runner #1516", () => {
   });
 
   it("reattaches to the persisted card on duplicate admission and never creates a second project", async () => {
-    const claims = fakeCoordinator();
+    const claims = await fakeCoordinator();
     await seedReservation();
     const request = makeRequest();
 
@@ -337,14 +369,14 @@ describe("scheduled-project-runner #1516", () => {
   });
 
   it("refuses admission when a different run owns the active reservation", async () => {
-    fakeCoordinator();
+    await fakeCoordinator();
     await seedReservation("daily-ai", "other-run");
     await expect(mod.scheduledProjectRunner(makeRequest({ runId: "daily-ai_1" }))).rejects.toThrow(/admission conflict/);
     expect(kanban.kanbanList("*")).toHaveLength(0);
   });
 
   it("#1588: the Orc goal carries the machine-derived lane duration budget when set", async () => {
-    const claims = fakeCoordinator();
+    const claims = await fakeCoordinator();
     await seedReservation();
     const pending = mod.scheduledProjectRunner(makeRequest({ laneDurationMs: 600000 } as never));
     expect(claims).toHaveLength(1);
@@ -357,7 +389,7 @@ describe("scheduled-project-runner #1516", () => {
   });
 
   it("refuses a persisted card whose durable source identity belongs to another run", async () => {
-    fakeCoordinator();
+    await fakeCoordinator();
     await seedReservation();
     const root = kanban.kanbanEnqueue("Daily Ai", "task", "other-run", { type: "O", maxAgents: 4 });
     stateStore.updateActiveRun("daily-ai", "daily-ai_1", { cardId: root });
@@ -367,7 +399,7 @@ describe("scheduled-project-runner #1516", () => {
   });
 
   it("resolves immediately when the persisted card is already terminal", async () => {
-    fakeCoordinator();
+    await fakeCoordinator();
     await seedReservation();
     const store = new reviewStoreMod.ProjectReviewStore();
     const root = kanban.kanbanEnqueue("Daily Ai", "task", "daily-ai_1", { type: "O", maxAgents: 4 });
@@ -383,7 +415,7 @@ describe("scheduled-project-runner #1516", () => {
   });
 
   it("#1605: an accepted root delivers the RENDERED synthesis (card result with Known gaps), not the authored decision text", async () => {
-    fakeCoordinator();
+    await fakeCoordinator();
     await seedReservation();
     const store = new reviewStoreMod.ProjectReviewStore();
     const root = kanban.kanbanEnqueue("Daily Ai", "task", "daily-ai_1", { type: "O", maxAgents: 4 });
@@ -409,7 +441,7 @@ describe("scheduled-project-runner #1516", () => {
   });
 
   it("#1604: durable uncovered ids yield supervision/contract_uncovered naming them", async () => {
-    fakeCoordinator();
+    await fakeCoordinator();
     await seedReservation();
     const pending = mod.scheduledProjectRunner(makeRequest());
     const root = kanban.kanbanList("*")[0]!;
@@ -430,7 +462,7 @@ describe("scheduled-project-runner #1516", () => {
   });
 
   it("#1604: NULL coverage ids surface the lane code, not contract_uncovered (deadline-misdiagnosis fix)", async () => {
-    fakeCoordinator();
+    await fakeCoordinator();
     await seedReservation();
     const pending = mod.scheduledProjectRunner(makeRequest());
     const root = kanban.kanbanList("*")[0]!;
@@ -475,7 +507,7 @@ describe("scheduled-project-runner #1516", () => {
   });
 
   it("#1604: empty coverage ids with a failed lane yield the lane code", async () => {
-    fakeCoordinator();
+    await fakeCoordinator();
     await seedReservation();
     const pending = mod.scheduledProjectRunner(makeRequest());
     const root = kanban.kanbanList("*")[0]!;
@@ -520,7 +552,7 @@ describe("scheduled-project-runner #1516", () => {
   });
 
   it("#1604: coverage_undeterminable in blocked_reason surfaces as project_blocked, never masked by lane codes", async () => {
-    fakeCoordinator();
+    await fakeCoordinator();
     await seedReservation();
     const pending = mod.scheduledProjectRunner(makeRequest());
     const root = kanban.kanbanList("*")[0]!;
@@ -567,7 +599,7 @@ describe("scheduled-project-runner #1516", () => {
   });
 
   it("#1605: an accepted root with a failed lane returns the accepted synthesis", async () => {
-    fakeCoordinator();
+    await fakeCoordinator();
     await seedReservation();
     const pending = mod.scheduledProjectRunner(makeRequest());
     const root = kanban.kanbanList("*")[0]!;
@@ -606,7 +638,7 @@ describe("scheduled-project-runner #1516", () => {
   });
 
   it("#1605: an Orc-blocked decision with persisted gaps surfaces project_blocked with the Orc blocker, not contract_uncovered", async () => {
-    fakeCoordinator();
+    await fakeCoordinator();
     await seedReservation();
     const pending = mod.scheduledProjectRunner(makeRequest());
     const root = kanban.kanbanList("*")[0]!;
@@ -650,7 +682,7 @@ describe("scheduled-project-runner #1516", () => {
   });
 
   it("#1605: a pre-review structural block without an Orc decision keeps the lane/definition diagnostics", async () => {
-    fakeCoordinator();
+    await fakeCoordinator();
     await seedReservation();
     const pending = mod.scheduledProjectRunner(makeRequest());
     const root = kanban.kanbanList("*")[0]!;
@@ -670,13 +702,15 @@ describe("scheduled-project-runner #1516", () => {
 });
 
 describe("scheduled-project-runner #1546 reattach routing", () => {
-  function seedExecutingReattach(overrides: Record<string, unknown> = {}): { root: number; store: reviewStoreMod.ProjectReviewStore; claims: Array<{ projectCardId: number; goal: string }> } {
-    const claims = fakeCoordinator();
-    return seedReattach({ state: "executing", claims, ...overrides }) as { root: number; store: reviewStoreMod.ProjectReviewStore; claims: Array<{ projectCardId: number; goal: string }> };
+  // #1554: seed FIRST, start the generation after — the boot scan must not
+  // observe the fixture (the runner's wake owns the claim timing).
+  async function seedExecutingReattach(overrides: Record<string, unknown> = {}): Promise<{ root: number; store: reviewStoreMod.ProjectReviewStore; claims: Array<{ projectCardId: number; goal: string }> }> {
+    const { root, store } = await seedReattach({ state: "executing", ...overrides });
+    const claims = await fakeCoordinator();
+    return { root, store, claims };
   }
 
-  function seedReattach(opts: { state?: string; claims: Array<{ projectCardId: number; goal: string }>; cardStatus?: string; retryMarker?: string | null }): { root: number; store: reviewStoreMod.ProjectReviewStore; claims: Array<{ projectCardId: number; goal: string }> } {
-    const { claims } = opts;
+  async function seedReattach(opts: { state?: string; cardStatus?: string; retryMarker?: string | null }): Promise<{ root: number; store: reviewStoreMod.ProjectReviewStore }> {
     const root = kanban.kanbanEnqueue("Daily Ai", "task", "daily-ai_1", { type: "O", maxAgents: 4 });
     const store = new reviewStoreMod.ProjectReviewStore();
     if (opts.state) {
@@ -705,16 +739,18 @@ describe("scheduled-project-runner #1546 reattach routing", () => {
     } else {
       kanban.kanbanRunning(root);
     }
-    return { root, store, claims };
+    return { root, store };
   }
 
   it("keeps the synchronous goal-bearing claim on an awaiting_contract reattach", async () => {
     await seedReservation();
-    const { root, claims } = seedReattach({ state: "awaiting_contract", claims: fakeCoordinator() });
+    const { root } = await seedReattach({ state: "awaiting_contract" });
+    const claims = await fakeCoordinator();
     const pending = mod.scheduledProjectRunner(makeRequest());
 
-    expect(claims).toHaveLength(1);
-    expect(claims[0]!.projectCardId).toBe(root);
+    // the runner's synchronous goal-bearing claim is never dropped behind the
+    // driver's generic authoring claim
+    expect(claims.some(c => c.projectCardId === root && c.goal.includes("Agent budget"))).toBe(true);
     expect(kanban.kanbanGetCard(root)?.status).toBe("running");
 
     const store = new reviewStoreMod.ProjectReviewStore();
@@ -725,7 +761,7 @@ describe("scheduled-project-runner #1546 reattach routing", () => {
 
   it("#1656 binds the canonical workspace before the first Orc claim", async () => {
     await seedReservation();
-    const claims = fakeCoordinator();
+    const claims = await fakeCoordinator();
     const pending = mod.scheduledProjectRunner(makeRequest());
 
     expect(claims).toHaveLength(1);
@@ -742,7 +778,8 @@ describe("scheduled-project-runner #1546 reattach routing", () => {
 
   it("#1656 a reattach with a different cwd fails closed and never rebinds", async () => {
     await seedReservation();
-    const { root } = seedReattach({ state: "executing", claims: fakeCoordinator() });
+    const { root } = await seedReattach({ state: "executing" });
+    await fakeCoordinator();
     const store = new reviewStoreMod.ProjectReviewStore();
     const first = join(TEST_HOME, "workspace", "daily-ai");
     const second = join(TEST_HOME, "workspace", "other");
@@ -764,12 +801,13 @@ describe("scheduled-project-runner #1546 reattach routing", () => {
 
   it("reattach in a non-terminal non-awaiting state never authors and wakes the shared driver", async () => {
     await seedReservation();
-    const { root, store, claims } = seedExecutingReattach();
+    const { root, store, claims } = await seedExecutingReattach();
     const pending = mod.scheduledProjectRunner(makeRequest());
 
-    // the runner itself claims nothing; the driver claims the continuation
-    // from the wake (executing + no children + no live Orc row)
-    expect(claims).toHaveLength(0);
+    // #1554: the boot scan owns the continuation claim (executing + no
+    // children + no live Orc row); the runner itself never authors. The
+    // admission wake adds no second claim.
+    expect(claims).toHaveLength(1);
     await new Promise(r => setTimeout(r, 20));
     expect(claims).toHaveLength(1);
     expect(claims[0]!.projectCardId).toBe(root);
@@ -782,12 +820,12 @@ describe("scheduled-project-runner #1546 reattach routing", () => {
 
   it("terminal reattach reads terminal evidence without supervision insertion or a claim", async () => {
     await seedReservation();
-    const claims = fakeCoordinator();
     const root = kanban.kanbanEnqueue("Daily Ai", "task", "daily-ai_1", { type: "O", maxAgents: 4 });
     // #1590: kanbanComplete is running→done — dispatch first.
     kanban.kanbanRunning(root);
     kanban.kanbanComplete(root, null, "already completed");
     stateStore.updateActiveRun("daily-ai", "daily-ai_1", { cardId: root });
+    const claims = await fakeCoordinator();
 
     const result = await mod.scheduledProjectRunner(makeRequest());
 
@@ -798,17 +836,19 @@ describe("scheduled-project-runner #1546 reattach routing", () => {
 
   it("a reattached due queued retry is promoted only by the driver, never directly", async () => {
     await seedReservation();
-    const { root, store, claims } = seedReattach({
+    const { root, store } = await seedReattach({
       state: "executing",
       cardStatus: "queued",
       retryMarker: new Date(Date.now() - 1000).toISOString(),
-      claims: fakeCoordinator(),
     });
+    const claims = await fakeCoordinator();
     const pending = mod.scheduledProjectRunner(makeRequest());
-    expect(claims).toHaveLength(0);
 
+    // #1554: the boot scan claims the stranded due root exactly once
+    // (claim-before-promotion), and the admission wake adds no second claim.
     await new Promise(r => setTimeout(r, 20));
-    // claim-before-promotion by the driver: exactly one claim, card running
+    expect(claims).toHaveLength(1);
+    await new Promise(r => setTimeout(r, 20));
     expect(claims).toHaveLength(1);
     expect(kanban.kanbanGetCard(root)?.status).toBe("running");
     expect(kanban.kanbanGetCard(root)?.next_retry_at).toBeNull();
@@ -820,12 +860,12 @@ describe("scheduled-project-runner #1546 reattach routing", () => {
 
   it("a reattached future queued retry stays queued and keeps its marker", async () => {
     await seedReservation();
-    const { root, claims } = seedReattach({
+    const { root } = await seedReattach({
       state: "executing",
       cardStatus: "queued",
       retryMarker: new Date(Date.now() + 60_000).toISOString(),
-      claims: fakeCoordinator(),
     });
+    const claims = await fakeCoordinator();
     const control = makeControl("spr-future");
     const pending = mod.scheduledProjectRunner(makeRequest({ executionControl: control }));
     await new Promise(r => setTimeout(r, 20));

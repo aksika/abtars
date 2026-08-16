@@ -184,7 +184,7 @@ async function setupEnvironment(): Promise<{
   spin: any;
   requestReconcile: (id: number) => void;
   requestWorkerDispatch: () => void;
-  startReconciler: () => void;
+  startReconciler: (deps?: Partial<import("../../components/reconciler.js").ReconcilerDeps>) => Promise<void>;
   kanbanEnqueue: any;
   kanbanGetCard: any;
   kanbanGetChildren: any;
@@ -196,7 +196,8 @@ async function setupEnvironment(): Promise<{
   const { spin } = await import("../../components/spin.js");
   const { setOrcToolsDeps } = await import("../../components/transport/orc-tools.js");
   setOrcToolsDeps(spin);
-  const { requestReconcile, startReconciler, requestWorkerDispatch } = await import("../../components/reconciler.js");
+  const { requestReconcile, requestWorkerDispatch } = await import("../../components/reconciler.js");
+  const startReconciler = startTestReconciler;
   const { kanbanEnqueue, kanbanGetCard, kanbanGetChildren, kanbanRunning, kanbanComplete } = await import("../../components/tasks/kanban-board.js");
   const { WorkerSupervisionStore } = await import("../../components/worker-supervision-store.js");
   const { ProjectReviewStore } = await import("../../components/project-acceptance/project-review-store.js");
@@ -211,6 +212,60 @@ async function setupEnvironment(): Promise<{
   _dispatchPump = requestWorkerDispatch;
 
   return { spin, requestReconcile, requestWorkerDispatch, startReconciler, kanbanEnqueue, kanbanGetCard, kanbanGetChildren, kanbanRunning, kanbanComplete, WorkerSupervisionStore, ProjectReviewStore };
+}
+
+
+let _reconcilerGenerationCounter = 0;
+/** #1554: Pi service installed by the Pi harness, consumed at generation start. */
+let _harnessPiService: unknown = null;
+
+/**
+ * #1554: start a real Reconciler generation with production composition and
+ * deterministic harness dependencies. The coordinator, wake scheduler, and
+ * adapters are real; only external boundaries (model runtime, Pi process) are
+ * doubled.
+ */
+async function startTestReconciler(
+  deps: Partial<import("../../components/reconciler.js").ReconcilerDeps> = {},
+): Promise<void> {
+  const { startReconciler } = await import("../../components/reconciler.js");
+  const { LifecycleWakeScheduler } = await import("../../components/lifecycle-wake-scheduler.js");
+  const { OrcProjectCoordinator } = await import("../../components/orc-project/orc-project-coordinator.js");
+  const { loadPeerConfig } = await import("../../components/peer-config.js");
+  const { SpinWorkerAdapter } = await import("../../components/spin-worker-adapter.js");
+  const { ReconcileQuarantineStore } = await import("../../components/reconcile-quarantine-store.js");
+  const { WorkerSupervisionStore } = await import("../../components/worker-supervision-store.js");
+  const { PiExecutorAdapter } = await import("../../components/pi-executor-adapter.js");
+  const { spin } = await import("../../components/spin.js");
+
+  const peerName = loadPeerConfig().self.name;
+  const coordinator = deps.coordinator ?? new OrcProjectCoordinator({
+    ownerPeer: peerName,
+    startPort: async (context, goal) => {
+      await spin.spin({
+        type: "O",
+        goal,
+        sessionId: context.sessionId,
+        cardId: context.projectCardId,
+        settlementOwner: "spin",
+        source: "agent",
+        orcContext: context,
+      });
+    },
+  });
+  const scheduler = deps.wakeScheduler ?? new LifecycleWakeScheduler();
+  await startReconciler({
+    generationId: `local-swarm-${++_reconcilerGenerationCounter}`,
+    coordinator,
+    wakeScheduler: scheduler,
+    workerAdapter: deps.workerAdapter ?? new SpinWorkerAdapter(),
+    piService: (deps.piService ?? _harnessPiService) as never,
+    createPiAdapter: (service) => new PiExecutorAdapter(service.executor, new WorkerSupervisionStore()),
+    getQuarantineStore: () => new ReconcileQuarantineStore(),
+    projectRunProgress: deps.projectRunProgress ?? (() => {}),
+    failureCascade: deps.failureCascade,
+  });
+  await scheduler.start();
 }
 
 function createMockRuntime(durationMs = 30, startBarrier?: WorkerStartBarrier) {
@@ -331,7 +386,7 @@ async function runHappyPath(): Promise<LocalSwarmResult> {
   activeProjectCardId = projectCardId;
   kanbanRunning(projectCardId);
   bindProjectWorkspace(projectCardId);
-  startReconciler();
+  await startReconciler();
 
   const { getOrcTools } = await import("../../components/transport/orc-tools.js");
   const orcTools = getOrcTools();
@@ -488,7 +543,7 @@ async function runRestartRecovery(): Promise<LocalSwarmResult> {
     provenance: { requested_by: "user", authored_by: "orc", created_at: new Date().toISOString() },
   } as any);
   reviewStore.stateTransition(projectCardId, ["awaiting_contract"], "executing");
-  startReconciler();
+  await startReconciler();
 
   const childCardId = kanbanEnqueue("Restart worker", "agent", undefined, {
     type: "W", priority: "MEDIUM", deliveryMode: "deliver", parent_id: projectCardId,
@@ -555,7 +610,7 @@ async function runCapacityDeadline(): Promise<LocalSwarmResult> {
   activeProjectCardId = projectCardId;
   kanbanRunning(projectCardId);
   bindProjectWorkspace(projectCardId);
-  startReconciler();
+  await startReconciler();
 
   const { getOrcTools } = await import("../../components/transport/orc-tools.js");
   const orcTools = getOrcTools();
@@ -676,7 +731,7 @@ async function runPriorityAge(): Promise<LocalSwarmResult> {
   activeProjectCardId = projectCardId;
   kanbanRunning(projectCardId);
   bindProjectWorkspace(projectCardId);
-  startReconciler();
+  await startReconciler();
 
   const { getOrcTools } = await import("../../components/transport/orc-tools.js");
   const orcTools = getOrcTools();
@@ -771,7 +826,7 @@ async function runTokenBudget(): Promise<LocalSwarmResult> {
   const db = new WorkerSupervisionStore().db;
   db.prepare("UPDATE kanban_board SET max_tokens = 20000 WHERE id = ?").run(projectCardId);
 
-  startReconciler();
+  await startReconciler();
 
   const reviewStore = new ProjectReviewStore();
   const rootContractId = `rc_budget_${projectCardId}`;
@@ -1152,7 +1207,6 @@ async function installPiHarness(opts: {
   const { requireTaskDatabase } = await import("../../components/tasks/kanban-board.js");
   const { PiRunStore } = await import("../../components/pi-executor/pi-run-store.js");
   const { SupervisedPiSettlement } = await import("../../components/pi-executor/supervised-pi-settlement.js");
-  const { setPiService } = await import("../../components/reconciler.js");
   const { deliverCard } = await import("../../components/tasks/kanban-delivery.js");
 
   const db = requireTaskDatabase();
@@ -1199,10 +1253,11 @@ async function installPiHarness(opts: {
   });
 
   const service = { store: piStore, executor: fakeExecutor, config: piConfig };
-  // dispatchExecutor() constructs the Pi adapter from the live service (see
-  // reconciler.ts dispatchExecutor); no global worker-adapter override here —
-  // the Spin lane must keep its own adapter in mixed scenarios.
-  setPiService(service as any);
+  // #1554: the Pi service enters the generation through deps.createPiAdapter
+  // at start (the scenario's startReconciler call); no global worker-adapter
+  // or service override — the Spin lane keeps its own adapter in mixed
+  // scenarios.
+  _harnessPiService = service;
 
   return {
     spin, requestReconcile, requestWorkerDispatch, startReconciler,
@@ -1300,7 +1355,7 @@ async function runSupervisedPiProject(
   activeProjectCardId = projectCardId;
   h.kanbanRunning(projectCardId);
   bindProjectWorkspace(projectCardId);
-  h.startReconciler();
+  await h.startReconciler();
 
   const { getOrcTools } = await import("../../components/transport/orc-tools.js");
   const defineContractTool = getOrcTools().find(t => t.name === "define_project_contract")!;
@@ -1385,7 +1440,7 @@ async function runPiSpinRouting(): Promise<LocalSwarmResult> {
   activeProjectCardId = projectCardId;
   h.kanbanRunning(projectCardId);
   bindProjectWorkspace(projectCardId);
-  h.startReconciler();
+  await h.startReconciler();
 
   const { getOrcTools } = await import("../../components/transport/orc-tools.js");
   const defineContractTool = getOrcTools().find(t => t.name === "define_project_contract")!;
@@ -1475,7 +1530,7 @@ async function runPiUnavailable(): Promise<LocalSwarmResult> {
   });
   activeProjectCardId = projectCardId;
   kanbanRunning(projectCardId);
-  startReconciler();
+  await startReconciler();
 
   const { getOrcTools } = await import("../../components/transport/orc-tools.js");
   const defineContractTool = getOrcTools().find(t => t.name === "define_project_contract")!;
@@ -1572,7 +1627,7 @@ async function runPiWorkspaceContention(): Promise<LocalSwarmResult> {
   });
   activeProjectCardId = projectCardId;
   h.kanbanRunning(projectCardId);
-  h.startReconciler();
+  await h.startReconciler();
 
   const { getOrcTools } = await import("../../components/transport/orc-tools.js");
   const defineContractTool = getOrcTools().find(t => t.name === "define_project_contract")!;
@@ -1658,7 +1713,7 @@ async function runPiWorkspaceContention(): Promise<LocalSwarmResult> {
 async function runPiStandaloneCapacity(): Promise<LocalSwarmResult> {
   const h = await installPiHarness({ behavior: "complete", holdMs: 250, maxConcurrent: 1 });
   h.spin.setRuntime(createMockRuntime(100) as any);
-  h.startReconciler();
+  await h.startReconciler();
 
   const first = h.piStore.createPiCardAndRun({
     runId: `e2e_standalone_${Date.now()}_a`, sessionId: "s1", title: "Standalone pi 1",
@@ -1802,7 +1857,7 @@ async function runPiInputAnswer(): Promise<LocalSwarmResult> {
   activeProjectCardId = projectCardId;
   h.kanbanRunning(projectCardId);
   bindProjectWorkspace(projectCardId);
-  h.startReconciler();
+  await h.startReconciler();
 
   const { getOrcTools } = await import("../../components/transport/orc-tools.js");
   const orcTools = getOrcTools();
@@ -1959,7 +2014,7 @@ async function runPiAskOrc(): Promise<LocalSwarmResult> {
   activeProjectCardId = projectCardId;
   h.kanbanRunning(projectCardId);
   bindProjectWorkspace(projectCardId);
-  h.startReconciler();
+  await h.startReconciler();
 
   const { getOrcTools } = await import("../../components/transport/orc-tools.js");
   const orcTools = getOrcTools();

@@ -16,7 +16,7 @@ import { mkdirSync, realpathSync } from "node:fs";
 import { kanbanEnqueue, kanbanRunning, kanbanGetCard, kanbanGetChildren } from "./kanban-board.js";
 import { readState, advanceRun } from "./task-state-store.js";
 import { ProjectReviewStore } from "../project-acceptance/project-review-store.js";
-import { abortProjectById, getOrCreateOrcCoordinator, requestReconcileForProject } from "../reconciler.js";
+import { abortProjectById, getActiveOrcCoordinator, requestReconcileForProject } from "../reconciler.js";
 import { WorkerSupervisionStore } from "../worker-supervision-store.js";
 import { makeTaskFailure } from "./task-failure.js";
 import type { TaskFailureDiagnosticV1, TaskFailureLaneFact } from "./task-failure.js";
@@ -125,7 +125,7 @@ export async function scheduledProjectRunner(request: ScheduledProjectRequest): 
       // #1546 R5: a reattached project without a contract keeps the
       // synchronous goal-bearing claim so the machine-derived task goal wins
       // over a generic Reconciler authoring wake for the same card.
-      const coordinator = getOrCreateOrcCoordinator();
+      const coordinator = getActiveOrcCoordinator();
       if (!coordinator) throw new Error("scheduled project admission failed: Orc coordinator unavailable");
       const claim = coordinator.scheduleScheduledProject(rootCardId, goal);
       if (claim.kind === "conflict" || claim.kind === "not_actionable") {
@@ -171,7 +171,7 @@ export async function scheduledProjectRunner(request: ScheduledProjectRequest): 
   // authoring turn — every later Orc/Worker turn reconstructs this scope.
   bindRequestWorkspace(reviewStore, rootCardId, request.executionScope.cwd);
 
-  const coordinator = getOrCreateOrcCoordinator();
+  const coordinator = getActiveOrcCoordinator();
   if (!coordinator) throw new Error("scheduled project admission failed: Orc coordinator unavailable");
 
   const supervision = reviewStore.getSupervision(rootCardId);

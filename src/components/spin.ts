@@ -1442,8 +1442,8 @@ export class Spin {
     // #1480: Release Orc run after successful turn
     if (session.orcContext) {
       try {
-        const { getOrCreateOrcCoordinator } = await import("./reconciler.js");
-        const coordinator = getOrCreateOrcCoordinator();
+        const { getActiveOrcCoordinator } = await import("./reconciler.js");
+        const coordinator = getActiveOrcCoordinator();
         if (coordinator) {
           const released = coordinator.releaseOwnedRun(session.orcContext, "completed");
           if (!released) this.reportFailedOrcRelease(coordinator.getStore(), session.orcContext);
@@ -1550,8 +1550,8 @@ export class Spin {
     // #1480: Release Orc run after failed turn
     if (session.orcContext) {
       try {
-        const { getOrCreateOrcCoordinator } = await import("./reconciler.js");
-        const coordinator = getOrCreateOrcCoordinator();
+        const { getActiveOrcCoordinator } = await import("./reconciler.js");
+        const coordinator = getActiveOrcCoordinator();
         if (coordinator) {
           const released = coordinator.releaseOwnedRun(session.orcContext, "failed");
           if (!released) this.reportFailedOrcRelease(coordinator.getStore(), session.orcContext);

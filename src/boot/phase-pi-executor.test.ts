@@ -102,7 +102,6 @@ vi.mock("../components/commands/handlers-pi.js", () => ({
 }));
 
 vi.mock("../components/reconciler.js", () => ({
-  setPiService: vi.fn(),
   requestReconcile: vi.fn(),
   requestWorkerDispatch: vi.fn(),
 }));

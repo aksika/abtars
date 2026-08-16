@@ -118,6 +118,9 @@ export function makeScheduledProjectFixture(
     const store = new ReviewStore();
     const supervision = store.getSupervision(rootId);
     if (!supervision) throw new Error(`fixture: no supervision for root #${rootId}`);
+    // #1554: the driver may have settled the project already (review dispatch
+    // is driver-owned); an explicit fixture accept after that is a no-op.
+    if (supervision.state === "accepted" || supervision.state === "blocked") return;
     const round = supervision.review_round + 1;
     const snapshot = { summary: "all worker outcomes terminal" };
     const { id: caseId } = store.insertReviewCase(rootId, supervision.generation, round, snapshot, `sd_${rootId}_${round}`);
@@ -372,6 +375,14 @@ export function makeScheduledProjectFixture(
           expectedResponseKind: "text",
         });
         state.lastTurn = "input_requested";
+        finish("completed");
+        return;
+      }
+      if (state.holdAcceptance) {
+        // #1554: with the Reconciler live, review dispatch is driver-owned —
+        // the scripted turn must honor the hold: release the claim without a
+        // decision; the ownership-released event re-wakes and re-dispatches
+        // once the hold clears.
         finish("completed");
         return;
       }

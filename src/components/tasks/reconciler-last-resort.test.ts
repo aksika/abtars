@@ -23,6 +23,32 @@ let runStoreMod: typeof import("../orc-project/orc-project-run-store.js");
 let coordinatorMod: typeof import("../orc-project/orc-project-coordinator.js");
 let failureMod: typeof import("./task-failure.js");
 
+
+let activeHandle: import("../reconciler.js").ReconcilerHandle | null = null;
+let wakeScheduler: import("../lifecycle-wake-scheduler.js").LifecycleWakeScheduler | null = null;
+
+/** #1554: start a real generation over the tmpdir stores with a scripted coordinator. */
+async function startGeneration(coordinator: unknown, piService: unknown = null): Promise<void> {
+  const { LifecycleWakeScheduler } = await import("../lifecycle-wake-scheduler.js");
+  const { SpinWorkerAdapter } = await import("../spin-worker-adapter.js");
+  const { ReconcileQuarantineStore } = await import("../reconcile-quarantine-store.js");
+  await activeHandle?.stop();
+  activeHandle = null;
+  wakeScheduler?.stop();
+  wakeScheduler = new LifecycleWakeScheduler();
+  activeHandle = await reconciler.startReconciler({
+    generationId: `last-resort-${Date.now()}`,
+    coordinator: coordinator as never,
+    wakeScheduler,
+    workerAdapter: new SpinWorkerAdapter(),
+    piService: piService as never,
+    createPiAdapter: (() => ({ kind: "pi", capacity: async () => ({ available: 0, max: 0 }), start: async () => ({ kind: "start_failed", reason: "unavailable", retryable: false }), cancel: async () => ({ kind: "cancelled", attemptId: "" }), inspect: async () => ({ kind: "running", lifecycle: "running" }) })) as never,
+    getQuarantineStore: () => new ReconcileQuarantineStore(),
+    projectRunProgress: () => {},
+  } as never);
+  await wakeScheduler.start();
+}
+
 const ENTRY = {
   id: "project-task",
   kind: "agent" as const,
@@ -52,6 +78,13 @@ beforeEach(async () => {
   runStoreMod = await import("../orc-project/orc-project-run-store.js");
   coordinatorMod = await import("../orc-project/orc-project-coordinator.js");
   failureMod = await import("./task-failure.js");
+});
+
+afterEach(async () => {
+  await activeHandle?.stop();
+  activeHandle = null;
+  wakeScheduler?.stop();
+  wakeScheduler = null;
 });
 
 afterEach(() => {
@@ -113,6 +146,12 @@ describe("reconciler #1546 last-resort and claim ordering (real stores)", () => 
     const { rootId, run } = await seedScheduledProject();
     const entry = taskStore.readEntries()[0]!;
 
+    // #1554: a running generation is required for the request façade.
+    await startGeneration(new coordinatorMod.OrcProjectCoordinator({
+      ownerPeer: "test-peer",
+      startPort: async () => { /* working Orc */ },
+    }));
+
     // the driver freezes the project and settles through the settler
     reconciler.settleProjectLastResort(rootId);
     await flush();
@@ -141,6 +180,10 @@ describe("reconciler #1546 last-resort and claim ordering (real stores)", () => 
     const onFailed = (cardId: number): void => { failed.push(cardId); };
     nerveBus.on("card:failed", onFailed);
     try {
+      await startGeneration(new coordinatorMod.OrcProjectCoordinator({
+        ownerPeer: "test-peer",
+        startPort: async () => { /* working Orc */ },
+      }));
       reconciler.settleProjectLastResort(rootId);
       await flush();
       await flush();
@@ -163,6 +206,10 @@ describe("reconciler #1546 last-resort and claim ordering (real stores)", () => 
     store.initializeSupervision(rootId, `ct_${rootId}`, "executing");
     kanban.kanbanRunning(rootId);
 
+    await startGeneration(new coordinatorMod.OrcProjectCoordinator({
+      ownerPeer: "test-peer",
+      startPort: async () => { /* working Orc */ },
+    }));
     reconciler.settleProjectLastResort(rootId);
     await flush();
 
@@ -176,7 +223,7 @@ describe("reconciler #1546 last-resort and claim ordering (real stores)", () => 
       ownerPeer: "test-peer",
       startPort: async () => { /* a working Orc keeps its claim live */ },
     });
-    reconciler.setOrcCoordinator(coordinator);
+    await startGeneration(coordinator);
     const { rootId } = await seedScheduledProject({ cardStatus: "queued" });
     const runStore = new runStoreMod.OrcProjectRunStore();
 
@@ -220,11 +267,14 @@ describe("reconciler #1546 last-resort and claim ordering (real stores)", () => 
     const store = new reviewStoreMod.ProjectReviewStore();
     store.incrementGeneration(rootId); // generation advanced past the stale row
 
-    reconciler.setOrcCoordinator(coordinator);
+    // #1554: starting the generation runs coordinator boot recovery exactly
+    // once — the stale foreign row is superseded, never settled.
+    await startGeneration(coordinator);
     reconciler.requestReconcile(rootId);
     await flush();
 
-    // busy is ownership: no settlement, no second run, project untouched
+    // the driver re-claims through its own coordinator; the stale run is
+    // superseded, not settled: no history row, one live run, project untouched
     expect(new runStoreMod.OrcProjectRunStore().getLiveRuns()).toHaveLength(1);
     expect(kanban.kanbanGetCard(rootId)!.status).toBe("running");
     expect(store.getSupervision(rootId)!.state).toBe("executing");
@@ -236,16 +286,11 @@ describe("reconciler #1546 last-resort and claim ordering (real stores)", () => 
       ownerPeer: "test-peer",
       startPort: async () => { /* working Orc */ },
     });
+    // #1554: the generation owns the coordinator; the driver's own authoring
+    // claim on the admission wake is the live owner the promotion re-observes.
+    await startGeneration(coordinator);
     const { rootId } = await seedScheduledProject({ cardStatus: "queued" });
-    // an authoring/continuation claim already owns the project
-    const claim = coordinator.getStore().claimIntent(
-      { projectCardId: rootId, intentKind: "contract_authoring", originKind: "local", cardSource: "task", sourcePeer: null },
-      "test-peer",
-      "test-instance",
-    );
-    expect(claim.kind).toBe("claimed");
 
-    reconciler.setOrcCoordinator(coordinator);
     reconciler.requestReconcile(rootId);
     await flush();
 

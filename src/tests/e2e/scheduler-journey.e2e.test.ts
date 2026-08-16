@@ -267,6 +267,39 @@ async function makeQueueWithCoordinator(): Promise<{ queue: import("../../compon
 }
 
 /** #1548: per-test scripted Orc boundary wired into the real reconciler. */
+
+let activeTestHandle: import("../../components/reconciler.js").ReconcilerHandle | null = null;
+
+/** #1554: start a real generation over the fixture coordinator (real stores).
+ * The worker adapter is a pass-through: the fixture owns worker completion
+ * (completeWorkers), so the dispatch pump must keep claims running instead of
+ * executing real Spin sessions against an unset runtime. */
+async function startGeneration(coordinator: unknown): Promise<void> {
+  const { LifecycleWakeScheduler } = await import("../../components/lifecycle-wake-scheduler.js");
+  const { ReconcileQuarantineStore } = await import("../../components/reconcile-quarantine-store.js");
+  await activeTestHandle?.stop();
+  activeTestHandle = null;
+  const scheduler = new LifecycleWakeScheduler();
+  activeTestHandle = await reconcilerModule.startReconciler({
+    generationId: `scheduler-journey-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+    coordinator: coordinator as never,
+    wakeScheduler: scheduler,
+    workerAdapter: {
+      kind: "agent",
+      schedulingPolicy: { recovery: "process_bound" },
+      capacity: async () => ({ available: 8, max: 8 }),
+      start: async () => ({ kind: "started", attemptId: "", generation: 1, executorId: "spin-local" }),
+      cancel: async () => ({ kind: "cancelled", attemptId: "" }),
+      inspect: async () => ({ kind: "running", lifecycle: "running" }),
+    } as never,
+    piService: null,
+    createPiAdapter: (() => ({ kind: "pi", capacity: async () => ({ available: 0, max: 0 }), start: async () => ({ kind: "start_failed", reason: "unavailable", retryable: false }), cancel: async () => ({ kind: "cancelled", attemptId: "" }), inspect: async () => ({ kind: "running", lifecycle: "running" }) })) as never,
+    getQuarantineStore: () => new ReconcileQuarantineStore(),
+    projectRunProgress: () => {},
+  } as never);
+  await scheduler.start();
+}
+
 async function makeFixture(opts?: Parameters<typeof makeFixtureFactory>[1]) {
   const { fixture, orc } = makeFixtureFactory({
     OrcProjectCoordinator: (await import("../../components/orc-project/orc-project-coordinator.js")).OrcProjectCoordinator,
@@ -276,7 +309,9 @@ async function makeFixture(opts?: Parameters<typeof makeFixtureFactory>[1]) {
     WorkerSupervisionService: (await import("../../components/worker-supervision-service.js")).WorkerSupervisionService,
     WorkerSupervisionStore: (await import("../../components/worker-supervision-store.js")).WorkerSupervisionStore,
   }, opts);
-  reconcilerModule.setOrcCoordinator(orc);
+  // #1554: the fixture's Orc coordinator becomes the generation's own — no
+  // module setter wiring.
+  await startGeneration(orc);
   return { fixture, orc };
 }
 
@@ -367,7 +402,9 @@ beforeEach(async () => {
   });
 });
 
-afterEach(() => {
+afterEach(async () => {
+  await activeTestHandle?.stop();
+  activeTestHandle = null;
   rmSync(TEST_HOME, { recursive: true, force: true });
 });
 
@@ -947,10 +984,16 @@ describe("#1539 scheduler E2E — journey 12: terminal O project reattach across
       // records no turn.
       await waitFor(() => stateStore.readState("project-task")?.activeRun?.runId === firstRunId && stateStore.readState("project-task")?.activeRun?.cardId !== undefined);
       expect(fixture2.fixture.lastTurn).toBe("none");
-      const { ProjectReviewStore } = await import("../../components/project-acceptance/project-review-store.js");
-      expect(new reviewStoreMod.ProjectReviewStore().getSupervision(rootCardId)?.state).toBe("executing");
+      // #1554: the restart generation's boot recovery settled the dead
+      // process-bound worker (bridge_restart) and the driver opened the
+      // review case from the now all-terminal children — the reattached run
+      // re-enters through the review lane, never a fresh authoring turn.
+      const supAfterRestart = new reviewStoreMod.ProjectReviewStore().getSupervision(rootCardId);
+      expect(["executing", "review_ready", "review_requested"].includes(supAfterRestart?.state ?? "")).toBe(true);
+      expect(fixture2.fixture.lastTurn).toBe("none");
       fixture2.fixture.adoptRoot(rootCardId);
-      fixture2.fixture.completeWorkers();
+      // the held acceptance gates the driver-owned review turn; once released,
+      // the scripted Orc accepts the durable case
       fixture2.fixture.holdAcceptance = false;
       fixture2.fixture.accept();
       await waitFor(() => queue2.currentJobs.length === 0 && !stateStore.readState("project-task")?.activeRun);
@@ -960,8 +1003,11 @@ describe("#1539 scheduler E2E — journey 12: terminal O project reattach across
       expect(ev[0]!.outcome).toBe("success");
       expect(ev[0]!.runId).toBe(firstRunId);
       expect(rootCardId).toBeDefined();
-      // Root O + its fixture worker W are done; no duplicates.
-      expect(cardStatuses().filter(s => s.endsWith(":done"))).toHaveLength(2);
+      // Root O is done; its fixture worker W is terminal (settled
+      // bridge_restart by the restart generation's boot recovery). No
+      // duplicates.
+      expect(cardStatuses().filter(s => s.endsWith(":done") || s.endsWith(":failed"))).toHaveLength(2);
+      expect(cardStatuses().filter(s => s.endsWith(":done"))).toHaveLength(1);
       scheduler2.stop();
     } finally {
       scheduler.stop();
@@ -1548,12 +1594,11 @@ describe("#1548 Task-6 coverage — dispatcher-owned review and external input w
       // decision settlement) moves repair_planned -> repairing.
       fixture.completeWorkers();
       reconcilerModule.requestReconcile(rootCardId);
-      await waitForReachControlled(fixture, "repair_planned");
-      // The durable repair decision is a named reconciler-owned continuation.
-      expect(observer.sample().durableContinuations.some(c => c.kind === "repair_planned")).toBe(true);
-      observer.checkpoint();
-      reconcilerModule.requestReconcile(rootCardId);
+      // #1554: the driver owns the repair continuation — the review turn
+      // settles the repair decision AND creates the repair worker, and the
+      // driver advances repair_planned -> repairing within the pass.
       await waitForReachControlled(fixture, "repairing");
+      observer.checkpoint();
       await vi.advanceTimersByTimeAsync(500);
       const snapRepair = observer.sample();
       expect(snapRepair.liveAttempts.length).toBeGreaterThan(0);
@@ -1786,10 +1831,14 @@ describe("#1656 E2E — truthful worker evidence and fail-closed parent acceptan
     return { attemptId: attempt.id, summary: outcome.summary };
   }
 
-  /** Build the immutable review case through the real assembler. */
+  /** Build the immutable review case through the real assembler.
+   *  #1554: the driver may already own the open case (all-terminal children);
+   *  reuse it so the decision targets the driver's durable case. */
   async function assembleAndInsertReview(rootCardId: number): Promise<string> {
     const store = new reviewStoreMod.ProjectReviewStore();
     const supervision = store.getSupervision(rootCardId)!;
+    const existing = store.getLatestOpenCase(rootCardId);
+    if (existing) return existing.id;
     const { ReviewCaseAssembler } = await import("../../components/project-acceptance/project-review-case.js");
     const snapshot = await new ReviewCaseAssembler().assembleCase(rootCardId, supervision.generation, supervision.review_round + 1);
     if ("error" in snapshot) throw new Error(`review assembly failed: ${snapshot.error}`);
@@ -1819,6 +1868,9 @@ describe("#1656 E2E — truthful worker evidence and fail-closed parent acceptan
     expect(result.envelope.criteria.every(c => c.status === "failed")).toBe(true);
     // The pump projection fails the W card — execution completed ≠ accepted.
     board.kanbanFail(worker.id, "worker completed without passing acceptance");
+    // #1554: let the driver's wake open the review case first (or reuse ours).
+    await new Promise(r => setTimeout(r, 0));
+    await new Promise(r => setTimeout(r, 0));
 
     const caseId = await assembleAndInsertReview(rootCardId);
     const store = new reviewStoreMod.ProjectReviewStore();
@@ -1875,6 +1927,9 @@ describe("#1656 E2E — truthful worker evidence and fail-closed parent acceptan
     const worker = board.kanbanGetChildren(rootCardId).find(c => c.type === "W")!;
     const { attemptId } = settleLane(rootCardId, worker.id, true);
     board.kanbanComplete(worker.id, null, "worker completed");
+    // #1554: let the driver's wake open the review case first (or reuse ours).
+    await new Promise(r => setTimeout(r, 0));
+    await new Promise(r => setTimeout(r, 0));
 
     const caseId = await assembleAndInsertReview(rootCardId);
     const store = new reviewStoreMod.ProjectReviewStore();
@@ -1935,6 +1990,9 @@ describe("#1656 E2E — truthful worker evidence and fail-closed parent acceptan
     const optional = settleLane(rootCardId, optionalLane.id, false);
     board.kanbanComplete(requiredLane.id, null, "worker completed");
     board.kanbanFail(optionalLane.id, "worker completed without passing acceptance");
+    // #1554: let the driver's wake open the review case first (or reuse ours).
+    await new Promise(r => setTimeout(r, 0));
+    await new Promise(r => setTimeout(r, 0));
 
     const caseId = await assembleAndInsertReview(rootCardId);
     const store = new reviewStoreMod.ProjectReviewStore();

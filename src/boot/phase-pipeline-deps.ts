@@ -30,6 +30,7 @@ import type { PipelineDeps } from "../components/message-pipeline.js";
 
 import { getEnv } from "../components/env-schema.js";
 import { unavailable } from "../capabilities/sleep/index.js";
+import { requestReconcileForProject } from "../components/reconciler.js";
 
 /** #1297: credit exhaustion cannot be self-healed — SHA must stop before any
  *  state read/write. Identified by exact structured fields, never message text. */
@@ -186,18 +187,19 @@ export async function phasePipelineDeps(ctx: BootCtx): Promise<PhaseResult> {
 
   const cronQueue = new CronQueue(coordinator);
   ctx.cronQueue = cronQueue;
+  ctx.scheduledRunCoordinator = coordinator;
 
-  // #1539: wire the wake scheduler into the reconciler (executor-lease source
-  // registers on startReconciler) and register the remaining due sources.
-  const { setWakeScheduler, setFailureCascade } = await import("../components/reconciler.js");
-  setWakeScheduler(wakeScheduler);
-  // #1588: the reconciler's last-resort scheduled settlements ride the same
-  // failure cascade as every other failed run.
-  setFailureCascade(coordinator.failureCallback);
+  // #1554: the wake scheduler and the scheduled-run projection ports are
+  // bridge-generation owned and stored on BootCtx. The Reconciler composes
+  // them in phase-reconciler — no setter wiring here.
+  ctx.lifecycleWakeScheduler = wakeScheduler;
+  ctx.reconcilerInputs = {
+    projectRunProgress: (cardId: number) => coordinator.projectCardProgress(cardId),
+    failureCascade: coordinator.failureCallback,
+  };
 
   const { createRunDeadlineSource, createTaskAdmissionSource, createKanbanRetrySource } = await import("../components/tasks/due-sources.js");
   wakeScheduler.register(createKanbanRetrySource((cardId: number) => {
-    const { requestReconcileForProject } = require("../components/reconciler.js") as typeof import("../components/reconciler.js");
     requestReconcileForProject(cardId);
   }, () => {
     const { spin } = require("../components/spin.js") as typeof import("../components/spin.js");
@@ -219,8 +221,6 @@ export async function phasePipelineDeps(ctx: BootCtx): Promise<PhaseResult> {
   const { setKanbanDueChangedHook } = await import("../components/tasks/kanban-board.js");
   setKanbanDueChangedHook(() => wakeScheduler.sourceChanged("kanban-retry"));
   wireCardProgressProjection(coordinator);
-  const { setRunProgressBridge } = await import("../components/reconciler.js");
-  setRunProgressBridge((cardId: number) => coordinator.projectCardProgress(cardId));
 
   // Wire task_manage --run to the cron queue (singleton: _enqueueCron)
   const { setEnqueueCron } = await import("../components/transport/tool-registry.js");
@@ -406,24 +406,11 @@ export async function phasePipelineDeps(ctx: BootCtx): Promise<PhaseResult> {
   const { initChannelSync } = await import("../components/tasks/kanban-channel.js");
   initChannelSync();
 
-  // #1505/#1539: recover any active runs from a prior process crash BEFORE
-  // the wake scheduler starts, so new due occurrences are never admitted
-  // ahead of recovery.
-  const taskStoreModule = await import("../components/tasks/task-store.js");
-  const entries = taskStoreModule.readEntries();
-  await coordinator.recover(entries, (entry, run) => {
-    const enqueueResult = cronQueue.enqueue(entry, false, run);
-    if (enqueueResult) {
-      logWarn("boot", `Could not reattach scheduled project ${entry.id}: ${enqueueResult}`);
-      return false;
-    }
-    return true;
-  });
-
-  // #1539: the initial scan is boot recovery — wake every overdue item, then
-  // arm the earliest future due item.
-  await wakeScheduler.start();
-
+  // #1554: scheduled-run recovery and the wake-scheduler start moved to
+  // phase-reconciler AFTER the Reconciler generation exists. Both trigger
+  // admission of scheduled projects, and a project admitted before the
+  // generation would fail its coordinator check. Recovery still completes
+  // before the scheduler starts, exactly as today.
   // Register Tier 3 heartbeat tasks (cron, housekeeping, self-healer, etc.)
   const { registerTier3Tasks } = await import("./heartbeat-tier3.js");
   await registerTier3Tasks(ctx);

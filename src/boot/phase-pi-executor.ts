@@ -228,8 +228,11 @@ export async function phasePiExecutor(ctx: BootCtx): Promise<void> {
     setPiCapacityService(service);
   } catch { /* best effort */ }
 
-  const { setPiService: setReconcilerService, requestReconcile, requestWorkerDispatch } = await import("../components/reconciler.js");
-  setReconcilerService(service);
+  // #1554: the Reconciler receives the Pi service through its phase-reconciler
+  // composition (ctx.piExecutorService) — no reconciler setter wiring here.
+  // Capacity-release and progress callbacks below keep using the stable
+  // request façade, which targets the active generation at call time.
+  const { requestReconcile, requestWorkerDispatch } = await import("../components/reconciler.js");
 
   // Kept outside the wiring try so boot recovery can route supervised
   // interruptions through the same Worker-owned settlement authority.

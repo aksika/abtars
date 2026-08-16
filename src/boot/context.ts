@@ -159,6 +159,24 @@ export interface BootCtx {
   /** #1635: interactive Pi coding session service (live-turn interruption on
    * shutdown). */
   codingSessionService?: import("../components/pi-executor/pi-coding-session-service.js").PiCodingSessionService;
+
+  // ── #1554: Reconciler lifecycle ownership ──────────────────────────────
+  /** Set by phase-pipeline-deps; owned by the bridge generation, explicitly
+   * stopped in Bridge.shutdown before Pi teardown. */
+  lifecycleWakeScheduler: import("../components/lifecycle-wake-scheduler.js").LifecycleWakeScheduler | null;
+  /** Set by phase-pipeline-deps: scheduled-run projection ports for the
+   * Reconciler. Consumed (not mutated) by phase-reconciler. */
+  reconcilerInputs: {
+    projectRunProgress: (cardId: number) => void;
+    failureCascade?: (entryId: string, diagnostic: import("../components/tasks/task-failure.js").TaskFailureDiagnosticV1) => void;
+  } | null;
+  /** #1554: set by phase-pipeline-deps; recovery + admission by
+   * phase-reconciler after the Reconciler generation starts. */
+  scheduledRunCoordinator: import("../components/tasks/scheduled-run-coordinator.js").ScheduledRunCoordinator | null;
+  /** Set by phase-reconciler after successful start. */
+  reconcilerHandle: import("../components/reconciler.js").ReconcilerHandle | null;
+  /** Set by phase-reconciler after successful start. */
+  reconcilerRecovery: import("../components/reconciler.js").ReconcilerRecoveryReport | null;
 }
 
 /**
@@ -236,6 +254,13 @@ export function createBootCtx(overrides: Partial<BootCtx> = {}): BootCtx {
     sandboxEnabled: false,
     seatbeltActive: false,
     mcpDaemonStarted: false,
+
+    // #1554: Reconciler lifecycle slots
+    lifecycleWakeScheduler: null,
+    reconcilerInputs: null,
+    scheduledRunCoordinator: null,
+    reconcilerHandle: null,
+    reconcilerRecovery: null,
 
     // Callbacks
     isSleepActive: () => false,

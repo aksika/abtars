@@ -98,12 +98,13 @@ export async function registerTier3Tasks(ctx: BootCtx): Promise<void> {
 
   // #1539: R3 bounded safety scan — a no-op whenever the lifecycle wake
   // scheduler is healthy. No acceptance criterion may depend on it.
+  // #1554: reads the scheduler from BootCtx (bridge-generation owned), not a
+  // Reconciler getter.
   heartbeat.registerTask({
     name: "lifecycle-due-safety-scan",
     execute: async () => {
       try {
-        const { getWakeScheduler } = await import("../components/reconciler.js");
-        getWakeScheduler()?.safetyScan();
+        ctx.lifecycleWakeScheduler?.safetyScan();
         return { state: "idle" as const };
       } catch (err) { logAndSwallow(TAG, "lifecycle-due-safety-scan", err); return { state: "idle" as const }; }
     },
@@ -175,33 +176,19 @@ export async function registerTier3Tasks(ctx: BootCtx): Promise<void> {
 
   heartbeat.registerTask(createUserSessionExpiryTask());
 
-  import("../components/reconciler.js").then(({ startReconciler, scanActiveProjects, retryPendingReviewRequests }) => {
-    startReconciler();
-    heartbeat.registerTask({
-      name: "reconciler-resync",
-      execute: async () => {
-        scanActiveProjects();
-        const { ProjectReviewStore } = await import("../components/project-acceptance/project-review-store.js");
-        const expired = new ProjectReviewStore().abandonExpiredRequests();
-        return { state: expired > 0 ? "ran" : "idle" as const };
-      },
-    });
-    heartbeat.registerTask({
-      name: "review-request-retry",
-      execute: async () => {
-        const count = retryPendingReviewRequests();
-        return { state: count > 0 ? "ran" : "idle" as const };
-      },
-    });
-    heartbeat.registerTask({
-      name: "project-acceptance-outbox",
-      execute: async () => {
-        const { drainAcceptanceOutbox } = await import("../components/project-acceptance/project-review-service.js");
-        const count = await drainAcceptanceOutbox();
-        return { state: count > 0 ? "ran" : "idle" as const };
-      },
-    });
-  }).catch(err => logAndSwallow(TAG, "reconciler", err));
+  // #1554 (approved heartbeat move): project-acceptance-outbox is registered
+  // independently of Reconciler startup so a Reconciler failure can never
+  // suppress durable outbox delivery. reconciler-resync and review-request-
+  // retry register in phase-reconciler only after a successful generation
+  // start (Reconciler-owned safety/retry work must not exist without one).
+  heartbeat.registerTask({
+    name: "project-acceptance-outbox",
+    execute: async () => {
+      const { drainAcceptanceOutbox } = await import("../components/project-acceptance/project-review-service.js");
+      const count = await drainAcceptanceOutbox();
+      return { state: count > 0 ? "ran" : "idle" as const };
+    },
+  });
 
   // #1358 review — Drain unacknowledged remote Pi events for connected peers
   // on each heartbeat tick, under the declared DRAIN_BUDGET (spec #1358

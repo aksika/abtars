@@ -42,7 +42,11 @@ beforeEach(async () => {
   coordinatorMod = await import("../orc-project/orc-project-coordinator.js");
 });
 
-afterEach(() => {
+afterEach(async () => {
+  await activeHandle?.stop();
+  activeHandle = null;
+  wakeScheduler?.stop();
+  wakeScheduler = null;
   rmSync(TEST_HOME, { recursive: true, force: true });
 });
 
@@ -119,13 +123,38 @@ function makeCoordinator(startPort: (ctx: unknown, goal: string) => Promise<void
   });
 }
 
+
+let activeHandle: import("../reconciler.js").ReconcilerHandle | null = null;
+let wakeScheduler: import("../lifecycle-wake-scheduler.js").LifecycleWakeScheduler | null = null;
+
+/** #1554: start a real generation over the tmpdir stores with the given coordinator. */
+async function startGeneration(coordinator: InstanceType<typeof coordinatorMod.OrcProjectCoordinator>): Promise<void> {
+  const { LifecycleWakeScheduler } = await import("../lifecycle-wake-scheduler.js");
+  const { SpinWorkerAdapter } = await import("../spin-worker-adapter.js");
+  const { ReconcileQuarantineStore } = await import("../reconcile-quarantine-store.js");
+  await activeHandle?.stop();
+  activeHandle = null;
+  wakeScheduler?.stop();
+  wakeScheduler = new LifecycleWakeScheduler();
+  activeHandle = await reconciler.startReconciler({
+    generationId: `orc-recovery-${Date.now()}`,
+    coordinator,
+    wakeScheduler,
+    workerAdapter: new SpinWorkerAdapter(),
+    piService: null,
+    createPiAdapter: (() => ({ kind: "pi", capacity: async () => ({ available: 0, max: 0 }), start: async () => ({ kind: "start_failed", reason: "unavailable", retryable: false }), cancel: async () => ({ kind: "cancelled", attemptId: "" }), inspect: async () => ({ kind: "running", lifecycle: "running" }) })) as never,
+    getQuarantineStore: () => new ReconcileQuarantineStore(),
+    projectRunProgress: () => {},
+  } as never);
+  await wakeScheduler.start();
+}
+
 describe("#1628 Orc authoring recovery (real stores)", () => {
   it("race 1: a busy claim from card:queued is dropped and the post-release event produces a fresh claim", async () => {
     const starts: Array<{ runId: string }> = [];
     const coordinator = makeCoordinator(async (ctx: { runId: string }) => { starts.push(ctx); });
     const rootId = await seedProject({ cardStatus: "queued" });
-    reconciler.setOrcCoordinator(coordinator);
-    reconciler.startReconciler(); // registers the ownership subscription
+    await startGeneration(coordinator);
     const runStore = new runStoreMod.OrcProjectRunStore();
 
     // wake 1 (the stranded sweep at boot): claim, run stays live (start port succeeds)
@@ -171,10 +200,10 @@ describe("#1628 Orc authoring recovery (real stores)", () => {
     runStore.db.prepare(`UPDATE orc_project_runs SET created_at = ? WHERE id = ?`)
       .run(new Date(Date.now() - 60_000).toISOString(), foreign.context.runId);
 
-    // NO injection: getOrCreateOrcCoordinator creates the coordinator and runs
-    // boot recovery; startReconciler wakes the recovered projects after the
+    // #1554: the generation owns the coordinator and runs boot recovery
+    // exactly once at start; the recovered projects are woken after the
     // listeners are registered (spin is mocked, so the claim starts harmlessly).
-    reconciler.startReconciler();
+    await startGeneration(makeCoordinator(async () => {}));
 
     await flush();
     await flush();
@@ -187,7 +216,7 @@ describe("#1628 Orc authoring recovery (real stores)", () => {
 
   it("durability: the boot sweep alone recovers a stranded queued root with no event path", async () => {
     const rootId = await seedProject({ cardStatus: "queued" });
-    reconciler.setOrcCoordinator(makeCoordinator(async () => {}));
+    await startGeneration(makeCoordinator(async () => {}));
     // project 63's exact state: only run already superseded, no live run, no events
     seedRun(rootId, 1, { started: false, createdAt: new Date(Date.now() - 600_000).toISOString(), state: "superseded" });
     const runStore = new runStoreMod.OrcProjectRunStore();
@@ -222,7 +251,7 @@ describe("#1628 Orc authoring recovery (real stores)", () => {
 
   it("budget: an unstarted stale claim does not spend the started-turn budget", async () => {
     const rootId = await seedProject({ cardStatus: "queued" });
-    reconciler.setOrcCoordinator(makeCoordinator(async () => {}));
+    await startGeneration(makeCoordinator(async () => {}));
     seedRun(rootId, 1, { started: false, createdAt: new Date(Date.now() - 300_000).toISOString(), state: "superseded" });
     const runStore = new runStoreMod.OrcProjectRunStore();
 
@@ -236,7 +265,7 @@ describe("#1628 Orc authoring recovery (real stores)", () => {
 
   it("exhaustion: three started unsuccessful turns settle blocked once with no fourth turn", async () => {
     const rootId = await seedProject({ cardStatus: "queued" });
-    reconciler.setOrcCoordinator(makeCoordinator(async () => {}));
+    await startGeneration(makeCoordinator(async () => {}));
     const old = new Date(Date.now() - 600_000).toISOString();
     seedRun(rootId, 1, { started: true, createdAt: old });
     seedRun(rootId, 1, { started: true, createdAt: old });
@@ -258,7 +287,7 @@ describe("#1628 Orc authoring recovery (real stores)", () => {
 
   it("unstartable: three consecutive pre-start failures settle blocked and terminate the wake loop", async () => {
     const rootId = await seedProject({ cardStatus: "queued" });
-    reconciler.setOrcCoordinator(makeCoordinator(async () => {}));
+    await startGeneration(makeCoordinator(async () => {}));
     seedRun(rootId, 1, { started: false });
     seedRun(rootId, 1, { started: false });
     seedRun(rootId, 1, { started: false });
@@ -287,7 +316,7 @@ describe("#1628 Orc authoring recovery (real stores)", () => {
       sourcePeer: "kp",
       notes: { request_id: "req_peer_1", contribution_ref: "ref_peer_1" },
     });
-    reconciler.setOrcCoordinator(makeCoordinator(async () => {}));
+    await startGeneration(makeCoordinator(async () => {}));
     const old = new Date(Date.now() - 600_000).toISOString();
     seedRun(rootId, 1, { started: true, createdAt: old });
     seedRun(rootId, 1, { started: true, createdAt: old });
@@ -334,7 +363,7 @@ describe("#1628 Orc authoring recovery (real stores)", () => {
 
   it("happy path: a persisted contract proceeds normally regardless of the attempt count", async () => {
     const rootId = await seedProject({ cardStatus: "running", state: "executing" });
-    reconciler.setOrcCoordinator(makeCoordinator(async () => {}));
+    await startGeneration(makeCoordinator(async () => {}));
     const old = new Date(Date.now() - 600_000).toISOString();
     seedRun(rootId, 1, { started: true, createdAt: old });
     seedRun(rootId, 1, { started: true, createdAt: old });
@@ -384,7 +413,7 @@ describe("#1628 Orc authoring recovery (real stores)", () => {
       limits: {},
       provenance: { requested_by: "user", authored_by: "orc", created_at: new Date().toISOString() },
     });
-    reconciler.setOrcCoordinator(makeCoordinator(async () => {}));
+    await startGeneration(makeCoordinator(async () => {}));
     const runStore = new runStoreMod.OrcProjectRunStore();
 
     reconciler.requestReconcile(acceptedId);
@@ -405,7 +434,7 @@ describe("#1628 Orc authoring recovery (real stores)", () => {
     // A peer root without an authenticated source peer cannot derive an
     // origin — scheduleContractAuthoring conflicts with origin_invalid.
     const rootId = await seedProject({ cardStatus: "queued", source: "peer", sourcePeer: undefined });
-    reconciler.setOrcCoordinator(new coordinatorMod.OrcProjectCoordinator({
+    await startGeneration(new coordinatorMod.OrcProjectCoordinator({
       ownerPeer: "kp",
       ownerInstanceId: "inst-test",
       getRootIdentity: () => ({ source: "peer", sourcePeer: null }),

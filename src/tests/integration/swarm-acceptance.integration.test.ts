@@ -68,6 +68,8 @@ vi.mock("../../components/tasks/kanban-board.js", async (importOriginal) => {
     cascadeFail: vi.fn(),
     isUnblocked: () => true,
     resolveRootId: (id: number) => id,
+    kanbanRunningProjectIds: () => Array.from(cards.values()).filter((c: any) => c.status === "running" && c.type === "O").map((c: any) => c.id),
+    kanbanStrandedQueuedProjectIds: () => [],
     KANBAN_TERMINAL_STATUSES: ["done", "delivered", "failed"],
     kanbanPromoteDueRetry: () => false,
     requireTaskDatabase: () => { if (!_overrideDb) throw new Error("_overrideDb not set — call initDb() in beforeEach"); return _overrideDb; },
@@ -87,11 +89,18 @@ vi.mock("../../components/spin-worker-adapter.js", () => ({
   }),
 }));
 
-vi.mock("../../components/executor-lease-store.js", () => ({
-  ExecutorLeaseStore: vi.fn().mockImplementation(function () {
-    return { getSnapshot: vi.fn().mockReturnValue(null) };
-  }),
-}));
+vi.mock("../../components/executor-lease-store.js", () => {
+  const MockStore = vi.fn().mockImplementation(function () {
+    return {
+      getSnapshot: vi.fn().mockReturnValue(null),
+      getEvaluationSchedule: vi.fn().mockReturnValue([]),
+      getDueSnapshots: vi.fn().mockReturnValue([]),
+    };
+  });
+  (MockStore as unknown as { onLeaseChanged?: () => void }).onLeaseChanged = undefined;
+  (MockStore as unknown as { lastChangedCardId?: number }).lastChangedCardId = undefined;
+  return { ExecutorLeaseStore: MockStore };
+});
 
 async function flush(): Promise<void> {
   await new Promise(r => setTimeout(r, 0));
@@ -143,6 +152,47 @@ let ProjectReviewStore: typeof import("../../components/project-acceptance/proje
 let ReviewCaseAssembler: typeof import("../../components/project-acceptance/project-review-case.js").ReviewCaseAssembler;
 let ProjectReviewService: typeof import("../../components/project-acceptance/project-review-service.js").ProjectReviewService;
 
+
+let activeTestHandle: import("../../components/reconciler.js").ReconcilerHandle | null = null;
+let testWakeScheduler: import("../../components/lifecycle-wake-scheduler.js").LifecycleWakeScheduler | null = null;
+let testGenerationCounter = 0;
+
+/** #1554: start a generation over the harness DB with an optional fake coordinator. */
+async function startTestGeneration(coordinator?: unknown): Promise<void> {
+  const { LifecycleWakeScheduler } = await import("../../components/lifecycle-wake-scheduler.js");
+  const { ReconcileQuarantineStore } = await import("../../components/reconcile-quarantine-store.js");
+  await activeTestHandle?.stop();
+  activeTestHandle = null;
+  testWakeScheduler?.stop();
+  testWakeScheduler = new LifecycleWakeScheduler();
+  activeTestHandle = await mod.startReconciler({
+    generationId: `swarm-acceptance-${++testGenerationCounter}`,
+    coordinator: ({
+      getStore: () => ({ countStartedAuthoringTurns: () => 0, countConsecutiveUnstartableAuthoringTurns: () => 0, lastAuthoringClaimAt: () => null, lastAuthoringFailureCode: () => null }),
+      bootRecovery: () => [] as number[],
+      onOwnershipReleased: () => () => {},
+      scheduleContractAuthoring: () => ({ kind: "busy" as const, activeRunId: "or_unused" }),
+      scheduleScheduledProject: () => ({ kind: "busy" as const, activeRunId: "or_unused" }),
+      scheduleReview: () => ({ kind: "busy" as const, activeRunId: "or_review" }),
+      ...(coordinator as Record<string, unknown> | undefined),
+    }) as never,
+    wakeScheduler: testWakeScheduler,
+    workerAdapter: new (await import("../../components/spin-worker-adapter.js")).SpinWorkerAdapter() as never,
+    piService: null,
+    createPiAdapter: (() => ({ kind: "pi", capacity: async () => ({ available: 0, max: 0 }), start: async () => ({ kind: "start_failed", reason: "unavailable", retryable: false }), cancel: async () => ({ kind: "cancelled", attemptId: "" }), inspect: async () => ({ kind: "running", lifecycle: "running" }) })) as never,
+    getQuarantineStore: () => new ReconcileQuarantineStore(),
+    projectRunProgress: () => {},
+  } as never);
+  await testWakeScheduler.start();
+}
+
+async function stopTestGeneration(): Promise<void> {
+  await activeTestHandle?.stop();
+  activeTestHandle = null;
+  testWakeScheduler?.stop();
+  testWakeScheduler = null;
+}
+
 function makeChildContract(childId: number, rootCardId: number, criterionId: string): import("../../components/worker-contract.js").WorkerAcceptanceContractV1 {
   return {
     schema_version: 1,
@@ -173,8 +223,8 @@ function makeEnvelope(childId: number, contractId: string, rootCriterionId: stri
 }
 
 /** #1618: supervised roots claim through the Orc coordinator, not legacy dispatch. */
-function installFakeCoordinator(claims: Array<{ kind: string; pid: number; goal?: string }>) {
-  mod.setOrcCoordinator({
+async function installFakeCoordinator(claims: Array<{ kind: string; pid: number; goal?: string }>) {
+  await startTestGeneration({
     scheduleContractAuthoring: (pid: number) => {
       claims.push({ kind: "authoring", pid });
       return { kind: "claimed" as const, context: { runId: `or_${pid}_fake`, projectCardId: pid } };
@@ -287,9 +337,11 @@ describe("Swarm acceptance — Scenario A: three local workers (#927)", () => {
     ReviewCaseAssembler = rca.ReviewCaseAssembler;
     const prsvc = await import("../../components/project-acceptance/project-review-service.js");
     ProjectReviewService = prsvc.ProjectReviewService;
+    await startTestGeneration();
   });
 
-  afterEach(() => {
+  afterEach(async () => {
+    await stopTestGeneration();
     vi.restoreAllMocks();
     if (_rawDb) { try { _rawDb.close(); } catch {} _rawDb = null; _overrideDb = null; }
   });
@@ -331,7 +383,7 @@ describe("Swarm acceptance — Scenario A: three local workers (#927)", () => {
 
   it("all-terminal children trigger ReviewCaseAssembler with real structured results and one durable Orc review claim", async () => {
     const claims: Array<{ kind: string; pid: number; goal?: string }> = [];
-    installFakeCoordinator(claims);
+    await installFakeCoordinator(claims);
     const { projectId, childIds } = await createProject();
     const store = new WorkerSupervisionStore();
     for (let i = 0; i < childIds.length; i++) {
@@ -361,7 +413,6 @@ describe("Swarm acceptance — Scenario A: three local workers (#927)", () => {
       expect.objectContaining({ type: "O", cardId: projectId }),
     );
 
-    mod.setOrcCoordinator(null);
   });
 
   it("duplicate reconcile pass does not create duplicate review case (exactly-once)", async () => {
@@ -450,7 +501,7 @@ describe("Swarm acceptance — Scenario A: three local workers (#927)", () => {
 
   it("#1626: queued root with retry backoff settles through the real review service", async () => {
     const claims: Array<{ kind: string; pid: number; goal?: string }> = [];
-    installFakeCoordinator(claims);
+    await installFakeCoordinator(claims);
     const { projectId, childIds } = await createProject();
     const store = new WorkerSupervisionStore();
     for (let i = 0; i < childIds.length; i++) {
@@ -530,7 +581,6 @@ describe("Swarm acceptance — Scenario A: three local workers (#927)", () => {
     // No legacy Orc dispatch for the review turn.
     expect(dispatchMock).not.toHaveBeenCalledWith(expect.objectContaining({ type: "O", cardId: projectId }));
 
-    mod.setOrcCoordinator(null);
   });
 });
 
@@ -546,9 +596,11 @@ describe("Swarm acceptance — coverage gate (#1604)", () => {
     WorkerSupervisionStore = wss.WorkerSupervisionStore;
     const prs = await import("../../components/project-acceptance/project-review-store.js");
     ProjectReviewStore = prs.ProjectReviewStore;
+    await startTestGeneration();
   });
 
-  afterEach(() => {
+  afterEach(async () => {
+    await stopTestGeneration();
     vi.restoreAllMocks();
     if (_rawDb) { try { _rawDb.close(); } catch {} _rawDb = null; _overrideDb = null; }
   });
@@ -570,7 +622,7 @@ describe("Swarm acceptance — coverage gate (#1604)", () => {
 
   it("partial coverage dispatches exactly one coverage round and stays executing, spawn-eligible", async () => {
     const claims: Array<{ kind: string; pid: number; goal?: string }> = [];
-    installFakeCoordinator(claims);
+    await installFakeCoordinator(claims);
     const { projectId } = await createGapProject();
     const reviewStore = new ProjectReviewStore();
 
@@ -588,7 +640,7 @@ describe("Swarm acceptance — coverage gate (#1604)", () => {
 
   it("identical signature with grace not elapsed: no second dispatch, no settle (tight loop)", async () => {
     const claims: Array<{ kind: string; pid: number; goal?: string }> = [];
-    installFakeCoordinator(claims);
+    await installFakeCoordinator(claims);
     const { projectId } = await createGapProject();
     const reviewStore = new ProjectReviewStore();
 
@@ -689,9 +741,11 @@ describe("Swarm acceptance — production contract shape (#1605)", () => {
     ReviewCaseAssembler = rca.ReviewCaseAssembler;
     const prsvc = await import("../../components/project-acceptance/project-review-service.js");
     ProjectReviewService = prsvc.ProjectReviewService;
+    await startTestGeneration();
   });
 
-  afterEach(() => {
+  afterEach(async () => {
+    await stopTestGeneration();
     vi.restoreAllMocks();
     if (_rawDb) { try { _rawDb.close(); } catch {} _rawDb = null; _overrideDb = null; }
   });
@@ -906,6 +960,7 @@ describe("Swarm acceptance — Scenario B: one remote contribution (#927)", () =
     await initDb();
 
     reconcilerMod = await import("../../components/reconciler.js");
+    await startTestGeneration();
     const prs = await import("../../components/project-acceptance/project-review-store.js");
     ProjectReviewStore = prs.ProjectReviewStore;
     const rca = await import("../../components/project-acceptance/project-review-case.js");
@@ -938,7 +993,8 @@ describe("Swarm acceptance — Scenario B: one remote contribution (#927)", () =
     peerHelpService.setContributionStore(contributionStore);
   });
 
-  afterEach(() => {
+  afterEach(async () => {
+    await stopTestGeneration();
     vi.restoreAllMocks();
     if (_rawDb) { try { _rawDb.close(); } catch {} _rawDb = null; _overrideDb = null; }
   });
@@ -1037,7 +1093,7 @@ describe("Swarm acceptance — Scenario B: one remote contribution (#927)", () =
 
   it("terminal event completes contribution proxy card and wakes Reconciler", async () => {
     const claims: Array<{ kind: string; pid: number; goal?: string }> = [];
-    installFakeCoordinator(claims);
+    await installFakeCoordinator(claims);
     const projectId = createScenarioProject();
     setupContribution(projectId);
 
@@ -1095,7 +1151,7 @@ describe("Swarm acceptance — Scenario B: one remote contribution (#927)", () =
 
   it("duplicate terminal event is idempotent (no duplicate reconcile)", async () => {
     const claims: Array<{ kind: string; pid: number; goal?: string }> = [];
-    installFakeCoordinator(claims);
+    await installFakeCoordinator(claims);
     const projectId = createScenarioProject();
     setupContribution(projectId);
     claims.length = 0;
@@ -1121,7 +1177,7 @@ describe("Swarm acceptance — Scenario B: one remote contribution (#927)", () =
 
   it("declined contribution state is set and proxy card fails cleanly", async () => {
     const claims: Array<{ kind: string; pid: number; goal?: string }> = [];
-    installFakeCoordinator(claims);
+    await installFakeCoordinator(claims);
     const projectId = createScenarioProject();
     const result = contributionStore.reserveProxy({
       peer: "molty",
@@ -1164,13 +1220,15 @@ describe("Swarm acceptance — escaped Orc review journeys (#1620)", () => {
     await initDb();
 
     mod = await import("../../components/reconciler.js");
+    await startTestGeneration();
     const prs = await import("../../components/project-acceptance/project-review-store.js");
     ProjectReviewStore = prs.ProjectReviewStore;
     const wss = await import("../../components/worker-supervision-store.js");
     WorkerSupervisionStore = wss.WorkerSupervisionStore;
   });
 
-  afterEach(() => {
+  afterEach(async () => {
+    await stopTestGeneration();
     vi.restoreAllMocks();
     if (_rawDb) { try { _rawDb.close(); } catch {} _rawDb = null; _overrideDb = null; }
   });
@@ -1244,7 +1302,7 @@ describe("Swarm acceptance — escaped Orc review journeys (#1620)", () => {
 
   it("Molty 54 shape: Orc-only root reads its case and submits one typed accept", async () => {
     const claims: Array<{ kind: string; pid: number; goal?: string }> = [];
-    installFakeCoordinator(claims);
+    await installFakeCoordinator(claims);
     const projectId = nextCardId++;
     const rootContract = {
       schema_version: 2, id: `pc_${projectId}`, project_card_id: projectId, digest: `d_${projectId}`,
@@ -1306,7 +1364,7 @@ describe("Swarm acceptance — escaped Orc review journeys (#1620)", () => {
 
   it("KP 24 shape: requester root with failed peer claim and delegated gap blocks for the authored reason", async () => {
     const claims: Array<{ kind: string; pid: number; goal?: string }> = [];
-    installFakeCoordinator(claims);
+    await installFakeCoordinator(claims);
     const projectId = nextCardId++;
     const rootContract = {
       schema_version: 2, id: `pc_${projectId}`, project_card_id: projectId, digest: `d_${projectId}`,
@@ -1410,7 +1468,7 @@ describe("Swarm acceptance — escaped Orc review journeys (#1620)", () => {
 
   it("ordinary non-peer supervised project uses the same tools and enums", async () => {
     const claims: Array<{ kind: string; pid: number; goal?: string }> = [];
-    installFakeCoordinator(claims);
+    await installFakeCoordinator(claims);
     const projectId = nextCardId++;
     const now = new Date().toISOString().replace(/Z$/, "");
     cards.set(projectId, {

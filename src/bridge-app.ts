@@ -16,6 +16,7 @@ import { phaseSleep } from "./boot/phase-sleep.js";
 import { phaseDashboard } from "./boot/phase-dashboard.js";
 import { phaseAgentApi } from "./boot/phase-agent-api.js";
 import { phaseSessionControl } from "./boot/phase-session-control.js";
+import { phaseReconciler } from "./boot/phase-reconciler.js";
 import { phaseShutdown } from "./boot/phase-shutdown.js";
 
 /**
@@ -73,6 +74,14 @@ export class Bridge {
     });
     await step("dashboard", () => this.ctx.dashboardServer?.stop());
     await step("services", () => this.ctx.registry.stopAll());
+    // #1554: the Reconciler generation stops BEFORE Pi and later dependencies
+    // — drain card/Worker work first, then stop the lifecycle wake scheduler,
+    // then interrupt Pi. The existing bounded shutdown-step policy stays
+    // authoritative; no new timer or watchdog is introduced.
+    await step("reconciler", async () => {
+      await this.ctx.reconcilerHandle?.stop();
+    });
+    await step("lifecycle-wake", () => this.ctx.lifecycleWakeScheduler?.stop());
     await step("pi-executor", async () => {
       // #1647 — graceful interruption must complete (bounded probes, typed
       // run/card settlement, process + C-session + capacity cleanup) before
@@ -134,6 +143,7 @@ export const BOOT_PHASES = [
   phaseSleep,
   phaseDashboard,
   phaseAgentApi,
+  phaseReconciler,
   phaseSessionControl,
   phaseShutdown,
 ] as const;

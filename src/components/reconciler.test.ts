@@ -137,6 +137,7 @@ vi.mock("./worker-supervision-store.js", () => {
       contractExists = workerContractExistsMock;
       getLatestAttempt = getLatestAttemptMock;
       getResultByAttempt = getResultByAttemptMock;
+      getActiveSupervisedAttempts = () => [];
       claimAttempt = claimAttemptMock;
       markAttemptStartObservable = markAttemptStartObservableMock;
       markAttemptRunning = markAttemptRunningMock;
@@ -168,11 +169,16 @@ vi.mock("./spin-worker-adapter.js", () => ({
 }));
 
 // These are imported by reconcileProject / evaluateLease — mock as no-ops
-vi.mock("./executor-lease-store.js", () => ({
-  ExecutorLeaseStore: vi.fn().mockImplementation(() => ({
+vi.mock("./executor-lease-store.js", () => {
+  const MockExecutorLeaseStore = vi.fn().mockImplementation(() => ({
     getSnapshot: vi.fn().mockReturnValue(null),
-  })),
-}));
+    getEvaluationSchedule: vi.fn().mockReturnValue([]),
+    getDueSnapshots: vi.fn().mockReturnValue([]),
+  }));
+  (MockExecutorLeaseStore as unknown as { onLeaseChanged?: () => void }).onLeaseChanged = undefined;
+  (MockExecutorLeaseStore as unknown as { lastChangedCardId?: number }).lastChangedCardId = undefined;
+  return { ExecutorLeaseStore: MockExecutorLeaseStore };
+});
 
 function makeReviewStoreMock() {
   const transactionImpl = vi.fn((fn: () => void) => fn());
@@ -271,6 +277,67 @@ let reviewStoreMock: {
   setState: ReturnType<typeof vi.fn>;
 };
 
+// ── #1554: deterministic generation startup for the mocked environment ─────
+
+let testGenerationCounter = 0;
+let activeTestHandle: import("./reconciler.js").ReconcilerHandle | null = null;
+
+function makeTestCoordinator(overrides: Record<string, unknown> = {}) {
+  return {
+    getStore: makeFakeRunStore,
+    bootRecovery: () => [] as number[],
+    onOwnershipReleased: () => () => {},
+    scheduleContractAuthoring: () => ({ kind: "busy" as const, activeRunId: "or_unused" }),
+    scheduleScheduledProject: () => ({ kind: "busy" as const, activeRunId: "or_unused" }),
+    scheduleReview: () => ({ kind: "busy" as const, activeRunId: "or_review" }),
+    ...overrides,
+  };
+}
+
+const testWakeScheduler = {
+  register: vi.fn(() => () => {}),
+  sourceChanged: vi.fn(),
+  start: vi.fn(async () => {}),
+  stop: vi.fn(),
+  safetyScan: vi.fn(),
+} as unknown as import("./lifecycle-wake-scheduler.js").LifecycleWakeScheduler;
+
+const testPiAdapter: import("./swarm-executor-types.js").SwarmExecutorAdapter = {
+  kind: "pi",
+  schedulingPolicy: { recovery: "inspectable" },
+  capacity: async () => ({ available: 0, max: 0 }),
+  start: async () => ({ kind: "start_failed", reason: "unavailable", retryable: false }),
+  cancel: async () => ({ kind: "cancelled", attemptId: "" }),
+  inspect: async () => ({ kind: "running", lifecycle: "running" }),
+};
+
+async function startTestGeneration(
+  mod2: typeof import("./reconciler.js") = mod,
+  overrides: { coordinator?: unknown; workerAdapter?: unknown; piService?: unknown } = {},
+): Promise<import("./reconciler.js").ReconcilerHandle> {
+  const { SpinWorkerAdapter } = await import("./spin-worker-adapter.js");
+  const { ReconcileQuarantineStore } = await import("./reconcile-quarantine-store.js");
+  return mod2.startReconciler({
+    generationId: `test-gen-${++testGenerationCounter}`,
+    coordinator: { ...makeTestCoordinator(), ...(overrides.coordinator as Record<string, unknown> | undefined) } as never,
+    wakeScheduler: testWakeScheduler,
+    workerAdapter: (overrides.workerAdapter ?? new SpinWorkerAdapter()) as never,
+    piService: (overrides.piService ?? null) as never,
+    createPiAdapter: (() => testPiAdapter) as never,
+    getQuarantineStore: () => new ReconcileQuarantineStore(),
+    projectRunProgress: () => {},
+  } as never);
+}
+
+/** Stop the active generation and start a new one with different deps. */
+async function swapTestGeneration(
+  overrides: { coordinator?: unknown; workerAdapter?: unknown; piService?: unknown } = {},
+): Promise<void> {
+  await activeTestHandle?.stop();
+  activeTestHandle = null;
+  activeTestHandle = await startTestGeneration(mod, overrides);
+}
+
   beforeEach(async () => {
   vi.clearAllMocks();
   resolveRootIdMock.mockReturnValue(undefined);
@@ -303,6 +370,12 @@ let reviewStoreMock: {
   getLiveRunForProjectMock.mockReturnValue(undefined);
   spawnChildMock.mockReset();
   mod = await import("./reconciler.js");
+  activeTestHandle = await startTestGeneration();
+});
+
+afterEach(async () => {
+  await activeTestHandle?.stop();
+  activeTestHandle = null;
 });
 
 function makeCard(overrides: Partial<{
@@ -549,6 +622,7 @@ describe("Reconciler — #1411 domain guard", () => {
       kanbanGetCardMock.mockReturnValue(makeCard({ status: "failed" }));
 
       const localMod = await import("./reconciler.js");
+      activeTestHandle = await startTestGeneration(localMod);
       localMod.requestReconcile(1);
       await flush();
 
@@ -594,13 +668,15 @@ describe("Reconciler — #1411 domain guard", () => {
       // Replace the adapter with a deferred-returning one — the branch is
       // executor-neutral (only Pi emits it today, but any adapter may).
       const mod2 = await import("./reconciler.js");
-      mod2.setWorkerAdapter({
-        kind: "agent",
-        capacity: async () => ({ available: 1, max: 1 }),
-        start: async () => ({ kind: "deferred", reason: "resource_busy", provesNoStart: true }),
-        cancel: async () => ({ kind: "cancelled", attemptId: "a_1" }),
-        inspect: async () => ({ kind: "running", lifecycle: "running" }),
-      } as any);
+      await swapTestGeneration({
+        workerAdapter: {
+          kind: "agent",
+          capacity: async () => ({ available: 1, max: 1 }),
+          start: async () => ({ kind: "deferred", reason: "resource_busy", provesNoStart: true }),
+          cancel: async () => ({ kind: "cancelled", attemptId: "a_1" }),
+          inspect: async () => ({ kind: "running", lifecycle: "running" }),
+        } as any,
+      });
       mod2.requestReconcile(2);
       await flush();
       await new Promise(r => setTimeout(r, 10));
@@ -689,15 +765,17 @@ describe("Reconciler — #1411 domain guard", () => {
       // #1625: review dispatch is coordinator-owned after 0b4504a9 — install a
       // deterministic fake and assert the durable scheduleReview claim.
       const reviewClaims: Array<[number, number, string]> = [];
-      mod.setOrcCoordinator({
-      getStore: makeFakeRunStore,
-        scheduleContractAuthoring: () => ({ kind: "busy" as const, activeRunId: "or_unused" }),
-        scheduleScheduledProject: () => ({ kind: "busy" as const, activeRunId: "or_unused" }),
-        scheduleReview: (projectCardId: number, projectGeneration: number, reviewCaseId: string) => {
-          reviewClaims.push([projectCardId, projectGeneration, reviewCaseId]);
-          return { kind: "claimed" as const, context: { runId: `or_review_${projectCardId}`, projectCardId } };
-        },
-      } as never);
+      await swapTestGeneration({
+        coordinator: {
+          getStore: makeFakeRunStore,
+          scheduleContractAuthoring: () => ({ kind: "busy" as const, activeRunId: "or_unused" }),
+          scheduleScheduledProject: () => ({ kind: "busy" as const, activeRunId: "or_unused" }),
+          scheduleReview: (projectCardId: number, projectGeneration: number, reviewCaseId: string) => {
+            reviewClaims.push([projectCardId, projectGeneration, reviewCaseId]);
+            return { kind: "claimed" as const, context: { runId: `or_review_${projectCardId}`, projectCardId } };
+          },
+        } as never,
+      });
 
       mod.requestReconcile(1);
       await flush();
@@ -708,8 +786,6 @@ describe("Reconciler — #1411 domain guard", () => {
       expect(reviewClaims).toEqual([[1, 1, "rc_test_1"]]);
       expect(dispatchMock).not.toHaveBeenCalledWith(expect.objectContaining({ type: "O", cardId: 1 }));
       expect(kanbanCompleteMock).not.toHaveBeenCalled();
-
-      mod.setOrcCoordinator(null);
     });
 
     it("project with all-terminal children but no contract does not auto-complete (legacy removed)", async () => {
@@ -776,27 +852,29 @@ describe("Reconciler — #1546 scheduled-root driver", () => {
     }
   }
 
-  function fakeCoordinator(claims: Array<{ projectCardId: number; goal: string }>) {
-    mod.setOrcCoordinator({
-      getStore: makeFakeRunStore,
-      scheduleContractAuthoring: (projectCardId: number) => {
-        claims.push({ projectCardId, goal: "contract_authoring" });
-        getLiveRunForProjectMock.mockReturnValue({ project_generation: 1, id: `or_${projectCardId}` });
-        return { kind: "claimed" as const, context: { runId: `or_${projectCardId}`, projectCardId } };
-      },
-      scheduleScheduledProject: (projectCardId: number, goal: string) => {
-        claims.push({ projectCardId, goal });
-        // a real claim creates the durable live Orc row the next pass observes
-        getLiveRunForProjectMock.mockReturnValue({ project_generation: 1, id: `or_${projectCardId}` });
-        return { kind: "claimed" as const, context: { runId: `or_${projectCardId}`, projectCardId } };
-      },
-      scheduleReview: () => ({ kind: "busy" as const, activeRunId: "or_review" }),
-    } as never);
+  async function fakeCoordinator(claims: Array<{ projectCardId: number; goal: string }>) {
+    await swapTestGeneration({
+      coordinator: {
+        getStore: makeFakeRunStore,
+        scheduleContractAuthoring: (projectCardId: number) => {
+          claims.push({ projectCardId, goal: "contract_authoring" });
+          getLiveRunForProjectMock.mockReturnValue({ project_generation: 1, id: `or_${projectCardId}` });
+          return { kind: "claimed" as const, context: { runId: `or_${projectCardId}`, projectCardId } };
+        },
+        scheduleScheduledProject: (projectCardId: number, goal: string) => {
+          claims.push({ projectCardId, goal });
+          // a real claim creates the durable live Orc row the next pass observes
+          getLiveRunForProjectMock.mockReturnValue({ project_generation: 1, id: `or_${projectCardId}` });
+          return { kind: "claimed" as const, context: { runId: `or_${projectCardId}`, projectCardId } };
+        },
+        scheduleReview: () => ({ kind: "busy" as const, activeRunId: "or_review" }),
+      } as never,
+    });
   }
 
   it("routes a queued due scheduled root to the driver and promotes only after the continuation claim", async () => {
     const claims: Array<{ projectCardId: number; goal: string }> = [];
-    fakeCoordinator(claims);
+    await fakeCoordinator(claims);
     setupExecutingProject();
     let phase: "queued" | "running" = "queued";
     kanbanGetCardMock.mockReturnValue(scheduledRootCard({
@@ -830,7 +908,11 @@ describe("Reconciler — #1546 scheduled-root driver", () => {
     reviewStoreMock.contractExists.mockReturnValue(false);
     reviewStoreMock.getSupervision.mockReturnValue(undefined);
     reviewStoreMock.hasActiveProjectSupervision.mockReturnValue(true);
-    mod.setOrcCoordinator(null);
+    // #1554: no generation = fail closed. A running generation always owns a
+    // coordinator; without one, the request façade performs no mutation and
+    // never settles.
+    await activeTestHandle?.stop();
+    activeTestHandle = null;
 
     mod.requestReconcile(1);
     await flush();
@@ -838,12 +920,12 @@ describe("Reconciler — #1546 scheduled-root driver", () => {
 
     expect(dispatchMock).not.toHaveBeenCalled();
     expect(kanbanPromoteDueRetryMock).not.toHaveBeenCalled();
-    expect(kanbanFailMock).toHaveBeenCalledWith(1, "no scheduled Orc continuation owner after restart");
+    expect(kanbanFailMock).not.toHaveBeenCalled();
   });
 
   it("keeps a future-dated queued scheduled root a no-op", async () => {
     const claims: Array<{ projectCardId: number; goal: string }> = [];
-    fakeCoordinator(claims);
+    await fakeCoordinator(claims);
     setupExecutingProject();
     kanbanGetCardMock.mockReturnValue(scheduledRootCard({
       status: "queued",
@@ -860,7 +942,7 @@ describe("Reconciler — #1546 scheduled-root driver", () => {
 
   it("leaves an unrelated parentless queued card without supervision on the legacy path", async () => {
     const claims: Array<{ projectCardId: number; goal: string }> = [];
-    fakeCoordinator(claims);
+    await fakeCoordinator(claims);
     kanbanGetCardMock.mockReturnValue(makeCard({ status: "queued", type: "O", source: "agent", next_retry_at: new Date(Date.now() - 1000).toISOString() }));
     reviewStoreMock.hasActiveProjectSupervision.mockReturnValue(false);
 
@@ -874,7 +956,7 @@ describe("Reconciler — #1546 scheduled-root driver", () => {
 
   it("#1618 routes a queued supervised peer root to the Orc coordinator, never the legacy drain", async () => {
     const claims: Array<{ projectCardId: number; goal: string }> = [];
-    fakeCoordinator(claims);
+    await fakeCoordinator(claims);
     kanbanGetCardMock.mockReturnValue(makeCard({ status: "queued", type: "O", source: "peer", source_id: "req_1", next_retry_at: null }));
     reviewStoreMock.hasActiveProjectSupervision.mockReturnValue(true);
     reviewStoreMock.contractExists.mockReturnValue(false);
@@ -893,7 +975,7 @@ describe("Reconciler — #1546 scheduled-root driver", () => {
 
   it("#1618 does not silently adopt a peer root without supervision", async () => {
     const claims: Array<{ projectCardId: number; goal: string }> = [];
-    fakeCoordinator(claims);
+    await fakeCoordinator(claims);
     kanbanGetCardMock.mockReturnValue(makeCard({ status: "queued", type: "O", source: "peer", source_id: "req_2", next_retry_at: null }));
     reviewStoreMock.hasActiveProjectSupervision.mockReturnValue(false);
     reviewStoreMock.contractExists.mockReturnValue(false);
@@ -907,7 +989,7 @@ describe("Reconciler — #1546 scheduled-root driver", () => {
 
   it("resumes a pending Worker attempt without a lease (worker_resume owns)", async () => {
     const claims: Array<{ projectCardId: number; goal: string }> = [];
-    fakeCoordinator(claims);
+    await fakeCoordinator(claims);
     setupExecutingProject({
       children: [{ ...makeCard({ id: 2, status: "queued", type: "W" }), parent_id: 1 }],
       attemptLifecycle: "pending",
@@ -923,7 +1005,7 @@ describe("Reconciler — #1546 scheduled-root driver", () => {
 
   it("does not treat an orphaned attempt row without a Worker contract as ownership", async () => {
     const claims: Array<{ projectCardId: number; goal: string }> = [];
-    fakeCoordinator(claims);
+    await fakeCoordinator(claims);
     setupExecutingProject({
       children: [{ ...makeCard({ id: 2, status: "queued", type: "W" }), parent_id: 1 }],
       attemptLifecycle: "pending",
@@ -939,7 +1021,7 @@ describe("Reconciler — #1546 scheduled-root driver", () => {
 
   it("retains a valid live attempt (running) — never settled, never claimed", async () => {
     const claims: Array<{ projectCardId: number; goal: string }> = [];
-    fakeCoordinator(claims);
+    await fakeCoordinator(claims);
     setupExecutingProject({
       children: [{ ...makeCard({ id: 2, status: "running", type: "W" }), parent_id: 1 }],
       attemptLifecycle: "running",
@@ -954,7 +1036,7 @@ describe("Reconciler — #1546 scheduled-root driver", () => {
 
   it("creates the review case for an executing project whose children are all terminal", async () => {
     const claims: Array<{ projectCardId: number; goal: string }> = [];
-    fakeCoordinator(claims);
+    await fakeCoordinator(claims);
     setupExecutingProject({
       children: [
         { ...makeCard({ id: 2, status: "done", type: "W" }), parent_id: 1 },
@@ -981,7 +1063,7 @@ describe("Reconciler — #1546 scheduled-root driver", () => {
     // claimCoverageRound pins state='executing', so a stale gap here can never
     // be claimed — the recovery must not deadlock on it.
     const claims: Array<{ projectCardId: number; goal: string }> = [];
-    fakeCoordinator(claims);
+    await fakeCoordinator(claims);
     reviewStoreMock.contractExists.mockReturnValue(true);
     reviewStoreMock.getSupervision.mockReturnValue(supervision({
       state: "review_ready",
@@ -1015,7 +1097,7 @@ describe("Reconciler — #1546 scheduled-root driver", () => {
 
   it("#1605: a fresh delegated gap dispatches exactly one coverage round and stays executing", async () => {
     const claims: Array<{ projectCardId: number; goal: string }> = [];
-    fakeCoordinator(claims);
+    await fakeCoordinator(claims);
     setupExecutingProject({
       children: [{ ...makeCard({ id: 2, status: "done", type: "W" }), parent_id: 1 }],
     });
@@ -1046,7 +1128,7 @@ describe("Reconciler — #1546 scheduled-root driver", () => {
 
   it("#1605: an unchanged gap before grace stays waiting — no second dispatch, no review case", async () => {
     const claims: Array<{ projectCardId: number; goal: string }> = [];
-    fakeCoordinator(claims);
+    await fakeCoordinator(claims);
     setupExecutingProject({
       children: [{ ...makeCard({ id: 2, status: "done", type: "W" }), parent_id: 1 }],
     });
@@ -1077,7 +1159,7 @@ describe("Reconciler — #1546 scheduled-root driver", () => {
 
   it("#1605: an unchanged gap after grace proceeds to review with the persisted gap — never blocked", async () => {
     const claims: Array<{ projectCardId: number; goal: string }> = [];
-    fakeCoordinator(claims);
+    await fakeCoordinator(claims);
     setupExecutingProject({
       children: [{ ...makeCard({ id: 2, status: "done", type: "W" }), parent_id: 1 }],
     });
@@ -1107,7 +1189,7 @@ describe("Reconciler — #1546 scheduled-root driver", () => {
 
   it("#1605: a new gap at the coverage-round cap proceeds to review, not a terminal block", async () => {
     const claims: Array<{ projectCardId: number; goal: string }> = [];
-    fakeCoordinator(claims);
+    await fakeCoordinator(claims);
     setupExecutingProject({
       children: [{ ...makeCard({ id: 2, status: "done", type: "W" }), parent_id: 1 }],
     });
@@ -1137,7 +1219,7 @@ describe("Reconciler — #1546 scheduled-root driver", () => {
 
   it("#1605: a fully covered project proceeds to review without a coverage round", async () => {
     const claims: Array<{ projectCardId: number; goal: string }> = [];
-    fakeCoordinator(claims);
+    await fakeCoordinator(claims);
     setupExecutingProject({
       children: [{ ...makeCard({ id: 2, status: "done", type: "W" }), parent_id: 1 }],
     });
@@ -1161,7 +1243,7 @@ describe("Reconciler — #1546 scheduled-root driver", () => {
 
   it("#1605: an Orc-only project with zero children proceeds directly to review (no continuation claim, no spawn loop)", async () => {
     const claims: Array<{ projectCardId: number; goal: string }> = [];
-    fakeCoordinator(claims);
+    await fakeCoordinator(claims);
     setupExecutingProject({ children: [] });
     reviewStoreMock.getLatestOpenCase.mockReturnValue(undefined);
     reviewStoreMock.stateTransition.mockReturnValue(true);
@@ -1202,7 +1284,7 @@ describe("Reconciler — #1546 scheduled-root driver", () => {
 
   it("#1605: a zero-child executing project WITH delegated criteria still claims the scheduled continuation (Orc must spawn Workers)", async () => {
     const claims: Array<{ projectCardId: number; goal: string }> = [];
-    fakeCoordinator(claims);
+    await fakeCoordinator(claims);
     setupExecutingProject({ children: [] });
     reviewStoreMock.getContractByProjectCardId.mockReturnValue({
       id: "pc_delegated",
@@ -1235,7 +1317,7 @@ describe("Reconciler — #1546 scheduled-root driver", () => {
 
   it("#1605: an executing project with a missing/unparseable contract is not this owner (gate blocks it)", async () => {
     const claims: Array<{ projectCardId: number; goal: string }> = [];
-    fakeCoordinator(claims);
+    await fakeCoordinator(claims);
     setupExecutingProject({ children: [] });
     reviewStoreMock.getContractByProjectCardId.mockReturnValue(undefined);
 
@@ -1250,7 +1332,7 @@ describe("Reconciler — #1546 scheduled-root driver", () => {
 
   it("#1605: a corrupt/unreadable contract still fails closed as a structural block", async () => {
     const claims: Array<{ projectCardId: number; goal: string }> = [];
-    fakeCoordinator(claims);
+    await fakeCoordinator(claims);
     setupExecutingProject({
       children: [{ ...makeCard({ id: 2, status: "done", type: "W" }), parent_id: 1 }],
     });
@@ -1273,7 +1355,7 @@ describe("Reconciler — #1546 scheduled-root driver", () => {
 
   it("#1605: repair re-entry with the same capped gap returns to review, never re-dispatches", async () => {
     const claims: Array<{ projectCardId: number; goal: string }> = [];
-    fakeCoordinator(claims);
+    await fakeCoordinator(claims);
     setupExecutingProject({
       children: [{ ...makeCard({ id: 2, status: "done", type: "W" }), parent_id: 1 }],
     });
@@ -1307,14 +1389,16 @@ describe("Reconciler — #1546 scheduled-root driver", () => {
 
   it("classifies reviewing with an open case as review ownership (never a fresh authoring claim)", async () => {
     const claims: Array<{ projectCardId: number; goal: string }> = [];
-    mod.setOrcCoordinator({
-      getStore: makeFakeRunStore,
-      scheduleScheduledProject: (projectCardId: number, goal: string) => {
-        claims.push({ projectCardId, goal });
-        return { kind: "claimed" as const, context: { runId: "or_1", projectCardId } };
-      },
-      scheduleReview: () => ({ kind: "claimed" as const, context: { runId: "or_r", projectCardId: 1 } }),
-    } as never);
+    await swapTestGeneration({
+      coordinator: {
+        getStore: makeFakeRunStore,
+        scheduleScheduledProject: (projectCardId: number, goal: string) => {
+          claims.push({ projectCardId, goal });
+          return { kind: "claimed" as const, context: { runId: "or_1", projectCardId } };
+        },
+        scheduleReview: () => ({ kind: "claimed" as const, context: { runId: "or_r", projectCardId: 1 } }),
+      } as never,
+    });
     setupExecutingProject();
     reviewStoreMock.getSupervision.mockReturnValue(supervision({ state: "reviewing" }));
     reviewStoreMock.getLatestOpenCase.mockReturnValue({ id: "rc_open", project_card_id: 1, status: "open", round: 1 } as never);
@@ -1329,7 +1413,7 @@ describe("Reconciler — #1546 scheduled-root driver", () => {
 
   it("classifies reviewing with no open case and no live Orc row as none → continuation claim", async () => {
     const claims: Array<{ projectCardId: number; goal: string }> = [];
-    fakeCoordinator(claims);
+    await fakeCoordinator(claims);
     setupExecutingProject();
     reviewStoreMock.getSupervision.mockReturnValue(supervision({ state: "reviewing" }));
 
@@ -1341,7 +1425,7 @@ describe("Reconciler — #1546 scheduled-root driver", () => {
 
   it("treats a live Orc claim matching the generation as an existing owner — no second claim", async () => {
     const claims: Array<{ projectCardId: number; goal: string }> = [];
-    fakeCoordinator(claims);
+    await fakeCoordinator(claims);
     setupExecutingProject();
     getLiveRunForProjectMock.mockReturnValue({ project_generation: 1, id: "or_live" });
 
@@ -1354,7 +1438,7 @@ describe("Reconciler — #1546 scheduled-root driver", () => {
 
   it("treats a stale-generation live Orc row as not an owner (claim attempt resolves it)", async () => {
     const claims: Array<{ projectCardId: number; goal: string }> = [];
-    fakeCoordinator(claims);
+    await fakeCoordinator(claims);
     setupExecutingProject();
     getLiveRunForProjectMock.mockReturnValue({ project_generation: 2, id: "or_stale" });
 
@@ -1366,16 +1450,18 @@ describe("Reconciler — #1546 scheduled-root driver", () => {
 
   it("never settles on a busy claim — the existing live run owns the project", async () => {
     const claims: Array<{ projectCardId: number; goal: string }> = [];
-    mod.setOrcCoordinator({
-      getStore: makeFakeRunStore,
-      scheduleScheduledProject: (projectCardId: number, _goal: string) => {
-        claims.push({ projectCardId, goal: _goal });
-        // busy means a live row exists — the next pass observes it as an owner
-        getLiveRunForProjectMock.mockReturnValue({ project_generation: 1, id: "or_busy" });
-        return { kind: "busy" as const, activeRunId: "or_busy" };
-      },
-      scheduleReview: () => ({ kind: "busy" as const, activeRunId: "or_busy" }),
-    } as never);
+    await swapTestGeneration({
+      coordinator: {
+        getStore: makeFakeRunStore,
+        scheduleScheduledProject: (projectCardId: number, _goal: string) => {
+          claims.push({ projectCardId, goal: _goal });
+          // busy means a live row exists — the next pass observes it as an owner
+          getLiveRunForProjectMock.mockReturnValue({ project_generation: 1, id: "or_busy" });
+          return { kind: "busy" as const, activeRunId: "or_busy" };
+        },
+        scheduleReview: () => ({ kind: "busy" as const, activeRunId: "or_busy" }),
+      } as never,
+    });
     setupExecutingProject();
 
     mod.requestReconcile(1);
@@ -1388,18 +1474,20 @@ describe("Reconciler — #1546 scheduled-root driver", () => {
   it("re-derives ownership once on conflict and settles only when the second pass still finds no owner", async () => {
     const claims: Array<{ projectCardId: number; goal: string }> = [];
     let conflictFirst = true;
-    mod.setOrcCoordinator({
-      getStore: makeFakeRunStore,
-      scheduleScheduledProject: (projectCardId: number, goal: string) => {
-        claims.push({ projectCardId, goal });
-        if (conflictFirst) {
-          conflictFirst = false;
+    await swapTestGeneration({
+      coordinator: {
+        getStore: makeFakeRunStore,
+        scheduleScheduledProject: (projectCardId: number, goal: string) => {
+          claims.push({ projectCardId, goal });
+          if (conflictFirst) {
+            conflictFirst = false;
+            return { kind: "conflict" as const, reason: "project_generation_mismatch" };
+          }
           return { kind: "conflict" as const, reason: "project_generation_mismatch" };
-        }
-        return { kind: "conflict" as const, reason: "project_generation_mismatch" };
-      },
-      scheduleReview: () => ({ kind: "busy" as const, activeRunId: "or_busy" }),
-    } as never);
+        },
+        scheduleReview: () => ({ kind: "busy" as const, activeRunId: "or_busy" }),
+      } as never,
+    });
     setupExecutingProject();
 
     mod.requestReconcile(1);
@@ -1420,16 +1508,18 @@ describe("Reconciler — #1546 scheduled-root driver", () => {
 
   it("does not settle when a conflict re-derive finds an owner", async () => {
     const claims: Array<{ projectCardId: number; goal: string }> = [];
-    mod.setOrcCoordinator({
-      getStore: makeFakeRunStore,
-      scheduleScheduledProject: (projectCardId: number, goal: string) => {
-        claims.push({ projectCardId, goal });
-        // another writer advanced the project during the claim attempt
-        reviewStoreMock.getSupervision.mockReturnValue(supervision({ state: "accepted" }));
-        return { kind: "conflict" as const, reason: "project_generation_mismatch" };
-      },
-      scheduleReview: () => ({ kind: "busy" as const, activeRunId: "or_busy" }),
-    } as never);
+    await swapTestGeneration({
+      coordinator: {
+        getStore: makeFakeRunStore,
+        scheduleScheduledProject: (projectCardId: number, goal: string) => {
+          claims.push({ projectCardId, goal });
+          // another writer advanced the project during the claim attempt
+          reviewStoreMock.getSupervision.mockReturnValue(supervision({ state: "accepted" }));
+          return { kind: "conflict" as const, reason: "project_generation_mismatch" };
+        },
+        scheduleReview: () => ({ kind: "busy" as const, activeRunId: "or_busy" }),
+      } as never,
+    });
     setupExecutingProject();
 
     mod.requestReconcile(1);
@@ -1441,7 +1531,7 @@ describe("Reconciler — #1546 scheduled-root driver", () => {
 
   it("terminal roots (accepted/blocked) are no-ops", async () => {
     const claims: Array<{ projectCardId: number; goal: string }> = [];
-    fakeCoordinator(claims);
+    await fakeCoordinator(claims);
     setupExecutingProject();
     reviewStoreMock.getSupervision.mockReturnValue(supervision({ state: "blocked" }));
 
@@ -1454,7 +1544,7 @@ describe("Reconciler — #1546 scheduled-root driver", () => {
 
   it("duplicate wakes do not duplicate work", async () => {
     const claims: Array<{ projectCardId: number; goal: string }> = [];
-    fakeCoordinator(claims);
+    await fakeCoordinator(claims);
     setupExecutingProject();
 
     for (let i = 0; i < 5; i++) {
@@ -1469,7 +1559,7 @@ describe("Reconciler — #1546 scheduled-root driver", () => {
 
   it("falls through to the no-owner decision when needs_input has neither pending nor answered requests", async () => {
     const claims: Array<{ projectCardId: number; goal: string }> = [];
-    fakeCoordinator(claims);
+    await fakeCoordinator(claims);
     setupExecutingProject();
     reviewStoreMock.getSupervision.mockReturnValue(supervision({ state: "needs_input" }));
     reviewStoreMock.getAnsweredInputRequests.mockReturnValue([]);
@@ -1484,7 +1574,7 @@ describe("Reconciler — #1546 scheduled-root driver", () => {
 
   it("resumes needs_input through the existing transition when requests are answered", async () => {
     const claims: Array<{ projectCardId: number; goal: string }> = [];
-    fakeCoordinator(claims);
+    await fakeCoordinator(claims);
     setupExecutingProject({
       children: [{ ...makeCard({ id: 2, status: "done", type: "W" }), parent_id: 1 }],
     });
@@ -1501,7 +1591,7 @@ describe("Reconciler — #1546 scheduled-root driver", () => {
 
   it("treats pending input requests as the input owner", async () => {
     const claims: Array<{ projectCardId: number; goal: string }> = [];
-    fakeCoordinator(claims);
+    await fakeCoordinator(claims);
     setupExecutingProject();
     reviewStoreMock.getSupervision.mockReturnValue(supervision({ state: "needs_input" }));
     reviewStoreMock.getAnsweredInputRequests.mockReturnValue([]);
@@ -1515,7 +1605,7 @@ describe("Reconciler — #1546 scheduled-root driver", () => {
 
   it("falls through to the no-owner decision when repair_planned has no repair items", async () => {
     const claims: Array<{ projectCardId: number; goal: string }> = [];
-    fakeCoordinator(claims);
+    await fakeCoordinator(claims);
     setupExecutingProject();
     reviewStoreMock.getSupervision.mockReturnValue(supervision({ state: "repair_planned" }));
     reviewStoreMock.getLatestDecisionForProject.mockReturnValue({
@@ -1534,7 +1624,7 @@ describe("Reconciler — #1546 scheduled-root driver", () => {
 
   it("reuses an existing repair Worker after a crash before repair state transition", async () => {
     const claims: Array<{ projectCardId: number; goal: string }> = [];
-    fakeCoordinator(claims);
+    await fakeCoordinator(claims);
     setupExecutingProject();
 
     let repairState: "repair_planned" | "repairing" = "repair_planned";
@@ -1592,7 +1682,7 @@ describe("Reconciler — #1546 scheduled-root driver", () => {
     // the fallback projectId (1) that the deleted require/catch branch used
     // under Vitest.
     const claims: Array<{ projectCardId: number; goal: string }> = [];
-    fakeCoordinator(claims);
+    await fakeCoordinator(claims);
     setupExecutingProject();
     resolveRootIdMock.mockReturnValue(7);
     let repairState: "repair_planned" | "repairing" = "repair_planned";
@@ -1635,11 +1725,11 @@ describe("Reconciler — #1546 scheduled-root driver", () => {
 
 describe("Reconciler — #1664 error boundary", () => {
   /** A healthy queued W child under a running project, dispatched by the pump. */
-  function healthyChildDispatchScenario() {
-    // #1638 test earlier in this file replaces the module's worker adapter
-    // with a deferred-returning one; reset to the default mock so the pump
-    // actually starts (and dispatches) the child.
-    mod.setWorkerAdapter(null);
+  async function healthyChildDispatchScenario() {
+    // #1554: earlier tests swapped in custom worker adapters; restore the
+    // default mocked adapter so the pump actually starts (and dispatches)
+    // the child.
+    await swapTestGeneration();
     kanbanGetCardMock.mockImplementation((id: number) => {
       if (id === 1) throw new Error("deterministic failure #1664");
       if (id === 99) return makeCard({ id: 99, status: "running", type: "O", parent_id: null });
@@ -1666,7 +1756,7 @@ describe("Reconciler — #1664 error boundary", () => {
   }
 
   it("contains a throwing reconcile pass: process survives, no unhandledRejection, healthy card still runs, failure row recorded", async () => {
-    healthyChildDispatchScenario();
+    await healthyChildDispatchScenario();
     dispatchMock.mockClear();
 
     const unhandled = await expectNoUnhandledRejection(() => {
@@ -1683,7 +1773,7 @@ describe("Reconciler — #1664 error boundary", () => {
   });
 
   it("a successful pass clears the failure record", async () => {
-    healthyChildDispatchScenario();
+    await healthyChildDispatchScenario();
     // pre-seed a recorded failure for a card that is about to pass
     quarantineState.recorded.push({ cardId: 2, signature: "Error:old", now: "2026-08-16T10:00:00.000Z" });
 
@@ -1694,7 +1784,7 @@ describe("Reconciler — #1664 error boundary", () => {
   });
 
   it("store lookup failure fails open and does not stop other cards", async () => {
-    healthyChildDispatchScenario();
+    await healthyChildDispatchScenario();
     quarantineState.throwOnLookup = true;
     dispatchMock.mockClear();
 
@@ -1708,7 +1798,7 @@ describe("Reconciler — #1664 error boundary", () => {
   });
 
   it("recordFailure failure is contained: original throw logged, healthy card still runs", async () => {
-    healthyChildDispatchScenario();
+    await healthyChildDispatchScenario();
     quarantineState.throwOnRecord = true;
     dispatchMock.mockClear();
 
@@ -1722,7 +1812,7 @@ describe("Reconciler — #1664 error boundary", () => {
   });
 
   it("clearFailures failure is contained on the success path", async () => {
-    healthyChildDispatchScenario();
+    await healthyChildDispatchScenario();
     quarantineState.throwOnClear = true;
     dispatchMock.mockClear();
 
@@ -1733,12 +1823,24 @@ describe("Reconciler — #1664 error boundary", () => {
   });
 
   it("store construction failure fails open — a wake still reconciles behind the boundary", async () => {
-    // The reconciler caches one store per module; force a fresh module so the
-    // lazy singleton reconstructs under a throwing constructor.
+    // #1554: the quarantine accessor constructs per generation start, so a
+    // throwing constructor fails open at every boundary call. Start a fresh
+    // generation under the throwing store on a fresh module instance.
+    await activeTestHandle?.stop();
+    activeTestHandle = null;
     quarantineState.throwOnConstruct = true;
     vi.resetModules();
     const freshMod = await import("./reconciler.js");
-    healthyChildDispatchScenario();
+    activeTestHandle = await startTestGeneration(freshMod);
+    kanbanGetCardMock.mockImplementation((id: number) => {
+      if (id === 2) return makeCard({ id: 2, status: "queued", type: "W", parent_id: 99 });
+      return makeCard({ id: 99, status: "running", type: "O", parent_id: null });
+    });
+    kanbanQueuedDispatchOrderMock.mockReturnValue([makeCard({ id: 2, status: "queued", type: "W", parent_id: 99 })]);
+    kanbanPromoteDueRetryMock.mockReturnValue(true);
+    cardHasContractMock.mockReturnValue(true);
+    getLatestAttemptMock.mockReturnValue({ id: "a_2", lifecycle: "pending", executor_kind: "agent", executor_id: "spin-local", generation: 1 });
+    getContractForCardMock.mockReturnValue({ id: "c_2", limits: {}, schema_version: 1, goal: "g", criteria: [], expected_artifacts: [], verification_commands: [], required_capabilities: [], supports_root_criteria: [], provenance: { root_card_id: 99, card_id: 2 } });
     dispatchMock.mockClear();
 
     let unhandled = false;
@@ -1758,7 +1860,7 @@ describe("Reconciler — #1664 error boundary", () => {
   it("dispatch pump failures are contained with a logged handler, not a silent swallow", async () => {
     // Make the pump throw on its first pass: kanbanQueuedDispatchOrder throws
     // synchronously inside dispatchOnePass, which rejects runWorkerDispatch.
-    healthyChildDispatchScenario();
+    await healthyChildDispatchScenario();
     kanbanQueuedDispatchOrderMock.mockImplementation(() => { throw new Error("dispatch pump failure"); });
     dispatchMock.mockClear();
 
@@ -1778,7 +1880,7 @@ describe("Reconciler — #1664 error boundary", () => {
       if (count >= 3) quarantineState.quarantined.add(cardId);
       return { cardId, failureCount: count, errorSignature: signature, lastErrorAt: now, quarantinedAt: count >= 3 ? now : null };
     };
-    healthyChildDispatchScenario();
+    await healthyChildDispatchScenario();
     kanbanGetCardMock.mockImplementation((id: number) => {
       if (id === 1) throw new Error("deterministic failure #1664");
       if (id === 99) return makeCard({ id: 99, status: "running", type: "O", parent_id: null });
@@ -1804,7 +1906,7 @@ describe("Reconciler — #1664 error boundary", () => {
   });
 
   it("boot recovery does not re-arm a quarantined card and counts woken vs skipped", async () => {
-    healthyChildDispatchScenario();
+    await healthyChildDispatchScenario();
     kanbanGetCardMock.mockImplementation((id: number) => {
       if (id === 63) return makeCard({ id: 63, status: "running", type: "O", parent_id: null });
       if (id === 99) return makeCard({ id: 99, status: "running", type: "O", parent_id: null });
@@ -1851,7 +1953,7 @@ describe("Reconciler — #1664 error boundary", () => {
   });
 
   it("releasing a quarantine re-wakes the card on the next request (operator clear flow)", async () => {
-    healthyChildDispatchScenario();
+    await healthyChildDispatchScenario();
     kanbanGetCardMock.mockImplementation((id: number) => {
       if (id === 1) throw new Error("deterministic failure #1664");
       if (id === 99) return makeCard({ id: 99, status: "running", type: "O", parent_id: null });

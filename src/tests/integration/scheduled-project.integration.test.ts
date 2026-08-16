@@ -31,10 +31,45 @@ describe("scheduled project orchestration (#1516)", () => {
     toolRegistryMod = await import("../../components/transport/tool-registry.js");
   });
 
-  afterEach(() => {
+  afterEach(async () => {
+    await activeHandle?.stop();
+    activeHandle = null;
+    wakeScheduler?.stop();
+    wakeScheduler = null;
     vi.restoreAllMocks();
     rmSync(home, { recursive: true, force: true });
   });
+
+
+let activeHandle: import("../../components/reconciler.js").ReconcilerHandle | null = null;
+let wakeScheduler: import("../../components/lifecycle-wake-scheduler.js").LifecycleWakeScheduler | null = null;
+
+/** #1554: start a real generation over the tmpdir stores with a scripted coordinator. */
+async function startGeneration(coordinator: unknown): Promise<void> {
+  const { LifecycleWakeScheduler } = await import("../../components/lifecycle-wake-scheduler.js");
+  const { SpinWorkerAdapter } = await import("../../components/spin-worker-adapter.js");
+  const { ReconcileQuarantineStore } = await import("../../components/reconcile-quarantine-store.js");
+  await activeHandle?.stop();
+  activeHandle = null;
+  wakeScheduler?.stop();
+  wakeScheduler = new LifecycleWakeScheduler();
+  activeHandle = await reconciler.startReconciler({
+    generationId: `scheduled-project-${Date.now()}`,
+    coordinator: ({
+      getStore: () => ({ countStartedAuthoringTurns: () => 0, countConsecutiveUnstartableAuthoringTurns: () => 0, lastAuthoringClaimAt: () => null, lastAuthoringFailureCode: () => null }),
+      bootRecovery: () => [] as number[],
+      onOwnershipReleased: () => () => {},
+      ...(coordinator as Record<string, unknown> | undefined),
+    }) as never,
+    wakeScheduler,
+    workerAdapter: new SpinWorkerAdapter(),
+    piService: null,
+    createPiAdapter: (() => ({ kind: "pi", capacity: async () => ({ available: 0, max: 0 }), start: async () => ({ kind: "start_failed", reason: "unavailable", retryable: false }), cancel: async () => ({ kind: "cancelled", attemptId: "" }), inspect: async () => ({ kind: "running", lifecycle: "running" }) })) as never,
+    getQuarantineStore: () => new ReconcileQuarantineStore(),
+    projectRunProgress: () => {},
+  } as never);
+  await wakeScheduler.start();
+}
 
   async function waitForIdle(queue: { currentJob: unknown }): Promise<void> {
     const deadline = Date.now() + 5_000;
@@ -49,7 +84,7 @@ describe("scheduled project orchestration (#1516)", () => {
     mkdirSync(join(home, "workspace", "brief-task"), { recursive: true });
 
     const claims: Array<{ projectCardId: number; goal: string }> = [];
-    reconciler.setOrcCoordinator({
+    await startGeneration({
       scheduleScheduledProject(projectCardId: number, goal: string) {
         claims.push({ projectCardId, goal });
         return { kind: "claimed", context: { runId: "or_test", projectCardId } };
@@ -162,7 +197,7 @@ describe("scheduled project orchestration (#1516)", () => {
     const artifactPath = join(home, "workspace", "stale-task", "stale.md");
     mkdirSync(join(home, "workspace", "stale-task"), { recursive: true });
 
-    reconciler.setOrcCoordinator({
+    await startGeneration({
       scheduleScheduledProject() {
         return { kind: "claimed", context: { runId: "or_test", projectCardId: 1 } };
       },
