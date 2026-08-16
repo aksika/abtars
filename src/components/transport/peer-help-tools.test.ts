@@ -146,14 +146,19 @@ describe("peer_ask_help", () => {
     expect(mockAskHelp).toHaveBeenCalledTimes(1);
   });
 
-  it("rejects an explicit peer whose inventory contradicts requirements", async () => {
+  it("sends exactly once to an explicit peer whose inventory contradicts requirements, surfacing the receiver decline", async () => {
     mockGetPeerInventory.mockReturnValue({ peer: "kp", capabilities: ["docker"] });
     mockHasAllCapabilities.mockReturnValue(false);
+    mockAskHelp.mockResolvedValue({
+      version: 1, request_id: "req-explicit-missing-cap", decision: "declined", reason_code: "policy_denied", proves_non_creation: true,
+    });
     const result = JSON.parse(await mod.peerAskHelpTool.execute({
       goal: "do something", peer: "kp", requires: ["pi-executor"], request_id: "req-explicit-missing-cap",
     }));
-    expect(result.error).toContain("required capabilities");
-    expect(mockAskHelp).not.toHaveBeenCalled();
+    expect(result.decision).toBe("declined");
+    expect(result.reason_code).toBe("policy_denied");
+    expect(mockAskHelp).toHaveBeenCalledTimes(1);
+    expect(mockAskHelp.mock.calls[0]?.[0]).toBe("kp");
   });
 
   it("surfaces decline from peer", async () => {

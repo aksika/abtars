@@ -21,7 +21,10 @@ vi.mock("../../components/reconciler.js", () => ({
 vi.mock("../../components/peer-config.js", () => ({
   loadPeerConfig: () => ({
     self: { name: "molty" },
-    peers: { kp: { trust: 1, verifyKey: "abc" } },
+    peers: {
+      kp: { trust: 1, verifyKey: "abc" },
+      other: { trust: 1, verifyKey: "ghi" },
+    },
   }),
 }));
 
@@ -130,9 +133,9 @@ describe("Peer round trip — production-shaped two-node (#1618)", () => {
       askHelp: async (_peer: string, _request: any) => {
         sends.push({ peer: _peer, request: _request });
         // the transport IS the wire: the other end runs the real receiver
-        // admission and its authoritative response (incl. contribution ref)
-        const resp = await receiverService.handleHelpRequest("kp", _request);
-        return { version: 1, request_id: _request.request_id, decision: resp.decision, contribution_ref: resp.contribution_ref ?? undefined };
+        // admission and its authoritative response (incl. contribution ref
+        // and proves_non_creation on declines), forwarded unchanged
+        return receiverService.handleHelpRequest("kp", _request);
       },
       wakeProject: mockRequestReconcileForProject,
       kanbanUpdate: requester.kanban.kanbanUpdate,
@@ -373,5 +376,68 @@ describe("Peer round trip — production-shaped two-node (#1618)", () => {
     const ledgers = requester.db.prepare("SELECT COUNT(*) as cnt FROM peer_contributions WHERE request_id = 'r4'").get() as any;
     expect(ledgers.cnt).toBe(1);
     expect(replay.projectCardId).toBeGreaterThan(0);
+  });
+
+  // ── #1672: authoritative receiver decline ─────────────────────────────────
+  it("explicit peer with contradictory inventory reaches real receiver admission, declines with proves_non_creation, and replays idempotently", async () => {
+    // the receiver genuinely lacks the requested generic capability; the
+    // requester explicitly names the peer regardless of any inventory hint
+    const request = {
+      version: 1, request_id: "r5", created_at: new Date().toISOString(),
+      expires_at: new Date(Date.now() + 300_000).toISOString(),
+      goal: "g5", priority: "MEDIUM", required_capabilities: ["synthetic-cap"],
+    };
+
+    const delegated = await requesterService.delegate({
+      peer: "molty",
+      request,
+      binding: { kind: "create_cli_project", title: "d5", goal: "g5" },
+    });
+    expect(delegated.decision).toBe("declined");
+    expect(delegated.response?.proves_non_creation).toBe(true);
+    expect(sends).toHaveLength(1);
+    expect(sends[0]!.peer).toBe("molty");
+
+    // receiver admission created no receiver card, project, or run
+    const receiverCards = receiver.db.prepare("SELECT COUNT(*) as cnt FROM kanban_board WHERE source = 'peer'").get() as any;
+    expect(receiverCards.cnt).toBe(0);
+    const receiverSupervision = receiver.db.prepare("SELECT COUNT(*) as cnt FROM project_supervision").get() as any;
+    expect(receiverSupervision.cnt).toBe(0);
+
+    // requester projection is terminal declined
+    const ledger = contributionStore.getContribution("molty", "r5");
+    expect(ledger).toBeDefined();
+    expect(ledger.state).toBe("declined");
+    const proxy = requester.db.prepare("SELECT status FROM kanban_board WHERE id = (SELECT proxy_card_id FROM peer_contributions WHERE request_id = 'r5')").get() as any;
+    expect(proxy.status).toBe("failed");
+
+    // replay reuses the same durable decision with no second send
+    sends.length = 0;
+    const replay = await requesterService.delegate({
+      peer: "molty",
+      request,
+      binding: { kind: "create_cli_project", title: "d5", goal: "g5" },
+    });
+    expect(replay.decision).toBe("declined");
+    expect(sends).toHaveLength(0);
+    const ledgers = requester.db.prepare("SELECT COUNT(*) as cnt FROM peer_contributions WHERE request_id = 'r5'").get() as any;
+    expect(ledgers.cnt).toBe(1);
+  });
+
+  it("#1672: an explicit request never falls back to another connected capable peer", async () => {
+    const request = {
+      version: 1, request_id: "r6", created_at: new Date().toISOString(),
+      expires_at: new Date(Date.now() + 300_000).toISOString(),
+      goal: "g6", priority: "MEDIUM", required_capabilities: [],
+    };
+    const delegated = await requesterService.delegate({
+      peer: "molty",
+      request,
+      binding: { kind: "create_cli_project", title: "d6", goal: "g6" },
+    });
+    expect(delegated.decision).toBe("accepted");
+    // exactly one send to the NAMED peer; the other enrolled peer is never contacted
+    expect(sends).toHaveLength(1);
+    expect(sends[0]!.peer).toBe("molty");
   });
 });

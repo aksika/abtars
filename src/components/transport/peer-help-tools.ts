@@ -134,18 +134,6 @@ export const peerAskHelpTool: ToolDefinition = {
     if (!resolvedPeer.ok) return JSON.stringify({ error: resolvedPeer.message, code: resolvedPeer.code });
     peer = resolvedPeer.peer;
 
-    // #1433/#1357: An explicit peer with no inventory may still be asked over a
-    // live route; receiver admission is authoritative. Contradictory inventory
-    // is an early rejection, never a fallback to another peer. Automatic
-    // selection does not re-check at dispatch time — capability changes are
-    // resolved by receiver admission, which is authoritative.
-    if (args.peer && deduped.length > 0) {
-      const { getPeerInventory, hasAllCapabilities } = await import("../peer-transport/peer-inventory.js");
-      if (getPeerInventory(peer) && !hasAllCapabilities(peer, deduped)) {
-        return JSON.stringify({ error: `Peer ${peer} does not have the required capabilities: [${deduped.join(", ")}]` });
-      }
-    }
-
     if (!peer) {
       return JSON.stringify({ error: "No peer specified and none auto-selected" });
     }
