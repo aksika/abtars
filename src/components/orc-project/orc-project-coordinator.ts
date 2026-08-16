@@ -285,6 +285,38 @@ export class OrcProjectCoordinator {
   }
 }
 
+/**
+ * #1671: classify a failed terminal release by reading the run once, after the
+ * CAS was lost. Distinct from `releaseOwnedRun`'s boolean: this turns the
+ * silent "no-op release" into a bounded, testable classification so the Spin
+ * terminal path can log an invariant failure instead of dropping it.
+ */
+export type OrcReleaseFailure =
+  | { kind: "run_unknown" }
+  | { kind: "already_terminal"; state: "released" | "superseded" }
+  | {
+      kind: "rejected_live";
+      state: import("./orc-project-contracts.js").OrcRunState;
+      reason: import("./orc-project-contracts.js").OrcRunReason | "release_rejected";
+    };
+
+export function classifyFailedRelease(
+  store: OrcProjectRunStore,
+  context: OrcInvocationContextV1,
+): OrcReleaseFailure {
+  const row = store.getRun(context.runId);
+  if (!row) return { kind: "run_unknown" as const };
+  if (row.state === "released" || row.state === "superseded") {
+    return { kind: "already_terminal" as const, state: row.state };
+  }
+  const validation = store.validateCurrentContext(context);
+  return {
+    kind: "rejected_live" as const,
+    state: row.state,
+    reason: validation.ok ? ("release_rejected" as const) : validation.reason,
+  };
+}
+
 function defaultRootIdentity(projectCardId: number): OrcRootIdentity {
   try {
     const { kanbanGetCard } = require("../tasks/kanban-board.js");

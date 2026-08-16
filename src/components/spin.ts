@@ -3,7 +3,7 @@
  * Single flat Map<sessionId, ManagedSession>. No bucketing. No PlatformState.
  */
 
-import { logInfo, logWarn, logDebug } from "./logger.js";
+import { logInfo, logWarn, logDebug, logError } from "./logger.js";
 import { logAndSwallow } from "./log-and-swallow.js";
 import { classifyContent } from "./clean-response.js";
 import type { ContentOutcome } from "./clean-response.js";
@@ -1445,12 +1445,15 @@ export class Spin {
         const { getOrCreateOrcCoordinator } = await import("./reconciler.js");
         const coordinator = getOrCreateOrcCoordinator();
         if (coordinator) {
-          coordinator.releaseOwnedRun(session.orcContext, "completed");
+          const released = coordinator.releaseOwnedRun(session.orcContext, "completed");
+          if (!released) this.reportFailedOrcRelease(coordinator.getStore(), session.orcContext);
         } else {
           // #1628: coordinator unavailable — fall back to the direct store
           // release; the boot sweep remains the recovery floor.
           const { OrcProjectRunStore } = await import("./orc-project/orc-project-run-store.js");
-          new OrcProjectRunStore().release(session.orcContext, "completed");
+          const store = new OrcProjectRunStore();
+          const released = store.release(session.orcContext, "completed");
+          if (!released) this.reportFailedOrcRelease(store, session.orcContext);
         }
       } catch (err) { logWarn(TAG, `Orc release error: ${err instanceof Error ? err.message : String(err)}`); }
     }
@@ -1550,12 +1553,15 @@ export class Spin {
         const { getOrCreateOrcCoordinator } = await import("./reconciler.js");
         const coordinator = getOrCreateOrcCoordinator();
         if (coordinator) {
-          coordinator.releaseOwnedRun(session.orcContext, "failed");
+          const released = coordinator.releaseOwnedRun(session.orcContext, "failed");
+          if (!released) this.reportFailedOrcRelease(coordinator.getStore(), session.orcContext);
         } else {
           // #1628: coordinator unavailable — fall back to the direct store
           // release; the boot sweep remains the recovery floor.
           const { OrcProjectRunStore } = await import("./orc-project/orc-project-run-store.js");
-          new OrcProjectRunStore().release(session.orcContext, "failed");
+          const store = new OrcProjectRunStore();
+          const released = store.release(session.orcContext, "failed");
+          if (!released) this.reportFailedOrcRelease(store, session.orcContext);
         }
       } catch (err) { logWarn(TAG, `Orc release error: ${err instanceof Error ? err.message : String(err)}`); }
     }
@@ -1569,6 +1575,28 @@ export class Spin {
 
     this.applyTerminate(session, terminate);
     if (cardId !== undefined) { this.executions.release(spec.type, cardId); this.executions.drainLegacyQueued((request) => this.dispatch(request)); }
+  }
+
+  /**
+   * #1671: a failed terminal release CAS is not silently dropped. Read the run
+   * once and classify: a terminal row is benign idempotency; a still-live row
+   * is a bounded invariant failure with a typed mismatch reason; a missing row
+   * is run_unknown. Diagnostics carry only stable IDs, generations, state, and
+   * reason codes through the redacting logger.
+   */
+  private reportFailedOrcRelease(
+    store: import("./orc-project/orc-project-run-store.js").OrcProjectRunStore,
+    context: import("./orc-project/orc-project-contracts.js").OrcInvocationContextV1,
+  ): void {
+    const { classifyFailedRelease } = require("./orc-project/orc-project-coordinator.js") as typeof import("./orc-project/orc-project-coordinator.js");
+    const failure = classifyFailedRelease(store, context);
+    if (failure.kind === "run_unknown") {
+      logWarn(TAG, `Orc release: run_unknown (run=${context.runId}, project=${context.projectCardId})`);
+    } else if (failure.kind === "already_terminal") {
+      logInfo(TAG, `Orc release: run ${context.runId} already ${failure.state} — benign idempotency`);
+    } else {
+      logError(TAG, `Orc release rejected while live: run=${context.runId} project=${context.projectCardId} project_generation=${context.projectGeneration} ownership_generation=${context.ownershipGeneration} state=${failure.state} reason=${failure.reason}`);
+    }
   }
 
   private releaseSessionTransport(session: ManagedSession): void {

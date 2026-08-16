@@ -8,6 +8,7 @@ import { authorizePeerEgress } from "./orc-project-context.js";
 
 let TEST_HOME: string;
 let CoordinatorType: typeof import("./orc-project-coordinator.js").OrcProjectCoordinator;
+let classifyFailedRelease: typeof import("./orc-project-coordinator.js").classifyFailedRelease;
 
 function cleanHome(dir: string): void {
   if (existsSync(dir)) {
@@ -22,6 +23,7 @@ beforeAll(async () => {
   vi.doMock("../../paths.js", () => ({ abtarsHome: () => TEST_HOME }));
   const mod = await import("./orc-project-coordinator.js");
   CoordinatorType = mod.OrcProjectCoordinator;
+  classifyFailedRelease = mod.classifyFailedRelease;
 });
 
 afterAll(() => {
@@ -269,5 +271,160 @@ describe("OrcProjectCoordinator ownership-released event (#1628)", () => {
 
     expect(h.coordinator.releaseOwnedRun(claim.context, "failed")).toBe(true);
     expect(events).toHaveLength(1); // the second listener still ran
+  });
+});
+
+// ── #1671: failed-release classification ──────────────────────────────────────
+
+describe("classifyFailedRelease (#1671)", () => {
+  it("classifies a missing run as run_unknown", () => {
+    const h = makeHarness();
+    const failure = classifyFailedRelease(h.store, {
+      version: 1,
+      runId: "or_nope",
+      intentKey: "contract:999:1",
+      projectCardId: 999,
+      projectGeneration: 1,
+      ownershipGeneration: 1,
+      ownerPeer: "kp",
+      ownerInstanceId: "inst_1",
+      origin: { kind: "local" },
+    });
+    expect(failure).toEqual({ kind: "run_unknown" });
+  });
+
+  it("classifies a released row as already_terminal idempotency", () => {
+    const h = makeHarness();
+    seedProject(h.store, 11);
+    const claim = h.coordinator.scheduleContractAuthoring(11);
+    expect(claim.kind).toBe("claimed");
+    if (claim.kind !== "claimed") return;
+    expect(h.coordinator.releaseOwnedRun(claim.context, "completed")).toBe(true);
+
+    const failure = classifyFailedRelease(h.store, claim.context);
+    expect(failure).toEqual({ kind: "already_terminal", state: "released" });
+  });
+
+  it("classifies a still-live row with a mismatched context as rejected_live with a typed reason", () => {
+    const h = makeHarness();
+    seedProject(h.store, 12);
+    const claim = h.coordinator.scheduleContractAuthoring(12);
+    expect(claim.kind).toBe("claimed");
+    if (claim.kind !== "claimed") return;
+    const bind = h.store.bindExecution(claim.context, "sess_12", "exec_12");
+    expect(bind.ok).toBe(true);
+
+    // a stale context whose execution ID no longer matches the bound run
+    const stale = { ...claim.context, sessionId: "sess_12", executionId: "exec_OTHER" };
+    expect(h.store.release(stale, "completed")).toBe(false);
+
+    const failure = classifyFailedRelease(h.store, stale);
+    expect(failure).toEqual({
+      kind: "rejected_live",
+      state: "running",
+      reason: "execution_mismatch",
+    });
+    // the live row was not mutated by the failed release
+    expect(h.store.getRun(claim.context.runId)?.state).toBe("running");
+  });
+
+  it("classifies a superseded row as already_terminal and never releases it", () => {
+    const h = makeHarness();
+    seedProject(h.store, 13);
+    const claim = h.coordinator.scheduleContractAuthoring(13);
+    expect(claim.kind).toBe("claimed");
+    if (claim.kind !== "claimed") return;
+    expect(h.store.supersede(claim.context.runId, "stale")).toBe(true);
+
+    const failure = classifyFailedRelease(h.store, claim.context);
+    expect(failure).toEqual({ kind: "already_terminal", state: "superseded" });
+    expect(h.store.getRun(claim.context.runId)?.state).toBe("superseded");
+  });
+});
+
+// ── #1671: global-progress regression (real SQLite) ───────────────────────────
+
+describe("#1671 global progress (real SQLite)", () => {
+  it("releases A before the ownership event and promotes B after a successful terminal", () => {
+    const h = makeHarness();
+    seedProject(h.store, 21);
+    seedProject(h.store, 22);
+    const events: import("./orc-project-contracts.js").OrcOwnershipReleasedV1[] = [];
+    const observedAtEvent: string[] = [];
+    h.coordinator.onOwnershipReleased((e) => {
+      observedAtEvent.push(h.store.getRun(e.runId)?.state ?? "missing");
+      events.push(e);
+    });
+
+    // claim A and B: A takes the global slot (dispatching), B stays scheduled
+    const a = h.coordinator.scheduleContractAuthoring(21);
+    expect(a.kind).toBe("claimed");
+    const b = h.coordinator.scheduleContractAuthoring(22);
+    expect(b.kind).toBe("claimed");
+    expect(h.starts).toHaveLength(1); // only A was promoted
+    if (a.kind !== "claimed" || b.kind !== "claimed") return;
+
+    // bind A to a real session/execution
+    const bind = h.store.bindExecution(a.context, "sess_21", "exec_21");
+    expect(bind.ok).toBe(true);
+    const boundContext = { ...a.context, sessionId: "sess_21", executionId: "exec_21" };
+
+    // terminal release through the coordinator
+    const released = h.coordinator.releaseOwnedRun(boundContext, "completed");
+    expect(released).toBe(true);
+
+    // A is durable-terminal BEFORE the ownership listener saw it
+    expect(h.store.getRun(a.context.runId)?.state).toBe("released");
+    expect(observedAtEvent).toEqual(["released"]);
+    expect(events).toHaveLength(1);
+
+    // B acquires the global slot after release
+    expect(h.store.getRun(b.context.runId)?.state).toBe("scheduled");
+    h.store.pump();
+    expect(h.store.getRun(b.context.runId)?.state).toBe("dispatching");
+  });
+
+  it("promotes B after a failed terminal execution too", () => {
+    const h = makeHarness();
+    seedProject(h.store, 23);
+    seedProject(h.store, 24);
+    const events: import("./orc-project-contracts.js").OrcOwnershipReleasedV1[] = [];
+    h.coordinator.onOwnershipReleased((e) => events.push(e));
+
+    const a = h.coordinator.scheduleContractAuthoring(23);
+    const b = h.coordinator.scheduleContractAuthoring(24);
+    expect(a.kind).toBe("claimed");
+    expect(b.kind).toBe("claimed");
+    if (a.kind !== "claimed" || b.kind !== "claimed") return;
+
+    const bind = h.store.bindExecution(a.context, "sess_23", "exec_23");
+    expect(bind.ok).toBe(true);
+    const boundContext = { ...a.context, sessionId: "sess_23", executionId: "exec_23" };
+
+    expect(h.coordinator.releaseOwnedRun(boundContext, "failed")).toBe(true);
+    expect(h.store.getRun(a.context.runId)?.state).toBe("released");
+    expect(events).toHaveLength(1);
+    expect(events[0]!.outcome).toBe("failed");
+
+    h.store.pump();
+    expect(h.store.getRun(b.context.runId)?.state).toBe("dispatching");
+  });
+
+  it("a stale live context can never release the row nor emit an ownership event", () => {
+    const h = makeHarness();
+    seedProject(h.store, 25);
+    const events: import("./orc-project-contracts.js").OrcOwnershipReleasedV1[] = [];
+    h.coordinator.onOwnershipReleased((e) => events.push(e));
+
+    const a = h.coordinator.scheduleContractAuthoring(25);
+    expect(a.kind).toBe("claimed");
+    if (a.kind !== "claimed") return;
+    const bind = h.store.bindExecution(a.context, "sess_25", "exec_25");
+    expect(bind.ok).toBe(true);
+
+    const stale = { ...a.context, sessionId: "sess_25", executionId: "exec_OTHER" };
+    expect(h.coordinator.releaseOwnedRun(stale, "completed")).toBe(false);
+    expect(h.store.getRun(a.context.runId)?.state).toBe("running");
+    expect(events).toHaveLength(0);
   });
 });
