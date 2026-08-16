@@ -66,13 +66,18 @@ describe("validateTaskFile", () => {
   it("returns ok with zero findings for a valid file and matching package tree", () => {
     mkdirSync(join(taskRoot, "valid-one"), { recursive: true });
     writeFileSync(join(taskRoot, "valid-one", "TASK.md"), "# TASK\nDo the thing.\n");
-    const p = writeTasks([validAgent("valid-one", { taskFile: join(taskRoot, "valid-one", "TASK.md") })]);
+    mkdirSync(join(taskRoot, "..package"), { recursive: true });
+    writeFileSync(join(taskRoot, "..package", "TASK.md"), "# TASK\nDot package.\n");
+    const p = writeTasks([
+      validAgent("valid-one", { taskFile: join(taskRoot, "valid-one", "TASK.md") }),
+      validAgent("dot-package", { taskFile: join(taskRoot, "..package", "TASK.md") }),
+    ]);
 
     const result = validateTaskFile(p);
     expect(result.ok).toBe(true);
     expect(result.findings).toEqual([]);
     expect(result.path).toBe(p);
-    expect(result.summary).toEqual({ entryCount: 1, validEntryCount: 1, findingCount: 0 });
+    expect(result.summary).toEqual({ entryCount: 2, validEntryCount: 2, findingCount: 0 });
   });
 
   it("accumulates all findings in deterministic order across one document", () => {
@@ -149,6 +154,19 @@ describe("validateTaskFile", () => {
       { code: "file_missing", message: `task file not found: ${join(taskRoot, "tasks.json")}`, path: join(taskRoot, "tasks.json") },
     ]);
     expect(result.summary.entryCount).toBe(0);
+  });
+
+  it("reports file_unreadable when the document parent cannot be read", () => {
+    if (typeof process.getuid === "function" && process.getuid() === 0) return;
+    const p = join(taskRoot, "tasks.json");
+    writeFileSync(p, "[]", "utf-8");
+    try { chmodSync(taskRoot, 0o000); } catch { return; }
+    try {
+      const result = validateTaskFile(p);
+      expect(result.findings.map(f => f.code)).toEqual(["file_unreadable"]);
+    } finally {
+      chmodSync(taskRoot, 0o700);
+    }
   });
 
   it("reports json_invalid for malformed JSON", () => {

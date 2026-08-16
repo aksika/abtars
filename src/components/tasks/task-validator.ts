@@ -1,5 +1,5 @@
-import { existsSync, readFileSync, readdirSync, lstatSync, accessSync, statSync, constants as fsConstants } from "node:fs";
-import { join, resolve, relative, isAbsolute } from "node:path";
+import { readFileSync, readdirSync, lstatSync, accessSync, statSync, constants as fsConstants } from "node:fs";
+import { join, resolve, relative, isAbsolute, sep } from "node:path";
 import { homedir } from "node:os";
 import { abtarsHome } from "../../paths.js";
 import { normalize, isAgentTask } from "./task-types.js";
@@ -54,18 +54,21 @@ interface ValidEntryRef {
  * writes files and never initializes runtime state.
  */
 export function validateTaskFile(path?: string): TaskValidationResult {
-  const resolvedPath = path ? resolve(path.replace(/^~/, homedir())) : join(abtarsHome(), "tasks", "tasks.json");
+  const resolvedPath = path !== undefined
+    ? resolve(path.replace(/^~/, homedir()))
+    : resolve(abtarsHome(), "tasks", "tasks.json");
   const findings: TaskValidationFinding[] = [];
 
-  if (!existsSync(resolvedPath)) {
-    findings.push({ code: "file_missing", message: `task file not found: ${resolvedPath}`, path: resolvedPath });
-    return result(resolvedPath, findings, 0, 0);
-  }
   let rawText: string;
   try {
     rawText = readFileSync(resolvedPath, "utf-8");
-  } catch {
-    findings.push({ code: "file_unreadable", message: `task file not readable: ${resolvedPath}`, path: resolvedPath });
+  } catch (error) {
+    const missing = isMissingError(error);
+    findings.push({
+      code: missing ? "file_missing" : "file_unreadable",
+      message: missing ? `task file not found: ${resolvedPath}` : `task file not readable: ${resolvedPath}`,
+      path: resolvedPath,
+    });
     return result(resolvedPath, findings, 0, 0);
   }
 
@@ -106,46 +109,36 @@ export function validateTaskFile(path?: string): TaskValidationResult {
     valid.push({ entryIndex: i, entry: parsed.entry });
   }
 
-  const taskRoot = join(abtarsHome(), "tasks");
+  const taskRoot = resolve(abtarsHome(), "tasks");
   const referencedPackages = new Set<string>();
   for (const { entryIndex, entry } of valid) {
     if (!isAgentTask(entry)) continue;
     if (entry.taskFile) {
       const resolved = resolveTaskFilePath(entry.taskFile);
-      if (!existsSync(resolved)) {
-        findings.push({
-          code: "task_file_missing",
-          message: `task file not found: ${entry.taskFile}`,
-          entryIndex,
-          entryId: entry.id,
-          configuredPath: entry.taskFile,
-          path: resolved,
-        });
-      } else {
-        try {
-          const stat = statSync(resolved);
-          if (!stat.isFile()) {
-            findings.push({
-              code: "task_file_unreadable",
-              message: `task file is not a regular file: ${entry.taskFile}`,
-              entryIndex,
-              entryId: entry.id,
-              configuredPath: entry.taskFile,
-              path: resolved,
-            });
-          } else {
-            readFileSync(resolved, "utf-8");
-          }
-        } catch {
+      try {
+        const stat = statSync(resolved);
+        if (!stat.isFile()) {
           findings.push({
             code: "task_file_unreadable",
-            message: `task file not readable: ${entry.taskFile}`,
+            message: `task file is not a regular file: ${entry.taskFile}`,
             entryIndex,
             entryId: entry.id,
             configuredPath: entry.taskFile,
             path: resolved,
           });
+        } else {
+          readFileSync(resolved, "utf-8");
         }
+      } catch (error) {
+        const missing = isMissingError(error);
+        findings.push({
+          code: missing ? "task_file_missing" : "task_file_unreadable",
+          message: missing ? `task file not found: ${entry.taskFile}` : `task file not readable: ${entry.taskFile}`,
+          entryIndex,
+          entryId: entry.id,
+          configuredPath: entry.taskFile,
+          path: resolved,
+        });
       }
       const pkg = referencedPackage(taskRoot, resolved);
       if (pkg) referencedPackages.add(pkg);
@@ -153,19 +146,7 @@ export function validateTaskFile(path?: string): TaskValidationResult {
     if (entry.report) {
       for (const f of entry.report.requires.files) {
         const resolved = resolveTaskContractPath(f, entry.id);
-        if (!existsSync(resolved)) {
-          findings.push({
-            code: "required_file_missing",
-            message: `required file not found: ${f}`,
-            entryIndex,
-            entryId: entry.id,
-            configuredPath: f,
-            path: resolved,
-          });
-          continue;
-        }
         try {
-          accessSync(resolved, fsConstants.R_OK);
           const stat = lstatSync(resolved);
           if (!stat.isFile() || stat.isSymbolicLink()) {
             findings.push({
@@ -176,11 +157,14 @@ export function validateTaskFile(path?: string): TaskValidationResult {
               configuredPath: f,
               path: resolved,
             });
+          } else {
+            accessSync(resolved, fsConstants.R_OK);
           }
-        } catch {
+        } catch (error) {
+          const missing = isMissingError(error);
           findings.push({
-            code: "required_file_unreadable",
-            message: `required file not readable: ${f}`,
+            code: missing ? "required_file_missing" : "required_file_unreadable",
+            message: missing ? `required file not found: ${f}` : `required file not readable: ${f}`,
             entryIndex,
             entryId: entry.id,
             configuredPath: f,
@@ -216,18 +200,18 @@ function result(
  *  no realpath canonicalization. */
 function referencedPackage(taskRoot: string, resolvedTaskFile: string): string | undefined {
   const rel = relative(taskRoot, resolvedTaskFile);
-  if (!rel || isAbsolute(rel) || rel.startsWith("..")) return undefined;
-  const first = rel.split("/")[0]!;
+  if (!rel || isAbsolute(rel) || rel === ".." || rel.startsWith(`..${sep}`)) return undefined;
+  const first = rel.split(sep)[0]!;
   if (first === rel) return undefined;
   return first;
 }
 
 function scanOrphanPackages(taskRoot: string, referenced: Set<string>, findings: TaskValidationFinding[]): void {
-  if (!existsSync(taskRoot)) return;
   let entries: Dirent[];
   try {
     entries = readdirSync(taskRoot, { withFileTypes: true });
-  } catch {
+  } catch (error) {
+    if (isMissingError(error)) return;
     findings.push({
       code: "task_packages_unreadable",
       message: `cannot read task package root: ${taskRoot}`,
@@ -244,4 +228,8 @@ function scanOrphanPackages(taskRoot: string, referenced: Set<string>, findings:
       });
     }
   }
+}
+
+function isMissingError(error: unknown): boolean {
+  return typeof error === "object" && error !== null && "code" in error && error.code === "ENOENT";
 }
