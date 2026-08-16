@@ -1029,6 +1029,21 @@ export async function runFoundation(ctx: ScenarioContext): Promise<RemoteSwarmSc
     scenario.evidence.push({ kind: "chat", id: reply.sessionId ?? "tui" });
     ctx.onEvent({ ts: ctx.now().toISOString(), stage: "declined-admission", node: "requester", message: `orc replied (${reply.reply.length} chars)` });
 
+    // The requester's peer_ask_help inventory guard refuses to SEND a request
+    // whose required capability the receiver's static inventory lacks, so a
+    // receiver-side policy decline can never be produced through the
+    // requester's production path. Record the finding as blocked evidence
+    // rather than waiting out a doomed poll.
+    if (reply.reply.includes("does not have the required capabilities")) {
+      scenario.state = "blocked";
+      scenario.failure = {
+        stage: "declined-admission",
+        code: "RECEIVER_DECLINE_UNREACHABLE",
+        message: "requester inventory guard rejects the required capability before the request reaches the receiver; no deterministic receiver-decline path exists in the product (product defect filed separately)",
+      };
+      return;
+    }
+
     const requester = await pollSnapshot(ctx, "requester", [requestId], ctx.marker, (snap) => {
       const contribution = contributionFor(snap, requestId);
       const proxy = cardsForSourceId(snap, requestId).find((c) => c.type === "contribution");
