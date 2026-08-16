@@ -340,5 +340,18 @@ description: No deps
       watcher.generateCatalog();
       expect(readCatalog()).toContain("- [self] needy:");
     });
+
+    it("tracks dependency status by source path when skill names collide", async () => {
+      writeDeclaringSkill("same-name", { "fixture-pkg": "^1.2.3" });
+      const custom = join(skillsDir, "custom", "same-name");
+      mkdirSync(custom, { recursive: true });
+      writeFileSync(join(custom, "SKILL.md"), "---\nname: same-name\ndescription: custom duplicate without deps\n---\n");
+
+      const count = await watcher.prepareAndGenerateCatalog();
+
+      expect(count).toBe(1);
+      expect(readCatalog()).toContain("- [custom] same-name:");
+      expect(readCatalog()).not.toContain("- [self] same-name:");
+    });
   });
 });

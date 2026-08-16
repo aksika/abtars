@@ -40,8 +40,12 @@ const SOURCE_RANK: Record<string, number> = {
 
 /** npm package name: lowercase URL-safe, optional scope. */
 const NPM_NAME_RE = /^(?:@[a-z0-9-~][a-z0-9-._~]*\/)?[a-z0-9-~][a-z0-9-._~]*$/;
-/** Conservative exact semantic version: MAJOR.MINOR.PATCH with optional prerelease/build. */
-const EXACT_VERSION_RE = /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/;
+/**
+ * Exact semantic version: MAJOR.MINOR.PATCH with optional valid
+ * prerelease/build identifiers. Numeric identifiers cannot have leading zeroes
+ * and a prerelease/build suffix cannot be empty.
+ */
+const EXACT_VERSION_RE = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-(?:0|[1-9]\d*|[0-9A-Za-z-]*[A-Za-z-][0-9A-Za-z-]*)(?:\.(?:0|[1-9]\d*|[0-9A-Za-z-]*[A-Za-z-][0-9A-Za-z-]*))*)?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$/;
 
 /** Bounded tail of npm process output kept in diagnostics. */
 const MAX_PROCESS_OUTPUT_CHARS = 2000;
@@ -59,6 +63,8 @@ export interface SkillCandidate {
   rootDir: string;
   /** Absolute path to scripts/package.json when the skill declares one. */
   manifestPath?: string;
+  /** Why an existing manifest could not be safely admitted. */
+  manifestError?: string;
   /**
    * Resolution-probe base when rootDir is not under the dependency root
    * (staged core skills probed from a scratch location under the home).
@@ -171,12 +177,19 @@ export function discoverSkillCandidates(root: string): SkillCandidate[] {
       return;
     }
     if (entries.some(e => e.name === "SKILL.md" && !e.isDir)) {
+      // A symlinked SKILL.md is still a file to Dirent, but it must not make
+      // the catalog or dependency planner read instructions outside the
+      // configured skill root.
+      if (!safelyUnder(rootReal, join(dirReal, "SKILL.md"))) return;
       const manifestPath = join(dirReal, "scripts", "package.json");
+      const manifestExists = existsSync(manifestPath);
+      const safeManifest = manifestExists ? safelyUnder(rootReal, manifestPath) : null;
       out.push({
         name: basename(dirReal),
         source: sourceOfSkill(rootReal, dirReal),
         rootDir: dirReal,
-        ...(existsSync(manifestPath) ? { manifestPath } : {}),
+        ...(safeManifest ? { manifestPath: safeManifest } : {}),
+        ...(manifestExists && !safeManifest ? { manifestError: `manifest path escapes the configured skill root: ${manifestPath}` } : {}),
       });
     }
     for (const e of entries) {
@@ -230,6 +243,7 @@ export function isValidExactVersion(version: string): boolean {
 export function readSkillDependencies(
   candidate: SkillCandidate,
 ): { ok: true; declarations: SkillDependencyDeclaration[] } | { ok: false; error: string } {
+  if (candidate.manifestError) return { ok: false, error: candidate.manifestError };
   if (!candidate.manifestPath) return { ok: true, declarations: [] };
   let raw: string;
   try {
@@ -424,14 +438,20 @@ export function installNpmPackages(
  * Real Node module resolution probe from a nested skill script path. Bare
  * specifiers resolve via parent-directory lookup, reaching
  * $ABTARS_HOME/node_modules from any $ABTARS_HOME/skills/.../scripts dir.
- * import.meta.resolve throws (non-zero exit) when the package cannot be
- * resolved from the nested path.
+ * A real dynamic import throws (non-zero exit) when the package cannot be
+ * resolved or loaded from the nested path. Read-only catalog checks can opt
+ * into import.meta.resolve instead, which validates lookup without executing
+ * dependency code.
  *
  * When the candidate carries a probeDir (staged core skills probed from a
  * scratch location under the home before reconcile), the scratch scripts dir
  * is created first — same parent-directory walk-up mechanism.
  */
-export function probeNestedResolution(skill: SkillCandidate, packageName: string): boolean {
+export function probeNestedResolution(
+  skill: SkillCandidate,
+  packageName: string,
+  options: { load?: boolean } = {},
+): boolean {
   const scriptsDir = join(skill.probeDir ?? skill.rootDir, "scripts");
   if (!existsSync(scriptsDir)) {
     if (!skill.probeDir) return false;
@@ -442,9 +462,12 @@ export function probeNestedResolution(skill: SkillCandidate, packageName: string
     }
   }
   try {
+    const expression = options.load === false
+      ? `import.meta.resolve(${JSON.stringify(packageName)})`
+      : `await import(${JSON.stringify(packageName)})`;
     const r = spawnSync(
       process.execPath,
-      ["--input-type=module", "--eval", `import.meta.resolve(${JSON.stringify(packageName)})`],
+      ["--input-type=module", "--eval", expression],
       { cwd: scriptsDir, stdio: "ignore", timeout: PROBE_TIMEOUT_MS },
     );
     return !r.error && r.status === 0;
@@ -461,11 +484,11 @@ function declareLabels(skill: SkillCandidate, packageName: string, version: stri
 /** Skills (by name+rootDir) owning a given package pin. */
 function skillsOwningPin(
   candidates: SkillCandidate[],
-  plan: SkillDependencyPlan,
+  declarations: readonly SkillDependencyDeclaration[],
   packageName: string,
 ): SkillCandidate[] {
   return candidates.filter(c =>
-    plan.declarations.some(
+    declarations.some(
       d => d.skill.name === c.name && d.skill.rootDir === c.rootDir && d.packageName === packageName,
     ),
   );
@@ -488,7 +511,7 @@ export function readonlyDependencyStatus(home: string, candidate: SkillCandidate
     const installed = directInstalledVersion(home, d.packageName);
     if (installed !== d.version) {
       reasons.push(`"${d.packageName}@${d.version}" not prepared (installed: ${installed ?? "none"}) — run /skill reload`);
-    } else if (!probeNestedResolution(candidate, d.packageName)) {
+    } else if (!probeNestedResolution(candidate, d.packageName, { load: false })) {
       reasons.push(`"${d.packageName}" not resolvable from ${join(candidate.rootDir, "scripts")}`);
     }
   }
@@ -538,16 +561,30 @@ export async function prepareSkillDependencies(
     declarations.push(...read.declarations);
   }
 
-  const validated = validateAndAggregate(declarations);
-  if (!validated.ok) {
+  let plan: SkillDependencyPlan;
+  let declarationsForPlan = declarations;
+  while (true) {
+    const validated = validateAndAggregate(declarationsForPlan);
+    if (validated.ok) {
+      plan = validated.plan;
+      break;
+    }
     if (opts.mode === "strict") fail("invalid_declaration", validated.errors.map(e => e.message).join("; "));
+
+    // In per-skill mode, invalid/conflicting declarations exclude only their
+    // owning skills. Rebuild the plan from unaffected declarations so valid
+    // skills still get their dependencies prepared in this same lifecycle.
     for (const err of validated.errors) {
       for (const skill of err.skills) skipWith(skill, err.message);
     }
-    const ready = candidates.filter(c => !isSkipped(c));
-    return { ready, skipped: [...skipped.values()], installed: [] };
+    const unaffected = declarationsForPlan.filter(d => !isSkipped(d.skill));
+    if (unaffected.length === declarationsForPlan.length) {
+      // Defensive guard: validation errors must always identify their owners.
+      plan = { skills: [], declarations: [], packages: new Map() };
+      break;
+    }
+    declarationsForPlan = unaffected;
   }
-  const plan = validated.plan;
 
   // Determine which pins need work. Exact direct-version match = no-op.
   const allPins: InstalledPin[] = [...plan.packages.entries()].map(([name, version]) => ({ name, version }));
@@ -566,14 +603,14 @@ export async function prepareSkillDependencies(
       const msg = `npm install failed. ${recoveryCommand(home, missing)}${outputSnippet}`;
       if (opts.mode === "strict") fail("install_failed", msg);
       for (const pin of unsatisfied) {
-        for (const skill of skillsOwningPin(candidates, plan, pin.name)) skipWith(skill, msg);
+        for (const skill of skillsOwningPin(candidates, declarationsForPlan, pin.name)) skipWith(skill, msg);
       }
     } else if (unsatisfied.length > 0) {
       // npm exited 0 but a direct version is still wrong — post-install mismatch.
       const msg = `post-install verification failed for ${unsatisfied.map(p => `${p.name}@${p.version}`).join(", ")}. ${recoveryCommand(home, missing)}${outputSnippet}`;
       if (opts.mode === "strict") fail("post_install_mismatch", msg);
       for (const pin of unsatisfied) {
-        for (const skill of skillsOwningPin(candidates, plan, pin.name)) skipWith(skill, msg);
+        for (const skill of skillsOwningPin(candidates, declarationsForPlan, pin.name)) skipWith(skill, msg);
       }
     }
   }
@@ -583,13 +620,13 @@ export async function prepareSkillDependencies(
     if (directInstalledVersion(home, pin.name) !== pin.version) {
       const msg = `declared version "${pin.name}@${pin.version}" is not installed at ${join(home, "node_modules")}. ${recoveryCommand(home, [pin])}`;
       if (opts.mode === "strict") fail("missing_dependency", msg);
-      for (const skill of skillsOwningPin(candidates, plan, pin.name)) skipWith(skill, msg);
+      for (const skill of skillsOwningPin(candidates, declarationsForPlan, pin.name)) skipWith(skill, msg);
     }
   }
 
   // Real nested Node resolution from each declaring skill's scripts dir.
   for (const candidate of candidates) {
-    const owns = plan.declarations.filter(
+    const owns = declarationsForPlan.filter(
       d => d.skill.name === candidate.name && d.skill.rootDir === candidate.rootDir,
     );
     if (owns.length === 0) continue;

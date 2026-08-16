@@ -129,6 +129,30 @@ describe("#1542 — skill dependency inventory", () => {
     rmSync(outside, { recursive: true, force: true });
   });
 
+  it("ignores a SKILL.md symlink that points outside the approved root", () => {
+    const outside = mkdtempSync(join(tmpdir(), "outside-skill-md-"));
+    writeFileSync(join(outside, "SKILL.md"), "# escaped\n");
+    const dir = join(root, "self", "escaped-file");
+    mkdirSync(dir, { recursive: true });
+    symlinkSync(join(outside, "SKILL.md"), join(dir, "SKILL.md"));
+
+    expect(discoverSkillCandidates(root).map(c => c.name)).toEqual([]);
+    rmSync(outside, { recursive: true, force: true });
+  });
+
+  it("reports a package manifest symlink that points outside the approved root", () => {
+    const outside = mkdtempSync(join(tmpdir(), "outside-manifest-"));
+    writeFileSync(join(outside, "package.json"), JSON.stringify({ dependencies: { "escaped-pkg": "1.0.0" } }));
+    const dir = skill("self", "unsafe-manifest", null);
+    mkdirSync(join(dir, "scripts"), { recursive: true });
+    symlinkSync(join(outside, "package.json"), join(dir, "scripts", "package.json"));
+
+    const candidate = discoverSkillCandidates(root).find(c => c.name === "unsafe-manifest");
+    expect(candidate?.manifestError).toContain("escapes");
+    expect(candidate && readSkillDependencies(candidate)).toEqual({ ok: false, error: candidate?.manifestError });
+    rmSync(outside, { recursive: true, force: true });
+  });
+
   it("reports a missing root as an empty inventory", () => {
     expect(discoverSkillCandidates(join(root, "nope"))).toEqual([]);
   });
@@ -185,6 +209,11 @@ describe("#1542 — skill dependency inventory", () => {
     expect(isValidExactVersion("1.2.3")).toBe(true);
     expect(isValidExactVersion("1.2.3-beta.1")).toBe(true);
     expect(isValidExactVersion("1.2.3+build.5")).toBe(true);
+    expect(isValidExactVersion("0.0.0")).toBe(true);
+    expect(isValidExactVersion("01.2.3")).toBe(false);
+    expect(isValidExactVersion("1.2.3-")).toBe(false);
+    expect(isValidExactVersion("1.2.3+")).toBe(false);
+    expect(isValidExactVersion("1.2.3-01")).toBe(false);
     expect(isValidExactVersion("^1.2.3")).toBe(false);
     expect(isValidExactVersion("~1.2.3")).toBe(false);
     expect(isValidExactVersion("1.2.x")).toBe(false);
@@ -286,6 +315,33 @@ describe("#1542 — skill dependency inventory", () => {
     expect(result.skipped[0]!.reasons[0]).toContain("npm install failed");
     expect(result.skipped[0]!.reasons[0]).toContain("npm install --prefix");
     expect(result.skipped[0]!.reasons[0]).toContain("fixture-pkg@1.2.3");
+  });
+
+  it("still prepares unaffected skills when another declaration is invalid", async () => {
+    const bad = skill("downloaded", "bad", { "bad-pkg": "^1.2.3" });
+    const good = skill("self", "good", { "fixture-pkg": "1.2.3" });
+    const badCandidate = { name: "bad", source: "downloaded", rootDir: bad, manifestPath: join(bad, "scripts", "package.json") };
+    const goodCandidate = { name: "good", source: "self", rootDir: good, manifestPath: join(good, "scripts", "package.json") };
+
+    const result = await prepareWith([badCandidate, goodCandidate], "per-skill");
+
+    expect(result.ready.map(c => c.name)).toEqual(["good"]);
+    expect(result.skipped.map(s => s.skill.name)).toEqual(["bad"]);
+    expect(result.installed).toEqual([{ name: "fixture-pkg", version: "1.2.3" }]);
+    expect(directInstalledVersion(home, "fixture-pkg")).toBe("1.2.3");
+  });
+
+  it("excludes every owner when a deduplicated shared pin cannot be installed", async () => {
+    process.env.FAKE_NPM_FAIL = "1";
+    const first = skill("self", "first", { "fixture-pkg": "1.2.3" });
+    const second = skill("custom", "second", { "fixture-pkg": "1.2.3" });
+    const firstCandidate = { name: "first", source: "self", rootDir: first, manifestPath: join(first, "scripts", "package.json") };
+    const secondCandidate = { name: "second", source: "custom", rootDir: second, manifestPath: join(second, "scripts", "package.json") };
+
+    const result = await prepareWith([firstCandidate, secondCandidate], "per-skill");
+
+    expect(result.ready).toEqual([]);
+    expect(result.skipped.map(s => s.skill.name).sort()).toEqual(["first", "second"]);
   });
 
   it("throws before any process mutation in strict mode on install failure", async () => {

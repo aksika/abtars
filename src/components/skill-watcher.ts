@@ -7,8 +7,8 @@
  */
 
 import { logAndSwallow } from "./log-and-swallow.js";
-import { readdirSync, readFileSync, writeFileSync, existsSync } from "node:fs";
-import { join, basename, dirname, resolve } from "node:path";
+import { readdirSync, readFileSync, writeFileSync, existsSync, realpathSync } from "node:fs";
+import { join, basename, dirname, resolve, sep } from "node:path";
 import { execFileSync } from "node:child_process";
 import { homedir } from "node:os";
 import { logInfo, logWarn } from "./logger.js";
@@ -48,7 +48,9 @@ export class SkillWatcher implements ISkillSlot {
   private _skillCache: SkillInfo[] = [];
   /**
    * Dependency-eligibility status from the last async preparation
-   * (#1542). Skill name -> skip reasons (empty/absent = no dependency gate).
+   * (#1542). Candidate root -> skip reasons (empty/absent = no dependency
+   * gate). The path key is required because source groups may contain the same
+   * skill name.
    */
   private _dependencyStatus = new Map<string, string[]>();
 
@@ -64,20 +66,23 @@ export class SkillWatcher implements ISkillSlot {
    * /skill reload — the controlled lifecycle boundaries for npm work.
    */
   async prepareAndGenerateCatalog(): Promise<number> {
+    const candidates = discoverSkillCandidates(this.skillsDir);
     try {
-      const { discoverSkillCandidates, prepareSkillDependencies } = await import("./skill-dependencies.js");
-      const candidates = discoverSkillCandidates(this.skillsDir);
+      const { prepareSkillDependencies } = await import("./skill-dependencies.js");
       const result = await prepareSkillDependencies(candidates, { mode: "per-skill" });
       this._dependencyStatus = new Map<string, string[]>();
-      for (const c of result.ready) this._dependencyStatus.set(c.name, []);
+      for (const c of result.ready) this._dependencyStatus.set(c.rootDir, []);
       for (const s of result.skipped) {
-        this._dependencyStatus.set(s.skill.name, s.reasons);
+        this._dependencyStatus.set(s.skill.rootDir, s.reasons);
         logWarn(TAG, `Skill "${s.skill.name}" (${s.skill.source}) skipped: ${s.reasons.join("; ")}`);
       }
     } catch (err) {
-      // Preparation must never take the catalog down — degraded catalog only.
+      // An unexpected preparation error must not admit declared skills. Keep
+      // the service alive, but leave every discovered candidate excluded until
+      // the next explicit lifecycle retry.
       logAndSwallow(TAG, "prepareSkillDependencies", err);
-      this._dependencyStatus = new Map();
+      const reason = `dependency preparation unavailable: ${err instanceof Error ? err.message : String(err)}`;
+      this._dependencyStatus = new Map(candidates.map(c => [c.rootDir, [reason]]));
     }
     return this.generateCatalog();
   }
@@ -94,6 +99,7 @@ export class SkillWatcher implements ISkillSlot {
     const skipped: string[] = [];
     const cache: SkillInfo[] = [];
     const skillsCfg = this.loadSkillsConfig();
+    const dependencyCandidates = discoverSkillCandidates(this.skillsDir);
     for (const filepath of files) {
       const header = this.parseSkillHeader(filepath);
       if (!header.name) continue;
@@ -109,12 +115,20 @@ export class SkillWatcher implements ISkillSlot {
         }
       }
       const group = this.getSourceDir(filepath).split("/")[0] ?? "core";
-      let depReasons = this._dependencyStatus.get(header.name);
+      const candidate = dependencyCandidates.find(c => {
+        try {
+          return c.rootDir === realpathSync(dirname(filepath));
+        } catch {
+          return false;
+        }
+      });
+      let depReasons = candidate ? this._dependencyStatus.get(candidate.rootDir) : undefined;
       if (depReasons === undefined) {
         // No async preparation for this skill — read-only re-check (#1542):
         // report declared-but-unprepared dependencies without invoking npm.
-        const match = discoverSkillCandidates(this.skillsDir).find(c => c.name === header.name);
-        depReasons = match ? readonlyDependencyStatus(abtarsHome(), match) : [];
+        depReasons = candidate
+          ? readonlyDependencyStatus(abtarsHome(), candidate)
+          : ["skill path is not safely contained by the configured skills root"];
       }
       if (depReasons.length > 0) {
         const reason = `npm deps: ${depReasons.join("; ")}`;
@@ -210,10 +224,22 @@ export class SkillWatcher implements ISkillSlot {
       for (const entry of readdirSync(dir, { withFileTypes: true })) {
         const full = join(dir, entry.name);
         if (entry.isDirectory()) results.push(...this.scanMdFiles(full));
-        else if (entry.name === "SKILL.md") results.push(full);
+        else if (entry.name === "SKILL.md" && this.isSafeSkillPath(full)) results.push(full);
       }
     } catch (err) { logAndSwallow("skill_watcher", "op", err); }
     return results;
+  }
+
+  /** Do not admit a SKILL.md symlink whose target escapes the skills root. */
+  private isSafeSkillPath(filepath: string): boolean {
+    try {
+      const root = realpathSync(this.skillsDir);
+      const real = realpathSync(filepath);
+      const prefix = root.endsWith(sep) ? root : root + sep;
+      return real !== root && real.startsWith(prefix);
+    } catch {
+      return false;
+    }
   }
 
   /**
