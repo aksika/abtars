@@ -37,6 +37,7 @@ abTARS gains Pi superpowers: Pi's provider engine (pi-ai) becomes an optional L1
 Sub-chapters:
 - [TUI (Terminal Interface)](/abtars/pi-tui) — how to use `abtars tui`
 - [pi-ai Providers](/abtars/pi-providers) — enabling Pi-powered providers
+- [Custom Providers (abtars + pi)](/abtars/custom-pi-providers) — add a new API provider end-to-end
 - [Pi Executor](/abtars/pi-executor) — coding delegation via `/pi run`
 
 ## Version policy
