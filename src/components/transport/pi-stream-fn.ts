@@ -9,6 +9,7 @@ import type {
   Usage,
 } from "@earendil-works/pi-ai";
 import { logDebug } from "../logger.js";
+import { logAndSwallow } from "../log-and-swallow.js";
 import type { FallbackPolicy } from "./fallback-policy.js";
 import type { ModelCandidate } from "./model-candidates.js";
 import { candidateKey } from "./model-candidates.js";
@@ -253,7 +254,7 @@ async function* withInactivityTimeout(
     if (abortListener) signal.removeEventListener("abort", abortListener);
     // The provider may ignore abort. Never await its return() here: logical
     // stream timeout must not be coupled to unbounded provider cleanup.
-    try { void Promise.resolve(iterator.return?.()).catch(() => {}); } catch { /* best effort */ }
+    try { void Promise.resolve(iterator.return?.()).catch(err => logAndSwallow(TAG, "provider stream return during teardown", err)); } catch { /* best effort */ }
   }
 }
 

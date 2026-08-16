@@ -161,7 +161,7 @@ export async function getStatus(ctx?: BridgeStatusCtx): Promise<StatusView> {
   try {
     const history: string[] = JSON.parse(readFileSync(paths.releasesHistory, "utf-8"));
     rollbackAvailable = Math.min(history.length - 1, 3);
-  } catch {}
+  } catch { /* history.json may be absent or corrupt; a zero rollback count is the safe display default */ }
 
   // Bridge state from bridge.lock
   const bridgeState = readBridgeLock(ctx?.bridgeLockPath ?? join(home, "bridge.lock"));
@@ -608,7 +608,7 @@ function collectTui(bridgePid: number | null): TuiInfo {
     const envContent = readFileSync(envPath, "utf-8");
     const tuiLine = envContent.split("\n").find(l => l.startsWith("TUI_ENABLED="));
     if (tuiLine) tuiEnabled = !/=(false|0)$/i.test(tuiLine.trim());
-  } catch {}
+  } catch { /* .env may be absent; TUI is enabled by default (#1352) */ }
 
   // #1352: removed onTuiBranch gate — TUI is stable, no need to restrict to dev branches.
   const present = tuiEnabled;
@@ -662,7 +662,7 @@ async function collectRuntime(ctx: BridgeStatusCtx, warnings: string[]): Promise
   try {
     const lock = JSON.parse(readFileSync(ctx.bridgeLockPath, "utf-8")) as Record<string, unknown>;
     if (typeof lock["sleepStatus"] === "string") sleepStatus = lock["sleepStatus"] as string;
-  } catch {}
+  } catch { /* bridge.lock may be absent or partially written; "awake" is the safe display default */ }
 
   // Watchdog
   const wdPidEnv = process.env["ABTARS_WATCHDOG_PID"];
@@ -729,7 +729,7 @@ async function collectRuntime(ctx: BridgeStatusCtx, warnings: string[]): Promise
       hbRunning = hb.isRunning;
       hbInternalTaskCount = hb.getTaskNames().length;
     }
-  } catch {}
+  } catch { /* heartbeat module may be unavailable in a partial boot; the status view falls back to not-running */ }
   const heartbeat: RuntimeView["heartbeat"] = {
     running: hbRunning,
     intervalSec: Math.round(ctx.heartbeatIntervalMs / 1000),
@@ -739,7 +739,7 @@ async function collectRuntime(ctx: BridgeStatusCtx, warnings: string[]): Promise
         if (typeof lock["lastHeartbeat"] === "number") {
           return Math.max(0, Math.round((Date.now() - (lock["lastHeartbeat"] as number)) / 1000));
         }
-      } catch {}
+      } catch { /* bridge.lock may be absent or partially written; the last-tick age falls back to null */ }
       return null;
     })(),
     internalTaskCount: hbInternalTaskCount,
@@ -770,7 +770,7 @@ async function collectRuntime(ctx: BridgeStatusCtx, warnings: string[]): Promise
   try {
     const { abtarsHome } = await import("../paths.js");
     shaPolicyConfigured = existsSync(join(abtarsHome(), "config", "sha-policy.json"));
-  } catch {}
+  } catch { /* abtars home may be unavailable in a partial boot; the flag falls back to false */ }
 
   // Skills
   let skillsActive = 0;
@@ -778,7 +778,7 @@ async function collectRuntime(ctx: BridgeStatusCtx, warnings: string[]): Promise
     const { getSkillCache } = await import("../capabilities/hotskills/index.js");
     const skills = getSkillCache() as unknown as Array<{ skipped?: boolean }>;
     skillsActive = skills.filter(s => !s.skipped).length;
-  } catch {}
+  } catch { /* skills cache may be unavailable in a partial boot; the count falls back to zero */ }
 
   // Soul bundle
   let soulBundle: RuntimeView["soulBundle"] = null;
@@ -905,7 +905,7 @@ function countRuntimeFailures(
     for (const svc of Object.values(states)) {
       if (svc.retrying) n++;
     }
-  } catch {}
+  } catch { /* registry may be unavailable in a partial boot; the retrying count stays as-is */ }
   for (const [, running] of Object.entries(platformStates)) {
     if (!running) n++;
   }

@@ -324,7 +324,7 @@ function executeBash(cmd: string, timeout: number, signal?: AbortSignal, executi
     timeoutTimer = setTimeout(() => {
       timedOut = true;
       child.kill("SIGTERM");
-      setTimeout(() => { try { child.kill("SIGKILL"); } catch {} }, 3000);
+      setTimeout(() => { try { child.kill("SIGKILL"); } catch (err) { if ((err as NodeJS.ErrnoException).code === "ESRCH") return; logAndSwallow(TAG, `force-kill child after timeout`, err); } }, 3000);
     }, timeout);
 
     if (signal) {
@@ -332,7 +332,7 @@ function executeBash(cmd: string, timeout: number, signal?: AbortSignal, executi
         if (timeoutTimer) clearTimeout(timeoutTimer);
         aborted = true;
         child.kill("SIGTERM");
-        setTimeout(() => { try { child.kill("SIGKILL"); } catch {} }, 3000);
+        setTimeout(() => { try { child.kill("SIGKILL"); } catch (err) { if ((err as NodeJS.ErrnoException).code === "ESRCH") return; logAndSwallow(TAG, `force-kill child after abort`, err); } }, 3000);
       };
       signal.addEventListener("abort", onAbort, { once: true });
       child.on("exit", () => signal.removeEventListener("abort", onAbort));
@@ -632,7 +632,7 @@ const memoryRecallTool: ToolDefinition = {
         limit: parseInt(stringValue(args["limit"] ?? "10"), 10),
         maxClassification: userEntry?.maxClass ?? 1,
       });
-      import("../metrics-collector.js").then(({ recordLatency }) => recordLatency("recall", Date.now() - t0)).catch(() => {});
+      import("../metrics-collector.js").then(({ recordLatency }) => recordLatency("recall", Date.now() - t0)).catch(err => logAndSwallow(TAG, "record recall latency", err));
       return JSON.stringify(result);
     } catch (err) {
       return JSON.stringify({ error: err instanceof Error ? err.message : String(err) });

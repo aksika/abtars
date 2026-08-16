@@ -10,7 +10,7 @@
     "dev": "node --import tsx src/main.ts",
     "start": "node dist/main.js",
     "typecheck": "tsc --noEmit && tsc -p tsconfig.scripts.json",
-    "check-imports": "node scripts/check-imports.mjs",
+    "check-imports": "node scripts/check-imports.mjs && node scripts/check-silent-catches.mjs",
     "smoke:deps-standalone": "bash scripts/smoke-deps-standalone.sh",
     "test": "vitest --run --exclude 'src/tests/integration/**' --exclude 'src/tests/e2e/**' --exclude '**/*integration.test.ts' --exclude '**/*e2e.test.ts' --exclude 'src/tests/recovery-redesign.test.ts'",
     "test:watch": "vitest",

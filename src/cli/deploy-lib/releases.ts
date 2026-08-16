@@ -106,7 +106,7 @@ export async function healthProbe(
       if (content.pid !== oldPid && content.lastHeartbeat && content.lastHeartbeat > afterTimestamp) {
         return { healthy: true, pid: content.pid, heartbeat: content.lastHeartbeat };
       }
-    } catch {}
+    } catch { /* bridge.lock may be absent or partially written while the bridge restarts; the probe retries until the deadline */ }
     await new Promise(r => setTimeout(r, 3000));
   }
   return { healthy: false };

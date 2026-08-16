@@ -30,8 +30,7 @@ export function acquireLock(
   while (Date.now() < deadline) {
     try {
       mkdirSync(dir, { recursive: true });
-    } catch {
-    }
+    } catch { /* mkdir may fail transiently (permission/race); the retry loop below owns the outcome */ }
 
     if (!existsSync(dir)) {
       wait(200);
@@ -82,8 +81,7 @@ export function releaseLock(token: string): void {
     if (owner.token === token) {
       rmSync(lockDirPath(), { recursive: true, force: true });
     }
-  } catch {
-  }
+  } catch { /* the lock may already be gone or corrupt; releasing is best-effort */ }
 }
 
 function parseOwner(): LockOwner | null {

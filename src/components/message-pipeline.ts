@@ -296,12 +296,12 @@ export async function handleInboundMessage(
           if (!effectiveSession.transport) await spin.ensureSessionTransport(effectiveSession);
         } catch (fallbackErr) {
           logWarn(TAG, `A fallback transport attach failed for ${effectiveSessionId}: ${fallbackErr instanceof Error ? fallbackErr.message : String(fallbackErr)}`);
-          await adapter.sendMessage(msg.channelId, `⚠️ ${fallbackErr instanceof Error ? fallbackErr.message : String(fallbackErr)}`, { threadId: msg.threadId }).catch(() => {});
+          await adapter.sendMessage(msg.channelId, `⚠️ ${fallbackErr instanceof Error ? fallbackErr.message : String(fallbackErr)}`, { threadId: msg.threadId }).catch(err => logAndSwallow(TAG, `send fallback-transport error notice to ${msg.channelId}`, err));
           return;
         }
       } else {
         logWarn(TAG, `ensureSessionTransport failed for ${effectiveSessionId}: ${err instanceof Error ? err.message : String(err)}`);
-        await adapter.sendMessage(msg.channelId, `⚠️ ${err instanceof Error ? err.message : String(err)}`, { threadId: msg.threadId }).catch(() => {});
+        await adapter.sendMessage(msg.channelId, `⚠️ ${err instanceof Error ? err.message : String(err)}`, { threadId: msg.threadId }).catch(err2 => logAndSwallow(TAG, `send transport error notice to ${msg.channelId}`, err2));
         return;
       }
     }
@@ -555,7 +555,7 @@ export async function handleInboundMessage(
     // unhandled rejection during those awaits and crashes the bridge. Marking the promise
     // handled here: the real rejection still propagates when `await responsePromise` runs
     // and is caught by this try/catch, which renders the graceful error to the user.
-    void responsePromise.catch(() => {});
+    void responsePromise.catch(() => { /* rejection still propagates to the `await` below and is handled by the enclosing try/catch; this pre-attach only prevents unhandled-rejection surfacing during the overlap */ });
 
     // --- Typing + reaction ---
     if (!isVoice && adapter.setReaction && msg.messageId) {

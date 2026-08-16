@@ -16,6 +16,9 @@ import { SupervisedPiRpcClient } from "./pi-rpc-client.js";
 import { buildChildEnv, buildTrustArgs, resolveAndValidateWorkspace, validatePersistedSession, validateSessionFile, type PiExecutorConfig, type SessionProof } from "./config.js";
 import { basename } from "node:path";
 import { accessSync, constants, lstatSync } from "node:fs";
+import { logAndSwallow } from "../log-and-swallow.js";
+
+const TAG = "pi-runtime-host";
 
 /** Memory mode for a Pi child process. `none` disables abmind hooks and
  * correlation env (#1635 R5); the default keeps `/pi run`'s existing env. */
@@ -141,7 +144,7 @@ export class PiRuntimeHost {
     try {
       await client.launch(this.config_.command, args, ws.canonicalPath, env);
     } catch (err) {
-      await client.close().catch(() => {});
+      await client.close().catch(closeErr => logAndSwallow(TAG, "close client after launch failure", closeErr));
       return { ok: false, error: `Launch failed: ${err instanceof Error ? err.message : String(err)}` };
     }
     return { ok: true, client, canonicalPath: ws.canonicalPath };

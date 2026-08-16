@@ -20,6 +20,7 @@ import type { PiCodingProjectionSink } from "../../components/pi-executor/pi-cod
 import type { PiCodingSessionStore } from "../../components/pi-executor/pi-coding-session-store.js";
 import type { TelegramApi } from "./telegram-api.js";
 import { logWarn } from "../../components/logger.js";
+import { logAndSwallow } from "../../components/log-and-swallow.js";
 import { randomUUID } from "node:crypto";
 
 const TAG = "telegram-coding";
@@ -80,14 +81,14 @@ export async function handleCodingCallback(data: string, chatId: number): Promis
   const token = data.slice("coding:".length);
   const pending = callbackTokens.get(token);
   if (!pending) {
-    if (api) await api.sendMessage(chatId, "Pi control expired — the request is no longer pending.").catch(() => {});
+    if (api) await api.sendMessage(chatId, "Pi control expired — the request is no longer pending.").catch(err => logAndSwallow(TAG, `send expired-control notice to ${chatId}`, err));
     return true;
   }
   callbackTokens.delete(token);
   const ok = await callbackHandler(pending.sessionId, pending.requestId, pending.value, chatId);
   if (ok) clearRequestTokens(pending.sessionId, pending.requestId);
   if (!ok && api) {
-    await api.sendMessage(chatId, "Pi control expired — the request is no longer pending.").catch(() => {});
+    await api.sendMessage(chatId, "Pi control expired — the request is no longer pending.").catch(err => logAndSwallow(TAG, `send expired-control notice to ${chatId}`, err));
   }
   return true;
 }

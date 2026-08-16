@@ -6,6 +6,7 @@
  */
 
 import { logWarn } from "../components/logger.js";
+import { logAndSwallow } from "../components/log-and-swallow.js";
 import { readFileSync } from "node:fs";
 import type { BootCtx, PhaseResult } from "./context.js";
 import type { Bridge } from "../bridge-app.js";
@@ -15,11 +16,11 @@ export async function phaseShutdown(ctx: BootCtx, bridge: Bridge): Promise<Phase
     if (signal) {
       // Log forensics: who might have sent it
       let parent = "";
-      try { parent = readFileSync(`/proc/${process.ppid}/cmdline`, "utf-8").replace(/\0/g, " ").trim(); } catch {}
+      try { parent = readFileSync(`/proc/${process.ppid}/cmdline`, "utf-8").replace(/\0/g, " ").trim(); } catch { /* parent may have exited (ESRCH) or /proc may be unavailable; an empty forensic parent string is acceptable */ }
       logWarn("main", `${signal} received (pid=${process.pid} ppid=${process.ppid} parent="${parent}")`);
     }
     if (ctx.sandboxEnabled) {
-      import("../components/sandbox-runtime.js").then(m => m.killAllSandboxes()).catch(() => {});
+      import("../components/sandbox-runtime.js").then(m => m.killAllSandboxes()).catch(err => logAndSwallow("main", "sandbox cleanup during shutdown", err));
     }
     bridge.requestShutdown(code);
   };

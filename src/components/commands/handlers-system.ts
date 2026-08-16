@@ -185,7 +185,7 @@ export async function handleHealing(text: string, ctx: CommandContext): Promise<
     const fixes = loadFixes();
     if (fixes.length === 0) { await ctx.reply("🩺 No fix rules configured."); return true; }
     let state: Record<string, { totalRuns?: number }> = {};
-    try { state = JSON.parse(readFileSync(join(process.env["ABTARS_HOME"] || join(process.env["HOME"] || "~", ".abtars"), "state", "sha-state.json"), "utf-8")); } catch {}
+    try { state = JSON.parse(readFileSync(join(process.env["ABTARS_HOME"] || join(process.env["HOME"] || "~", ".abtars"), "state", "sha-state.json"), "utf-8")); } catch { /* sha-state.json may be absent on first run or transiently corrupt; the listing falls back to zero runs */ }
     const lines = fixes.map(f => {
       const v = f.verified === false ? " ⚠️" : "";
       const src = f.createdAt ? "(self)" : "(core)";
@@ -616,7 +616,7 @@ export async function runNpmUpdate(
       ? `x Update timed out after 180s:\n${tail}`
       : "x Update timed out after 180s";
     logWarn("update", `npm ${channel} timed out`);
-    ctx.reply(msg).catch(() => {});
+    ctx.reply(msg).catch(err => logAndSwallow("update", "reply update timeout notice", err));
   }, 180_000);
 
   child.on("error", (err) => {
@@ -626,7 +626,7 @@ export async function runNpmUpdate(
     const code = (err as NodeJS.ErrnoException).code;
     const msg = `x Update failed to start${code ? ` (${code})` : ""}: ${err.message}`;
     logWarn("update", `npm ${channel} spawn error: ${err.message}`);
-    ctx.reply(msg).catch(() => {});
+    ctx.reply(msg).catch(err2 => logAndSwallow("update", "reply update spawn-error notice", err2));
   });
 
   child.on("close", (code, signal) => {
@@ -637,9 +637,9 @@ export async function runNpmUpdate(
     if (code === 0) return;
 
     if (code !== null && code !== 0) {
-      ctx.reply(`x Update failed (exit ${code}):\n${stderr.slice(-300)}`).catch(() => {});
+      ctx.reply(`x Update failed (exit ${code}):\n${stderr.slice(-300)}`).catch(err => logAndSwallow("update", "reply update exit-failure notice", err));
     } else if (code === null && signal) {
-      ctx.reply(`x Update terminated (signal ${signal})`).catch(() => {});
+      ctx.reply(`x Update terminated (signal ${signal})`).catch(err => logAndSwallow("update", "reply update signal notice", err));
     }
   });
 
@@ -707,11 +707,11 @@ export async function handleSoftware(_text: string, ctx: CommandContext): Promis
       // else → exit code + stderr tail. Closes the class where ENOENT used to
       // route to the success branch.
       if (code === 0) {
-        ctx.reply("+ abmind update complete — check /software").catch(() => {});
+        ctx.reply("+ abmind update complete — check /software").catch(err => logAndSwallow("update", "reply abmind update success", err));
       } else if (code === null && !stderr) {
-        ctx.reply("x abmind update failed: binary not found. Check `abmind --version` on this host, or set ABMIND_PATH.").catch(() => {});
+        ctx.reply("x abmind update failed: binary not found. Check `abmind --version` on this host, or set ABMIND_PATH.").catch(err => logAndSwallow("update", "reply abmind binary-not-found notice", err));
       } else {
-        ctx.reply(`x abmind update failed (exit ${code}):\n${stderr.slice(-300)}`).catch(() => {});
+        ctx.reply(`x abmind update failed (exit ${code}):\n${stderr.slice(-300)}`).catch(err => logAndSwallow("update", "reply abmind update failure", err));
       }
     });
     return true;

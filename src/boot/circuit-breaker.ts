@@ -3,6 +3,7 @@ import { join } from "node:path";
 import { resolveAbtarsHome, resolveReleasesDir } from "../cli/deploy-lib/paths.js";
 import { readSupervisorState, resetRestartCount } from "../supervisor/state.js";
 import { activateRelease } from "../cli/deploy-lib/activate.js";
+import { logAndSwallow } from "../components/log-and-swallow.js";
 
 const MAX_DEATHS = 4;
 
@@ -26,12 +27,12 @@ export function checkCircuitBreaker(): void {
   if (restartCount < MAX_DEATHS) return;
 
   let history: string[] = [];
-  try { history = JSON.parse(readFileSync(historyFile, "utf-8")); } catch {}
+  try { history = JSON.parse(readFileSync(historyFile, "utf-8")); } catch { /* history file may be absent or corrupt; an empty history falls through to the rollback-unavailable path below */ }
 
   if (history.length < 2) {
     console.error("[circuit-breaker] No previous release to roll back to — continuing anyway");
     resetRestartCount(home, "rollback-unavailable");
-    try { writeFileSync(join(home, "rollback-history-missing"), new Date().toISOString() + "\n"); } catch {}
+    try { writeFileSync(join(home, "rollback-history-missing"), new Date().toISOString() + "\n"); } catch (err) { logAndSwallow("circuit-breaker", "record rollback-history-missing marker", err); }
     return;
   }
 
@@ -40,7 +41,7 @@ export function checkCircuitBreaker(): void {
   if (!existsSync(targetDir)) {
     console.error(`[circuit-breaker] history[1] dir ${target} not found — continuing anyway`);
     resetRestartCount(home, "rollback-target-missing");
-    try { writeFileSync(join(home, "rollback-target-missing"), new Date().toISOString() + " " + target + "\n"); } catch {}
+    try { writeFileSync(join(home, "rollback-target-missing"), new Date().toISOString() + " " + target + "\n"); } catch (err) { logAndSwallow("circuit-breaker", "record rollback-target-missing marker", err); }
     return;
   }
 

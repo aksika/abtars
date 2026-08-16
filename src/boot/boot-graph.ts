@@ -47,7 +47,7 @@ export async function bootGraph(nodes: BootNode[], ctx: BootCtx): Promise<BootRe
       }
       for (const dep of node.optionalDeps ?? []) {
         const depNode = nodeMap.get(dep);
-        if (depNode) await resolve(depNode).catch(() => {});
+        if (depNode) await resolve(depNode).catch(() => { /* optional-dep subtree failed — already recorded in the report; the optional-node contract must not block this node */ });
       }
       const t0 = Date.now();
       logTrace("boot", `${node.name}: deps satisfied, executing (optional=${node.optional})`);

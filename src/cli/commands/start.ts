@@ -25,11 +25,11 @@ export async function start(): Promise<number> {
     if (process.platform === "darwin") {
       const plistPath = join(homedir(), "Library", "LaunchAgents", "com.abtars.watchdog.plist");
       const uid = `gui/${process.getuid!()}`;
-      try { execFileSync("launchctl", ["bootstrap", uid, plistPath], { timeout: 5000 }); } catch {}
+      try { execFileSync("launchctl", ["bootstrap", uid, plistPath], { timeout: 5000 }); } catch { /* watchdog plist may already be loaded; bootstrap is idempotent */ }
     } else {
-      try { execFileSync("systemctl", ["--user", "unmask", "abtars-watchdog"], { timeout: 5000 }); } catch {}
-      try { execFileSync("systemctl", ["--user", "enable", "abtars-watchdog"], { timeout: 5000 }); } catch {}
-      try { execFileSync("systemctl", ["--user", "start", "abtars-watchdog"], { timeout: 5000 }); } catch {}
+      try { execFileSync("systemctl", ["--user", "unmask", "abtars-watchdog"], { timeout: 5000 }); } catch { /* unit may not be masked; unmask is idempotent */ }
+      try { execFileSync("systemctl", ["--user", "enable", "abtars-watchdog"], { timeout: 5000 }); } catch { /* unit may already be enabled; enable is idempotent */ }
+      try { execFileSync("systemctl", ["--user", "start", "abtars-watchdog"], { timeout: 5000 }); } catch { /* unit may already be started; the watchdog startup is best-effort */ }
     }
     process.stdout.write(`+ Service loaded. Watchdog starting...\n`);
     return 0;

@@ -1,6 +1,9 @@
 import type { AbmindClientLike } from "../../components/abmind-client-contract.js";
 import { getEnv } from "../../components/env-schema.js";
 import { logInfo, logWarn, logError } from "../../components/logger.js";
+import { logAndSwallow } from "../../components/log-and-swallow.js";
+
+const TAG = "sleep";
 import { writeSleepStatus } from "../../components/transport/bridge-lock-transport.js";
 import { startSleepCard, type SleepCard } from "./sleep-card.js";
 import type { CapabilityApi } from "../capability.js";
@@ -168,7 +171,7 @@ async function runUntilDeadline<T>(operation: () => Promise<T> | T, deadlineAt: 
   const operationPromise = Promise.resolve().then(operation);
   const remainingMs = deadlineAt - Date.now();
   if (remainingMs <= 0) {
-    void operationPromise.catch(() => {});
+    void operationPromise.catch(err => logAndSwallow(TAG, "deadline-expired operation", err));
     return { kind: "timed_out" };
   }
   return runWithAbsoluteDeadline(operationPromise, remainingMs);
@@ -198,7 +201,7 @@ export function createSleepHandle(opts: SleepOpts): SleepHandle {
     try {
       const pending = opts.quarantineSession?.(sessionId, reason);
       if (pending && typeof (pending as Promise<void>).catch === "function") {
-        void (pending as Promise<void>).catch(() => {});
+        void (pending as Promise<void>).catch(err => logAndSwallow(TAG, "quarantine night session during termination", err));
       }
     } catch { /* local termination still proceeds */ }
     nightSessionId = undefined;

@@ -3,6 +3,9 @@ import { createInterface } from "node:readline";
 import { EventEmitter } from "node:events";
 import type { AcpResponse, AcpNotification, AcpMessage } from "../../types/index.js";
 import { serialize, parse, buildRequest } from "./jsonrpc.js";
+import { logAndSwallow } from "../log-and-swallow.js";
+
+const TAG = "acp-client";
 
 export type AcpClientEvents = {
   notification: [AcpNotification];
@@ -112,7 +115,7 @@ export class AcpClient extends EventEmitter<AcpClientEvents> {
       this.process.kill("SIGTERM");
       this.process = null;
       this.initialized = false;
-      if (pid) setTimeout(() => { try { process.kill(pid, "SIGKILL"); } catch {} }, 2000).unref();
+      if (pid) setTimeout(() => { try { process.kill(pid, "SIGKILL"); } catch (err) { if ((err as NodeJS.ErrnoException).code === "ESRCH") return; logAndSwallow(TAG, `force-kill child ${pid} after SIGTERM`, err); } }, 2000).unref();
     }
   }
 

@@ -26,7 +26,7 @@ type LogCursor = {
 function logShaCall(errorKey: string, errorLine: string): void {
   const logPath = join(abtarsHome(), "logs", "sha-call.log");
   const entry = JSON.stringify({ ts: localISO(), errorKey, errorLine: errorLine.slice(0, 300) });
-  try { appendFileSync(logPath, entry + "\n"); } catch {}
+  try { appendFileSync(logPath, entry + "\n"); } catch (err) { logAndSwallow(TAG, "append sha-call log", err); }
 }
 
 function logAutoFix(message: string): void {
@@ -37,7 +37,7 @@ function logAutoFix(message: string): void {
 }
 
 function notify(adapter: TelegramAdapter, chatId: string, msg: string): void {
-  try { adapter.sendNotification(chatId, msg); } catch {}
+  try { adapter.sendNotification(chatId, msg); } catch (err) { logAndSwallow(TAG, `send self-heal notification to ${chatId}`, err, "warn"); }
 }
 
 export function createSelfHealerTask(
@@ -148,7 +148,7 @@ export function createSelfHealerTask(
         logCursor.partial = raw.slice(lastNewline + 1);
         return complete;
       } finally {
-        try { closeSync(fd); } catch {}
+        try { closeSync(fd); } catch (err) { logAndSwallow(TAG, "close log file descriptor", err); }
       }
     } catch {
       logCursor = null;
@@ -215,7 +215,7 @@ function handleUnknownFault(errorLine: string, errorKey: string, adapter: Telegr
     try {
       mkdirSync(join(abtarsHome(), "src"), { recursive: true });
       execSync(`git clone -b dev git@github.com:aksika/abtars.git "${srcDir}"`, { timeout: 60_000, stdio: "ignore" });
-    } catch {}
+    } catch (err) { logAndSwallow(TAG, "clone source tree for self-heal", err, "warn"); }
   }
 
   const prompt = `A runtime error occurred:\n"${errorLine.slice(0, 500)}"\n\nBefore investigating, check ~/.abtars/logs/sha-call.log for prior entries matching this error pattern.\nIf you find a PREVIOUS entry with a similar error pattern:\n  - This is a recurring fault you could not eliminate last time.\n  - Add a suppress rule to ~/.abtars/config/sha-policy-self.json (read existing file, append to fixes array):\n    {"pattern": "<plain substring from the error line>", "action": "suppress"}\n    Pattern is matched via substring (includes), NOT regex. Use a distinctive fragment.\n  - Report: "Recurring unfixable fault — suppressed."\n  - Do NOT attempt a fix.\n\nOtherwise, diagnose and fix it. After fixing:\n1. Report what you did (1 paragraph)\n2. If this error is likely to recur and you found a deterministic fix, write a wired rule to ~/.abtars/config/sha-policy-self.json:\n   {"pattern": "<substring>", "action": "run", "command": [...], "cooldownMin": 30}\n   Pattern is matched via substring (includes), NOT regex.\n   If the error was a one-off or no reliable automated fix exists, skip this step.\n\nIf you cannot find the root cause in the source code, tell the user:\n"This may be fixed in a newer version. Try /update to get the latest."

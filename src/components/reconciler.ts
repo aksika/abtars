@@ -8,6 +8,7 @@ import {
   isUnblocked, cascadeFail, resolveRootId, type KanbanCard,
 } from "./tasks/kanban-board.js";
 import { logInfo, logWarn, logError } from "./logger.js";
+import { logAndSwallow } from "./log-and-swallow.js";
 import {
   ReconcileQuarantineStore,
   reconcileErrorSignature,
@@ -231,7 +232,7 @@ export async function abortProjectById(projectId: number, reason: string): Promi
 function scheduleOrcReview(generation: ReconcilerGeneration, projectId: number, projectGeneration: number, caseId: string, requestId: string): void {
   const result = generation.deps.coordinator.scheduleReview(projectId, projectGeneration, caseId);
   if (result.kind === "claimed" || result.kind === "idempotent") {
-    try { (new ProjectReviewStore()).bumpReviewRequestAttempt(requestId); } catch {}
+    try { (new ProjectReviewStore()).bumpReviewRequestAttempt(requestId); } catch (err) { logAndSwallow(TAG, `bump review request attempt ${requestId}`, err); }
   }
 }
 
@@ -339,7 +340,7 @@ function settleAuthoringExhausted(
     undefined,
     authority,
   );
-  try { nerve.fire("card:failed", projectId); } catch {}
+  try { nerve.fire("card:failed", projectId); } catch (err) { logAndSwallow(TAG, `fire card:failed for ${projectId}`, err); }
 }
 
 // ── Keyed scheduler (per-card reconciliation) ────────────────────────────────
@@ -972,7 +973,7 @@ async function handleReviewState(generation: ReconcilerGeneration, projectId: nu
       undefined,
       authority,
     );
-    try { nerve.fire("card:failed", projectId); } catch {}
+    try { nerve.fire("card:failed", projectId); } catch (err) { logAndSwallow(TAG, `fire card:failed for ${projectId}`, err); }
   }
 }
 
@@ -1107,7 +1108,7 @@ function settleCoverageBlocked(
     { authority },
   );
   if (blocked) {
-    try { nerve.fire("card:failed", projectId); } catch {}
+    try { nerve.fire("card:failed", projectId); } catch (err) { logAndSwallow(TAG, `fire card:failed for ${projectId}`, err); }
   }
   logWarn(TAG, `Project ${projectId}: coverage gate blocked — ${reason}`);
 }
@@ -1349,7 +1350,7 @@ function dispatchPendingReviewRequests(generation: ReconcilerGeneration): number
   for (const req of pending) {
     const result = generation.deps.coordinator.scheduleReview(req.project_card_id, req.generation, req.review_case_id);
     if (result.kind === "claimed" || result.kind === "idempotent") {
-      try { store.bumpReviewRequestAttempt(req.id); } catch {}
+      try { store.bumpReviewRequestAttempt(req.id); } catch (err) { logAndSwallow(TAG, `bump review request attempt ${req.id}`, err); }
       dispatched++;
     }
   }
@@ -1845,7 +1846,7 @@ async function abortProject(generation: ReconcilerGeneration, projectId: number,
     },
   );
   if (blocked && !opts?.skipRootFail) {
-    try { nerve.fire("card:failed", projectId); } catch {}
+    try { nerve.fire("card:failed", projectId); } catch (err) { logAndSwallow(TAG, `fire card:failed for ${projectId}`, err); }
   }
   const store = new WorkerSupervisionStore();
   for (const card of children) {

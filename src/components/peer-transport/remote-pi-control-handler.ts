@@ -25,6 +25,7 @@ import type { PiRunStore } from "../pi-executor/pi-run-store.js";
 import { buildPublicProjection } from "./remote-pi-projection.js";
 import type { RemotePiEventProducer } from "./remote-pi-event-producer.js";
 import { logInfo, logWarn, logError, logTrace } from "../logger.js";
+import { logAndSwallow } from "../log-and-swallow.js";
 
 const TAG = "remote-pi-control-handler";
 
@@ -447,7 +448,7 @@ export class RemotePiControlHandler {
       // Trigger opportunistic push so the origin sees it promptly.
       try {
         const { getRemotePiDelivery } = await import("./remote-pi-registry.js");
-        getRemotePiDelivery()?.pushEvents(request.run_id, authenticatedPeer.peerName).catch(() => {});
+        getRemotePiDelivery()?.pushEvents(request.run_id, authenticatedPeer.peerName).catch(err => logAndSwallow(TAG, `push events after resume for ${request.run_id}`, err));
       } catch { /* best effort */ }
       const projection = this._buildPublicProjection(resumedRun);
       return {

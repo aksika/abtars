@@ -308,7 +308,7 @@ export class ContributionStore {
 
       if (row.state === "completed" || row.state === "failed") {
         if (row.terminal_event_id === event.event_id && row.terminal_digest === payloadDigest) return "duplicate";
-        try { console.warn(`[contribution-store] conflict: terminal event for settled contribution ${peer}/${event.request_id}`); } catch {}
+        try { console.warn(`[contribution-store] conflict: terminal event for settled contribution ${peer}/${event.request_id}`); } catch { /* console may be closed during shutdown; the conflict warning is best-effort */ }
         return "conflict";
       }
 
@@ -324,7 +324,7 @@ export class ContributionStore {
       }
 
       if (event.sequence <= row.last_sequence) {
-        try { console.warn(`[contribution-store] reorder: sequence ${event.sequence} <= last ${row.last_sequence} for ${peer}/${event.request_id} — rejecting`); } catch {}
+        try { console.warn(`[contribution-store] reorder: sequence ${event.sequence} <= last ${row.last_sequence} for ${peer}/${event.request_id} — rejecting`); } catch { /* console may be closed during shutdown; the reorder warning is best-effort */ }
         return "conflict";
       }
 

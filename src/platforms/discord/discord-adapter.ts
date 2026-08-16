@@ -219,8 +219,8 @@ export class DiscordAdapter implements PlatformAdapter {
 
   private _startTypingLoop(channelId: string): void {
     if (this._typingIntervals.has(channelId)) return;
-    this.api.sendTyping(channelId).catch(() => {});
-    const iv = setInterval(() => { this.api.sendTyping(channelId).catch(() => {}); }, 8000);
+    this.api.sendTyping(channelId).catch(err => logAndSwallow(TAG, `send typing to ${channelId}`, err));
+    const iv = setInterval(() => { this.api.sendTyping(channelId).catch(err => logAndSwallow(TAG, `send typing to ${channelId}`, err)); }, 8000);
     this._typingIntervals.set(channelId, iv);
   }
 

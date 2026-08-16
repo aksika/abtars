@@ -30,6 +30,7 @@ import type { Spin } from "../spin.js";
 import { captureGitEvidence, computeChangedFilesSummary } from "./evidence.js";
 import type { PiUiReply, ResumeCapability } from "./types.js";
 import { logInfo, logWarn, logDebug } from "../logger.js";
+import { logAndSwallow } from "../log-and-swallow.js";
 import type { NativeCodingHandoffInfo } from "../../platforms/tui/tui-protocol.js";
 
 const TAG = "pi-coding";
@@ -1287,7 +1288,7 @@ export class PiCodingSessionService {
   private cancelTurn(owned: OwnedTurn, reason: string): void {
     if (owned.settling) return;
     owned.settling = true;
-    owned.client.abort().catch(() => {});
+    owned.client.abort().catch(err => logAndSwallow(TAG, `abort process for ${owned.sessionId}`, err));
     const graceMs = this.deps.config.abortGraceMs;
     owned.abortTimer = setTimeout(() => {
       if (this.live.get(owned.sessionId) !== owned) return;

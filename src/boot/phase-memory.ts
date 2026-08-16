@@ -18,6 +18,7 @@
  */
 
 import { logInfo, logWarn } from "../components/logger.js";
+import { logAndSwallow } from "../components/log-and-swallow.js";
 import type { BootCtx, PhaseResult } from "./context.js";
 import { loadAbmind } from "../utils/abmind-lazy.js";
 import { createDisabledRuntime, createUnavailableRuntime } from "../components/memory-runtime.js";
@@ -90,7 +91,7 @@ export async function createMemoryRuntimeFromEndpoint(
       assertNegotiatedCapabilities(runtime);
       return { mode: "wss", client, runtime, abmindModule: null };
     } catch (err) {
-      await client.close().catch(() => {});
+      await client.close().catch(closeErr => logAndSwallow("memory", "close WSS client after failed negotiation", closeErr));
       throw new MemoryEndpointUnavailableError(
         wssFailureCode(err),
         err instanceof Error ? err.message : String(err),
@@ -123,7 +124,7 @@ async function buildLocalClient(mod: typeof import("abmind"), socketPath?: strin
       // The client owns a Unix socket before negotiation succeeds — close it
       // so a failed negotiation cannot leak socket/reconnect resources.
       // Reused by `abtars doctor` through createMemoryRuntimeFromEndpoint.
-      await client.close().catch(() => {});
+      await client.close().catch(closeErr => logAndSwallow("memory", "close local client after failed negotiation", closeErr));
       throw err;
     }
   }

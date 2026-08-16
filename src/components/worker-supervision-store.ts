@@ -1,6 +1,7 @@
 import { kanbanTransition, requireTaskDatabase, type TaskDatabase } from "./tasks/kanban-board.js";
 import type { WorkerAcceptanceContractV1, WorkerResultEnvelopeV1 } from "./worker-contract.js";
 import { ExecutorLeaseStore } from "./executor-lease-store.js";
+import { addColumnIfMissing } from "../utils/sqlite-migrate.js";
 import { logSwarmTrace } from "./swarm-trace.js";
 import {
   authorizeActiveProjectWork,
@@ -127,7 +128,7 @@ export class WorkerSupervisionStore {
       if (needsMigration) {
         db.exec(`ALTER TABLE worker_contracts RENAME TO worker_contracts_old`);
         // Drop the old UNIQUE index that conflicts with the new table
-        try { db.exec(`DROP INDEX IF EXISTS sqlite_autoindex_worker_contracts_1`); } catch {}
+        db.exec(`DROP INDEX IF EXISTS sqlite_autoindex_worker_contracts_1`);
       }
     }
 
@@ -227,42 +228,40 @@ export class WorkerSupervisionStore {
       }
     } catch { /* worker_contracts_old does not exist or is empty — skip migration */ }
 
-    // Safe migration: add columns if they don't exist
-    try { db.exec(`ALTER TABLE worker_attempts ADD COLUMN generation INTEGER DEFAULT 1`); } catch {}
-    try { db.exec(`ALTER TABLE worker_attempts ADD COLUMN lifecycle TEXT NOT NULL DEFAULT 'pending'`); } catch {}
-    try { db.exec(`ALTER TABLE worker_attempts ADD COLUMN claimed_at TEXT`); } catch {}
-    try { db.exec(`ALTER TABLE worker_attempts ADD COLUMN hard_deadline_at TEXT`); } catch {}
-    try { db.exec(`ALTER TABLE worker_attempts ADD COLUMN cancel_reason TEXT`); } catch {}
-    try { db.exec(`ALTER TABLE worker_attempts ADD COLUMN source_attempt_id TEXT`); } catch {}
-    try { db.exec(`ALTER TABLE worker_attempts ADD COLUMN retry_directive_id TEXT`); } catch {}
-    try { db.exec(`ALTER TABLE worker_attempts ADD COLUMN earliest_claim_at TEXT`); } catch {}
+    // Safe migration: add columns if they don't exist (duplicate-column failures are expected)
+    addColumnIfMissing(db, "worker_attempts", "generation INTEGER DEFAULT 1");
+    addColumnIfMissing(db, "worker_attempts", "lifecycle TEXT NOT NULL DEFAULT 'pending'");
+    addColumnIfMissing(db, "worker_attempts", "claimed_at TEXT");
+    addColumnIfMissing(db, "worker_attempts", "hard_deadline_at TEXT");
+    addColumnIfMissing(db, "worker_attempts", "cancel_reason TEXT");
+    addColumnIfMissing(db, "worker_attempts", "source_attempt_id TEXT");
+    addColumnIfMissing(db, "worker_attempts", "retry_directive_id TEXT");
+    addColumnIfMissing(db, "worker_attempts", "earliest_claim_at TEXT");
     // #1510: Add budget and usage columns
-    try { db.exec(`ALTER TABLE worker_attempts ADD COLUMN reserved_tokens INTEGER NOT NULL DEFAULT 0`); } catch {}
-    try { db.exec(`ALTER TABLE worker_attempts ADD COLUMN input_tokens INTEGER`); } catch {}
-    try { db.exec(`ALTER TABLE worker_attempts ADD COLUMN output_tokens INTEGER`); } catch {}
-    try { db.exec(`ALTER TABLE worker_attempts ADD COLUMN charged_tokens INTEGER NOT NULL DEFAULT 0`); } catch {}
-    try { db.exec(`ALTER TABLE worker_attempts ADD COLUMN usage_charged_at TEXT`); } catch {}
+    addColumnIfMissing(db, "worker_attempts", "reserved_tokens INTEGER NOT NULL DEFAULT 0");
+    addColumnIfMissing(db, "worker_attempts", "input_tokens INTEGER");
+    addColumnIfMissing(db, "worker_attempts", "output_tokens INTEGER");
+    addColumnIfMissing(db, "worker_attempts", "charged_tokens INTEGER NOT NULL DEFAULT 0");
+    addColumnIfMissing(db, "worker_attempts", "usage_charged_at TEXT");
     // #1638: executor-neutral runtime resource binding (Pi run id/generation).
     // execution_continuity stays a plain TEXT column — SQLite cannot add a
     // CHECK via ADD COLUMN; its 'initial'|'resumed'|'fresh' domain is enforced
     // in the typed store operations below.
-    try { db.exec(`ALTER TABLE worker_attempts ADD COLUMN executor_resource_id TEXT`); } catch {}
-    try { db.exec(`ALTER TABLE worker_attempts ADD COLUMN executor_resource_generation INTEGER`); } catch {}
-    try { db.exec(`ALTER TABLE worker_attempts ADD COLUMN execution_continuity TEXT`); } catch {}
+    addColumnIfMissing(db, "worker_attempts", "executor_resource_id TEXT");
+    addColumnIfMissing(db, "worker_attempts", "executor_resource_generation INTEGER");
+    addColumnIfMissing(db, "worker_attempts", "execution_continuity TEXT");
     // #1644: immutable root project authority (card id, supervision generation,
     // scheduled run id) captured when the attempt is created and copied verbatim
     // to every retry/repair successor. Legacy rows stay NULL; they cannot be
     // claimed or settled as live supervised project work without authority.
-    try { db.exec(`ALTER TABLE worker_attempts ADD COLUMN root_project_card_id INTEGER`); } catch {}
-    try { db.exec(`ALTER TABLE worker_attempts ADD COLUMN root_project_generation INTEGER`); } catch {}
-    try { db.exec(`ALTER TABLE worker_attempts ADD COLUMN scheduled_run_id TEXT`); } catch {}
-    try {
-      db.exec(`
+    addColumnIfMissing(db, "worker_attempts", "root_project_card_id INTEGER");
+    addColumnIfMissing(db, "worker_attempts", "root_project_generation INTEGER");
+    addColumnIfMissing(db, "worker_attempts", "scheduled_run_id TEXT");
+    db.exec(`
         CREATE UNIQUE INDEX IF NOT EXISTS idx_worker_attempt_runtime_generation
         ON worker_attempts(executor_kind, executor_resource_id, executor_resource_generation)
         WHERE executor_resource_id IS NOT NULL
       `);
-    } catch {}
 
     // Backfill lifecycle for rows created before the #1364 state machine.
     db.exec(`

@@ -147,7 +147,7 @@ export async function buildTransport(ctx: BootCtx): Promise<PhaseResult> {
     setTimeout(() => {
       import("../components/notification.js").then(({ sendNotification }) =>
         sendNotification(ctx, `⚠️ transport.json missing, no backup. Running emergency model: ${fb.model}. Fix: /update deploy`))
-        .catch(() => {});
+        .catch(err => logAndSwallow("main", "emergency-mode transport notification", err));
     }, 10_000);
   } else {
     // transport.json valid — walk primary + fb chain
@@ -313,7 +313,7 @@ export async function buildTransport(ctx: BootCtx): Promise<PhaseResult> {
           try {
             const cwd = readlinkSync(`/proc/${pid}/cwd`);
             if (cwd.startsWith(home)) { process.kill(pid, "SIGTERM"); killed++; }
-          } catch {} // dead, no /proc (macOS), or no permission
+          } catch { /* dead, no /proc (macOS), or no permission — all expected and safe */ }
         }
         if (killed) logDebug("main", `CWD-checked kill: ${killed} orphan(s)`);
       } catch { /* best effort */ }

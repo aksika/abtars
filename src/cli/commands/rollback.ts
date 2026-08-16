@@ -12,7 +12,7 @@ function resolveReleaseIdentity(releaseDir: string, target: string): { version: 
   try {
     const pkg = JSON.parse(readFileSync(join(releaseDir, 'package.json'), 'utf-8')) as { version?: string };
     if (typeof pkg.version === 'string' && pkg.version) version = pkg.version;
-  } catch { }
+  } catch { /* package.json may be absent from the release dir; the target string is a safe fallback */ }
   const commit = /^[0-9a-f]{7,40}$/.test(target) ? target : null;
   return { version, commit };
 }
@@ -30,7 +30,7 @@ export async function rollback(opts?: { to?: number }): Promise<number> {
   }
 
   let history: string[] = [];
-  try { history = JSON.parse(readFileSync(historyFile, "utf-8")); } catch {}
+  try { history = JSON.parse(readFileSync(historyFile, "utf-8")); } catch { /* history.json may be absent or corrupt; an empty history falls through to the slot-not-found error below */ }
 
   if (history.length <= slot) {
     process.stderr.write(`Nothing at slot ${slot} (history has ${history.length} entries).\n`);
@@ -69,7 +69,7 @@ export async function rollback(opts?: { to?: number }): Promise<number> {
       state.version = targetVersion;
       state.completedAt = new Date().toISOString();
       writeFileSync(statePath, JSON.stringify(state) + '\n');
-    } catch {}
+    } catch { /* deploy.state may be absent on first boot; the rollback itself already completed */ }
 
     const command = publishCommand(paths.home, "rollback", `rollback:${target}`);
     if (command.result === "busy") {
@@ -90,7 +90,7 @@ export async function rollback(opts?: { to?: number }): Promise<number> {
       if (wdPid && wdPid > 0 && wdIdentity && validateBridgePid(wdPid, wdIdentity, ['abtars-watchdog.sh']).safeToSignal) {
         process.kill(wdPid, 'SIGUSR1');
       }
-    } catch {}
+    } catch { /* bridge.lock may be absent or the processes already gone; the supervisor respawn covers this */ }
 
     process.stdout.write(`+ Bridge killed — WD will respawn from ${target}\n`);
     return 0;

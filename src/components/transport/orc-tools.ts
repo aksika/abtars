@@ -8,6 +8,7 @@
 import type { ToolDefinition, ToolExecutionContext } from "./tool-registry.js";
 import type { SessionDispatch } from "./session-dispatch.js";
 import { logInfo } from "../logger.js";
+import { logAndSwallow } from "../log-and-swallow.js";
 import { logSwarmTrace } from "../swarm-trace.js";
 import { nerve } from "../nerve.js";
 import { REVIEW_PROJECT_PARAMETERS, INVALID_CONTRACT_PROPOSALS_EXHAUSTED } from "../project-acceptance/project-review-contract.js";
@@ -286,7 +287,7 @@ function supervisionSummary(cardId: number): string {
         if (view.closedAt) parts.push(`closed`);
         leaseInfo = ` lease:${parts.join(" ")}`;
       }
-    } catch {}
+    } catch { /* lease view is an optional status enrichment; a store-read failure simply omits it */ }
     // #1365: Retry state
     let retryInfo = "";
     try {
@@ -307,7 +308,7 @@ function supervisionSummary(cardId: number): string {
           if (classification.factors.length > 0) retryInfo += ` factors:${classification.factors.join(",")}`;
         }
       }
-    } catch {}
+    } catch { /* retry state is an optional status enrichment; a store-read failure simply omits it */ }
     return ` [sup: ${totalCriteria} crit, ${settledAttempts}/${attempts.length} attempts, ${latestLifecycle}${leaseInfo}${retryInfo}]`;
   } catch { return ""; }
 }
@@ -329,7 +330,7 @@ function projectSupervisionSummary(cardId: number): string {
       try {
         const card = require("../tasks/kanban-board.js").kanbanGetCard(cardId);
         if (card?.delivered_at) s += ` delivered:${card.delivered_at.slice(0, 10)}`;
-      } catch {}
+      } catch { /* delivered-at is an optional status enrichment; a store-read failure simply omits it */ }
     }
     return ` [${s}]`;
   } catch { return ""; }
@@ -367,7 +368,7 @@ const checkWorkersTool: ToolDefinition = {
           `  [${r.id}] ${r.question.slice(0, 200)} (response kind: ${r.expected_response_kind})`
         ).join("\n");
       }
-    } catch {}
+    } catch { /* pending-input note is an optional status enrichment; a store-read failure simply omits it */ }
 
     if (children.length === 0) return `${header}\nNo workers spawned yet.${inputNote}`;
     const lines = children.map(c => {
@@ -426,7 +427,7 @@ const cancelWorkerTool: ToolDefinition = {
     };
     const cancelled = new WorkerSupervisionStore().cancelProjectChild(cardId, authority, "cancelled by Orc");
     if (!cancelled) return "[err] project mutation rejected: worker cancellation is stale or no longer live";
-    try { nerve.fire("card:failed", cardId); } catch {}
+    try { nerve.fire("card:failed", cardId); } catch (err) { logAndSwallow(TAG, `fire card:failed for ${cardId}`, err); }
     logInfo(TAG, `cancel_worker card:${cardId} (parent:${projectCardId})`);
     return `x Worker #${cardId} cancelled.`;
   },
@@ -631,7 +632,7 @@ const defineProjectContractTool: ToolDefinition = {
             authority,
           );
           if (record.kind === "blocked") {
-            try { nerve.fire("card:failed", cardId); } catch {}
+            try { nerve.fire("card:failed", cardId); } catch (err) { logAndSwallow(TAG, `fire card:failed for ${cardId}`, err); }
             return `✗ Project blocked after ${record.total} invalid proposals.\n${errs}`;
           }
           if (record.kind === "ignored") return "[err] project mutation rejected: contract authoring authority is stale";

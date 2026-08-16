@@ -60,7 +60,7 @@ export function runLaunchctlBootstrap(
           timeout: 5000,
           stdio: ["ignore", "pipe", "pipe"],
         });
-      } catch {}
+      } catch { /* the job may already be absent after the EIO race; the retry below is the source of truth */ }
       result = run();
       if (result.status === 0) {
         return { ok: true };
@@ -273,7 +273,7 @@ export async function deployActivation(
   // Dedup ensures history[1] is always a DIFFERENT commit than history[0],
   // so the circuit-breaker rollback target is never the just-deployed version.
   let history: string[] = [];
-  try { history = JSON.parse(readFileSync(paths.releasesHistory, "utf-8")); } catch {}
+  try { history = JSON.parse(readFileSync(paths.releasesHistory, "utf-8")); } catch { /* history.json may be absent on first deploy; an empty history is the correct start */ }
   const newRef = staged.commit || staged.version;
   history = history.filter(h => h !== newRef);
   history.unshift(newRef);
@@ -353,7 +353,7 @@ export async function deployActivation(
       const bridgePid = bridgeLock && typeof bridgeLock.pid === "number" ? bridgeLock.pid : undefined;
       const bridgeIdentity = bridgeLock && typeof bridgeLock.startIdentity === "string" ? bridgeLock.startIdentity : null;
       if (bridgePid && bridgePid > 0 && bridgeIdentity && validateBridgePid(bridgePid, bridgeIdentity, ["abtars.js", "bundle"]).safeToSignal) {
-        try { process.kill(bridgePid, "SIGTERM"); } catch {}
+        try { process.kill(bridgePid, "SIGTERM"); } catch { /* bridge may already be gone; the L3 watchdog respawn is the safety net */ }
         process.stdout.write(`  x Killing bridge (PID ${bridgePid}) — L3 watchdog will respawn from new release...\n`);
         for (let i = 0; i < 10; i++) {
           await new Promise(r => setTimeout(r, 500));
@@ -373,9 +373,9 @@ export async function deployActivation(
       // 7.1 Stop daemon service (tells WD to exit via service manager)
       if (process.platform === "darwin") {
         const uid = `gui/${process.getuid?.() ?? 501}`;
-        try { execSync(`launchctl bootout ${uid}/com.abtars.watchdog 2>/dev/null`, { stdio: "ignore", timeout: 5000 }); } catch {}
+        try { execSync(`launchctl bootout ${uid}/com.abtars.watchdog 2>/dev/null`, { stdio: "ignore", timeout: 5000 }); } catch { /* watchdog job may not be loaded; bootout is idempotent */ }
       } else {
-        try { execSync("systemctl --user stop abtars-watchdog", { stdio: "ignore", timeout: 5000 }); } catch {}
+        try { execSync("systemctl --user stop abtars-watchdog", { stdio: "ignore", timeout: 5000 }); } catch { /* watchdog unit may not be running; stop is idempotent */ }
       }
 
       // 7.2 Wake the old watchdog; the durable command remains in state for the
@@ -387,7 +387,7 @@ export async function deployActivation(
         if (wdPid && wdPid > 0 && wdIdentity && validateBridgePid(wdPid, wdIdentity, ["abtars-watchdog.sh"]).safeToSignal) {
           process.kill(wdPid, "SIGUSR1");
         }
-      } catch {}
+      } catch { /* bridge.lock may be absent or the watchdog already gone; the wake is best-effort */ }
 
       // 7.3 Kill WD PID explicitly (belt)
       const wdLock = readBridgeLock(join(paths.home, "bridge.lock"));
@@ -395,7 +395,7 @@ export async function deployActivation(
       const wdIdentity = wdLock && typeof wdLock.watchdogStartIdentity === "string" ? wdLock.watchdogStartIdentity : null;
       if (wdPid && wdPid > 0) {
         if (wdIdentity && validateBridgePid(wdPid, wdIdentity, ["abtars-watchdog.sh"]).safeToSignal) {
-          try { process.kill(wdPid, "SIGTERM"); } catch {}
+          try { process.kill(wdPid, "SIGTERM"); } catch { /* watchdog may already be gone; SIGTERM is best-effort */ }
         }
       }
 
@@ -404,7 +404,7 @@ export async function deployActivation(
       const bridgePid = bridgeLock && typeof bridgeLock.pid === "number" ? bridgeLock.pid : undefined;
       const bridgeIdentity = bridgeLock && typeof bridgeLock.startIdentity === "string" ? bridgeLock.startIdentity : null;
       if (bridgePid && bridgePid > 0 && bridgeIdentity && validateBridgePid(bridgePid, bridgeIdentity, ["abtars.js", "bundle"]).safeToSignal) {
-        try { process.kill(bridgePid, "SIGTERM"); } catch {}
+        try { process.kill(bridgePid, "SIGTERM"); } catch { /* bridge may already be gone; SIGTERM is best-effort */ }
         process.stdout.write(`  x Killing bridge (PID ${bridgePid})...\n`);
         for (let i = 0; i < 10; i++) {
           await new Promise(r => setTimeout(r, 500));
@@ -425,7 +425,7 @@ export async function deployActivation(
           const currentWdIdentity = currentWd && typeof currentWd.watchdogStartIdentity === "string" ? currentWd.watchdogStartIdentity : null;
           if (currentWdPid === wdPid && currentWdIdentity &&
               validateBridgePid(wdPid, currentWdIdentity, ["abtars-watchdog.sh"]).safeToSignal) {
-            try { process.kill(wdPid, "SIGKILL"); } catch {}
+            try { process.kill(wdPid, "SIGKILL"); } catch { /* watchdog may already be gone; SIGKILL is the last-resort cleanup */ }
           }
         }
       }
@@ -455,9 +455,9 @@ export async function deployActivation(
           return 1;
         }
       } else {
-        try { execSync("systemctl --user unmask abtars-watchdog", { stdio: "ignore", timeout: 5000 }); } catch {}
-        try { execSync("systemctl --user enable abtars-watchdog", { stdio: "ignore", timeout: 5000 }); } catch {}
-        try { execSync("systemctl --user start abtars-watchdog", { stdio: "ignore", timeout: 5000 }); } catch {}
+        try { execSync("systemctl --user unmask abtars-watchdog", { stdio: "ignore", timeout: 5000 }); } catch { /* unit may not be masked; unmask is idempotent */ }
+        try { execSync("systemctl --user enable abtars-watchdog", { stdio: "ignore", timeout: 5000 }); } catch { /* unit may already be enabled; enable is idempotent */ }
+        try { execSync("systemctl --user start abtars-watchdog", { stdio: "ignore", timeout: 5000 }); } catch { /* unit may already be started; the watchdog startup is best-effort */ }
       }
       process.stdout.write(`  Daemon started\n`);
     }
@@ -525,8 +525,8 @@ async function refresh(paths: ReturnType<typeof packagePaths>, repoRoot: string)
       if (srcContent !== dstContent) {
         writeFileSync(dst, srcContent);
         const uid = `gui/${process.getuid?.() ?? 501}`;
-        try { execSync(`launchctl bootout ${uid}/com.abtars.watchdog 2>/dev/null`, { stdio: "ignore", timeout: 5000 }); } catch {}
-        try { execSync(`launchctl bootstrap ${uid} "${dst}"`, { stdio: "ignore", timeout: 5000 }); } catch {}
+        try { execSync(`launchctl bootout ${uid}/com.abtars.watchdog 2>/dev/null`, { stdio: "ignore", timeout: 5000 }); } catch { /* watchdog job may not be loaded; bootout is idempotent */ }
+        try { execSync(`launchctl bootstrap ${uid} "${dst}"`, { stdio: "ignore", timeout: 5000 }); } catch { /* watchdog job may already be loaded; bootstrap is idempotent */ }
         process.stdout.write(`  ✓ plist reloaded\n`);
       }
     }
@@ -538,7 +538,7 @@ async function refresh(paths: ReturnType<typeof packagePaths>, repoRoot: string)
       const dstContent = readFileSync(dst, "utf-8");
       if (srcContent !== dstContent) {
         copyFileSync(src, dst);
-        try { execSync("systemctl --user daemon-reload", { stdio: "ignore", timeout: 5000 }); } catch {}
+        try { execSync("systemctl --user daemon-reload", { stdio: "ignore", timeout: 5000 }); } catch { /* unit file reload is best-effort; the next start picks up the new definition */ }
         process.stdout.write(`  ✓ systemd unit reloaded\n`);
       }
     }

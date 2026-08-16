@@ -138,7 +138,7 @@ function restoreAbmindSibling(siblingPath: string, passphrase?: string): number 
   if (abmFile) {
     const abmPath = join(abmindHome, abmFile);
     const rc = restoreAbmind(abmPath, passphrase);
-    try { unlinkSync(abmPath); } catch {} // cleanup extracted .abm
+    try { unlinkSync(abmPath); } catch { /* cleanup extracted .abm — the file may already be gone */ }
     return rc;
   }
   process.stdout.write("ℹ no .abm in archive — files restored but memories not imported\n");
@@ -147,7 +147,7 @@ function restoreAbmindSibling(siblingPath: string, passphrase?: string): number 
 
 function extractZip(archivePath: string, destDir: string): number {
   // Avoid "getcwd: cannot access parent directories" if CWD is inside destDir
-  try { process.chdir(homedir()); } catch {}
+  try { process.chdir(homedir()); } catch { /* best-effort cwd escape; a failure surfaces in the extract path below */ }
   const is7z = archivePath.endsWith(".7z");
   const listCmd = is7z
     ? spawnSync("7z", ["l", archivePath], { encoding: "utf-8" })

@@ -331,7 +331,7 @@ function renderDetail(c: Awaited<ReturnType<typeof import("../tasks/kanban-board
         const reviewSummary = summarizeReviewCase(store.getLatestReviewCase(c.id));
         if (reviewSummary) lines.push(` Review: ${reviewSummary.trim()}`);
       }
-    } catch {}
+    } catch { /* project supervision is an optional display enrichment; a store-read failure simply omits it */ }
   }
   if (c.labels) lines.push(`Labels:   ${c.labels}`);
   if (c.assignee && c.assignee !== "professor") lines.push(`Assignee: ${c.assignee}`);

@@ -1,4 +1,5 @@
 import { requireTaskDatabase, type TaskDatabase } from "./tasks/kanban-board.js";
+import { addColumnIfMissing } from "../utils/sqlite-migrate.js";
 import type {
   ExecutorProgressFactV1,
   AttemptLeaseSnapshotV1,
@@ -83,16 +84,14 @@ export class ExecutorLeaseStore {
       );
     `);
 
-    try { this.db.exec(`ALTER TABLE attempt_lease_snapshots ADD COLUMN card_id INTEGER`); } catch {}
-    try { this.db.exec(`ALTER TABLE attempt_lease_snapshots ADD COLUMN state_version INTEGER DEFAULT 1`); } catch {}
-    try { this.db.exec(`ALTER TABLE attempt_lease_snapshots ADD COLUMN next_evaluation_at TEXT`); } catch {}
-    try { this.db.exec(`ALTER TABLE attempt_lease_snapshots ADD COLUMN closed_at TEXT`); } catch {}
-    try { this.db.exec(`ALTER TABLE attempt_progress_events ADD COLUMN fact_id TEXT`); } catch {}
-    try { this.db.exec(`ALTER TABLE attempt_progress_events ADD COLUMN lease_effect TEXT DEFAULT 'none'`); } catch {}
+    addColumnIfMissing(this.db, "attempt_lease_snapshots", "card_id INTEGER");
+    addColumnIfMissing(this.db, "attempt_lease_snapshots", "state_version INTEGER DEFAULT 1");
+    addColumnIfMissing(this.db, "attempt_lease_snapshots", "next_evaluation_at TEXT");
+    addColumnIfMissing(this.db, "attempt_lease_snapshots", "closed_at TEXT");
+    addColumnIfMissing(this.db, "attempt_progress_events", "fact_id TEXT");
+    addColumnIfMissing(this.db, "attempt_progress_events", "lease_effect TEXT DEFAULT 'none'");
 
-    try {
-      this.db.exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_progress_fact_id ON attempt_progress_events(attempt_id, claim_generation, fact_id)`);
-    } catch {}
+    this.db.exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_progress_fact_id ON attempt_progress_events(attempt_id, claim_generation, fact_id)`);
   }
 
   appendFact(

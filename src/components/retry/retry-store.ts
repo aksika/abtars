@@ -1,5 +1,6 @@
 import { requireTaskDatabase, type TaskDatabase } from "../tasks/kanban-board.js";
 import { kanbanTransition } from "../tasks/kanban-board.js";
+import { addColumnIfMissing } from "../../utils/sqlite-migrate.js";
 import type { FailureClassificationV1 } from "./failure-classifier.js";
 import type { RetryPolicyDecision } from "./retry-policy.js";
 import type { RetryDirectiveV1 } from "./retry-directive.js";
@@ -103,8 +104,8 @@ export class RetryStore {
         created_at TEXT NOT NULL
       );
     `);
-    try { this.db.exec(`ALTER TABLE retry_policy_decisions ADD COLUMN proposal_digest TEXT NOT NULL DEFAULT ''`); } catch {}
-    try { this.db.exec(`ALTER TABLE retry_policy_decisions ADD COLUMN review_deadline_at TEXT`); } catch {}
+    addColumnIfMissing(this.db, "retry_policy_decisions", "proposal_digest TEXT NOT NULL DEFAULT ''");
+    addColumnIfMissing(this.db, "retry_policy_decisions", "review_deadline_at TEXT");
   }
 
   // ── Classifications ────────────────────────────────────────────────────

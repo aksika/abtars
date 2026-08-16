@@ -6,6 +6,9 @@ import type { ReviewCaseSnapshot } from "./project-review-case.js";
 import { buildPeerTerminalEvent } from "./peer-terminal-event.js";
 import { nerve } from "../nerve.js";
 import { randomUUID } from "node:crypto";
+import { logAndSwallow } from "../log-and-swallow.js";
+
+const TAG = "project-review";
 
 const MAX_INVALID_PROPOSALS = 5;
 
@@ -179,7 +182,7 @@ export class ProjectReviewService {
         authority,
       );
       if (record.kind === "blocked") {
-        try { nerve.fire("card:failed", cardId); } catch {}
+        try { nerve.fire("card:failed", cardId); } catch (err) { logAndSwallow(TAG, `fire card:failed for ${cardId}`, err); }
         return {
           kind: "blocked_invalid",
           decisionId: record.decisionId,
@@ -219,7 +222,7 @@ export class ProjectReviewService {
         );
 
         // Fire events after commit
-        try { nerve.fire("card:done", cardId); } catch {}
+        try { nerve.fire("card:done", cardId); } catch (err) { logAndSwallow(TAG, `fire card:done for ${cardId}`, err); }
         return {
           kind: "accepted",
           decisionId,
@@ -268,7 +271,7 @@ export class ProjectReviewService {
           authority,
         );
         // Fire events after commit
-        try { nerve.fire("card:failed", cardId); } catch {}
+        try { nerve.fire("card:failed", cardId); } catch (err) { logAndSwallow(TAG, `fire card:failed for ${cardId}`, err); }
         return {
           kind: "blocked",
           decisionId: settledId,

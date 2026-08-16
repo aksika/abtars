@@ -112,8 +112,9 @@ export class PiCoreExecutionHost {
       this._readyReject = reject;
     });
     // Pre-attach a handler so a settlement-before-running rejection nobody
-    // awaited is never an unhandled rejection.
-    void this._readyPromise.catch(() => {});
+    // awaited is never an unhandled rejection. The rejection itself is
+    // consumed by start() and the execution caller via this._readyPromise.
+    void this._readyPromise.catch(() => { /* rejection is observed by the awaiting execution path; this pre-attached handler only prevents unhandled-rejection surfacing */ });
     logDebug(TAG, `Host created for execution ${this.executionId} (session ${this.sessionId}) gen=${this._generation}`);
   }
 

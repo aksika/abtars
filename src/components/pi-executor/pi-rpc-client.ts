@@ -1,6 +1,7 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { logDebug, logWarn, logError } from "../logger.js";
+import { logAndSwallow } from "../log-and-swallow.js";
 import { JsonlReader } from "./jsonl-reader.js";
 import type {
   RpcCommand, RpcResponse, RpcExtensionUIRequest, RpcExtensionUIResponse,
@@ -154,7 +155,7 @@ export class SupervisedPiRpcClient {
   }
 
   async abort(): Promise<void> {
-    try { await this.send({ type: "abort" }); } catch { }
+    try { await this.send({ type: "abort" }); } catch (err) { logAndSwallow(TAG, "send abort", err); }
   }
 
   async getAvailableModels(): Promise<Array<{ provider: string; id: string }>> {
@@ -252,11 +253,11 @@ export class SupervisedPiRpcClient {
     }
     if (this.jsonl) { this.jsonl.flush(); this.jsonl = null; }
     if (this.child && !this.child.killed) {
-      try { this.child.stdin?.end(); } catch { }
+      try { this.child.stdin?.end(); } catch (err) { logAndSwallow(TAG, "end child stdin during close", err); }
       const { pid } = this.child;
-      const killTimer = setTimeout(() => { try { process.kill(pid!, "SIGKILL"); } catch { } }, 5000);
+      const killTimer = setTimeout(() => { try { process.kill(pid!, "SIGKILL"); } catch (err) { if ((err as NodeJS.ErrnoException).code === "ESRCH") return; logAndSwallow(TAG, `force-kill child ${pid} after SIGTERM`, err); } }, 5000);
       this.child.on("exit", () => clearTimeout(killTimer));
-      try { this.child.kill("SIGTERM"); } catch { }
+      try { this.child.kill("SIGTERM"); } catch (err) { logAndSwallow(TAG, `send SIGTERM to child`, err); }
     }
     this.child = null;
     this.eventListeners.clear();

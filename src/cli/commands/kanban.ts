@@ -15,7 +15,7 @@ function readPort(): number {
     if (existsSync(portFile)) {
       return parseInt(readFileSync(portFile, "utf-8").trim(), 10);
     }
-  } catch {}
+  } catch { /* port file may be absent or unreadable when the bridge is not running; port 0 signals 'not found' */ }
   return 0;
 }
 

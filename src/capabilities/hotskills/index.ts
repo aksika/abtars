@@ -5,6 +5,7 @@
 import { join } from "node:path";
 import { SkillWatcher, type SkillInfo } from "../../components/skill-watcher.js";
 import { abtarsHome } from "../../paths.js";
+import { logAndSwallow } from "../../components/log-and-swallow.js";
 import type { CapabilityApi } from "../capability.js";
 
 let _instance: SkillWatcher | null = null;
@@ -35,5 +36,5 @@ export function register(_api: CapabilityApi): void {
   // regenerated when /skill reload is issued, so failure is non-fatal here.
   // #1432: no competing /skill registration — the canonical handler in
   // handlers-admin.ts owns /skill (run|stop|list|reload).
-  skillWatcher.prepareAndGenerateCatalog().catch(() => {});
+  skillWatcher.prepareAndGenerateCatalog().catch(err => logAndSwallow("hotskills", "prepare skill catalog at startup", err));
 }

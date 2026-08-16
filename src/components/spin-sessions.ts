@@ -10,6 +10,7 @@
 import type { ManagedSession, SessionType } from "./spin-types.js";
 import { sessionType, sessionCreatedAt, typeLabel } from "./spin-types.js";
 import { logDebug } from "./logger.js";
+import { logAndSwallow } from "./log-and-swallow.js";
 
 const MAX_LOG = 5;
 const TAG = "spin-sessions";
@@ -40,7 +41,7 @@ export function cancelSessionExecution(session: ManagedSession, reason: import("
   }
   const ctrl = session.executionControl;
   if (ctrl && !ctrl.terminal) {
-    void ctrl.requestCancel(reason).catch(() => {});
+    void ctrl.requestCancel(reason).catch(err => logAndSwallow(TAG, `cancel session execution`, err));
   }
   const release = session.releaseTransport;
   if (release) {

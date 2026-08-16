@@ -2,6 +2,7 @@ import { execFileSync } from "node:child_process";
 import { initBridgeLock } from "./components/transport/bridge-lock-transport.js";
 
 import { logInfo, logWarn, logError } from "./components/logger.js";
+import { logAndSwallow } from "./components/log-and-swallow.js";
 import type { BootCtx } from "./boot/context.js";
 import { clearMemoryToolDependencies, createBootCtx } from "./boot/context.js";
 import { phaseConfig } from "./boot/phase-config.js";
@@ -56,7 +57,7 @@ export class Bridge {
         }, ms);
         timer.unref?.();
       });
-      return Promise.race([Promise.resolve(fn()).catch(() => {}), timeout])
+      return Promise.race([Promise.resolve(fn()).catch(err => logWarn("main", `Shutdown step '${name}' failed: ${err instanceof Error ? err.message : String(err)} — continuing`)), timeout])
         .finally(() => { if (timer) clearTimeout(timer); });
     };
 
@@ -97,7 +98,7 @@ export class Bridge {
     await step("memory-tools", () => clearMemoryToolDependencies(this.ctx));
     await step("runtime", () => this.ctx.runtime.shutdown());
     await step("memory", async () => {
-      await this.ctx.memoryRuntime.close().catch(() => {});
+      await this.ctx.memoryRuntime.close().catch(err => logAndSwallow("main", "close memory runtime during shutdown", err));
     });
     // #1468: emergency teardown happens after platforms stop accepting new
     // messages and before normal transport teardown. The service fences
@@ -231,7 +232,7 @@ export async function startBridge(): Promise<number> {
         if (state.completedAt && Date.now() - new Date(state.completedAt).getTime() < 5 * 60_000) {
           deployNote = state.status === "success" ? " (updated)" : ` (update ${state.status})`;
         }
-      } catch {}
+      } catch { /* deploy.state may be absent on first boot or transiently corrupt; a missing note is acceptable */ }
       await sendToMainChat({ telegram: ctx.telegramAdapter, discord: ctx.discordAdapter }, `🔄 Back online. ${version}${deployNote}`);
       logInfo("main", "Startup: Back online notification sent");
       const failed = [...ctx.phaseHealth].filter(([, h]) => h.status === "failed" || h.status === "skipped");

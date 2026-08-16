@@ -13,6 +13,7 @@ import { requireTaskDatabase, kanbanGetCard, kanbanUpdate, kanbanFail } from "..
 import { ProjectReviewStore } from "../project-acceptance/project-review-store.js";
 import { requestReconcileForProject } from "../reconciler.js";
 import { logInfo, logWarn } from "../logger.js";
+import { logAndSwallow } from "../log-and-swallow.js";
 
 const TAG = "requester-contribution";
 import { randomUUID } from "node:crypto";
@@ -201,7 +202,7 @@ export class RequesterContributionService {
       try {
         this.contributionStore.transitionToNonStarted(input.peer, input.request.request_id, "unknown");
         this.kanbanUpdate(proxyCardId, { notes: JSON.stringify({ outcome: "unknown", request_id: input.request.request_id }) });
-      } catch {}
+      } catch (bookErr) { logAndSwallow(TAG, `record unknown outcome for proxy card ${proxyCardId}`, bookErr); }
       return {
         decision: "unknown",
         projectCardId,

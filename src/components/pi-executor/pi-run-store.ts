@@ -7,6 +7,7 @@ import { kanbanTransition, sqliteNow } from "../tasks/kanban-board.js";
 import { completePendingRequestInTransaction, ensureRequestLedgerSchema } from "../pi-request-ledger.js";
 import { validatePersistedSession, type SessionProof } from "./config.js";
 import { PiWorkspaceClaimStore } from "./pi-workspace-claim-store.js";
+import { addColumnIfMissing } from "../../utils/sqlite-migrate.js";
 
 export type RpcDelivery = "not_written" | "written_unacknowledged";
 
@@ -169,12 +170,12 @@ export class PiRunStore {
       usage_json TEXT,
       error TEXT
     )`);
-    try { this.db.exec(`ALTER TABLE pi_runs ADD COLUMN origin_request_id TEXT`); } catch {}
-    try { this.db.exec(`ALTER TABLE pi_runs ADD COLUMN delivery_policy TEXT NOT NULL DEFAULT 'leave_remote'`); } catch {}
+    addColumnIfMissing(this.db, "pi_runs", "origin_request_id TEXT");
+    addColumnIfMissing(this.db, "pi_runs", "delivery_policy TEXT NOT NULL DEFAULT 'leave_remote'");
     // #1647 — explicit reason the current generation starts. New writes are
     // always 'initial'; queueResumeGeneration() is the only path that writes
     // 'resume'. Never derived from the generation number or nullable fields.
-    try { this.db.exec(`ALTER TABLE pi_runs ADD COLUMN generation_intent TEXT NOT NULL DEFAULT 'initial'`); } catch {}
+    addColumnIfMissing(this.db, "pi_runs", "generation_intent TEXT NOT NULL DEFAULT 'initial'");
     // #1647 — one-time backfill: a standalone generation > 1 could only have
     // advanced through queueResumeGeneration(); supervised rows (which advance
     // through queueSupervisedGeneration) stay 'initial'. Idempotent: after the
@@ -191,9 +192,9 @@ export class PiRunStore {
     this.db.exec(`CREATE INDEX IF NOT EXISTS idx_pi_runs_status ON pi_runs(status)`);
     this.db.exec(`CREATE INDEX IF NOT EXISTS idx_pi_runs_card_id ON pi_runs(card_id)`);
     // #1395 — diagnostic reply-outcome columns (idempotent)
-    try { this.db.exec(`ALTER TABLE pi_runs ADD COLUMN last_ui_reply_request_id TEXT`); } catch {}
-    try { this.db.exec(`ALTER TABLE pi_runs ADD COLUMN last_ui_reply_generation INTEGER`); } catch {}
-    try { this.db.exec(`ALTER TABLE pi_runs ADD COLUMN last_ui_reply_outcome TEXT`); } catch {}
+    addColumnIfMissing(this.db, "pi_runs", "last_ui_reply_request_id TEXT");
+    addColumnIfMissing(this.db, "pi_runs", "last_ui_reply_generation INTEGER");
+    addColumnIfMissing(this.db, "pi_runs", "last_ui_reply_outcome TEXT");
     this.db.exec(`CREATE TABLE IF NOT EXISTS pi_run_progress (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       run_id TEXT NOT NULL REFERENCES pi_runs(id),

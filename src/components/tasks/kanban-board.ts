@@ -14,6 +14,7 @@ import { logSwarmTrace } from "../swarm-trace.js";
 import { isValidSessionType } from "../spin-profiles.js";
 import { initTaskStateSchema } from "./task-state-schema.js";
 import { initTaskHistorySchema } from "./task-history-schema.js";
+import { addColumnIfMissing } from "../../utils/sqlite-migrate.js";
 
 // better-sqlite3 is external (native module, resolved from ~/.local/lib/node_modules/)
 type SqliteDb = { prepare(sql: string): any; exec(sql: string): void; pragma(s: string): void; transaction<T>(fn: () => T): () => T };
@@ -125,24 +126,24 @@ export function ensureKanbanBoardSchema(database: { exec(sql: string): void }): 
       completed_at TEXT,
       delivered_at TEXT
     )`);
-    // Migrations — safe to re-run (silently skip if column exists)
-    try { database.exec(`ALTER TABLE kanban_board ADD COLUMN max_tokens INTEGER`); } catch {}
-    try { database.exec(`ALTER TABLE kanban_board ADD COLUMN max_cost REAL`); } catch {}
-    try { database.exec(`ALTER TABLE kanban_board ADD COLUMN tokens_used INTEGER DEFAULT 0`); } catch {}
-    try { database.exec(`ALTER TABLE kanban_board ADD COLUMN progress TEXT`); } catch {}
-    try { database.exec(`ALTER TABLE kanban_board ADD COLUMN delivery_mode TEXT DEFAULT 'deliver'`); } catch {}
-    try { database.exec(`ALTER TABLE kanban_board ADD COLUMN retry_count INTEGER DEFAULT 0`); } catch {}
-    try { database.exec(`ALTER TABLE kanban_board ADD COLUMN next_retry_at TEXT`); } catch {}
-    try { database.exec(`ALTER TABLE kanban_board ADD COLUMN chat_id TEXT`); } catch {}
-    try { database.exec(`ALTER TABLE kanban_board ADD COLUMN source_peer TEXT`); } catch {}
-    try { database.exec(`ALTER TABLE kanban_board ADD COLUMN goal TEXT`); } catch {}
-    try { database.exec(`ALTER TABLE kanban_board ADD COLUMN delivery_claimed_at TEXT`); } catch {}
-    try { database.exec(`ALTER TABLE kanban_board ADD COLUMN delivery_result TEXT CHECK(delivery_result IS NULL OR delivery_result IN ('sent','definitely_not_sent','unknown'))`); } catch {}
-    try { database.exec(`ALTER TABLE kanban_board ADD COLUMN delivery_receipt TEXT`); } catch {}
+    // Migrations — safe to re-run (duplicate-column failures are expected)
+    addColumnIfMissing(database, "kanban_board", "max_tokens INTEGER");
+    addColumnIfMissing(database, "kanban_board", "max_cost REAL");
+    addColumnIfMissing(database, "kanban_board", "tokens_used INTEGER DEFAULT 0");
+    addColumnIfMissing(database, "kanban_board", "progress TEXT");
+    addColumnIfMissing(database, "kanban_board", "delivery_mode TEXT DEFAULT 'deliver'");
+    addColumnIfMissing(database, "kanban_board", "retry_count INTEGER DEFAULT 0");
+    addColumnIfMissing(database, "kanban_board", "next_retry_at TEXT");
+    addColumnIfMissing(database, "kanban_board", "chat_id TEXT");
+    addColumnIfMissing(database, "kanban_board", "source_peer TEXT");
+    addColumnIfMissing(database, "kanban_board", "goal TEXT");
+    addColumnIfMissing(database, "kanban_board", "delivery_claimed_at TEXT");
+    addColumnIfMissing(database, "kanban_board", "delivery_result TEXT CHECK(delivery_result IS NULL OR delivery_result IN ('sent','definitely_not_sent','unknown'))");
+    addColumnIfMissing(database, "kanban_board", "delivery_receipt TEXT");
     // #1516: durable per-project agent cap (scheduled orchestration policy)
-    try { database.exec(`ALTER TABLE kanban_board ADD COLUMN max_agents INTEGER`); } catch {}
+    addColumnIfMissing(database, "kanban_board", "max_agents INTEGER");
     // #1516: project acceptance happens before scheduled artifact validation.
-    try { database.exec(`ALTER TABLE kanban_board ADD COLUMN delivery_ready INTEGER NOT NULL DEFAULT 1`); } catch {}
+    addColumnIfMissing(database, "kanban_board", "delivery_ready INTEGER NOT NULL DEFAULT 1");
 }
 
 function db(): SqliteDb | null {

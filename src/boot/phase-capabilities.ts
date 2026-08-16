@@ -10,6 +10,7 @@
  */
 
 import { logInfo, logWarn, logError, logDebug } from "../components/logger.js";
+import { logAndSwallow } from "../components/log-and-swallow.js";
 import type { BootCtx, PhaseResult } from "./context.js";
 
 export async function phaseCapabilities(ctx: BootCtx): Promise<PhaseResult> {
@@ -23,7 +24,7 @@ export async function phaseCapabilities(ctx: BootCtx): Promise<PhaseResult> {
     const sw = new SkillWatcher(join(abtarsHome(), "skills"), join(abtarsHome(), "skills", "skills_catalog.md"));
     // #1542: prepare declared skill dependencies at boot before catalog generation.
     await sw.prepareAndGenerateCatalog();
-  } catch {}
+  } catch (err) { logAndSwallow("boot", "skills catalog generation", err); }
 
   if (!transport || !pipelineDeps) { ctx.phaseHealth.set(phaseCapabilities.name, { status: "skipped", error: "no transport" }); logWarn("boot", `${phaseCapabilities.name}: skipping — transport not available`); return "skipped"; }
 

@@ -11,6 +11,7 @@
  */
 
 import { logDebug, logWarn } from "./logger.js";
+import { logAndSwallow } from "./log-and-swallow.js";
 import { kanbanQueuedDispatchOrder, kanbanFail, isUnblocked, type KanbanCard } from "./tasks/kanban-board.js";
 import { isValidSessionType } from "./spin-profiles.js";
 import { WorkerSupervisionStore } from "./worker-supervision-store.js";
@@ -86,7 +87,7 @@ class ExecutionControlImpl implements ExecutionControl {
     if (this._cancelled && this._cancelReason) {
       const reason = this._cancelReason;
       queueMicrotask(() => {
-        void Promise.resolve(this._cancelFn!(reason)).catch(() => {});
+        void Promise.resolve(this._cancelFn!(reason)).catch(err => logAndSwallow(TAG, `cancel execution bound after cancellation`, err));
       });
     }
     return true;
@@ -97,7 +98,7 @@ class ExecutionControlImpl implements ExecutionControl {
     this._cancelled = true;
     this._cancelReason = reason;
     if (this._cancelFn) {
-      await Promise.resolve(this._cancelFn(reason)).catch(() => {});
+      await Promise.resolve(this._cancelFn(reason)).catch(err => logAndSwallow(TAG, `request cancel execution`, err));
     }
     return "cancelled";
   }
@@ -107,7 +108,7 @@ class ExecutionControlImpl implements ExecutionControl {
     this._cancelled = true;
     this._cancelReason = reason;
     if (this._cancelFn) {
-      queueMicrotask(() => { void Promise.resolve(this._cancelFn!(reason)).catch(() => {}); });
+      queueMicrotask(() => { void Promise.resolve(this._cancelFn!(reason)).catch(err => logAndSwallow(TAG, `signal cancel execution`, err)); });
     }
     return "cancelled";
   }

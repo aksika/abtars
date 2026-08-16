@@ -270,7 +270,8 @@ export class PiCoreTransport implements IKiroTransport {
     });
     // Pre-attach a handler so a rejection nobody awaited (pre-host send
     // failure without any steer in flight) is never an unhandled rejection.
-    void hostReady.catch(() => {});
+    // The rejection itself is observed by the caller awaiting the slot's host.
+    void hostReady.catch(() => { /* rejection is observed by the slot caller; this pre-attached handler only prevents unhandled-rejection surfacing */ });
     const slot: ActivePiExecution = {
       generation: ++this._executionGeneration,
       hostReady,

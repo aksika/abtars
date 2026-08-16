@@ -7,6 +7,7 @@ import { randomBytes } from "node:crypto";
 import { readFileSync, writeFileSync, mkdirSync, appendFileSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import { logInfo, logWarn, logError } from "./logger.js";
+import { logAndSwallow } from "./log-and-swallow.js";
 
 const TAG = "action-gate";
 
@@ -131,7 +132,7 @@ export class ActionGate {
         const req = this.pending.get(requestId);
         if (req && !req.reminderSent) {
           req.reminderSent = true;
-          this.notify?.("⏳ Still waiting for authorization...", []).catch(() => {});
+          this.notify?.("⏳ Still waiting for authorization...", []).catch(err => logAndSwallow(TAG, "send authorization reminder", err));
         }
       }, 60_000);
 

@@ -180,7 +180,7 @@ export class AcpTransport implements IKiroTransport {
 
     // Kill previous CLI process if dead/disconnected (prevent orphan accumulation)
     if (this._rawClient && !this._rawClient.alive) {
-      try { this._rawClient.destroy(); } catch {}
+      try { this._rawClient.destroy(); } catch (err) { logAndSwallow(this.tag, "destroy dead raw client during reinit", err); }
       this._rawClient = null as any;
     }
 
@@ -281,7 +281,7 @@ export class AcpTransport implements IKiroTransport {
 
     // Track child PID for cleanup on next boot (#921)
     if (thisProcess.pid) {
-      import("./bridge-lock-transport.js").then(({ trackAcpPid }) => trackAcpPid(thisProcess.pid!)).catch(() => {});
+      import("./bridge-lock-transport.js").then(({ trackAcpPid }) => trackAcpPid(thisProcess.pid!)).catch(err => logAndSwallow(this.tag, "track ACP pid in bridge lock", err));
     }
 
     if (!thisProcess.stdin || !thisProcess.stdout) {
@@ -325,7 +325,7 @@ export class AcpTransport implements IKiroTransport {
             const inTok = typeof params["inputTokens"] === "number" ? params["inputTokens"] as number : 0;
             const outTok = typeof params["outputTokens"] === "number" ? params["outputTokens"] as number : 0;
             if (inTok || outTok) {
-              import("../budget.js").then(({ incrementBudgetCounter }) => incrementBudgetCounter(this.agentName, inTok + outTok)).catch(() => {});
+              import("../budget.js").then(({ incrementBudgetCounter }) => incrementBudgetCounter(this.agentName, inTok + outTok)).catch(err => logAndSwallow(this.tag, "increment budget from token metadata", err));
             }
           }
           if (method === "_kiro.dev/agent/not_found" || method === "_kiro.dev/model/not_found") {
@@ -498,7 +498,7 @@ export class AcpTransport implements IKiroTransport {
       import("../metrics-collector.js").then(({ recordLatency, recordCall }) => {
         recordLatency(`llm:${this.modelId ?? "unknown"}`, durationMs);
         recordCall(`llm:${this.modelId ?? "unknown"}`, true);
-      }).catch(() => {});
+      }).catch(err => logAndSwallow(this.tag, "record prompt metrics", err));
       import("../hooks/hook-system.js").then(({ hasHooks, fire }) => {
         if (!hasHooks("AfterPrompt")) return;
         fire("AfterPrompt", {
@@ -509,7 +509,7 @@ export class AcpTransport implements IKiroTransport {
         }).catch(err => logAndSwallow(TAG, "fire AfterPrompt", err));
       }).catch(err => logAndSwallow(TAG, "import hook-system", err));
       this.sm.promptCompleted();
-      import("../budget.js").then(({ incrementBudgetCounter }) => incrementBudgetCounter(this.agentName, 0)).catch(() => {});
+      import("../budget.js").then(({ incrementBudgetCounter }) => incrementBudgetCounter(this.agentName, 0)).catch(err => logAndSwallow(this.tag, "increment budget for prompt call", err));
 
       // Drain queued concurrent prompt (#671 Layer 2, #930 fix)
       this.drainPending();
@@ -626,7 +626,7 @@ export class AcpTransport implements IKiroTransport {
             this.sessions.delete(key);
             this.sealedSessionKeys.delete(key);
             try {
-              import("./sealed-acp-bridge.js").then(({ revokeSealedSession }) => revokeSealedSession(key)).catch(() => {});
+              import("./sealed-acp-bridge.js").then(({ revokeSealedSession }) => revokeSealedSession(key)).catch(err => logAndSwallow(this.tag, `revoke sealed session ${key}`, err));
             } catch { /* bridge may not be wired */ }
           }
           logWarn(this.tag, `Session ${sessionId} expired — invalidated, will recreate`);
@@ -730,7 +730,7 @@ export class AcpTransport implements IKiroTransport {
   private cleanupKiroFiles(kiroSessionId: string): void {
     const dir = join(homedir(), ".kiro", "sessions", "cli");
     for (const ext of [".json", ".jsonl", ".history"]) {
-      try { unlinkSync(join(dir, kiroSessionId + ext)); } catch {}
+      try { unlinkSync(join(dir, kiroSessionId + ext)); } catch { /* session file may already be gone (never created or cleaned by another path); removal is best effort */ }
     }
   }
 
@@ -756,7 +756,7 @@ export class AcpTransport implements IKiroTransport {
     const sessionId = params.sessionId;
     const previous = this.updateChains.get(sessionId) ?? Promise.resolve();
     const current = previous
-      .catch(() => {})
+      .catch(() => { /* each queued update is isolated by its own terminal catch below, so a stale rejection can never block this queued update */ })
       .then(() => this.handleSessionUpdate(params))
       .catch((err) => {
         logWarn(this.tag, `ACP session update failed (isolated): ${err instanceof Error ? err.message : String(err)}`);
@@ -764,7 +764,7 @@ export class AcpTransport implements IKiroTransport {
     this.updateChains.set(sessionId, current);
     void current.finally(() => {
       if (this.updateChains.get(sessionId) === current) this.updateChains.delete(sessionId);
-    }).catch(() => {});
+    }).catch(() => { /* current never rejects (terminal catch above); this keeps the map-cleanup chain detached */ });
     return current;
   }
 

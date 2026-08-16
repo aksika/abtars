@@ -60,6 +60,9 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      - name: Check source invariants
+        run: npm run check-imports
+
       - name: Build
         run: node esbuild.config.js
 

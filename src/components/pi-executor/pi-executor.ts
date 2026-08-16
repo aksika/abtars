@@ -1,4 +1,5 @@
 import { logInfo, logWarn, logDebug } from "../logger.js";
+import { logAndSwallow } from "../log-and-swallow.js";
 import { PiRpcError, SupervisedPiRpcClient, type PiProcessTermination, type PiAgentEvent } from "./pi-rpc-client.js";
 import { projectPiEvent } from "./pi-event-projection.js";
 import type { RpcExtensionUIRequest } from "@earendil-works/pi-coding-agent";
@@ -785,7 +786,7 @@ export class PiExecutor {
     }, owned.generation)) return;
     this._fireTransition(runId, undefined, "cancelling");
 
-    owned.client.abort().catch(() => {});
+    owned.client.abort().catch(err => logAndSwallow(TAG, `abort process for ${runId}`, err));
 
     const graceMs = this.config_.abortGraceMs;
     owned.abortTimer = setTimeout(async () => {

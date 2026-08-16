@@ -381,7 +381,7 @@ export class SubagentRuntime {
 
     // #1012: Track PID so boot-time cleanup finds orphans
     if ((transport as any).agent?.pid) {
-      import("./transport/bridge-lock-transport.js").then(({ trackAcpPid }) => trackAcpPid((transport as any).agent.pid)).catch(() => {});
+      import("./transport/bridge-lock-transport.js").then(({ trackAcpPid }) => trackAcpPid((transport as any).agent.pid)).catch(err => logAndSwallow(TAG, "track ACP pid in bridge lock", err));
     }
 
     // Inject session-type-appropriate SOUL bundle (#744)

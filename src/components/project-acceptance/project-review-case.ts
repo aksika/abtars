@@ -9,6 +9,9 @@ import { redactEnvelope, acceptancePassed } from "../worker-contract.js";
 import type { WorkerAcceptanceContractV1 } from "../worker-contract.js";
 import type { ExecutorKind } from "../worker-executor-identity.js";
 import { REVIEW_ACTIONS, CRITERION_VERDICTS, OUTPUT_DISPOSITIONS, CONTRADICTION_DISPOSITIONS } from "./project-review-contract.js";
+import { logAndSwallow } from "../log-and-swallow.js";
+
+const TAG = "project-review-case";
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -195,7 +198,7 @@ export class ReviewCaseAssembler {
           });
         }
       }
-    } catch {}
+    } catch (err) { logAndSwallow(TAG, `enrich review case with kanban contributions for project ${projectCardId}`, err); }
 
     try {
       const { requireTaskDatabase } = await import("../tasks/kanban-board.js") as typeof import("../tasks/kanban-board.js");
@@ -218,7 +221,7 @@ export class ReviewCaseAssembler {
           });
         }
       }
-    } catch {}
+    } catch (err) { logAndSwallow(TAG, `enrich review case with peer contributions for project ${projectCardId}`, err); }
 
     // #1605: the coverage read-model is the single source of truth for
     // ownership, child→root mappings, and the uncovered set. The assembler

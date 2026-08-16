@@ -3,6 +3,7 @@ import { parseHelpRequest, parseContributionEvent, canonicalRequestHash, contrib
 import { PeerHelpStore } from "./store.js";
 import { ContributionStore } from "./contribution-store.js";
 import { logInfo, logWarn, logDebug } from "../logger.js";
+import { logAndSwallow } from "../log-and-swallow.js";
 import { loadPeerConfig } from "../peer-config.js";
 
 const TAG = "peer-help";
@@ -308,7 +309,7 @@ export class PeerHelpService {
           const { requestReconcile } = await import("../reconciler.js");
           requestReconcile(row.project_card_id);
         }
-      } catch {}
+      } catch (err) { logAndSwallow(TAG, `wake reconcile for project after contribution event`, err); }
     }
 
     return { ok: result === "applied" || result === "duplicate" };
