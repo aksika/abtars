@@ -21,11 +21,36 @@ import { WorkerSupervisionStore } from "../components/worker-supervision-store.j
 import { PiExecutorAdapter } from "../components/pi-executor-adapter.js";
 import { ProjectReviewStore } from "../components/project-acceptance/project-review-store.js";
 import type { ToolExecutionScope } from "../components/tasks/task-package.js";
-import type { ReconcilerDeps } from "../components/reconciler.js";
+import type { ReconcilerDeps, ReconcilerHandle } from "../components/reconciler.js";
+import type { HeartbeatSystem } from "../components/heartbeat-system.js";
 
 const TAG = "reconciler";
 
 const MAX_UNRESOLVED_WARNINGS = 20;
+
+/** #1554: register the existing Reconciler-owned heartbeat work after start. */
+export function registerReconcilerHeartbeatTasks(
+  heartbeat: HeartbeatSystem,
+  scanActiveProjects: () => number,
+  retryPendingReviewRequests: () => number,
+): void {
+  heartbeat.registerTask({
+    name: "reconciler-resync",
+    execute: async () => {
+      scanActiveProjects();
+      const { ProjectReviewStore } = await import("../components/project-acceptance/project-review-store.js");
+      const expired = new ProjectReviewStore().abandonExpiredRequests();
+      return { state: expired > 0 ? "ran" : "idle" as const };
+    },
+  });
+  heartbeat.registerTask({
+    name: "review-request-retry",
+    execute: async () => {
+      const count = retryPendingReviewRequests();
+      return { state: count > 0 ? "ran" : "idle" as const };
+    },
+  });
+}
 
 /** #1656: reconstruct the bound execution scope for a scheduled Orc turn. */
 function executionScopeFor(context: { projectCardId: number }): ToolExecutionScope | undefined {
@@ -45,103 +70,110 @@ function executionScopeFor(context: { projectCardId: number }): ToolExecutionSco
 export async function phaseReconciler(ctx: BootCtx): Promise<PhaseResult> {
   const scheduler = ctx.lifecycleWakeScheduler;
   const inputs = ctx.reconcilerInputs;
-  if (!scheduler || !inputs) {
-    throw new Error("phase-reconciler: lifecycle wake scheduler or Reconciler inputs missing on BootCtx");
+  const heartbeat = ctx.heartbeat;
+  if (!scheduler || !inputs || !heartbeat) {
+    throw new Error("phase-reconciler: lifecycle wake scheduler, heartbeat, or Reconciler inputs missing on BootCtx");
   }
 
-  const { startReconciler, scanActiveProjects, retryPendingReviewRequests } = await import("../components/reconciler.js");
-  const { spin } = await import("../components/spin.js");
+  let handle: ReconcilerHandle | null = null;
+  let getActiveOrcCoordinator: (() => OrcProjectCoordinator | null) | undefined;
+  try {
+    const reconciler = await import("../components/reconciler.js");
+    const { startReconciler, scanActiveProjects, retryPendingReviewRequests } = reconciler;
+    getActiveOrcCoordinator = reconciler.getActiveOrcCoordinator;
+    const { spin } = await import("../components/spin.js");
 
-  // Load the local peer identity for coordinator ownership.
-  const peerName = loadPeerConfig().self.name;
+    // Load the local peer identity for coordinator ownership.
+    const peerName = loadPeerConfig().self.name;
 
-  // The Orc coordinator is constructed exactly once per bridge generation —
-  // never in agent-api, request paths, or the scheduled-project runner.
-  const coordinator = new OrcProjectCoordinator({
-    ownerPeer: peerName,
-    startPort: async (context, goal) => {
-      await spin.spin({
-        type: "O",
-        goal,
-        sessionId: context.sessionId,
-        cardId: context.projectCardId,
-        settlementOwner: "spin",
-        source: "agent",
-        orcContext: context,
-        executionScope: executionScopeFor(context),
+    // The Orc coordinator is constructed exactly once per bridge generation —
+    // never in agent-api, request paths, or the scheduled-project runner.
+    const coordinator = new OrcProjectCoordinator({
+      ownerPeer: peerName,
+      startPort: async (context, goal) => {
+        await spin.spin({
+          type: "O",
+          goal,
+          sessionId: context.sessionId,
+          cardId: context.projectCardId,
+          settlementOwner: "spin",
+          source: "agent",
+          orcContext: context,
+          executionScope: executionScopeFor(context),
+        });
+      },
+    });
+
+    // Generation-owned memoized quarantine-store accessor. Construction stays
+    // inside the #1664 safe wrappers so DDL failure degrades fail-open.
+    let quarantineStore: ReconcileQuarantineStore | null = null;
+    const getQuarantineStore = (): ReconcileQuarantineStore => quarantineStore ??= new ReconcileQuarantineStore();
+
+    const deps: ReconcilerDeps = {
+      generationId: `boot-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+      coordinator,
+      wakeScheduler: scheduler,
+      workerAdapter: new SpinWorkerAdapter(),
+      piService: ctx.piExecutorService ?? null,
+      createPiAdapter: (service) => new PiExecutorAdapter(service.executor, new WorkerSupervisionStore()),
+      getQuarantineStore,
+      projectRunProgress: inputs.projectRunProgress,
+      failureCascade: inputs.failureCascade,
+    };
+
+    handle = await startReconciler(deps);
+    ctx.reconcilerHandle = handle;
+    ctx.reconcilerRecovery = handle.recovery;
+
+    // #1554: scheduled-run admission starts only after the generation exists.
+    // Recover active runs from a prior crash FIRST, then start the scheduler —
+    // new due occurrences are never admitted ahead of recovery, and no
+    // admission can race the generation's coordinator.
+    if (ctx.scheduledRunCoordinator && ctx.cronQueue) {
+      const { readEntries } = await import("../components/tasks/task-store.js");
+      await ctx.scheduledRunCoordinator.recover(readEntries(), (entry, run) => {
+        const enqueueResult = ctx.cronQueue!.enqueue(entry, false, run);
+        if (enqueueResult) {
+          logWarn(TAG, `Could not reattach scheduled project ${entry.id}: ${enqueueResult}`);
+          return false;
+        }
+        return true;
       });
-    },
-  });
+    }
+    await scheduler.start();
+    logInfo(TAG, `Reconciler generation ${handle.generationId} started — ${handle.recovery.attempts.length} attempt(s) accounted, ${handle.recovery.recoveredProjectIds.length} recovered project(s)`);
 
-  // Generation-owned memoized quarantine-store accessor. Construction stays
-  // inside the #1664 safe wrappers so DDL failure degrades fail-open.
-  let quarantineStore: ReconcileQuarantineStore | null = null;
-  const getQuarantineStore = (): ReconcileQuarantineStore => quarantineStore ??= new ReconcileQuarantineStore();
+    // Bounded, structured warnings for unresolved recovery results.
+    const unresolved = handle.recovery.attempts.filter((a): a is Extract<typeof a, { kind: "unresolved" }> => a.kind === "unresolved");
+    for (const entry of unresolved.slice(0, MAX_UNRESOLVED_WARNINGS)) {
+      logWarn(TAG, `Recovery unresolved: attempt ${entry.attemptId} (${entry.executorKind}/${entry.executorId}) — ${entry.reason}${entry.detail ? `: ${entry.detail}` : ""}`);
+    }
+    if (unresolved.length > MAX_UNRESOLVED_WARNINGS) {
+      logWarn(TAG, `Recovery unresolved: ${unresolved.length - MAX_UNRESOLVED_WARNINGS} further attempt(s) omitted (bounded)`);
+    }
 
-  const deps: ReconcilerDeps = {
-    generationId: `boot-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
-    coordinator,
-    wakeScheduler: scheduler,
-    workerAdapter: new SpinWorkerAdapter(),
-    piService: ctx.piExecutorService ?? null,
-    createPiAdapter: (service) => new PiExecutorAdapter(service.executor, new WorkerSupervisionStore()),
-    getQuarantineStore,
-    projectRunProgress: inputs.projectRunProgress,
-    failureCascade: inputs.failureCascade,
-  };
+    // #1554 (approved heartbeat move): the Reconciler-owned safety/retry tasks
+    // register only after a successful generation start. project-acceptance-
+    // outbox stays independently registered in Tier-3.
+    registerReconcilerHeartbeatTasks(heartbeat, scanActiveProjects, retryPendingReviewRequests);
 
-  const handle = await startReconciler(deps);
-  ctx.reconcilerHandle = handle;
-  ctx.reconcilerRecovery = handle.recovery;
-
-  // #1554: scheduled-run admission starts only after the generation exists.
-  // Recover active runs from a prior crash FIRST, then start the scheduler —
-  // new due occurrences are never admitted ahead of recovery, and no
-  // admission can race the generation's coordinator.
-  if (ctx.scheduledRunCoordinator && ctx.cronQueue) {
-    const { readEntries } = await import("../components/tasks/task-store.js");
-    await ctx.scheduledRunCoordinator.recover(readEntries(), (entry, run) => {
-      const enqueueResult = ctx.cronQueue!.enqueue(entry, false, run);
-      if (enqueueResult) {
-        logWarn(TAG, `Could not reattach scheduled project ${entry.id}: ${enqueueResult}`);
-        return false;
+    return "ran";
+  } catch (err) {
+    // The Reconciler is the owner of this generation. If any later boot step
+    // fails after start, roll it back before propagating the phase failure so
+    // no listeners, lease source, static hook, or due scheduler survives a
+    // failed boot generation.
+    if (handle) {
+      try { await handle.stop(); } catch (stopErr) {
+        logWarn(TAG, `Reconciler rollback failed: ${stopErr instanceof Error ? stopErr.message : String(stopErr)}`);
       }
-      return true;
-    });
+      if (ctx.reconcilerHandle === handle) ctx.reconcilerHandle = null;
+      if (ctx.reconcilerRecovery === handle.recovery) ctx.reconcilerRecovery = null;
+    }
+    // A duplicate phase invocation must not stop the scheduler owned by an
+    // already-running generation. Other failures own this phase's scheduler
+    // and must stop it before the failed phase is reported.
+    if (!getActiveOrcCoordinator || getActiveOrcCoordinator() === null) scheduler.stop();
+    throw err;
   }
-  await scheduler.start();
-  logInfo(TAG, `Reconciler generation ${handle.generationId} started — ${handle.recovery.attempts.length} attempt(s) accounted, ${handle.recovery.recoveredProjectIds.length} recovered project(s)`);
-
-  // Bounded, structured warnings for unresolved recovery results.
-  const unresolved = handle.recovery.attempts.filter((a): a is Extract<typeof a, { kind: "unresolved" }> => a.kind === "unresolved");
-  for (const entry of unresolved.slice(0, MAX_UNRESOLVED_WARNINGS)) {
-    logWarn(TAG, `Recovery unresolved: attempt ${entry.attemptId} (${entry.executorKind}/${entry.executorId}) — ${entry.reason}${entry.detail ? `: ${entry.detail}` : ""}`);
-  }
-  if (unresolved.length > MAX_UNRESOLVED_WARNINGS) {
-    logWarn(TAG, `Recovery unresolved: ${unresolved.length - MAX_UNRESOLVED_WARNINGS} further attempt(s) omitted (bounded)`);
-  }
-
-  // #1554 (approved heartbeat move): the Reconciler-owned safety/retry tasks
-  // register only after a successful generation start. project-acceptance-
-  // outbox stays independently registered in Tier-3.
-  if (ctx.heartbeat) {
-    ctx.heartbeat.registerTask({
-      name: "reconciler-resync",
-      execute: async () => {
-        scanActiveProjects();
-        const { ProjectReviewStore } = await import("../components/project-acceptance/project-review-store.js");
-        const expired = new ProjectReviewStore().abandonExpiredRequests();
-        return { state: expired > 0 ? "ran" : "idle" as const };
-      },
-    });
-    ctx.heartbeat.registerTask({
-      name: "review-request-retry",
-      execute: async () => {
-        const count = retryPendingReviewRequests();
-        return { state: count > 0 ? "ran" : "idle" as const };
-      },
-    });
-  }
-
-  return "ran";
 }

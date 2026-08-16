@@ -7,7 +7,7 @@ import {
   kanbanQueuedDispatchOrder, kanbanPromoteDueRetry, kanbanTransition, sqliteNow, KANBAN_TERMINAL_STATUSES,
   isUnblocked, cascadeFail, resolveRootId, type KanbanCard,
 } from "./tasks/kanban-board.js";
-import { logInfo, logWarn, logError } from "./logger.js";
+import { logInfo, logWarn, logError, redactSecrets } from "./logger.js";
 import { logAndSwallow } from "./log-and-swallow.js";
 import {
   ReconcileQuarantineStore,
@@ -1446,6 +1446,11 @@ async function reconcileChildCard(generation: ReconcilerGeneration, card: Kanban
 
 /** #1554: internal pump entry for a captured generation. */
 function requestWorkerDispatchFor(generation: ReconcilerGeneration): void {
+  // A card pass can resume after shutdown has entered `closing`. Do not let
+  // that continuation create a new tracked pump; the generation token check
+  // inside the pump is too late because stop() may already have snapshotted
+  // the in-flight set.
+  if (!isActive(generation)) return;
   const pump = generation.dispatchPump;
   pump.dirty = true;
   if (!pump.running) {
@@ -2126,7 +2131,17 @@ function registerExecutorLeaseSource(generation: ReconcilerGeneration): () => vo
     },
   });
   // Registration is a source mutation: immediate scan + re-arm.
-  scheduler.sourceChanged("executor-lease");
+  try {
+    scheduler.sourceChanged("executor-lease");
+  } catch (err) {
+    // A source must not remain installed when its initial re-scan fails; the
+    // caller's startup rollback can then return the scheduler to its prior
+    // ownership state.
+    try { disposer(); } catch (disposeErr) {
+      logWarn(TAG, `executor-lease source rollback failed: ${disposeErr instanceof Error ? disposeErr.message : String(disposeErr)}`);
+    }
+    throw err;
+  }
   return disposer;
 }
 
@@ -2166,8 +2181,15 @@ async function runAttemptRecovery(generation: ReconcilerGeneration, coordinatorR
       });
       if (bootResult.kind === "settled" || bootResult.kind === "budget_violation") {
         logSwarmTrace({ event: "recovery_settled", card: attempt.card_id, attempt: attempt.id, generation: attempt.generation, reason: "bridge_restart" });
-        const card = kanbanGetCard(attempt.card_id);
-        if (card) kanbanFail(card.id, "bridge_restart");
+        try {
+          const card = kanbanGetCard(attempt.card_id);
+          if (card) kanbanFail(card.id, "bridge_restart");
+        } catch (err) {
+          // The durable attempt settlement is authoritative; a projection
+          // failure must not make an unrelated active attempt disappear from
+          // the recovery report or abort the entire bridge boot.
+          logWarn(TAG, `Boot recovery card projection failed for ${attempt.id}: ${err instanceof Error ? err.message : String(err)}`);
+        }
         recovered++;
       }
       results.push({
@@ -2179,7 +2201,23 @@ async function runAttemptRecovery(generation: ReconcilerGeneration, coordinatorR
       continue;
     }
     if (policy.recovery === "inspectable") {
-      const adapter = resolveAdapterForRecovery(generation, attempt.executor_kind, attempt.executor_id);
+      let adapter: SwarmExecutorAdapter | undefined;
+      try {
+        adapter = resolveAdapterForRecovery(generation, attempt.executor_kind, attempt.executor_id);
+      } catch (err) {
+        const bounded = redactSecrets(err instanceof Error ? err.message : String(err)).slice(0, 200);
+        logWarn(TAG, `Boot recovery adapter construction failed for ${attempt.id}: ${bounded}`);
+        results.push({
+          kind: "unresolved",
+          attemptId: attempt.id,
+          cardId: attempt.card_id,
+          executorKind: attempt.executor_kind,
+          executorId: attempt.executor_id,
+          reason: "inspection_failed",
+          detail: bounded,
+        });
+        continue;
+      }
       if (!adapter) {
         results.push({
           kind: "unresolved",
@@ -2218,7 +2256,7 @@ async function runAttemptRecovery(generation: ReconcilerGeneration, coordinatorR
             executorKind: attempt.executor_kind,
             executorId: attempt.executor_id,
             reason: "observation_unknown",
-            detail: String(observation.message ?? "").slice(0, 200),
+            detail: redactSecrets(String(observation.message ?? "")).slice(0, 200),
           });
           continue;
         }
@@ -2232,7 +2270,7 @@ async function runAttemptRecovery(generation: ReconcilerGeneration, coordinatorR
         });
         logSwarmTrace({ event: "recovery_inspect", card: attempt.card_id, attempt: attempt.id, reason: "inspectable_attempt" });
       } catch (err) {
-        const bounded = (err instanceof Error ? err.message : String(err)).slice(0, 200);
+        const bounded = redactSecrets(err instanceof Error ? err.message : String(err)).slice(0, 200);
         logWarn(TAG, `Boot recovery inspection failed for ${attempt.id}: ${bounded}`);
         results.push({
           kind: "unresolved",
