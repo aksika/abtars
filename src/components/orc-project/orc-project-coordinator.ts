@@ -309,7 +309,9 @@ export function classifyFailedRelease(
   if (row.state === "released" || row.state === "superseded") {
     return { kind: "already_terminal" as const, state: row.state };
   }
-  const validation = store.validateCurrentContext(context);
+  // Reuse the post-CAS row read; validation still checks current supervision
+  // generation, but does not issue a second run-row query.
+  const validation = store.validateCurrentContext(context, row);
   return {
     kind: "rejected_live" as const,
     state: row.state,

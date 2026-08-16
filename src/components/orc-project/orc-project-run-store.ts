@@ -210,8 +210,10 @@ export class OrcProjectRunStore {
     });
   }
 
-  validateCurrentContext(context: OrcInvocationContextV1): OrcContextValidation {
-    const row = this.db.prepare(`SELECT * FROM orc_project_runs WHERE id = ?`).get(context.runId) as unknown as OrcProjectRunRow | undefined;
+  validateCurrentContext(context: OrcInvocationContextV1, knownRow?: OrcProjectRunRow): OrcContextValidation {
+    // #1671: a failed-release classifier may already have read this exact row;
+    // reuse it so diagnostics stay bounded to one run-row read.
+    const row = knownRow ?? this.db.prepare(`SELECT * FROM orc_project_runs WHERE id = ?`).get(context.runId) as unknown as OrcProjectRunRow | undefined;
     if (!row) return { ok: false as const, reason: "run_unknown" as const };
 
     if (row.state === "released" || row.state === "superseded") {
