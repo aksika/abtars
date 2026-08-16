@@ -462,27 +462,37 @@ export function createHttpDelegatePort(profile: RemoteSwarmLiveProfileV1, receiv
       return parseDelegateResponse(response.status, response.body);
     }
     // The receiver's delegate route is loopback-only, so the request must
-    // originate on the receiver host through the approved tmux channel.
+    // originate on the receiver host through the approved tmux channel. The
+    // abtars agent API uses a self-signed Ed25519 identity cert; node's
+    // https.request honors rejectUnauthorized:false where curl and undici
+    // fetch fail on the receiver host.
     const port = profile.receiver.agentApiPort;
     if (!port) throw new Error("agentApiPort is not configured for receiver");
     if (!receiverPort) throw new Error("receiver command port is required for receiver-side delegation");
     const receiver = profile.receiver;
     const payload = JSON.stringify(body);
+    const script = [
+      "const https=require(\"node:https\");",
+      "const body=process.argv[2];",
+      `const req=https.request({host:"127.0.0.1",port:${port},path:"/v1/orc/delegate",method:"POST",rejectUnauthorized:false,headers:{"Content-Type":"application/json","Content-Length":Buffer.byteLength(body)}},res=>{let d=\"\";res.on(\"data\",c=>d+=c);res.on(\"end\",()=>console.log(\"REMOTE_SWARM_DELEGATE=\"+d))});`,
+      "req.on(\"error\",e=>{console.error(\"REMOTE_SWARM_DELEGATE_ERROR=\"+e.message);process.exit(1)});",
+      "req.end(body)",
+    ].join("");
     const result = await receiverPort.run([
-      { text: "curl", quote: false },
-      { text: "-sk", quote: false },
-      { text: "-X", quote: false },
-      { text: "POST", quote: false },
-      { text: `https://127.0.0.1:${port}/v1/orc/delegate`, quote: false },
-      { text: "-H", quote: false },
-      { text: "Content-Type:application/json", quote: false },
-      { text: "-d", quote: false },
+      { text: "node", quote: false },
+      { text: "-e", quote: false },
+      { text: script, quote: true },
       { text: payload, quote: true },
     ], { timeoutMs: 120_000, cwd: receiver.workdir });
     if (!result.ok) {
-      return { ok: false, decision: "error", error: `receiver delegate curl failed: ${result.stderr.slice(0, 500)}` };
+      return { ok: false, decision: "error", error: `receiver delegate failed: ${result.stderr.slice(0, 500)}` };
     }
-    return parseDelegateResponse(200, result.stdout);
+    const marker = "REMOTE_SWARM_DELEGATE=";
+    const line = result.stdout.split("\n").find((l) => l.startsWith(marker));
+    if (!line) {
+      return { ok: false, decision: "error", error: `receiver delegate produced no response: ${result.stdout.slice(0, 300)}` };
+    }
+    return parseDelegateResponse(200, line.slice(marker.length));
   };
 }
 

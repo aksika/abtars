@@ -1107,7 +1107,7 @@ describe("evidence writer", () => {
 });
 
 describe("receiver-side delegate", () => {
-  it("routes the receiver delegate through the tmux port as a quoted curl command", async () => {
+  it("routes the receiver delegate through the tmux port as a quoted node request", async () => {
     const { createHttpDelegatePort } = await import("./remote-swarm-live-e2e.ts");
     const root = tmpdirFixture();
     try {
@@ -1116,7 +1116,7 @@ describe("receiver-side delegate", () => {
       const fakeReceiverPort: CommandPort = {
         run: async (argv) => {
           captured = argv;
-          return { ok: true, exitCode: 0, stdout: JSON.stringify({ ok: true, decision: "accepted", request_id: "r1", contribution_ref: "help_x" }), stderr: "", timedOut: false };
+          return { ok: true, exitCode: 0, stdout: `REMOTE_SWARM_DELEGATE=${JSON.stringify({ ok: true, decision: "accepted", request_id: "r1", contribution_ref: "help_x" })}`, stderr: "", timedOut: false };
         },
       };
       const delegate = createHttpDelegatePort(profile, fakeReceiverPort);
@@ -1125,10 +1125,13 @@ describe("receiver-side delegate", () => {
       expect(result.decision).toBe("accepted");
       expect(captured).not.toBeNull();
       const argv = captured ?? [];
-      expect(argv[0]?.text).toBe("curl");
-      expect(argv.map((a) => a.text).join(" ")).toContain("https://127.0.0.1:17101/v1/orc/delegate");
-      const dashD = argv.find((a) => a.text === "-d");
-      const payloadArg = argv[argv.indexOf(dashD ?? { text: "-d" }) + 1];
+      expect(argv[0]?.text).toBe("node");
+      expect(argv[1]?.text).toBe("-e");
+      const script = argv[2]?.text ?? "";
+      expect(script).toContain("rejectUnauthorized:false");
+      expect(script).toContain("127.0.0.1");
+      expect(argv[2]?.quote).toBe(true);
+      const payloadArg = argv[3];
       expect(payloadArg?.quote).toBe(true);
       expect(JSON.parse(payloadArg?.text ?? "{}")).toEqual({ peer: "peer-r", goal: "a goal with spaces", request_id: "r1" });
     } finally {

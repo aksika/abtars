@@ -492,7 +492,13 @@ async function snapshot(args: ParsedArgs): Promise<RemoteSwarmSnapshotV1> {
         if (eventJson) {
           try {
             const parsed = JSON.parse(eventJson) as Record<string, unknown>;
-            if (typeof parsed.kind === "string") kind = trim(parsed.kind, 32);
+            if (typeof parsed.kind === "string") {
+              kind = trim(parsed.kind, 32);
+            } else if (parsed.outcome === "completed" || parsed.outcome === "failed") {
+              // The requester ledger stores the contribution PROJECTION in
+              // projection_json; the terminal kind lives in its outcome.
+              kind = trim(parsed.outcome, 32);
+            }
           } catch { /* keep unknown */ }
         }
         contributionEvents.push({
