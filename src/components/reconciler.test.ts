@@ -65,6 +65,49 @@ vi.mock("./worker-supervision-service.js", () => {
   };
 });
 
+// ── #1664: quarantine store mock ─────────────────────────────────────────────
+// The reconciler caches one store instance per module, so the mock class reads
+// a mutable state object that each test (re)configures. resetModules() is used
+// in the construction-failure test to force a fresh module-level singleton.
+interface RecordedFailure {
+  cardId: number;
+  signature: string;
+  now: string;
+}
+let quarantineState: {
+  quarantined: Set<number>;
+  recorded: RecordedFailure[];
+  cleared: number[];
+  throwOnConstruct: boolean;
+  throwOnLookup: boolean;
+  throwOnRecord: boolean;
+  throwOnClear: boolean;
+  resultFor: (cardId: number, signature: string, now: string) => { cardId: number; failureCount: number; errorSignature: string; lastErrorAt: string; quarantinedAt: string | null };
+};
+
+vi.mock("./reconcile-quarantine-store.js", () => ({
+  ReconcileQuarantineStore: class {
+    constructor() {
+      if (quarantineState.throwOnConstruct) throw new Error("store construct failed");
+    }
+    isQuarantined(cardId: number): boolean {
+      if (quarantineState.throwOnLookup) throw new Error("store lookup failed");
+      return quarantineState.quarantined.has(cardId);
+    }
+    recordFailure(cardId: number, signature: string, now: string) {
+      if (quarantineState.throwOnRecord) throw new Error("store record failed");
+      quarantineState.recorded.push({ cardId, signature, now });
+      return quarantineState.resultFor(cardId, signature, now);
+    }
+    clearFailures(cardId: number): void {
+      if (quarantineState.throwOnClear) throw new Error("store clear failed");
+      quarantineState.cleared.push(cardId);
+    }
+  },
+  reconcileErrorSignature: (err: unknown) =>
+    err instanceof Error ? `${err.name}:${err.message}` : String(err),
+}));
+
 const getLatestAttemptMock = vi.fn().mockReturnValue(null);
 const getResultByAttemptMock = vi.fn().mockReturnValue(undefined);
 /** #1656: lifecycle the adapter mock reports after a synchronous start settle. */
@@ -228,6 +271,16 @@ let reviewStoreMock: {
 
 beforeEach(async () => {
   vi.clearAllMocks();
+  quarantineState = {
+    quarantined: new Set(),
+    recorded: [],
+    cleared: [],
+    throwOnConstruct: false,
+    throwOnLookup: false,
+    throwOnRecord: false,
+    throwOnClear: false,
+    resultFor: (cardId, signature, now) => ({ cardId, failureCount: 1, errorSignature: signature, lastErrorAt: now, quarantinedAt: null }),
+  };
   reviewStoreMock = makeReviewStoreMock();
   readProjectCriterionCoverageMock.mockReturnValue({
     kind: "read",
@@ -1528,5 +1581,225 @@ describe("Reconciler — #1546 scheduled-root driver", () => {
       undefined,
       { authority: { projectCardId: 1, projectGeneration: 1, scheduledRunId: "run-1" } },
     );
+  });
+});
+
+// ── #1664: terminal reconcile error boundary ─────────────────────────────────
+
+describe("Reconciler — #1664 error boundary", () => {
+  /** A healthy queued W child under a running project, dispatched by the pump. */
+  function healthyChildDispatchScenario() {
+    // #1638 test earlier in this file replaces the module's worker adapter
+    // with a deferred-returning one; reset to the default mock so the pump
+    // actually starts (and dispatches) the child.
+    mod.setWorkerAdapter(null);
+    kanbanGetCardMock.mockImplementation((id: number) => {
+      if (id === 1) throw new Error("deterministic failure #1664");
+      if (id === 99) return makeCard({ id: 99, status: "running", type: "O", parent_id: null });
+      return makeCard({ id: 2, status: "queued", type: "W", parent_id: 99 });
+    });
+    kanbanQueuedDispatchOrderMock.mockReturnValue([makeCard({ id: 2, status: "queued", type: "W", parent_id: 99 })]);
+    kanbanPromoteDueRetryMock.mockReturnValue(true);
+    cardHasContractMock.mockReturnValue(true);
+    getLatestAttemptMock.mockReturnValue({ id: "a_2", lifecycle: "pending", executor_kind: "agent", executor_id: "spin-local", generation: 1 });
+    getContractForCardMock.mockReturnValue({ id: "c_2", limits: {}, schema_version: 1, goal: "g", criteria: [], expected_artifacts: [], verification_commands: [], required_capabilities: [], supports_root_criteria: [], provenance: { root_card_id: 99, card_id: 2 } });
+  }
+
+  async function expectNoUnhandledRejection(drive: () => void): Promise<boolean> {
+    let unhandled = false;
+    const handler = () => { unhandled = true; };
+    process.on("unhandledRejection", handler);
+    try {
+      drive();
+      await flush();
+    } finally {
+      process.off("unhandledRejection", handler);
+    }
+    return unhandled;
+  }
+
+  it("contains a throwing reconcile pass: process survives, no unhandledRejection, healthy card still runs, failure row recorded", async () => {
+    healthyChildDispatchScenario();
+    dispatchMock.mockClear();
+
+    const unhandled = await expectNoUnhandledRejection(() => {
+      mod.requestReconcile(1); // deterministic throw
+      mod.requestReconcile(2); // healthy child
+    });
+
+    expect(unhandled).toBe(false);
+    expect(quarantineState.recorded).toEqual([
+      expect.objectContaining({ cardId: 1, signature: "Error:deterministic failure #1664" }),
+    ]);
+    // a second healthy card still reconciles in the same generation
+    expect(dispatchMock).toHaveBeenCalledWith(expect.objectContaining({ type: "W", cardId: 2 }));
+  });
+
+  it("a successful pass clears the failure record", async () => {
+    healthyChildDispatchScenario();
+    // pre-seed a recorded failure for a card that is about to pass
+    quarantineState.recorded.push({ cardId: 2, signature: "Error:old", now: "2026-08-16T10:00:00.000Z" });
+
+    await expectNoUnhandledRejection(() => mod.requestReconcile(2));
+
+    expect(dispatchMock).toHaveBeenCalledWith(expect.objectContaining({ type: "W", cardId: 2 }));
+    expect(quarantineState.cleared).toContain(2);
+  });
+
+  it("store lookup failure fails open and does not stop other cards", async () => {
+    healthyChildDispatchScenario();
+    quarantineState.throwOnLookup = true;
+    dispatchMock.mockClear();
+
+    const unhandled = await expectNoUnhandledRejection(() => {
+      mod.requestReconcile(1);
+      mod.requestReconcile(2);
+    });
+
+    expect(unhandled).toBe(false);
+    expect(dispatchMock).toHaveBeenCalledWith(expect.objectContaining({ type: "W", cardId: 2 }));
+  });
+
+  it("recordFailure failure is contained: original throw logged, healthy card still runs", async () => {
+    healthyChildDispatchScenario();
+    quarantineState.throwOnRecord = true;
+    dispatchMock.mockClear();
+
+    const unhandled = await expectNoUnhandledRejection(() => {
+      mod.requestReconcile(1);
+      mod.requestReconcile(2);
+    });
+
+    expect(unhandled).toBe(false);
+    expect(dispatchMock).toHaveBeenCalledWith(expect.objectContaining({ type: "W", cardId: 2 }));
+  });
+
+  it("clearFailures failure is contained on the success path", async () => {
+    healthyChildDispatchScenario();
+    quarantineState.throwOnClear = true;
+    dispatchMock.mockClear();
+
+    const unhandled = await expectNoUnhandledRejection(() => mod.requestReconcile(2));
+
+    expect(unhandled).toBe(false);
+    expect(dispatchMock).toHaveBeenCalledWith(expect.objectContaining({ type: "W", cardId: 2 }));
+  });
+
+  it("store construction failure fails open — a wake still reconciles behind the boundary", async () => {
+    // The reconciler caches one store per module; force a fresh module so the
+    // lazy singleton reconstructs under a throwing constructor.
+    quarantineState.throwOnConstruct = true;
+    vi.resetModules();
+    const freshMod = await import("./reconciler.js");
+    healthyChildDispatchScenario();
+    dispatchMock.mockClear();
+
+    let unhandled = false;
+    const handler = () => { unhandled = true; };
+    process.on("unhandledRejection", handler);
+    try {
+      freshMod.requestReconcile(2);
+      await flush();
+    } finally {
+      process.off("unhandledRejection", handler);
+    }
+
+    expect(unhandled).toBe(false);
+    expect(dispatchMock).toHaveBeenCalledWith(expect.objectContaining({ type: "W", cardId: 2 }));
+  });
+
+  it("dispatch pump failures are contained with a logged handler, not a silent swallow", async () => {
+    // Make the pump throw on its first pass: kanbanQueuedDispatchOrder throws
+    // synchronously inside dispatchOnePass, which rejects runWorkerDispatch.
+    healthyChildDispatchScenario();
+    kanbanQueuedDispatchOrderMock.mockImplementation(() => { throw new Error("dispatch pump failure"); });
+    dispatchMock.mockClear();
+
+    const unhandled = await expectNoUnhandledRejection(() => {
+      mod.requestReconcile(1);
+      mod.requestReconcile(2);
+    });
+
+    expect(unhandled).toBe(false);
+  });
+
+  it("three same-signature failures quarantine the card; the next wake is a no-op", async () => {
+    // Script the store to quarantine once the third same-signature failure is
+    // recorded, mirroring the store's own threshold logic.
+    quarantineState.resultFor = (cardId, signature, now) => {
+      const count = quarantineState.recorded.filter(r => r.cardId === cardId).length;
+      if (count >= 3) quarantineState.quarantined.add(cardId);
+      return { cardId, failureCount: count, errorSignature: signature, lastErrorAt: now, quarantinedAt: count >= 3 ? now : null };
+    };
+    healthyChildDispatchScenario();
+    kanbanGetCardMock.mockImplementation((id: number) => {
+      if (id === 1) throw new Error("deterministic failure #1664");
+      if (id === 99) return makeCard({ id: 99, status: "running", type: "O", parent_id: null });
+      return makeCard({ id: 2, status: "queued", type: "W", parent_id: 99 });
+    });
+    const getCardCallsFor1 = () => kanbanGetCardMock.mock.calls.filter(c => c[0] === 1).length;
+
+    // Each wake is driven separately so every pass is a fresh failure.
+    const callsBefore = getCardCallsFor1();
+    await expectNoUnhandledRejection(() => mod.requestReconcile(1));
+    expect(getCardCallsFor1()).toBe(callsBefore + 1);
+    await expectNoUnhandledRejection(() => mod.requestReconcile(1));
+    expect(quarantineState.quarantined.has(1)).toBe(false);
+
+    // third failure crosses the threshold
+    await expectNoUnhandledRejection(() => mod.requestReconcile(1));
+    expect(quarantineState.quarantined.has(1)).toBe(true);
+
+    // fourth wake is a no-op — the throwing path is never entered again
+    const callsBeforeFourth = getCardCallsFor1();
+    await expectNoUnhandledRejection(() => mod.requestReconcile(1));
+    expect(getCardCallsFor1()).toBe(callsBeforeFourth);
+  });
+
+  it("boot recovery does not re-arm a quarantined card and counts woken vs skipped", async () => {
+    healthyChildDispatchScenario();
+    kanbanGetCardMock.mockImplementation((id: number) => {
+      if (id === 63) return makeCard({ id: 63, status: "running", type: "O", parent_id: null });
+      if (id === 99) return makeCard({ id: 99, status: "running", type: "O", parent_id: null });
+      return makeCard({ id: 2, status: "queued", type: "W", parent_id: 99 });
+    });
+    kanbanRunningProjectIdsMock.mockReturnValue([63, 99]);
+    kanbanStrandedQueuedProjectIdsMock.mockReturnValue([]);
+    quarantineState.quarantined.add(63);
+    dispatchMock.mockClear();
+    reviewStoreMock.stateTransition.mockClear();
+    kanbanFailMock.mockClear();
+
+    const woken = mod.scanActiveProjects();
+    await flush();
+    await flush();
+
+    expect(woken).toBe(1); // only the healthy card was woken
+    // the quarantined card was never re-woken: no derive pass, no mutation calls
+    expect(kanbanGetCardMock.mock.calls.filter(c => c[0] === 63).length).toBe(0);
+    expect(kanbanFailMock).not.toHaveBeenCalled();
+    expect(reviewStoreMock.stateTransition).not.toHaveBeenCalled();
+    // a healthy card in the same scan still reconciles (unsupervised root
+    // dispatches through the legacy Orc lane)
+    expect(dispatchMock).toHaveBeenCalledWith(expect.objectContaining({ type: "O", cardId: 99 }));
+  });
+
+  it("quarantining a card leaves its durable rows untouched (no settlement, no kanban mutation)", async () => {
+    // Durable rows (project_supervision, project_review_decisions, kanban
+    // state) are store-owned and mocked here; the honest assertion is that no
+    // mutation entry point fires while the card is quarantined.
+    quarantineState.quarantined.add(1);
+    quarantineState.recorded = [{ cardId: 1, signature: "Error:old", now: "2026-08-16T10:00:00.000Z" }];
+    kanbanFailMock.mockClear();
+    kanbanCompleteMock.mockClear();
+    reviewStoreMock.stateTransition.mockClear();
+
+    const unhandled = await expectNoUnhandledRejection(() => mod.requestReconcile(1));
+
+    expect(unhandled).toBe(false);
+    expect(kanbanFailMock).not.toHaveBeenCalled();
+    expect(kanbanCompleteMock).not.toHaveBeenCalled();
+    expect(reviewStoreMock.stateTransition).not.toHaveBeenCalled();
+    expect(quarantineState.cleared).not.toContain(1); // no success path either
   });
 });

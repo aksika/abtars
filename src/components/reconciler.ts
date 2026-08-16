@@ -7,7 +7,11 @@ import {
   kanbanQueuedDispatchOrder, kanbanPromoteDueRetry, kanbanTransition, sqliteNow, KANBAN_TERMINAL_STATUSES,
   isUnblocked, cascadeFail, type KanbanCard,
 } from "./tasks/kanban-board.js";
-import { logInfo, logWarn } from "./logger.js";
+import { logInfo, logWarn, logError } from "./logger.js";
+import {
+  ReconcileQuarantineStore,
+  reconcileErrorSignature,
+} from "./reconcile-quarantine-store.js";
 import { logSwarmTrace } from "./swarm-trace.js";
 import { WorkerSupervisionService } from "./worker-supervision-service.js";
 import { WorkerSupervisionStore } from "./worker-supervision-store.js";
@@ -329,6 +333,65 @@ interface CardReconcilerState {
   dirty: boolean;
 }
 
+// ── #1664: reconcile error boundary / poison quarantine ─────────────────────
+
+/**
+ * One lazily constructed module-local quarantine store, reused by the boundary.
+ * The accessor is only ever called inside a safe helper: construction executes
+ * DDL and can throw, and a throwing construction must fail open, never become a
+ * second unhandled rejection.
+ */
+let _quarantineStore: ReconcileQuarantineStore | null = null;
+function quarantineStore(): ReconcileQuarantineStore {
+  return _quarantineStore ??= new ReconcileQuarantineStore();
+}
+
+function safeIsQuarantined(cardId: number): boolean {
+  try {
+    return quarantineStore().isQuarantined(cardId);
+  } catch (err) {
+    logError(TAG, `Quarantine lookup failed for card ${cardId} — failing open, bridge stays alive`, err);
+    return false;
+  }
+}
+
+function safeRecordReconcileFailure(cardId: number, err: unknown): void {
+  logError(TAG, `Card ${cardId}: reconcile pass failed — recording for quarantine`, err);
+  try {
+    const row = quarantineStore().recordFailure(cardId, reconcileErrorSignature(err), new Date().toISOString());
+    if (row.quarantinedAt) {
+      logError(TAG, `Card ${cardId}: quarantined after ${row.failureCount} consecutive reconcile failures (${row.errorSignature})`);
+    }
+  } catch (storeErr) {
+    logError(TAG, `Card ${cardId}: failed to record reconcile failure — quarantine unavailable, bridge stays alive`, storeErr);
+  }
+}
+
+function safeClearFailures(cardId: number): void {
+  try {
+    quarantineStore().clearFailures(cardId);
+  } catch (err) {
+    logError(TAG, `Card ${cardId}: failed to clear quarantine record after successful pass`, err);
+  }
+}
+
+function safeLogDispatchFailure(err: unknown): void {
+  logError(TAG, "Worker dispatch pump failed", err);
+}
+
+/**
+ * Terminal guard against a mistake in a safe helper. Must never touch the
+ * quarantine store (a failure here could recurse into itself) and must be
+ * best-effort and non-throwing.
+ */
+function emergencyContainmentLog(cardId: number | undefined, err: unknown): void {
+  try {
+    logError(TAG, cardId !== undefined
+      ? `Card ${cardId}: containment failure — reconcile error boundary itself threw`
+      : "Containment failure — dispatch pump error boundary itself threw", err);
+  } catch { /* nothing left to do */ }
+}
+
 const _states = new Map<number, CardReconcilerState>();
 
 function getState(cardId: number): CardReconcilerState {
@@ -337,12 +400,33 @@ function getState(cardId: number): CardReconcilerState {
   return s;
 }
 
-function wakeCard(cardId: number): void {
+/**
+ * #1664: single choke point for every reconcile wake. Returns whether the wake
+ * was accepted: a coalesced wake is accepted, only a known quarantine returns
+ * false. Store lookup failure logs a bounded infrastructure error and fails
+ * open — the pass still runs behind the terminal boundary.
+ */
+function wakeCard(cardId: number): boolean {
+  if (safeIsQuarantined(cardId)) {
+    logWarn(TAG, `Card ${cardId}: wake ignored — quarantined after repeated reconcile failures`);
+    return false;
+  }
   const s = getState(cardId);
-  if (s.running) { s.dirty = true; return; }
+  if (s.running) { s.dirty = true; return true; }
   s.running = true;
   s.dirty = false;
-  queueMicrotask(() => reconcileCard(cardId));
+  queueMicrotask(() => runReconcileBehindBoundary(cardId));
+  return true;
+}
+
+/** #1664: terminal, non-throwing handler for a scheduled reconcile pass. */
+function runReconcileBehindBoundary(cardId: number): void {
+  void reconcileCard(cardId)
+    .then(
+      () => safeClearFailures(cardId),
+      (err: unknown) => safeRecordReconcileFailure(cardId, err),
+    )
+    .catch((boundaryError: unknown) => emergencyContainmentLog(cardId, boundaryError));
 }
 
 async function reconcileCard(cardId: number): Promise<void> {
@@ -1335,7 +1419,15 @@ export function requestWorkerDispatch(): void {
   dispatchPumpState.dirty = true;
   if (!dispatchPumpState.running) {
     dispatchPumpState.running = true;
-    queueMicrotask(() => runWorkerDispatch());
+    // #1664: logged terminal handler, not a silent swallow. The pump is
+    // re-entered by the next requestWorkerDispatch() and a persistent failure
+    // stays visible in the log. No quarantine here: the pass spans all projects,
+    // so a throw cannot be attributed to one card.
+    queueMicrotask(() => {
+      void runWorkerDispatch()
+        .catch((err: unknown) => safeLogDispatchFailure(err))
+        .catch((boundaryError: unknown) => emergencyContainmentLog(undefined, boundaryError));
+    });
   }
 }
 
@@ -1783,12 +1875,21 @@ export function retryPendingReviewRequests(): number {
 export function scanActiveProjects(): number {
   // #1628: union running roots with stranded queued roots — a queued root
   // with no live Orc run (project 63's state) is otherwise never rediscovered.
+  // #1664: quarantined cards are not re-woken at boot; the returned count is
+  // the number actually woken, so the "recovered N running project(s)" log is
+  // truthful.
   const projectIds = [...new Set([
     ...kanbanRunningProjectIds(),
     ...kanbanStrandedQueuedProjectIds(),
   ])].sort((a, b) => a - b);
-  for (const projectId of projectIds) wakeCard(projectId);
-  return projectIds.length;
+  const skipped: number[] = [];
+  let woken = 0;
+  for (const projectId of projectIds) {
+    if (wakeCard(projectId)) woken += 1;
+    else skipped.push(projectId);
+  }
+  if (skipped.length > 0) logWarn(TAG, `Skipped ${skipped.length} quarantined project(s): ${skipped.join(", ")}`);
+  return woken;
 }
 
 export function answerInputRequest(requestId: string, response: string): boolean {
