@@ -138,8 +138,12 @@ describe("reconcileErrorSignature", () => {
   });
 
   it("redacts secrets before storage", () => {
-    const sig = reconcileErrorSignature(new Error("token example_redacted_key leaked"));
-    expect(sig).not.toContain("example_redacted_key");
+    // Build the secret dynamically so no secret-like literal is embedded in
+    // source; assert the stored signature never carries it.
+    const secret = "sk_" + "live_" + "a".repeat(26);
+    const sig = reconcileErrorSignature(new Error(`token ${secret} leaked`));
+    expect(sig).not.toContain(secret);
+    expect(sig).toContain("REDACTED");
   });
 
   it("bounds the stored signature length", () => {
