@@ -2,7 +2,7 @@ import { describe, it, expect } from "vitest";
 import { readFileSync } from "node:fs";
 import { resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
-import { PI_COMPATIBILITY, classifyPiPin, formatPiPinWarning } from "./pi-compatibility.js";
+import { PI_COMPATIBILITY, classifyPiPin, formatPiPinWarning, formatPiPinnedInstallCommand } from "./pi-compatibility.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const ROOT = resolve(__dirname, "..", "..");
@@ -121,5 +121,19 @@ describe("formatPiPinWarning (#1572)", () => {
 
   it("returns a warning for unparseable versions (unknown shape is not tested)", () => {
     expect(formatPiPinWarning("9.9")).not.toBeNull();
+  });
+});
+
+describe("formatPiPinnedInstallCommand (#1573)", () => {
+  it("returns the exact pinned install command", () => {
+    expect(formatPiPinnedInstallCommand()).toBe(
+      `npm i -g '${PI_COMPATIBILITY.packageName}@${PI_COMPATIBILITY.pinnedRange}'`,
+    );
+  });
+
+  it("is the single command reused by the pin warning", () => {
+    const warning = formatPiPinWarning("0.85.1");
+    expect(warning).toContain(formatPiPinnedInstallCommand());
+    expect(warning!.split(formatPiPinnedInstallCommand())).toHaveLength(2);
   });
 });

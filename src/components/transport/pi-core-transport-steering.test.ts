@@ -84,6 +84,12 @@ vi.mock("./pi-core-types.js", () => ({
   }),
 }));
 
+// #1573: initialize() gates readiness on the runtime contract probe; unrelated
+// steering tests receive a successful probe.
+vi.mock("./pi-runtime-contract.js", () => ({
+  validatePiRuntimeContract: vi.fn(async () => {}),
+}));
+
 import { PiCoreTransport } from "./pi-core-transport.js";
 import { ModelHealthRegistry } from "./model-health-registry.js";
 import type { ModelCandidate } from "./model-candidates.js";

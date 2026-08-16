@@ -92,6 +92,8 @@ export class PiCoreTransport implements IKiroTransport {
   private _executionGeneration = 0;
   private _isReady = false;
   private _lastUsage: RuntimeUsageSnapshot | null = null;
+  /** #1573: shared in-flight initialization probe; cleared after settlement. */
+  private _initializing: Promise<void> | null = null;
 
   /** #1527: late-bound durable context provider; populated once memory is ready. */
   private _contextProvider: DurableContextProviderHolder;
@@ -284,7 +286,27 @@ export class PiCoreTransport implements IKiroTransport {
     if (this.activeSlot === slot) this.activeSlot = null;
   }
 
+  /**
+   * #1573: single readiness gate. Probes the complete executable runtime
+   * contract (agent-core methods, pi-ai createProvider, every configured API
+   * family) before `_isReady` flips or `onReady` fires. A rejection leaves the
+   * transport unready with no cached verdict, so a later explicit
+   * initialization after the operator repairs Pi probes again. Concurrent
+   * callers share one in-flight probe.
+   */
   async initialize(): Promise<void> {
+    if (this._isReady) return;
+    if (!this._initializing) {
+      this._initializing = this.runInitialization().finally(() => {
+        this._initializing = null;
+      });
+    }
+    return this._initializing;
+  }
+
+  private async runInitialization(): Promise<void> {
+    const { validatePiRuntimeContract } = await import("./pi-runtime-contract.js");
+    await validatePiRuntimeContract(this.config.candidates);
     this._isReady = true;
     this.onReady?.();
   }

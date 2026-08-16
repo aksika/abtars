@@ -70,6 +70,12 @@ vi.mock("./pi-stream-fn.js", () => ({
   }),
 }));
 
+// #1573: initialize() gates readiness on the runtime contract probe; unrelated
+// credit tests receive a successful probe.
+vi.mock("./pi-runtime-contract.js", () => ({
+  validatePiRuntimeContract: vi.fn(async () => {}),
+}));
+
 import { PiCoreTransport } from "./pi-core-transport.js";
 import { ProviderExecutionError } from "./provider-failure.js";
 import { ModelHealthRegistry } from "./model-health-registry.js";

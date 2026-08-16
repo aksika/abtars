@@ -25,6 +25,17 @@ vi.mock("../pi-installation.js", async (importOriginal) => {
     resolvePiInstallation: () => ({ state: "absent" as const }),
   };
 });
+// #1573: the readiness probe is the external boundary of initialize(). Unrelated
+// tests receive a successful probe; readiness tests override it per case.
+vi.mock("./pi-runtime-contract.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("./pi-runtime-contract.js")>();
+  return {
+    ...actual,
+    validatePiRuntimeContract: vi.fn(async () => {}),
+  };
+});
+
+import { validatePiRuntimeContract, PiRuntimeContractError } from "./pi-runtime-contract.js";
 
 function makeCandidates(): ModelCandidate[] {
   return [{
@@ -64,6 +75,63 @@ describe("PiCoreTransport", () => {
     const t = makeTransport();
     await t.initialize();
     expect(t.isReady).toBe(true);
+  });
+
+  describe("readiness contract (#1573)", () => {
+    beforeEach(() => {
+      vi.mocked(validatePiRuntimeContract).mockReset();
+      vi.mocked(validatePiRuntimeContract).mockResolvedValue(undefined);
+    });
+
+    it("keeps the transport not-ready and suppresses onReady when the probe fails", async () => {
+      const t = makeTransport();
+      const onReady = vi.fn();
+      t.onReady = onReady;
+      vi.mocked(validatePiRuntimeContract).mockRejectedValueOnce(
+        new PiRuntimeContractError("Pi runtime contract incompatible (0.84.0; pi-ai; missing createProvider).", {
+          component: "pi-ai",
+          capability: "createProvider",
+        }),
+      );
+      await expect(t.initialize()).rejects.toThrow(PiRuntimeContractError);
+      expect(t.isReady).toBe(false);
+      expect(onReady).not.toHaveBeenCalled();
+    });
+
+    it("probes again after a rejected attempt and succeeds once repaired", async () => {
+      const t = makeTransport();
+      const onReady = vi.fn();
+      t.onReady = onReady;
+      vi.mocked(validatePiRuntimeContract).mockRejectedValueOnce(
+        new PiRuntimeContractError("Pi runtime contract incompatible (0.84.0; openai-completions; missing streamSimple).", {
+          component: "openai-completions",
+          capability: "streamSimple",
+        }),
+      );
+      await expect(t.initialize()).rejects.toThrow(PiRuntimeContractError);
+      expect(t.isReady).toBe(false);
+
+      await t.initialize();
+      expect(t.isReady).toBe(true);
+      expect(onReady).toHaveBeenCalledTimes(1);
+    });
+
+    it("shares one in-flight probe among concurrent callers", async () => {
+      const t = makeTransport();
+      let release!: () => void;
+      const gate = new Promise<void>((resolve) => { release = resolve; });
+      vi.mocked(validatePiRuntimeContract).mockImplementationOnce(() => gate);
+      const first = t.initialize();
+      const second = t.initialize();
+      for (let i = 0; i < 100 && vi.mocked(validatePiRuntimeContract).mock.calls.length === 0; i++) {
+        await Promise.resolve();
+      }
+      expect(vi.mocked(validatePiRuntimeContract)).toHaveBeenCalledTimes(1);
+      release();
+      await Promise.all([first, second]);
+      expect(vi.mocked(validatePiRuntimeContract)).toHaveBeenCalledTimes(1);
+      expect(t.isReady).toBe(true);
+    });
   });
 
   it("implements IKiroTransport interface", () => {

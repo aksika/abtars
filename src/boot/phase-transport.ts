@@ -93,7 +93,7 @@ export async function buildTransport(ctx: BootCtx): Promise<PhaseResult> {
   if (!loadResult.ok && loadResult.state === "invalid") {
     if (ctx.transport) {
       logWarn("main", `transport.json is invalid (${loadResult.issues.length} issue(s)) — keeping existing transport alive`);
-      return "ran";
+      return "skipped";
     }
     logWarn("main", `transport.json is invalid (${loadResult.issues.length} issue(s)) — running transportless (primary unchanged, .env fallback not activated)`);
     ctx.transport = null;
@@ -192,7 +192,7 @@ export async function buildTransport(ctx: BootCtx): Promise<PhaseResult> {
       const tried = [prof!.model, ...prof!.fallbacks.map(f => f.model)].join(", ");
       if (ctx.transport) {
         logError("main", `All models failed init (${tried}) — keeping existing transport up`);
-        return "ran";
+        return "skipped";
       }
       logError("main", `All configured models failed init (${tried}). Fix transport.json or use /emergency`);
       logWarn("main", "Transport unavailable — running in Tier 2 (no agent responses)");
@@ -201,16 +201,12 @@ export async function buildTransport(ctx: BootCtx): Promise<PhaseResult> {
     }
   }
 
-  // #367 — if existing transport is up and new config rebuild needed, keep old on error
-  // (This path is only hit via /reset rebuild, not boot)
-
-  // Destroy old (if any) — now that we know the new config is valid
-  if (ctx.transport) {
-    try { await ctx.transport.destroy(); } catch (err) {
-      logWarn("main", `Old transport destroy failed: ${err instanceof Error ? err.message : String(err)}`);
-    }
-    ctx.transport = null;
-  }
+  // #1573: transactional replacement. The candidate is constructed and
+  // initialized before the working transport is destroyed: a rejected
+  // candidate is cleaned up on its own and the old instance (with all
+  // downstream references) stays active and wired. Only at initial boot (no
+  // old transport) does the typed rejection escape for degraded-boot reporting.
+  const previousTransport = ctx.transport;
 
   if (resolved.provider.transport === "tmux") {
     const defaults = tc?.transportDefaults?.tmux;
@@ -324,7 +320,31 @@ export async function buildTransport(ctx: BootCtx): Promise<PhaseResult> {
     });
   }
 
-  await transport.initialize();
+  try {
+    await transport.initialize();
+  } catch (err) {
+    // Clean up only the candidate — never the retained working transport.
+    try {
+      await transport.destroy();
+    } catch (cleanupErr) {
+      logWarn("main", `Rejected transport cleanup failed: ${cleanupErr instanceof Error ? cleanupErr.message : String(cleanupErr)}`);
+    }
+    if (previousTransport) {
+      logError("main", `Transport replacement rejected: ${err instanceof Error ? err.message : String(err)} — keeping existing transport up`);
+      return "skipped";
+    }
+    throw err;
+  }
+
+  // Candidate passed its readiness gate — destroy the old instance and publish.
+  if (previousTransport) {
+    try {
+      await previousTransport.destroy();
+    } catch (err) {
+      logWarn("main", `Old transport destroy failed: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
+  ctx.transport = transport;
 
   // SOUL bundle set in phase-pipelineDeps (after memory state resolved) #998
 
@@ -332,7 +352,6 @@ export async function buildTransport(ctx: BootCtx): Promise<PhaseResult> {
     logWarn("main", `⚠️ Fallbacks configured for ${resolved.provider.transport} transport — only API transport supports model fallback`);
   }
 
-  ctx.transport = transport;
   // Flush message queues on reinit — model lost context
   if ("onReinit" in transport) {
     (transport as any).onReinit = () => {
@@ -459,10 +478,16 @@ export async function buildTransport(ctx: BootCtx): Promise<PhaseResult> {
 /**
  * Rebuild professor transport in place (picks up transport.json changes).
  * Patches downstream references that captured the old transport (pipelineDeps, idleSave).
+ * A `skipped` result means the working transport was retained — downstream
+ * references must not be rewired and no "rebuilt" claim is printed (#1573).
  */
 export async function rebuildTransport(ctx: BootCtx): Promise<PhaseResult> {
   logInfo("main", "🔄 Rebuilding transport...");
-  await buildTransport(ctx);
+  const result = await buildTransport(ctx);
+  if (result === "skipped") {
+    logWarn("main", "Transport replacement rejected — existing transport retained");
+    return "skipped";
+  }
   if (ctx.pipelineDeps && ctx.transport) {
     (ctx.pipelineDeps as { transport: IKiroTransport }).transport = ctx.transport;
   }

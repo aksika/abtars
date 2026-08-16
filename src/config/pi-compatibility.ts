@@ -35,6 +35,14 @@ export function classifyPiPin(version: string): PiPinStatus {
 }
 
 /**
+ * The exact npm command abtars drives to install the tested Pi version. Single
+ * source used by warnings and runtime-contract remediation text (#1573).
+ */
+export function formatPiPinnedInstallCommand(): string {
+  return `npm i -g '${PI_COMPATIBILITY.packageName}@${PI_COMPATIBILITY.pinnedRange}'`;
+}
+
+/**
  * Operator-facing warning for an above-pin installation, including the exact
  * downgrade command. Returns null for at-pin. Single source for the text used
  * by status, deps, preflight, boot, and tui.
@@ -45,6 +53,6 @@ export function formatPiPinWarning(version: string): string | null {
   return (
     `Pi ${version} is newer than the version abtars is built against (${pinLabel}).\n` +
     `Pi features may fail. To return to the tested version:\n` +
-    `  npm i -g '${PI_COMPATIBILITY.packageName}@${PI_COMPATIBILITY.pinnedRange}'`
+    `  ${formatPiPinnedInstallCommand()}`
   );
 }
