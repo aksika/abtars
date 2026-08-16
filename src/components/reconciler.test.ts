@@ -1802,4 +1802,31 @@ describe("Reconciler — #1664 error boundary", () => {
     expect(reviewStoreMock.stateTransition).not.toHaveBeenCalled();
     expect(quarantineState.cleared).not.toContain(1); // no success path either
   });
+
+  it("releasing a quarantine re-wakes the card on the next request (operator clear flow)", async () => {
+    healthyChildDispatchScenario();
+    kanbanGetCardMock.mockImplementation((id: number) => {
+      if (id === 1) throw new Error("deterministic failure #1664");
+      if (id === 99) return makeCard({ id: 99, status: "running", type: "O", parent_id: null });
+      return makeCard({ id: 2, status: "queued", type: "W", parent_id: 99 });
+    });
+    const getCardCallsFor1 = () => kanbanGetCardMock.mock.calls.filter(c => c[0] === 1).length;
+
+    // quarantined: a wake is skipped
+    quarantineState.quarantined.add(1);
+    const callsBefore = getCardCallsFor1();
+    await expectNoUnhandledRejection(() => mod.requestReconcile(1));
+    expect(getCardCallsFor1()).toBe(callsBefore);
+
+    // operator clears the quarantine (what /project unquarantine does)
+    quarantineState.quarantined.delete(1);
+    quarantineState.recorded = [];
+
+    // the card reconciles again on the next wake
+    await expectNoUnhandledRejection(() => mod.requestReconcile(1));
+    expect(getCardCallsFor1()).toBe(callsBefore + 1);
+    expect(quarantineState.recorded).toEqual([
+      expect.objectContaining({ cardId: 1, signature: "Error:deterministic failure #1664" }),
+    ]);
+  });
 });

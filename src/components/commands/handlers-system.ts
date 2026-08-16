@@ -341,6 +341,19 @@ async function buildStatusLines(ctx: CommandContext): Promise<string[]> {
     } catch (err) { logAndSwallow("command_handlers", "op", err); }
   }
 
+  // #1664: quarantined reconcile cards — one line, only when non-empty.
+  // Best-effort store access: unavailability degrades to a bounded line and
+  // never fails the rest of /status. Signatures are redacted before storage.
+  try {
+    const { ReconcileQuarantineStore } = await import("../reconcile-quarantine-store.js");
+    const quarantined = new ReconcileQuarantineStore().listQuarantined();
+    if (quarantined.length > 0) {
+      lines.push(`Quarantined: ${quarantined.map(r => `card ${r.cardId} (${r.failureCount} failures, ${r.errorSignature})`).join("; ")}`);
+    }
+  } catch {
+    lines.push("Quarantine: unavailable");
+  }
+
   lines.push("");
   lines.push("Use /mcp for MCP server status.");
 

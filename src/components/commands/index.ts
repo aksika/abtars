@@ -11,7 +11,7 @@ import {
   handleStatus, handleDoctor, handleStop, handleWait, handleRestart,
   handleFull, handleShort, handleHealing, handleFacts,
   handleTasksList, handleTasksTrigger, handleTasksLog, handleTaskPause, handleKanban,
-  handleChannel, handleTodo,
+  handleChannel, handleTodo, handleProjectUnquarantine,
   handleEmergencyAlias, handleModels, handleHeartbeat, handleEffort, handleThinking, handleContinue, handleRoute,
   handleMemory, handleNlm,
   handleSleep, handleSleepSub, handleHelp, handleSkills,
@@ -89,6 +89,7 @@ registerPrefix("/task pause ", handleTaskPause);
 registerPrefix("/task resume ", handleTaskPause);
 registerPrefix("/tasks pause ", handleTaskPause);
 registerPrefix("/tasks resume ", handleTaskPause);
+registerPrefix("/project unquarantine ", handleProjectUnquarantine);
 registerPrefix("/pi run ", handlePiRun);
 registerPrefix("/pi status ", handlePiStatus);
 registerPrefix("/pi get ", handlePiStatus);

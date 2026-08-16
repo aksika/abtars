@@ -261,6 +261,7 @@ export async function handleHelp(_text: string, ctx: CommandContext): Promise<bo
     "/effort — Reasoning effort (off/low/medium/high/xhigh)",
     "/thinking show|hide — Show or hide model reasoning in chat",
     "/kanban — Kanban board",
+    "/project unquarantine <id> — Clear reconcile quarantine for a project",
     "/tribe — Peer status (Orc + enrolled peers)",
     "/pi run --workspace <alias> <goal> — Start a Pi coding run",
     "/pi status <runId> — Pi run status",

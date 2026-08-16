@@ -42,6 +42,7 @@ export const BOT_COMMANDS: readonly BotCommand[] = [
   { name: "usage", description: "Token usage & cost this session" },
   { name: "continue", description: "Nudge model to continue after failure" },
   { name: "kanban", description: "Kanban board" },
+  { name: "project", description: "Project operations (unquarantine)" },
   { name: "tribe", description: "Peer status (Orc + enrolled peers)" },
   { name: "help", description: "Show all commands" },
 ];

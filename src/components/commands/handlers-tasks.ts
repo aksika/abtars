@@ -212,6 +212,33 @@ export async function handleTaskPause(text: string, ctx: CommandContext): Promis
   return true;
 }
 
+/**
+ * #1664: operator clear of a reconcile quarantine. Release the durable row,
+ * then re-wake the card so it reconciles without waiting for an external event.
+ */
+export async function handleProjectUnquarantine(text: string, ctx: CommandContext): Promise<boolean> {
+  const raw = text.replace(/^\/project unquarantine\s*/i, "").trim();
+  const cardId = parseInt(raw, 10);
+  if (!raw || !Number.isInteger(cardId) || cardId <= 0) {
+    await ctx.reply("Usage: /project unquarantine <id>");
+    return true;
+  }
+  try {
+    const { ReconcileQuarantineStore } = await import("../reconcile-quarantine-store.js");
+    const released = new ReconcileQuarantineStore().releaseQuarantine(cardId);
+    if (!released) {
+      await ctx.reply(`card ${cardId} is not quarantined`);
+      return true;
+    }
+    const { requestReconcile } = await import("../reconciler.js");
+    requestReconcile(cardId);
+    await ctx.reply(`+ Quarantine cleared for card ${cardId} — reconciliation resumed.`);
+  } catch (err) {
+    await ctx.reply(`Failed: ${err instanceof Error ? err.message : String(err)}`);
+  }
+  return true;
+}
+
 export async function handleKanban(text: string, ctx: CommandContext): Promise<boolean> {
   try {
     const { kanbanList, kanbanGetCard, kanbanSearch } = await import("../tasks/kanban-board.js");
