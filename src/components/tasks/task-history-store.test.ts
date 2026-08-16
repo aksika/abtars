@@ -197,6 +197,16 @@ describe("append-once atomicity", () => {
     expect(store.getRun("once-run")).toEqual(first);
   });
 
+  it("propagates a constraint error instead of treating an invalid event as a duplicate", () => {
+    const invalid = {
+      ...makeEvent("invalid-outcome", "invalid-task"),
+      outcome: "not-a-task-outcome" as TaskOutcome,
+    };
+    expect(() => store.appendRunOnce(invalid)).toThrow(/CHECK constraint failed/);
+    expect(() => store.appendRun(invalid)).toThrow(/CHECK constraint failed/);
+    expect(store.getRun("invalid-outcome")).toBeUndefined();
+  });
+
   it("appendRun is idempotent for an explicit duplicate run ID", () => {
     expect(store.appendRun(makeEvent("idem-run", "idem-task"))).toBe("idem-run");
     expect(store.appendRun(makeEvent("idem-run", "idem-task"))).toBe("idem-run");
@@ -353,7 +363,7 @@ describe("legacy task-history.jsonl migration", () => {
           return {
             ...stmt,
             run: (...params: unknown[]) => {
-              if (failNextInsert && sql.includes("INSERT OR IGNORE INTO task_run_history")) {
+              if (failNextInsert && sql.includes("INSERT INTO task_run_history")) {
                 failNextInsert = false;
                 throw new Error("forced insert failure");
               }
@@ -378,12 +388,12 @@ describe("legacy task-history.jsonl migration", () => {
     }
   });
 
-  it("an empty legacy file is left in place and imports nothing", async () => {
+  it("renames an empty legacy file after importing nothing", async () => {
     writeFileSync(jsonlPath(), "");
     await loadStore();
     expect(store.recentRuns("task", 5)).toEqual([]);
-    expect(existsSync(jsonlPath())).toBe(true);
-    expect(existsSync(jsonlPath() + ".migrated")).toBe(false);
+    expect(existsSync(jsonlPath())).toBe(false);
+    expect(existsSync(jsonlPath() + ".migrated")).toBe(true);
   });
 });
 

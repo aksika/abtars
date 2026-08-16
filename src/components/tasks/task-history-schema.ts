@@ -80,10 +80,11 @@ const OUTCOMES = new Set([
 
 /** Live-write INSERT — also the migration import statement. */
 export const INSERT_TASK_RUN_HISTORY = `
-  INSERT OR IGNORE INTO task_run_history (
+  INSERT INTO task_run_history (
     run_id, task_id, kind, trigger, started_at, finished_at, outcome,
     exit_code, detail, delivery_text, result_path, kanban_card_id, group_id, diagnostic_json
   ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+  ON CONFLICT(run_id) DO NOTHING
 `;
 
 /** Encode a TaskRunEvent into the 14 bound parameters of INSERT_TASK_RUN_HISTORY. */
@@ -146,7 +147,8 @@ function historyPath(): string {
  * #1568: create the history table/indexes, import any legacy
  * `task-history.jsonl` exactly once, then run bounded retention. Idempotent by
  * construction: the import is skipped when the file is absent, and re-running
- * after a partial commit cannot duplicate rows (INSERT OR IGNORE on run_id).
+ * after a partial commit cannot duplicate rows (the insert ignores only a
+ * conflicting run_id).
  * The rename happens after the transaction commits; a crash before commit
  * leaves the JSONL intact for a clean retry.
  */
@@ -171,7 +173,6 @@ function importLegacyJsonl(db: TaskHistoryDb): void {
     return;
   }
   const lines = splitLines(raw);
-  if (lines.length === 0) return;
 
   const insert = db.prepare(INSERT_TASK_RUN_HISTORY);
   let imported = 0;

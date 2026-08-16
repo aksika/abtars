@@ -19,6 +19,8 @@ import { FIXTURE_MODEL_B } from "./bridge-config.js";
 import { waitFor } from "./child-process.js";
 import type { PiAcceptanceContext } from "./scenarios.js";
 import { resolveNativeDep } from "../../../utils/lazy-require.js";
+import { getRunFromDatabase } from "../../../components/tasks/task-history-store.js";
+import { wrapTaskDatabase } from "../../../components/tasks/kanban-board.js";
 
 export const SCHEDULED_TASK_ID = "scheduled-limit";
 const SCHEDULED_GOAL = `PI-E2E-SCHEDULED ${SCHEDULED_TASK_ID}`;
@@ -106,7 +108,11 @@ function readBridgeHomeEvidence(ctx: PiAcceptanceContext, providerSummaries: Pro
     try {
       // Reuse the production native-dependency resolver. The bridge HOME is
       // isolated, but the dependency itself is the existing host install.
-      const Database = resolveNativeDep("better-sqlite3") as new (path: string, opts: { readonly: boolean }) => { prepare(sql: string): { get(...args: unknown[]): unknown; all(...args: unknown[]): unknown[] } };
+      const Database = resolveNativeDep("better-sqlite3") as new (path: string, opts: { readonly: boolean }) => {
+        prepare(sql: string): { run(...args: unknown[]): { changes: number; lastInsertRowid: number | bigint }; get(...args: unknown[]): unknown; all(...args: unknown[]): unknown[] };
+        exec(sql: string): void;
+        transaction<T>(fn: () => T): () => T;
+      };
       const db = new Database(dbPath, { readonly: true });
       try {
         const run = db.prepare("SELECT run_id, card_id, phase FROM task_runs WHERE task_id = ? ORDER BY reserved_at DESC LIMIT 1").get(SCHEDULED_TASK_ID) as { run_id?: string; card_id?: number | null; phase?: string } | undefined;
@@ -114,10 +120,12 @@ function readBridgeHomeEvidence(ctx: PiAcceptanceContext, providerSummaries: Pro
         evidence.cardId = run?.card_id ?? undefined;
         evidence.phase = run?.phase;
 
-        // Terminal outcome through the same durable SQL evidence the bridge
-        // reads; a settled run carries a task_run_history row.
-        const terminal = db.prepare("SELECT outcome FROM task_run_history WHERE task_id = ? ORDER BY finished_at DESC, run_id DESC LIMIT 1").get(SCHEDULED_TASK_ID) as { outcome?: string } | undefined;
-        evidence.terminalOutcome = terminal?.outcome;
+        // Use the public history codec/API and correlate to the exact
+        // reservation, rather than treating the table as an acceptance API.
+        if (evidence.runId) {
+          const event = getRunFromDatabase(wrapTaskDatabase(db), evidence.runId);
+          evidence.terminalOutcome = event?.outcome;
+        }
 
         if (evidence.cardId !== undefined) {
           const sup = db.prepare("SELECT state FROM project_supervision WHERE project_card_id = ?").get(evidence.cardId) as { state?: string } | undefined;

@@ -74,7 +74,8 @@ function runRetentionBestEffort(db: TaskDatabase): void {
 }
 
 /**
- * Append exactly once: one atomic INSERT OR IGNORE owns run-ID uniqueness.
+ * Append exactly once: one atomic insert with a run_id-only conflict target
+ * owns run-ID uniqueness.
  * Returns the winning run ID, or null when the run is already recorded.
  * Only a uniqueness conflict maps to null — all database and serialization
  * failures propagate so settlement never mistakes a storage outage for an
@@ -121,7 +122,13 @@ export function hasRun(runId: string): boolean {
 
 /** Return the durable terminal event for a run, when one exists. */
 export function getRun(runId: string): TaskRunEvent | undefined {
-  const db = requireTaskDatabase();
+  return getRunFromDatabase(requireTaskDatabase(), runId);
+}
+
+/** Read one history event from an already-open task database. Acceptance
+ * harnesses use this to inspect an isolated bridge home without changing the
+ * process-global database singleton used by normal callers. */
+export function getRunFromDatabase(db: TaskDatabase, runId: string): TaskRunEvent | undefined {
   const row = db.prepare(`SELECT * FROM task_run_history WHERE run_id = ?`).get(runId);
   return row ? rowToEvent(row) : undefined;
 }
