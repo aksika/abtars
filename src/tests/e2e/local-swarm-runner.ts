@@ -519,10 +519,15 @@ async function runRestartRecovery(): Promise<LocalSwarmResult> {
   emitCheckpoint("worker_running");
 
   (completeBarrierResolve as (() => void) | undefined)?.();
-  await new Promise(r => setTimeout(r, 200));
+  // The settlement chain (session finalize -> criteria verdict -> attempt
+  // transition) is async; wait for the terminal lifecycle instead of racing
+  // it with a fixed sleep.
+  const finalAttempt = await eventually("worker-terminal", () => {
+    const a = store.getLatestAttempt(childCardId);
+    return a && (a.lifecycle === "completed" || a.lifecycle === "failed" || a.lifecycle === "cancelled" || a.lifecycle === "timed_out") ? a : null;
+  }, 20000);
 
   const afterSettle = readCounts();
-  const finalAttempt = store.getLatestAttempt(childCardId);
 
   return {
     schemaVersion: 2, ok: true, scenario, scenarioId,
@@ -580,7 +585,13 @@ async function runCapacityDeadline(): Promise<LocalSwarmResult> {
       criteria: JSON.stringify([{ id: `c${i + 1}`, description: `Criterion ${i + 1}` }]),
       verification_commands: JSON.stringify([{ id: `check_c${i + 1}`, argv: ["node"], timeout_ms: 5_000, criterion_ids: [`c${i + 1}`] }]),
       supports_root_criteria: JSON.stringify([`c${i + 1}`]),
-      max_duration_ms: i < 3 ? "300000" : "1",
+      // #1624: a deadline that must expire mid-scenario but never races the
+      // claim itself. max_duration_ms=1 made the derived hard deadline
+      // already-past by the time the claim transaction ran (under load the
+      // gap exceeds 1ms), so the claim was refused as deadline_expired and
+      // the attempt stayed pending forever. 2s expires quickly but is 3
+      // orders of magnitude past the synchronous derive→claim gap.
+      max_duration_ms: i < 3 ? "300000" : "2000",
     }, { userId: "test", orcContext: orcContext as any });
     const m = sr.match(/card #?(\d+)/);
     if (m) { childCardIds.push(Number(m[1])); activeChildCardIds.push(Number(m[1])); }
@@ -593,7 +604,7 @@ async function runCapacityDeadline(): Promise<LocalSwarmResult> {
   await eventually("three-active", () => {
     const active = store.getActiveAttemptCountForExecutor("agent", "spin-local");
     return active >= 3 ? active : null;
-  }, 10000);
+  }, 30000);
 
   const peakActive = store.getActiveAttemptCountForExecutor("agent", "spin-local");
 
