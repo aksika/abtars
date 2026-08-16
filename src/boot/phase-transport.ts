@@ -356,10 +356,15 @@ export async function buildTransport(ctx: BootCtx): Promise<PhaseResult> {
   ctx.runtime.setSessionManager(ctx.sessionManager);
   if (ctx.sandboxEnabled) ctx.runtime.setSandboxEnabled(true);
 
+  // #1555: transport-facing session boundary. Orc tools need Worker spawning
+  // regardless of the async-delegation flag; delegation stays under its gate.
+  const { setOrcToolsDeps } = await import("../components/transport/orc-tools.js");
+  setOrcToolsDeps(ctx.sessionManager);
+
   // Wire async delegation tools (#570)
   if (getEnv().enableAsyncDelegation) {
     const { setDelegationDeps } = await import("../components/transport/delegation-tools.js");
-    setDelegationDeps(ctx.runtime);
+    setDelegationDeps(ctx.runtime, ctx.sessionManager);
   }
 
   logInfo("main", "✓ Transport ready");

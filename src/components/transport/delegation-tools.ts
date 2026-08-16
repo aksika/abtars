@@ -5,8 +5,8 @@
 
 import type { ToolDefinition } from "./tool-registry.js";
 import type { SubagentRuntime, AgentName } from "../subagent-runtime.js";
-import type { SessionType } from "../spin-types.js";
-import { spin } from "../spin.js";
+import type { ManagedSession, SessionType } from "../spin-types.js";
+import type { SessionDispatch } from "./session-dispatch.js";
 import { addCompletion } from "../completion-buffer.js";
 import { logInfo, logWarn } from "../logger.js";
 import { getEnv } from "../env-schema.js";
@@ -21,9 +21,14 @@ function stringValue(value: unknown): string {
 }
 
 let _runtime: SubagentRuntime | null = null;
+let _sessionDispatch: SessionDispatch | null = null;
 
-export function setDelegationDeps(runtime: SubagentRuntime): void {
+export function setDelegationDeps(
+  runtime: SubagentRuntime,
+  sessionDispatch: SessionDispatch,
+): void {
   _runtime = runtime;
+  _sessionDispatch = sessionDispatch;
 }
 
 // Track active background sessions: taskId → metadata
@@ -64,7 +69,7 @@ export const spawnSessionTool: ToolDefinition = {
     required: ["type", "goal"],
   },
   async execute(args) {
-    if (!_runtime) return JSON.stringify({ error: "Delegation not initialized" });
+    if (!_runtime || !_sessionDispatch) return JSON.stringify({ error: "Delegation not initialized" });
 
     const typeInfo = TYPE_MAP[stringValue(args.type) || "task"];
     if (!typeInfo) return JSON.stringify({ error: `Unknown type: ${stringValue(args.type)}. Use: code, browse, task` });
@@ -77,7 +82,7 @@ export const spawnSessionTool: ToolDefinition = {
 
     // Create session via session manager
     const masterUid = (await import("../master-user.js")).getMasterUserId();
-    const session = spin.createSubSession(masterUid, "telegram", typeInfo.sessionType);
+    const session = _sessionDispatch.createSubSession(masterUid, "telegram", typeInfo.sessionType);
     if (typeof session === "string") return JSON.stringify({ error: session });
 
     const goal = stringValue(args.goal) || "No goal specified";
@@ -177,7 +182,7 @@ export const terminateSessionTool: ToolDefinition = {
     required: ["task_id"],
   },
   async execute(args) {
-    if (!_runtime) return JSON.stringify({ error: "Delegation not initialized" });
+    if (!_runtime || !_sessionDispatch) return JSON.stringify({ error: "Delegation not initialized" });
 
     const taskId = stringValue(args.task_id);
     const entry = activeBackgrounds.get(taskId);
@@ -188,14 +193,15 @@ export const terminateSessionTool: ToolDefinition = {
     entry.status = "terminated";
     entry.result = "(terminated by user)";
 
+    let managed: ManagedSession | undefined;
     if (entry.sessionId) {
-      const managed = spin.getSessionById(entry.sessionId);
+      managed = _sessionDispatch.getSessionById(entry.sessionId);
       if (managed) managed.status = "paused";
     }
 
     addCompletion({
       sessionId: entry.sessionId,
-      motherId: spin.getSessionById(entry.sessionId)?.motherId ?? "",
+      motherId: managed?.motherId ?? "",
       goal: entry.goal,
       status: "terminated",
       result: entry.result,

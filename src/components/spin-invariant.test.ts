@@ -138,4 +138,31 @@ describe("spin(spec) is the canonical model-call entry point (#1271)", () => {
     }
     expect(violations).toEqual([]);
   });
+
+  it("transport files never directly import the Spin session manager (#1555)", () => {
+    const TRANSPORT_DIR = join(SRC_DIR, "components", "transport");
+    const violations: string[] = [];
+    for (const file of walkTsFiles(TRANSPORT_DIR)) {
+      const rel = relative(process.cwd(), file);
+      const content = readFileSync(file, "utf-8");
+      // Strip JSDoc block comments and line comments to avoid matching doc text.
+      const stripped = content
+        .replace(/\/\*[\s\S]*?\*\//g, "")
+        .replace(/^\s*\/\/.*$/gm, "");
+      // Type-only imports are erased at runtime and may reference spin-types.
+      const lines = stripped.split("\n").filter(line => !/^\s*import\s+type\b/.test(line));
+      for (let i = 0; i < lines.length; i++) {
+        const line = lines[i];
+        // Direct runtime references to ../spin.js (the concrete session
+        // manager); ../spin-types.js and other type modules do not match.
+        if (
+          /\bfrom\s*["']\.\.\/spin\.js["']/.test(line) ||
+          /\b(?:import|require)\s*\(\s*["']\.\.\/spin\.js["']\s*\)/.test(line)
+        ) {
+          violations.push(`${rel}:${i + 1}: direct runtime import of ../spin.js — inject SessionDispatch instead: ${line.trim()}`);
+        }
+      }
+    }
+    expect(violations).toEqual([]);
+  });
 });

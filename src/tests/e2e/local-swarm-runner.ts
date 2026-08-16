@@ -194,6 +194,8 @@ async function setupEnvironment(): Promise<{
   ProjectReviewStore: any;
 }> {
   const { spin } = await import("../../components/spin.js");
+  const { setOrcToolsDeps } = await import("../../components/transport/orc-tools.js");
+  setOrcToolsDeps(spin);
   const { requestReconcile, startReconciler, requestWorkerDispatch } = await import("../../components/reconciler.js");
   const { kanbanEnqueue, kanbanGetCard, kanbanGetChildren, kanbanRunning, kanbanComplete } = await import("../../components/tasks/kanban-board.js");
   const { WorkerSupervisionStore } = await import("../../components/worker-supervision-store.js");

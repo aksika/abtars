@@ -7,7 +7,6 @@ const { spawnChildMock, getSupervisionMock, kanbanGetCardMock, validateWorkerRoo
   validateWorkerRootCriteriaMock: vi.fn().mockReturnValue(undefined),
 }));
 
-vi.mock("../spin.js", () => ({ spin: { spawnChild: spawnChildMock } }));
 vi.mock("../tasks/kanban-board.js", () => ({ kanbanGetCard: kanbanGetCardMock }));
 vi.mock("../project-acceptance/project-review-store.js", () => ({
   ProjectReviewStore: class { getSupervision = getSupervisionMock; },
@@ -17,10 +16,23 @@ vi.mock("../worker-supervision-service.js", () => ({
   WorkerSupervisionService: class {},
 }));
 
-import { clampBrowsingLaneDuration, MIN_BROWSING_LANE_MS, getOrcTools } from "./orc-tools.js";
+import { clampBrowsingLaneDuration, MIN_BROWSING_LANE_MS, getOrcTools, setOrcToolsDeps } from "./orc-tools.js";
 
 const spawnWorker = () => getOrcTools().find(tool => tool.name === "spawn_worker")!;
 const orcContext = { userId: "test", orcContext: { projectCardId: 42 } } as any;
+
+describe("spawn_worker missing session dependency (#1555)", () => {
+  it("fails before any card or worker creation when not wired", async () => {
+    const result = await spawnWorker().execute({
+      goal: "Run the worker task",
+      title: "unwired",
+    }, orcContext);
+
+    expect(result).toBe("[err] Orc tools not initialized");
+    expect(spawnChildMock).not.toHaveBeenCalled();
+    expect(kanbanGetCardMock).not.toHaveBeenCalled();
+  });
+});
 
 describe("clampBrowsingLaneDuration (#1588)", () => {
   it("clamps a browsing lane with artifacts and a 2-minute budget up to the 300s floor", () => {
@@ -49,6 +61,7 @@ describe("spawn_worker contract boundary (#1591)", () => {
     getSupervisionMock.mockReturnValue(undefined);
     kanbanGetCardMock.mockReturnValue({ max_tokens: null });
     validateWorkerRootCriteriaMock.mockReturnValue(undefined);
+    setOrcToolsDeps({ createSubSession: vi.fn(), getSessionById: vi.fn(), spawnChild: spawnChildMock });
   });
 
   it("keeps a duration-only spawn unsupervised while preserving timeoutMs", async () => {

@@ -6,12 +6,19 @@
  */
 
 import type { ToolDefinition, ToolExecutionContext } from "./tool-registry.js";
+import type { SessionDispatch } from "./session-dispatch.js";
 import { logInfo } from "../logger.js";
 import { logSwarmTrace } from "../swarm-trace.js";
 import { nerve } from "../nerve.js";
 import { REVIEW_PROJECT_PARAMETERS, INVALID_CONTRACT_PROPOSALS_EXHAUSTED } from "../project-acceptance/project-review-contract.js";
 
 const TAG = "orc-tools";
+
+let _sessionDispatch: SessionDispatch | null = null;
+
+export function setOrcToolsDeps(sessionDispatch: SessionDispatch): void {
+  _sessionDispatch = sessionDispatch;
+}
 
 function resolveCardId(args: Record<string, unknown>, context?: ToolExecutionContext): number | null {
   const bound = context?.orcContext;
@@ -125,7 +132,9 @@ const spawnWorkerTool: ToolDefinition = {
 
     const goal = args.goal;
     if (!goal) return "[err] goal is required";
-    const { spin } = await import("../spin.js");
+    // #1555: the session boundary is boot-injected. Fail before any card,
+    // contract, or runtime work when wiring is absent.
+    if (!_sessionDispatch) return "[err] Orc tools not initialized";
     const { kanbanGetCard } = await import("../tasks/kanban-board.js");
     const projectCard = kanbanGetCard(projectCardId);
     const criteria = parseJsonArray(args.criteria, "criteria");
@@ -209,7 +218,7 @@ const spawnWorkerTool: ToolDefinition = {
             : {}),
         }
         : undefined;
-      cardId = spin.spawnChild(projectCardId, {
+      cardId = _sessionDispatch.spawnChild(projectCardId, {
         goal,
         title: args.title || goal.slice(0, 40),
         source: "agent",
