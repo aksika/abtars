@@ -1,7 +1,7 @@
 import { requireTaskDatabase, kanbanTransition, kanbanGetCard, sqliteNow, type TaskDatabase } from "../tasks/kanban-board.js";
 import type { ProjectAcceptanceContract } from "./project-contract.js";
 import { logSwarmTrace } from "../swarm-trace.js";
-import { logDebug } from "../logger.js";
+import { logDebug, logWarn } from "../logger.js";
 import { buildPeerTerminalEvent } from "./peer-terminal-event.js";
 import type { ToolExecutionScope } from "../tasks/task-package.js";
 
@@ -1192,6 +1192,27 @@ export class ProjectReviewStore {
 
   // ── Review decisions ──────────────────────────────────────────────────
 
+  /**
+   * Idempotent decision persistence: a review case may be settled at most
+   * once. When a decision already exists for the case (duplicate settlement
+   * or a replay after a partially committed attempt), reuse the existing
+   * decision id so the rest of the settlement converges instead of throwing
+   * a UNIQUE constraint violation that would take down the whole bridge.
+   * Must be called inside the settlement transaction.
+   */
+  private persistReviewDecisionInTransaction(reviewCaseId: string, decision: unknown, decisionDigest: string, now: string, preferredId: string): string {
+    const existing = this.db.prepare(`SELECT id FROM project_review_decisions WHERE review_case_id = ?`).get(reviewCaseId) as { id: string } | undefined;
+    if (existing) {
+      logWarn("project-review-store", `review case ${reviewCaseId} already settled as ${existing.id}; reusing for idempotent settlement`);
+      return existing.id;
+    }
+    this.db.prepare(`
+      INSERT INTO project_review_decisions (id, review_case_id, decision_json, decision_digest, created_at)
+      VALUES (?, ?, ?, ?, ?)
+    `).run(preferredId, reviewCaseId, JSON.stringify(decision), decisionDigest, now);
+    return preferredId;
+  }
+
   insertDecision(reviewCaseId: string, decision: unknown, decisionDigest: string): { id: string } {
     const id = `rd_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
     this.db.prepare(`
@@ -1215,17 +1236,14 @@ export class ProjectReviewStore {
     acceptanceId?: string,
     authority?: ProjectMutationAuthority,
   ): { decisionId: string } {
-    const decisionId = acceptanceId ?? `rd_settle_${cardId}_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+    let decisionId = acceptanceId ?? `rd_settle_${cardId}_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
     const decisionDigest = `sd_${cardId}_${reviewCaseId}_${Date.now()}`;
     const now = new Date().toISOString();
 
     this.db.transaction(() => {
       this.assertReviewMutationAuthorityInTransaction(cardId, reviewCaseId, authority);
-      // Insert decision
-      this.db.prepare(`
-        INSERT INTO project_review_decisions (id, review_case_id, decision_json, decision_digest, created_at)
-        VALUES (?, ?, ?, ?, ?)
-      `).run(decisionId, reviewCaseId, JSON.stringify(decision), decisionDigest, now);
+      // Insert decision (idempotent per review case)
+      decisionId = this.persistReviewDecisionInTransaction(reviewCaseId, decision, decisionDigest, now, decisionId);
 
       // Set supervision to accepted only while the project is live. An abort
       // freezes it in blocked state before cancelling executors, so a late Orc
@@ -1418,10 +1436,7 @@ export class ProjectReviewStore {
   ): void {
     this.assertReviewMutationAuthorityInTransaction(cardId, reviewCaseId, authority);
     const decisionDigest = `sd_blk_${cardId}_${reviewCaseId}_${Date.now()}`;
-    this.db.prepare(`
-      INSERT INTO project_review_decisions (id, review_case_id, decision_json, decision_digest, created_at)
-      VALUES (?, ?, ?, ?, ?)
-    `).run(settledId, reviewCaseId, JSON.stringify(decision), decisionDigest, now);
+    settledId = this.persistReviewDecisionInTransaction(reviewCaseId, decision, decisionDigest, now, settledId);
 
     const state = authority
       ? this.db.prepare(`
@@ -1518,16 +1533,13 @@ export class ProjectReviewStore {
     additionalTokens: number,
     authority?: ProjectMutationAuthority,
   ): { decisionId: string } {
-    const decisionId = `rd_repair_${cardId}_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+    let decisionId = `rd_repair_${cardId}_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
     const decisionDigest = `sd_repair_${cardId}_${reviewCaseId}_${Date.now()}`;
     const now = new Date().toISOString();
 
     this.db.transaction(() => {
       this.assertReviewMutationAuthorityInTransaction(cardId, reviewCaseId, authority);
-      this.db.prepare(`
-        INSERT INTO project_review_decisions (id, review_case_id, decision_json, decision_digest, created_at)
-        VALUES (?, ?, ?, ?, ?)
-      `).run(decisionId, reviewCaseId, JSON.stringify(decision), decisionDigest, now);
+      decisionId = this.persistReviewDecisionInTransaction(reviewCaseId, decision, decisionDigest, now, decisionId);
 
       const state = this.db.prepare(`
         UPDATE project_supervision
@@ -1568,18 +1580,14 @@ export class ProjectReviewStore {
     },
     authority?: ProjectMutationAuthority,
   ): { decisionId: string } {
-    const decisionId = `rd_input_${cardId}_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+    let decisionId = `rd_input_${cardId}_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
     const decisionDigest = `sd_input_${cardId}_${reviewCaseId}_${Date.now()}`;
     const inputId = `ir_${cardId}_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
     const now = new Date().toISOString();
 
     this.db.transaction(() => {
       this.assertReviewMutationAuthorityInTransaction(cardId, reviewCaseId, authority);
-      this.db.prepare(`
-        INSERT INTO project_review_decisions (id, review_case_id, decision_json, decision_digest, created_at)
-        VALUES (?, ?, ?, ?, ?)
-      `).run(decisionId, reviewCaseId, JSON.stringify(decision), decisionDigest, now);
-
+      decisionId = this.persistReviewDecisionInTransaction(reviewCaseId, decision, decisionDigest, now, decisionId);
       const state = authority
         ? this.db.prepare(`
           UPDATE project_supervision SET state = 'needs_input', active_review_case_id = ?, updated_at = ?

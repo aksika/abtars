@@ -135,6 +135,29 @@ describe("ProjectReviewStore", () => {
       expect(s.hasActiveProjectSupervision(cid)).toBe(false);
     });
 
+    it("settleBlocked is idempotent per review case and never throws a UNIQUE violation", () => {
+      const { store: s, contract: c } = setupProject();
+      const cid = c.project_card_id;
+      insertKanbanCard(s, cid, "running");
+      // A review case that already carries a decision must not make a second
+      // blocked settlement throw (unhandled rejection crashed the whole
+      // bridge in the live two-node runs). The settlement reuses the existing
+      // decision and still converges the supervision and card to terminal.
+      s.insertDecision("case-double", { action: "blocked", reason: "first" }, "digest-1");
+      expect(() => s.settleBlocked(cid, "case-double", { action: "blocked", reason: "second" }, "blocker")).not.toThrow();
+      expect(s.getSupervision(cid)!.state).toBe("blocked");
+      expect(s.getSupervision(cid)!.accepted_decision_id).toBeTruthy();
+    });
+
+    it("settleAcceptance is idempotent per review case", () => {
+      const { store: s, contract: c } = setupProject();
+      const cid = c.project_card_id;
+      insertKanbanCard(s, cid, "running");
+      s.insertDecision("case-acc-double", { action: "accept", synthesis: "ok" }, "digest-1");
+      expect(() => s.settleAcceptance(cid, "case-acc-double", { action: "accept", synthesis: "ok" }, "ok")).not.toThrow();
+      expect(s.getSupervision(cid)!.state).toBe("accepted");
+    });
+
     it("hasActiveProjectSupervision: awaiting_contract counts as active (the authoring claim owns it)", () => {
       const cid = uniqueCardId();
       store.ensureAwaitingContract(cid);
