@@ -17,9 +17,11 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-const { resolveAgentMock, loadTransportStructuredMock } = vi.hoisted(() => ({
+const { resolveAgentMock, loadTransportStructuredMock, createAgentTransportMock, readAndClearAcpPidsMock } = vi.hoisted(() => ({
   resolveAgentMock: vi.fn(),
   loadTransportStructuredMock: vi.fn(),
+  createAgentTransportMock: vi.fn(),
+  readAndClearAcpPidsMock: vi.fn(),
 }));
 
 vi.mock("../components/transport-config.js", async (importOriginal) => {
@@ -45,6 +47,18 @@ vi.mock("../components/pi-installation.js", async (importOriginal) => {
   return {
     ...actual,
     resolvePiInstallation: () => ({ state: "absent" as const }),
+  };
+});
+
+vi.mock("../components/agent-registry.js", () => ({
+  createAgentTransport: (...args: unknown[]) => createAgentTransportMock(...args),
+}));
+
+vi.mock("../components/transport/bridge-lock-transport.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../components/transport/bridge-lock-transport.js")>();
+  return {
+    ...actual,
+    readAndClearAcpPids: (...args: unknown[]) => readAndClearAcpPidsMock(...args),
   };
 });
 
@@ -77,6 +91,13 @@ function validResolvedAgent(): ReturnType<typeof resolveAgentMock> {
     contextWindow: 128000,
     maxOutput: 4096,
     fallbacks: [],
+  };
+}
+
+function validAcpResolvedAgent(): ReturnType<typeof resolveAgentMock> {
+  return {
+    ...validResolvedAgent(),
+    provider: { transport: "acp", cli: "kiro-cli" },
   };
 }
 
@@ -125,6 +146,9 @@ beforeEach(() => {
   loadTransportStructuredMock.mockReturnValue(validTransportLoad());
   resolveAgentMock.mockReset();
   resolveAgentMock.mockReturnValue(validResolvedAgent());
+  createAgentTransportMock.mockReset();
+  readAndClearAcpPidsMock.mockReset();
+  readAndClearAcpPidsMock.mockReturnValue([]);
 });
 
 describe("transport readiness contract (#1573)", () => {
@@ -190,6 +214,22 @@ describe("transport readiness contract (#1573)", () => {
     expect(probeOrder).toBeLessThan(destroyOrder);
     expect(ctx.modelName).toBe(TEST_MODEL);
     expect(ctx.modelProvider).toBe("test-provider");
+  });
+
+  it("does not sweep ACP processes while an old transport is retained", async () => {
+    const ctx = makeBootCtx();
+    const oldTransport = makeOldTransport();
+    const candidate = makeOldTransport();
+    ctx.transport = oldTransport;
+    resolveAgentMock.mockReturnValue(validAcpResolvedAgent());
+    createAgentTransportMock.mockReturnValue(candidate);
+
+    const result = await buildTransport(ctx);
+
+    expect(result).toBe("ran");
+    expect(candidate.initialize).toHaveBeenCalledTimes(1);
+    expect(oldTransport.destroy).toHaveBeenCalledTimes(1);
+    expect(readAndClearAcpPidsMock).not.toHaveBeenCalled();
   });
 
   it("rebuildTransport does not rewire downstream references when the replacement is skipped", async () => {

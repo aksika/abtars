@@ -286,31 +286,38 @@ export async function buildTransport(ctx: BootCtx): Promise<PhaseResult> {
       if (pinWarning) logWarn("main", pinWarning.split("\n").join("; "));
     }
   } else {
-    // Kill stale ACP processes from previous run (#921, #1012)
-    const { readAndClearAcpPids } = await import("../components/transport/bridge-lock-transport.js");
-    const stalePids = readAndClearAcpPids();
-    for (const pid of stalePids) {
-      try { process.kill(pid, "SIGTERM"); } catch { /* already dead */ }
-    }
-    if (stalePids.length) logDebug("main", `Killed ${stalePids.length} stale ACP process(es)`);
-    // #1012: Defense-in-depth — kill kiro-cli acp processes whose CWD is inside ~/.abtars/
-    // Safe: agent sessions (AG1-5) have CWD outside ~/.abtars/, won't be touched.
-    try {
-      const { abtarsHome } = await import("../paths.js");
-      const home = abtarsHome();
-      const { readlinkSync } = await import("node:fs");
-      const candidates = execSync("ps ax -o pid,args 2>/dev/null | grep '[k]iro-cli.*acp' | awk '{print $1}' || true", { encoding: "utf-8", timeout: 3000 }).trim().split("\n").filter(Boolean);
-      let killed = 0;
-      for (const p of candidates) {
-        const pid = parseInt(p, 10);
-        if (!pid || pid === process.pid) continue;
-        try {
-          const cwd = readlinkSync(`/proc/${pid}/cwd`);
-          if (cwd.startsWith(home)) { process.kill(pid, "SIGTERM"); killed++; }
-        } catch {} // dead, no /proc (macOS), or no permission
+    // Kill stale ACP processes from previous run (#921, #1012). During a
+    // replacement the previous transport is deliberately still live until
+    // the candidate initializes; sweeping ACPs by PID/CWD here would kill the
+    // working transport before the transactional decision is known. Its
+    // destroy() handles the old process after candidate success, and a failed
+    // candidate is cleaned up without touching it.
+    if (!previousTransport) {
+      const { readAndClearAcpPids } = await import("../components/transport/bridge-lock-transport.js");
+      const stalePids = readAndClearAcpPids();
+      for (const pid of stalePids) {
+        try { process.kill(pid, "SIGTERM"); } catch { /* already dead */ }
       }
-      if (killed) logDebug("main", `CWD-checked kill: ${killed} orphan(s)`);
-    } catch { /* best effort */ }
+      if (stalePids.length) logDebug("main", `Killed ${stalePids.length} stale ACP process(es)`);
+      // #1012: Defense-in-depth — kill kiro-cli acp processes whose CWD is inside ~/.abtars/
+      // Safe: agent sessions (AG1-5) have CWD outside ~/.abtars/, won't be touched.
+      try {
+        const { abtarsHome } = await import("../paths.js");
+        const home = abtarsHome();
+        const { readlinkSync } = await import("node:fs");
+        const candidates = execSync("ps ax -o pid,args 2>/dev/null | grep '[k]iro-cli.*acp' | awk '{print $1}' || true", { encoding: "utf-8", timeout: 3000 }).trim().split("\n").filter(Boolean);
+        let killed = 0;
+        for (const p of candidates) {
+          const pid = parseInt(p, 10);
+          if (!pid || pid === process.pid) continue;
+          try {
+            const cwd = readlinkSync(`/proc/${pid}/cwd`);
+            if (cwd.startsWith(home)) { process.kill(pid, "SIGTERM"); killed++; }
+          } catch {} // dead, no /proc (macOS), or no permission
+        }
+        if (killed) logDebug("main", `CWD-checked kill: ${killed} orphan(s)`);
+      } catch { /* best effort */ }
+    }
     logInfo("main", `🔌 ACP transport (${resolved.provider.cli ?? "kiro-cli"}, model=${resolved.model})`);
     transport = createAgentTransport("main", {
       cliPath: resolved.provider.cli ?? config.transport.agentCliPath,
