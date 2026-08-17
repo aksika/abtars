@@ -72,7 +72,7 @@ async function fakeCoordinator(): Promise<Array<{ projectCardId: number; goal: s
       // a real claim is durable — the shared driver observes the live row
       try {
         new runStoreMod.OrcProjectRunStore().claimIntent(
-          { projectCardId, intentKind: "contract_authoring", originKind: "local", cardSource: "task", sourcePeer: null },
+          { projectCardId, intentKind: "contract_authoring", goal: "runner test goal", originKind: "local", cardSource: "task", sourcePeer: null },
           "test-peer",
           "test-instance",
         );

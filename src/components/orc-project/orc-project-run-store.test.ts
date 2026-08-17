@@ -29,6 +29,7 @@ afterAll(() => {
 const makeInput = (overrides?: Record<string, unknown>) => ({
   projectCardId: 1,
   intentKind: "contract_authoring",
+  goal: "Define acceptance contract for project #1",
   originKind: "local",
   sourcePeer: null,
   cardSource: "agent",
@@ -95,21 +96,43 @@ describe("OrcProjectRunStore", () => {
     expect(result.kind).toBe("busy");
   });
 
-  it("pumps oldest eligible scheduled run", () => {
-    seedProject(store, 3);
-    seedProject(store, 4);
-    store.claimIntent(makeInput({ projectCardId: 3 }), "local_peer", "inst_1");
-    store.claimIntent(makeInput({ projectCardId: 4 }), "local_peer", "inst_1");
+  it("persists the first claimant's goal and never overwrites it (#1675)", () => {
+    seedProject(store, 41);
+    const claim = store.claimIntent(makeInput({ projectCardId: 41, goal: "G1-OWNER" }), "local_peer", "inst_1");
+    expect(claim.kind).toBe("claimed");
+    if (claim.kind !== "claimed") return;
+    expect(store.getRun(claim.context.runId)?.goal).toBe("G1-OWNER");
 
-    const promoted = store.pump();
-    expect(promoted).not.toBeNull();
+    // the fresh schema reports goal as NOT NULL
+    const cols = store.db.prepare(`PRAGMA table_info(orc_project_runs)`).all() as Array<{ name: string; notnull: number }>;
+    const goalCol = cols.find((c) => c.name === "goal");
+    expect(goalCol?.notnull).toBe(1);
 
-    const run = store.getRun(promoted!);
-    expect(run).toBeDefined();
-    expect(run!.state).toBe("dispatching");
+    // an idempotent re-claim with a different goal leaves the stored goal unchanged
+    const again = store.claimIntent(makeInput({ projectCardId: 41, goal: "G2-LATE" }), "local_peer", "inst_1");
+    expect(again.kind).toBe("idempotent");
+    expect(store.getRun(claim.context.runId)?.goal).toBe("G1-OWNER");
   });
 
-  it("never dispatches a second run while a global turn is in flight (#1664)", () => {
+  it("promoteRun promotes exactly the given scheduled run once the slot is free (#1675)", () => {
+    seedProject(store, 3);
+    seedProject(store, 4);
+    const claim3 = store.claimIntent(makeInput({ projectCardId: 3 }), "local_peer", "inst_1");
+    const claim4 = store.claimIntent(makeInput({ projectCardId: 4 }), "local_peer", "inst_1");
+    if (claim3.kind !== "claimed" || claim4.kind !== "claimed") return;
+
+    // scoped promotion of the target run only
+    expect(store.promoteRun(claim3.context.runId)).toBe(true);
+    expect(store.getRun(claim3.context.runId)?.state).toBe("dispatching");
+
+    // a non-scheduled row, a missing row, or a row behind a taken slot is never promoted
+    expect(store.promoteRun(claim3.context.runId)).toBe(false); // already dispatching
+    expect(store.promoteRun(claim4.context.runId)).toBe(false); // global slot taken
+    expect(store.promoteRun("or_missing")).toBe(false);
+    expect(store.getRun(claim4.context.runId)?.state).toBe("scheduled");
+  });
+
+  it("never dispatches a second run while a global turn is in flight (#1664/#1675)", () => {
     seedProject(store, 30);
     seedProject(store, 31);
     const claim30 = store.claimIntent(makeInput({ projectCardId: 30 }), "local_peer", "inst_1");
@@ -118,23 +141,20 @@ describe("OrcProjectRunStore", () => {
     expect(claim31.kind).toBe("claimed");
     if (claim30.kind !== "claimed" || claim31.kind !== "claimed") return;
 
-    const first = store.pump();
-    expect(first).not.toBeNull();
-    // A concurrent pump (another reconciler wake) must not violate the
+    const first = store.promoteRun(claim30.context.runId);
+    expect(first).toBe(true);
+    // A concurrent promotion (another reconciler wake) must not violate the
     // global single-turn UNIQUE index — it leaves the second run scheduled.
-    expect(() => store.pump()).not.toThrow();
+    expect(store.promoteRun(claim31.context.runId)).toBe(false);
     const secondRun = store.getLiveRunForProject(31);
     expect(secondRun?.state).toBe("scheduled");
 
-    // Once the in-flight turn binds and releases, the next pump promotes the
-    // waiting run.
+    // Once the in-flight turn binds and releases, the next promotion succeeds.
     expect(store.bindExecution(claim30.context, "sess_30", "exec_30").ok).toBe(true);
-    expect(store.pump()).toBeNull();
+    expect(store.promoteRun(claim31.context.runId)).toBe(false); // still running
     expect(store.release({ ...claim30.context, sessionId: "sess_30", executionId: "exec_30" }, "completed")).toBe(true);
-    const promoted = store.pump();
-    expect(promoted).not.toBeNull();
-    expect(store.getRun(promoted!)?.state).toBe("dispatching");
-    void claim31;
+    expect(store.promoteRun(claim31.context.runId)).toBe(true);
+    expect(store.getRun(claim31.context.runId)?.state).toBe("dispatching");
   });
 
   it("binds execution and transitions to running", () => {
@@ -142,7 +162,7 @@ describe("OrcProjectRunStore", () => {
     const claim = store.claimIntent(makeInput({ projectCardId: 5 }), "local_peer", "inst_1");
     expect(claim.kind).toBe("claimed");
     if (claim.kind !== "claimed") return;
-    store.pump();
+    store.promoteRun(claim.context.runId);
 
     const bindResult = store.bindExecution(claim.context, "sess_1", "exec_1");
     expect(bindResult.ok).toBe(true);
@@ -220,7 +240,7 @@ describe("OrcProjectRunStore", () => {
     const claim = store.claimIntent(makeInput({ projectCardId: 13 }), "local_peer", "inst_1");
     expect(claim.kind).toBe("claimed");
     if (claim.kind !== "claimed") return;
-    store.pump();
+    store.promoteRun(claim.context.runId);
 
     const foreign = store.bindExecution({ ...claim.context, ownerInstanceId: "inst_2" }, "sess_1", "exec_1");
     expect(foreign).toEqual({ ok: false, reason: "foreign_instance" });
@@ -253,10 +273,10 @@ describe("OrcProjectRunStore authoring counts (#1628)", () => {
     const ownershipGeneration = opts.ownershipGeneration ?? Math.floor(Math.random() * 1_000_000) + 1;
     store.db.prepare(`
       INSERT INTO orc_project_runs
-        (id, intent_key, intent_kind, intent_ref, project_card_id,
+        (id, intent_key, intent_kind, intent_ref, goal, project_card_id,
          project_generation, ownership_generation, owner_peer, owner_instance_id,
          origin_kind, origin_peer, state, outcome, failure_code, created_at, started_at, released_at, updated_at)
-      VALUES (?, ?, 'contract_authoring', NULL, ?, ?, ?, 'kp', 'inst', 'local', NULL, ?, ?, ?, ?, ?, ?, ?)
+      VALUES (?, ?, 'contract_authoring', NULL, 'seeded goal', ?, ?, ?, 'kp', 'inst', 'local', NULL, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       runId,
       `contract:${cardId}:${generation}`,

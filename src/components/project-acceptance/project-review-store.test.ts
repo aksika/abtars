@@ -540,10 +540,10 @@ describe("ProjectReviewStore", () => {
       s.db.prepare("UPDATE project_review_requests SET attempts = ? WHERE id = ?").run(5, requestId);
       s.db.prepare(`
         INSERT INTO orc_project_runs
-          (id, intent_key, intent_kind, intent_ref, project_card_id, project_generation,
+          (id, intent_key, intent_kind, intent_ref, goal, project_card_id, project_generation,
            ownership_generation, global_slot, owner_peer, owner_instance_id,
            origin_kind, state, created_at, updated_at)
-        VALUES (?, ?, 'project_review', ?, ?, 1, 1, 1, 'kp', 'inst', 'local', 'running', ?, ?)
+        VALUES (?, ?, 'project_review', ?, 'review goal', ?, 1, 1, 1, 'kp', 'inst', 'local', 'running', ?, ?)
       `).run("or_guard", "review:case-live", "case-live", projectId.project_card_id, now, now);
 
       const facts = s.abandonExpiredRequests();
@@ -564,10 +564,10 @@ describe("ProjectReviewStore", () => {
       s.db.prepare("UPDATE project_review_requests SET attempts = ? WHERE id = ?").run(5, requestId);
       s.db.prepare(`
         INSERT INTO orc_project_runs
-          (id, intent_key, intent_kind, intent_ref, project_card_id, project_generation,
+          (id, intent_key, intent_kind, intent_ref, goal, project_card_id, project_generation,
            ownership_generation, global_slot, owner_peer, owner_instance_id,
            origin_kind, state, created_at, updated_at)
-        VALUES (?, ?, 'project_review', ?, ?, 2, 2, 1, 'kp', 'inst', 'local', 'running', ?, ?)
+        VALUES (?, ?, 'project_review', ?, 'review goal', ?, 2, 2, 1, 'kp', 'inst', 'local', 'running', ?, ?)
       `).run("or_stale_gen", "review:case-stale-gen", "case-stale-gen", projectId.project_card_id, now, now);
 
       const facts = s.abandonExpiredRequests();

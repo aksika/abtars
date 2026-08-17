@@ -27,6 +27,10 @@ export class OrcProjectRunStore {
                                   ('contract_authoring','project_review',
                                    'repair_review','input_resume','operator_turn')),
         intent_ref            TEXT,
+        /* #1675: the run row owns its goal — written once by the first
+           claimant and never overwritten by a later idempotent claim. A run
+           cannot be inserted without it. */
+        goal                  TEXT NOT NULL,
         project_card_id       INTEGER NOT NULL,
         project_generation    INTEGER NOT NULL,
         ownership_generation  INTEGER NOT NULL,
@@ -134,11 +138,11 @@ export class OrcProjectRunStore {
 
       this.db.prepare(`
         INSERT INTO orc_project_runs
-          (id, intent_key, intent_kind, intent_ref, project_card_id,
+          (id, intent_key, intent_kind, intent_ref, goal, project_card_id,
            project_generation, ownership_generation, owner_peer, owner_instance_id,
            origin_kind, origin_peer, state, created_at, updated_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'scheduled', ?, ?)
-      `).run(runId, intentKey, input.intentKind, input.intentRef ?? null, input.projectCardId,
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'scheduled', ?, ?)
+      `).run(runId, intentKey, input.intentKind, input.intentRef ?? null, input.goal, input.projectCardId,
         projectGeneration, nextGen, ownerPeer, ownerInstanceId,
         input.originKind, originPeer, now, now);
 
@@ -147,32 +151,29 @@ export class OrcProjectRunStore {
     });
   }
 
-  pump(): string | null {
+  /**
+   * #1675: promote exactly this run into the global turn slot, or leave it
+   * scheduled. Never promotes another project's run — the run row owns the
+   * goal used by the eventual start. The replaced global FIFO `pump()` had no
+   * caller and is deleted; the owner's wake re-enters this scoped promotion
+   * with the row's own goal.
+   *
+   * Global single-turn semantics: only one run may be dispatching/running at a
+   * time (idx_one_global_orc_turn). A concurrent promotion may have just
+   * claimed the slot; flipping this run anyway would violate the partial
+   * UNIQUE index and crash the whole bridge as an unhandled rejection.
+   * Leave the run scheduled and let the owner's next wake pick it up.
+   */
+  promoteRun(runId: string): boolean {
     return this.db.transaction(() => {
-      const eligible = this.db.prepare(`
-        SELECT id FROM orc_project_runs
-        WHERE state = 'scheduled'
-        ORDER BY created_at ASC, project_card_id ASC
-        LIMIT 1
-      `).get() as { id: string } | undefined;
-
-      if (!eligible) return null;
-
-      // Global single-turn semantics: only one run may be dispatching/running
-      // at a time (idx_one_global_orc_turn). A concurrent pump may have just
-      // claimed the slot; flipping this run anyway would violate the partial
-      // UNIQUE index and crash the whole bridge as an unhandled rejection.
-      // Leave the run scheduled and let a later pump pick it up.
       const result = this.db.prepare(`
         UPDATE orc_project_runs SET state = 'dispatching', updated_at = ?
-        WHERE id = ? AND state = 'scheduled'
-          AND NOT EXISTS (
-            SELECT 1 FROM orc_project_runs WHERE state IN ('dispatching', 'running')
-          )
-      `).run(new Date().toISOString(), eligible.id);
-
-      if (result.changes === 0) return null;
-      return eligible.id;
+         WHERE id = ? AND state = 'scheduled'
+           AND NOT EXISTS (
+             SELECT 1 FROM orc_project_runs WHERE state IN ('dispatching', 'running')
+           )
+      `).run(new Date().toISOString(), runId);
+      return result.changes > 0;
     });
   }
 

@@ -95,10 +95,10 @@ function seedRun(
   const runId = `or_seed_${cardId}_${Math.random().toString(36).slice(2, 10)}`;
   store.db.prepare(`
     INSERT INTO orc_project_runs
-      (id, intent_key, intent_kind, intent_ref, project_card_id,
+      (id, intent_key, intent_kind, intent_ref, goal, project_card_id,
        project_generation, ownership_generation, owner_peer, owner_instance_id,
        origin_kind, origin_peer, state, outcome, failure_code, created_at, started_at, released_at, updated_at)
-    VALUES (?, ?, 'contract_authoring', NULL, ?, ?, ?, 'kp', ?, 'local', NULL, ?, ?, ?, ?, ?, ?, ?)
+    VALUES (?, ?, 'contract_authoring', NULL, 'seeded goal', ?, ?, ?, 'kp', ?, 'local', NULL, ?, ?, ?, ?, ?, ?, ?)
   `).run(
     runId,
     `contract:${cardId}:${generation}`,
@@ -192,7 +192,7 @@ describe("#1628 Orc authoring recovery (real stores)", () => {
 
     // a live foreign-instance run predates this boot
     const foreign = runStore.claimIntent(
-      { projectCardId: rootId, intentKind: "contract_authoring", originKind: "local", cardSource: "agent", sourcePeer: null },
+      { projectCardId: rootId, intentKind: "contract_authoring", goal: "foreign goal", originKind: "local", cardSource: "agent", sourcePeer: null },
       "other-peer", "other-instance",
     );
     expect(foreign.kind).toBe("claimed");

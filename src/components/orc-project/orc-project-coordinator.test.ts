@@ -245,7 +245,7 @@ describe("OrcProjectCoordinator ownership-released event (#1628)", () => {
 
     // a live run owned by a foreign instance
     const foreign = h.store.claimIntent(
-      { projectCardId: 9, intentKind: "contract_authoring", originKind: "local", cardSource: "agent", sourcePeer: null },
+      { projectCardId: 9, intentKind: "contract_authoring", goal: "foreign goal", originKind: "local", cardSource: "agent", sourcePeer: null },
       "other-peer", "other-instance",
     );
     expect(foreign.kind).toBe("claimed");
@@ -380,7 +380,7 @@ describe("#1671 global progress (real SQLite)", () => {
 
     // B acquires the global slot after release
     expect(h.store.getRun(b.context.runId)?.state).toBe("scheduled");
-    h.store.pump();
+    h.store.promoteRun(b.context.runId);
     expect(h.store.getRun(b.context.runId)?.state).toBe("dispatching");
   });
 
@@ -406,7 +406,7 @@ describe("#1671 global progress (real SQLite)", () => {
     expect(events).toHaveLength(1);
     expect(events[0]!.outcome).toBe("failed");
 
-    h.store.pump();
+    h.store.promoteRun(b.context.runId);
     expect(h.store.getRun(b.context.runId)?.state).toBe("dispatching");
   });
 
@@ -477,7 +477,7 @@ describe("#1673 terminal cleanup after a project generation advance (real SQLite
 
     // B acquires the global slot once A's row no longer holds it
     expect(h.store.getRun(b.context.runId)?.state).toBe("scheduled");
-    h.store.pump();
+    h.store.promoteRun(b.context.runId);
     expect(h.store.getRun(b.context.runId)?.state).toBe("dispatching");
   });
 
@@ -510,5 +510,153 @@ describe("#1673 terminal cleanup after a project generation advance (real SQLite
     expect(h.coordinator.releaseOwnedRun({ ...a.context, sessionId: "sess_33", executionId: "exec_33" }, "completed")).toBe(true);
     expect(h.store.getRun(a.context.runId)?.state).toBe("released");
     expect(events).toHaveLength(1);
+  });
+});
+
+// ── #1675: a run is only promoted by the caller that starts it ────────────────
+
+describe("#1675 a run is only promoted by the caller that starts it", () => {
+  it("never promotes another project's queued run with the claiming project's goal", () => {
+    const h = makeHarness();
+    seedProject(h.store, 40); // holds the global slot
+    seedProject(h.store, 41); // queued behind the slot
+    seedProject(h.store, 42); // fresh claimant
+
+    const slot = h.coordinator.scheduleContractAuthoring(40);
+    expect(slot.kind).toBe("claimed");
+    if (slot.kind !== "claimed") return;
+    const queued = h.coordinator.scheduleContractAuthoring(41);
+    expect(queued.kind).toBe("claimed");
+    expect(h.starts).toHaveLength(1); // only the slot holder started
+
+    // Free the slot through the production ownership path so a subsequent
+    // claim could (wrongly) promote the queued run of another project.
+    const bind = h.store.bindExecution(slot.context, "sess_40", "exec_40");
+    expect(bind.ok).toBe(true);
+    expect(h.coordinator.releaseOwnedRun({ ...slot.context, sessionId: "sess_40", executionId: "exec_40" }, "completed")).toBe(true);
+    expect(h.store.getRun(queued.kind === "claimed" ? queued.context.runId : "")?.state).toBe("scheduled");
+
+    const goal42 = "DEFINE-42-MARKER-GOAL";
+    const claim42 = h.coordinator.scheduleScheduledProject(42, goal42);
+    expect(claim42.kind).toBe("claimed");
+
+    // #1675: a fresh claim on 42 must promote 42's own run — never 41's
+    // queued run — and never bind 42's goal to 41's context.
+    const wrongPairing = h.starts.find((s) => s.context.projectCardId === 41 && s.goal === goal42);
+    expect(wrongPairing).toBeUndefined();
+  });
+
+  it("starts the run created for the first claimant's goal with its persisted goal, never a later caller's goal", () => {
+    const h = makeHarness();
+    seedProject(h.store, 40); // holds the global slot
+    seedProject(h.store, 51);
+
+    const slot = h.coordinator.scheduleContractAuthoring(40);
+    expect(slot.kind).toBe("claimed");
+    if (slot.kind !== "claimed") return;
+
+    // G1 claims project 51 first — the run is created for G1 but stays queued.
+    const g1 = h.coordinator.scheduleScheduledProject(51, "G1-OWNER-GOAL");
+    expect(g1.kind).toBe("claimed");
+    if (g1.kind !== "claimed") return;
+    const g1RunId = g1.context.runId;
+    expect(h.starts.some((s) => s.context.runId === g1RunId)).toBe(false);
+
+    // The reconciler's generic authoring wake — different goal G2, same
+    // contract_authoring intent key — is idempotent against G1's run.
+    const g2 = h.coordinator.scheduleContractAuthoring(51);
+    expect(g2.kind).toBe("idempotent");
+    expect(h.starts.some((s) => s.context.runId === g1RunId)).toBe(false);
+
+    // Free the global slot through the production ownership path.
+    const bind = h.store.bindExecution(slot.context, "sess_40", "exec_40");
+    expect(bind.ok).toBe(true);
+    expect(h.coordinator.releaseOwnedRun({ ...slot.context, sessionId: "sess_40", executionId: "exec_40" }, "completed")).toBe(true);
+    expect(h.store.getRun(g1RunId)?.state).toBe("scheduled");
+
+    // The project's own wake re-enters scheduleX; the idempotent claim promotes
+    // the queued run — with the persisted first-claimant goal, never G2.
+    const wake = h.coordinator.scheduleContractAuthoring(51);
+    expect(wake.kind).toBe("idempotent");
+
+    const started = h.starts.find((s) => s.context.runId === g1RunId);
+    expect(started).toBeDefined();
+    expect(started!.goal).toBe("G1-OWNER-GOAL");
+  });
+
+  it("a freed slot reaches a queued run through the production wake path", () => {
+    const h = makeHarness();
+    seedProject(h.store, 60);
+    seedProject(h.store, 61);
+
+    const a = h.coordinator.scheduleContractAuthoring(60);
+    expect(a.kind).toBe("claimed");
+    if (a.kind !== "claimed") return;
+
+    const goal61 = "QUEUED-61-GOAL";
+    const b = h.coordinator.scheduleScheduledProject(61, goal61);
+    expect(b.kind).toBe("claimed");
+    if (b.kind !== "claimed") return;
+    expect(h.starts).toHaveLength(1);
+    expect(h.store.getRun(b.context.runId)?.state).toBe("scheduled");
+
+    // Bind + release the live run through the coordinator (ownership event).
+    const bind = h.store.bindExecution(a.context, "sess_60", "exec_60");
+    expect(bind.ok).toBe(true);
+    expect(h.coordinator.releaseOwnedRun({ ...a.context, sessionId: "sess_60", executionId: "exec_60" }, "completed")).toBe(true);
+    expect(h.store.getRun(b.context.runId)?.state).toBe("scheduled");
+
+    // The queued project's own wake re-enters its scheduleX (the reconciler's
+    // requestReconcileForProject path) — the idempotent claim promotes it.
+    // No test-only store.pump() is called anywhere in this scenario.
+    const wake = h.coordinator.scheduleScheduledProject(61, goal61);
+    expect(wake.kind).toBe("idempotent");
+
+    expect(h.store.getRun(b.context.runId)?.state).toBe("dispatching");
+    const started = h.starts.find((s) => s.context.runId === b.context.runId);
+    expect(started).toBeDefined();
+    expect(started!.goal).toBe(goal61);
+  });
+
+  it("an idempotent re-claim never starts a live run twice", () => {
+    const h = makeHarness();
+    seedProject(h.store, 70);
+
+    const first = h.coordinator.scheduleContractAuthoring(70);
+    expect(first.kind).toBe("claimed");
+    if (first.kind !== "claimed") return;
+    expect(h.starts.filter((s) => s.context.runId === first.context.runId)).toHaveLength(1);
+
+    const bind = h.store.bindExecution(first.context, "sess_70", "exec_70");
+    expect(bind.ok).toBe(true);
+
+    const again = h.coordinator.scheduleContractAuthoring(70);
+    expect(again.kind).toBe("idempotent");
+
+    expect(h.starts.filter((s) => s.context.runId === first.context.runId)).toHaveLength(1);
+    expect(h.store.getRun(first.context.runId)?.state).toBe("running");
+  });
+
+  it("boot recovery never leaves a dispatching run without a starter (#1675)", () => {
+    const h = makeHarness();
+    seedProject(h.store, 80);
+
+    const claim = h.coordinator.scheduleContractAuthoring(80);
+    expect(claim.kind).toBe("claimed");
+    if (claim.kind !== "claimed") return;
+
+    // Simulate a boot that interrupts the turn before it binds: the run is
+    // dispatching with no session/execution (the harness startPort never binds).
+    expect(h.store.getRun(claim.context.runId)?.state).toBe("dispatching");
+    expect(h.store.getRun(claim.context.runId)?.session_id).toBeNull();
+
+    const affected = h.coordinator.bootRecovery();
+    expect(affected).toEqual([80]);
+
+    // The impossible run was superseded; boot recovery promoted nothing, so
+    // the global slot is free rather than held by an unstarted run.
+    expect(h.store.getRun(claim.context.runId)?.state).toBe("superseded");
+    expect(h.store.getLiveRuns()).toHaveLength(0);
+    expect(h.starts).toHaveLength(1); // the mock start is recorded, nothing re-started
   });
 });

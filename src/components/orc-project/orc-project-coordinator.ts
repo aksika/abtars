@@ -202,22 +202,28 @@ export class OrcProjectCoordinator {
     }, `Operator turn for project #${projectCardId}`);
   }
 
-  private scheduleInternal(input: OrcClaimInput, goal: string): OrcRunClaimResult {
-    const result = this.store.claimIntent(input, this.ownerPeer, this.ownerInstanceId);
+  private scheduleInternal(input: Omit<OrcClaimInput, "goal">, goal: string): OrcRunClaimResult {
+    const result = this.store.claimIntent({ ...input, goal }, this.ownerPeer, this.ownerInstanceId);
 
-    if (result.kind === "claimed") {
-      const promoted = this.store.pump();
-      if (promoted) {
-        const promotedRun = this.store.getRun(promoted);
-        if (promotedRun && promotedRun.state === "dispatching") {
-          const context = buildContextForRun(promotedRun);
-          this.startPort(context, goal).catch((err) => {
-            logWarn(TAG, `Orc start port failed for run ${promoted}: ${err instanceof Error ? err.message : String(err)}`);
+    // #1675: promote exactly the run this claim owns (or the existing run an
+    // idempotent re-claim matches) and start it with the RUN ROW's persisted
+    // goal. An `idempotent` result proves identity (same intent key, same
+    // owner instance) — never that the caller's goal equals the run's first-
+    // claimant goal, so the caller's goal is never used here. Queued runs of
+    // other projects are reached by their own project's wake, which rebuilds
+    // that project's goal and re-enters this same scoped promotion.
+    if (result.kind === "claimed" || result.kind === "idempotent") {
+      const runId = result.context.runId;
+      if (this.store.promoteRun(runId)) {
+        const promoted = this.store.getRun(runId);
+        if (promoted && promoted.state === "dispatching") {
+          this.startPort(buildContextForRun(promoted), promoted.goal).catch((err) => {
+            logWarn(TAG, `Orc start port failed for run ${runId}: ${err instanceof Error ? err.message : String(err)}`);
             // #1628: through the funnel so the ownership-released event wakes
             // the project — the release is the recovery signal, not the
-            // scheduler's next opportunistic scan.
-            this.releaseOwnedRun(buildContextForRun(promotedRun), "failed");
-            this.store.pump();
+            // scheduler's next opportunistic scan. With pump() gone there is
+            // no second promotion attempt here.
+            this.releaseOwnedRun(buildContextForRun(promoted), "failed");
           });
         }
       }
@@ -272,10 +278,11 @@ export class OrcProjectCoordinator {
       }
     }
 
-    const promoted = this.store.pump();
-    if (promoted) {
-      logInfo(TAG, `Boot recovery: promoted run ${promoted} after recovery`);
-    }
+    // #1675: boot recovery never promotes. A promoted-but-unstarted run would
+    // hold the global slot with no session and no starter; the returned
+    // affected project ids are the caller's wake input, which re-enters each
+    // project's scheduleX and promotes through the scoped path with the row's
+    // own goal.
 
     return [...affected].sort((a, b) => a - b);
   }

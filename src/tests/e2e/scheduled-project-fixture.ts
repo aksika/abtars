@@ -214,6 +214,7 @@ export function makeScheduledProjectFixture(
         projectCardId: rootId,
         intentKind: "operator_turn",
         intentRef: `stale-${Date.now()}`,
+        goal: "stale operator turn",
         originKind: "local",
         sourcePeer: null,
         cardSource: "local",

@@ -259,7 +259,7 @@ describe("reconciler #1546 last-resort and claim ordering (real stores)", () => 
     const { rootId } = await seedScheduledProject();
     // a foreign-instance live claim predates the driver; supervision advanced
     const seeded = coordinator.getStore().claimIntent(
-      { projectCardId: rootId, intentKind: "contract_authoring", originKind: "local", cardSource: "task", sourcePeer: null },
+      { projectCardId: rootId, intentKind: "contract_authoring", goal: "seeded goal", originKind: "local", cardSource: "task", sourcePeer: null },
       "other-peer",
       "other-instance",
     );

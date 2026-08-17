@@ -84,6 +84,8 @@ export interface OrcProjectRunRow {
   intent_key: string;
   intent_kind: OrcIntentKind;
   intent_ref: string | null;
+  /** #1675: the first claimant's goal, written once at insert and never overwritten. */
+  goal: string;
   project_card_id: number;
   project_generation: number;
   ownership_generation: number;
@@ -113,6 +115,8 @@ export interface OrcClaimInput {
   projectCardId: number;
   intentKind: OrcIntentKind;
   intentRef?: string;
+  /** #1675: the goal of the claiming turn. The first claimant's goal wins the run; later idempotent claims never replace it. */
+  goal: string;
   originKind: OrcOriginKind;
   originPeer?: string;
   sourcePeer: string | null;

@@ -630,12 +630,12 @@ describe("#1678 single owner of Orc review-turn liveness", () => {
     // run store — the turn is genuinely in flight.
     const runStore = new OrcProjectRunStore();
     const claim = runStore.claimIntent(
-      { projectCardId: projectId, intentKind: "project_review", intentRef: caseId, originKind: "local", sourcePeer: null, cardSource: "agent", expectedProjectGeneration: 1 },
+      { projectCardId: projectId, intentKind: "project_review", intentRef: caseId, goal: "review-live", originKind: "local", sourcePeer: null, cardSource: "agent", expectedProjectGeneration: 1 },
       "kp", "inst-live",
     );
     expect(claim.kind).toBe("claimed");
     if (claim.kind !== "claimed") return;
-    runStore.pump();
+    runStore.promoteRun(claim.context.runId);
     const bound = runStore.bindExecution(claim.context, "sess-live", "exec-live");
     expect(bound.ok).toBe(true);
 
@@ -648,7 +648,7 @@ describe("#1678 single owner of Orc review-turn liveness", () => {
       scheduleContractAuthoring: () => ({ kind: "busy" as const, activeRunId: "or_busy" }),
       scheduleScheduledProject: () => ({ kind: "busy" as const, activeRunId: "or_busy" }),
       scheduleReview: (pid: number, gen: number, rc: string) => runStore.claimIntent(
-        { projectCardId: pid, intentKind: "project_review", intentRef: rc, originKind: "local", sourcePeer: null, cardSource: "agent", expectedProjectGeneration: gen },
+        { projectCardId: pid, intentKind: "project_review", intentRef: rc, goal: "review-wake", originKind: "local", sourcePeer: null, cardSource: "agent", expectedProjectGeneration: gen },
         "kp", "inst-live",
       ),
     } as never;
@@ -722,12 +722,12 @@ describe("#1678 single owner of Orc review-turn liveness", () => {
 
     const runStore = new OrcProjectRunStore();
     const claim = runStore.claimIntent(
-      { projectCardId: projectId, intentKind: "project_review", intentRef: caseId, originKind: "local", sourcePeer: null, cardSource: "agent", expectedProjectGeneration: 1 },
+      { projectCardId: projectId, intentKind: "project_review", intentRef: caseId, goal: "review-live", originKind: "local", sourcePeer: null, cardSource: "agent", expectedProjectGeneration: 1 },
       "kp", "inst-live",
     );
     expect(claim.kind).toBe("claimed");
     if (claim.kind !== "claimed") return;
-    runStore.pump();
+    runStore.promoteRun(claim.context.runId);
     const bound = runStore.bindExecution(claim.context, "sess-live", "exec-live");
     expect(bound.ok).toBe(true);
 
@@ -738,7 +738,7 @@ describe("#1678 single owner of Orc review-turn liveness", () => {
       scheduleContractAuthoring: () => ({ kind: "busy" as const, activeRunId: "or_busy" }),
       scheduleScheduledProject: () => ({ kind: "busy" as const, activeRunId: "or_busy" }),
       scheduleReview: (pid: number, gen: number, rc: string) => runStore.claimIntent(
-        { projectCardId: pid, intentKind: "project_review", intentRef: rc, originKind: "local", sourcePeer: null, cardSource: "agent", expectedProjectGeneration: gen },
+        { projectCardId: pid, intentKind: "project_review", intentRef: rc, goal: "review-wake", originKind: "local", sourcePeer: null, cardSource: "agent", expectedProjectGeneration: gen },
         "kp", "inst-live",
       ),
     } as never;
@@ -762,12 +762,12 @@ describe("#1678 single owner of Orc review-turn liveness", () => {
 
     const runStore = new OrcProjectRunStore();
     const claim = runStore.claimIntent(
-      { projectCardId: projectId, intentKind: "project_review", intentRef: caseId, originKind: "local", sourcePeer: null, cardSource: "agent", expectedProjectGeneration: 1 },
+      { projectCardId: projectId, intentKind: "project_review", intentRef: caseId, goal: "review-live", originKind: "local", sourcePeer: null, cardSource: "agent", expectedProjectGeneration: 1 },
       "kp", "inst-live",
     );
     expect(claim.kind).toBe("claimed");
     if (claim.kind !== "claimed") return;
-    runStore.pump();
+    runStore.promoteRun(claim.context.runId);
     const bound = runStore.bindExecution(claim.context, "sess-live", "exec-live");
     expect(bound.ok).toBe(true);
 
