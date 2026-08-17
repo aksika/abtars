@@ -526,6 +526,7 @@ export interface OrcCallResult {
 
 export interface OrcCallPort {
   call(goal: string, opts: { timeoutMs: number }): Promise<OrcCallResult>;
+  observeToolResult(toolName: string, expectedText: string, opts: { timeoutMs: number }): Promise<OrcCallResult>;
 }
 
 export interface TuiSocketOptions {
@@ -544,50 +545,71 @@ export class TuiOrcClient implements OrcCallPort {
     this.socketPath = opts.socketPath;
   }
 
-  async connect(mode: "new" | "resume" = "new"): Promise<{ socket: net.Socket; sessionId: string | null; close: () => void }> {
+  async connect(mode: "new" | "resume" | "orc" = "new"): Promise<{ socket: net.Socket; sessionId: string | null; initialFrames: TuiServerFrame[]; close: () => void }> {
     const socket = net.createConnection(this.socketPath);
     let sessionId: string | null = null;
-    await new Promise<void>((resolve, reject) => {
-      socket.once("error", (err) => reject(err));
-      socket.once("connect", () => {
-        socket.removeListener("error", reject);
-        socket.write(JSON.stringify({ t: "attach", mode: mode === "new" ? { kind: "new", sessionType: "A" } : { kind: "resume" }, cols: 100, rows: 30 }) + "\n");
-        resolve();
+    try {
+      await new Promise<void>((resolve, reject) => {
+        socket.once("error", (err) => reject(err));
+        socket.once("connect", () => {
+          socket.removeListener("error", reject);
+          const attachMode = mode === "new"
+            ? { kind: "new", sessionType: "A" as const }
+            : mode === "resume"
+              ? { kind: "resume" as const }
+              : { kind: "orc" as const };
+          socket.write(JSON.stringify({ t: "attach", mode: attachMode, cols: 100, rows: 30 }) + "\n");
+          resolve();
+        });
       });
-    });
-    const frames = await this.awaitReady(socket, 30_000);
-    if (frames === null) throw new Error("TUI attach rejected or timed out");
-    for (const frame of frames) {
-      if (frame.t === "ready" && typeof frame.sessionId === "string") sessionId = frame.sessionId;
+      const frames = await this.awaitReady(socket, 30_000);
+      if (frames === null) throw new Error("TUI attach rejected or timed out");
+      const ready = frames.find((frame) => frame.t === "ready");
+      if (ready === undefined) {
+        const error = frames.find((frame) => frame.t === "error");
+        throw new Error(`TUI attach rejected: ${String(error?.message ?? "unknown error")}`);
+      }
+      if (typeof ready.sessionId === "string") sessionId = ready.sessionId;
+      return {
+        socket,
+        sessionId,
+        initialFrames: frames,
+        close: () => { try { socket.destroy(); } catch { /* already closed */ } },
+      };
+    } catch (err) {
+      try { socket.destroy(); } catch { /* already closed */ }
+      throw err;
     }
-    return {
-      socket,
-      sessionId,
-      close: () => { try { socket.destroy(); } catch { /* already closed */ } },
-    };
   }
 
   private awaitReady(socket: net.Socket, timeoutMs: number): Promise<TuiServerFrame[] | null> {
     return new Promise((resolve) => {
       const frames: TuiServerFrame[] = [];
       let settled = false;
+      let remainder = "";
       const timer = setTimeout(() => {
         if (!settled) { settled = true; resolve(null); }
       }, timeoutMs);
       const onData = (chunk: Buffer): void => {
-        for (const line of chunk.toString("utf-8").split("\n")) {
+        remainder += chunk.toString("utf-8");
+        const lines = remainder.split("\n");
+        remainder = lines.pop() ?? "";
+        let terminalSeen = false;
+        for (const line of lines) {
           if (line.trim() === "") continue;
           try {
             const frame = JSON.parse(line) as TuiServerFrame;
             frames.push(frame);
             if (frame.t === "ready" || frame.t === "error") {
-              settled = true;
-              clearTimeout(timer);
-              socket.removeListener("data", onData);
-              resolve(frames);
-              return;
+              terminalSeen = true;
             }
-          } catch { /* skip partial line */ }
+          } catch { /* malformed bounded frame */ }
+        }
+        if (terminalSeen && !settled) {
+          settled = true;
+          clearTimeout(timer);
+          socket.removeListener("data", onData);
+          resolve(frames);
         }
       };
       socket.on("data", onData);
@@ -598,7 +620,7 @@ export class TuiOrcClient implements OrcCallPort {
     const conn = await this.connect("new");
     try {
       conn.socket.write(JSON.stringify({ t: "input", text: goal }) + "\n");
-      const frames = await this.awaitReply(conn.socket, opts.timeoutMs);
+      const frames = await this.awaitReply(conn.socket, opts.timeoutMs, conn.initialFrames);
       const markdown = frames
         .filter((f) => f.t === "message" && typeof f.markdown === "string")
         .map((f) => String(f.markdown))
@@ -615,16 +637,46 @@ export class TuiOrcClient implements OrcCallPort {
     }
   }
 
-  private awaitReply(socket: net.Socket, timeoutMs: number): Promise<TuiServerFrame[]> {
+  async observeToolResult(toolName: string, expectedText: string, opts: { timeoutMs: number }): Promise<OrcCallResult> {
+    const deadline = Date.now() + opts.timeoutMs;
+    let lastAttachError = "no Orc session was available";
+    let conn: Awaited<ReturnType<TuiOrcClient["connect"]>> | null = null;
+    while (Date.now() < deadline) {
+      try {
+        conn = await this.connect("orc");
+        break;
+      } catch (err) {
+        lastAttachError = err instanceof Error ? err.message : String(err);
+        const remaining = deadline - Date.now();
+        if (remaining <= 0) break;
+        await new Promise((resolve) => setTimeout(resolve, Math.min(1_000, remaining)));
+      }
+    }
+    if (conn === null) {
+      throw new Error(`could not attach to the bound Orc session within ${opts.timeoutMs}ms: ${lastAttachError}`);
+    }
+    try {
+      const remaining = Math.max(1, deadline - Date.now());
+      return await this.awaitToolResult(conn.socket, toolName, expectedText, remaining, conn.initialFrames, conn.sessionId);
+    } finally {
+      conn.close();
+    }
+  }
+
+  private awaitReply(socket: net.Socket, timeoutMs: number, initialFrames: TuiServerFrame[] = []): Promise<TuiServerFrame[]> {
     return new Promise((resolve) => {
-      const frames: TuiServerFrame[] = [];
+      const frames: TuiServerFrame[] = [...initialFrames];
       let settled = false;
       let streamText = "";
+      let remainder = "";
       const timer = setTimeout(() => {
         if (!settled) { settled = true; resolve(frames); }
       }, timeoutMs);
       const onData = (chunk: Buffer): void => {
-        for (const line of chunk.toString("utf-8").split("\n")) {
+        remainder += chunk.toString("utf-8");
+        const lines = remainder.split("\n");
+        remainder = lines.pop() ?? "";
+        for (const line of lines) {
           if (line.trim() === "") continue;
           let frame: TuiServerFrame;
           try {
@@ -666,6 +718,101 @@ export class TuiOrcClient implements OrcCallPort {
           }
         }
       };
+      socket.on("data", onData);
+    });
+  }
+
+  private awaitToolResult(
+    socket: net.Socket,
+    toolName: string,
+    expectedText: string,
+    timeoutMs: number,
+    initialFrames: TuiServerFrame[],
+    sessionId: string | null,
+  ): Promise<OrcCallResult> {
+    return new Promise((resolve, reject) => {
+      const frames: TuiServerFrame[] = [...initialFrames];
+      let settled = false;
+      let toolStarted = false;
+      let streamText = "";
+      let remainder = "";
+
+      const finish = (): void => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        socket.removeListener("data", onData);
+        const markdown = frames
+          .filter((frame) => frame.t === "message" && typeof frame.markdown === "string")
+          .map((frame) => String(frame.markdown))
+          .join("\n");
+        resolve({ reply: `${markdown}${streamText ? `\n${streamText}` : ""}`.slice(0, 16_384), sessionId });
+      };
+      const fail = (err: Error): void => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        socket.removeListener("data", onData);
+        reject(err);
+      };
+      const handle = (frame: TuiServerFrame): void => {
+        frames.push(frame);
+        if (frame.t === "tool-start" && frame.name === toolName) {
+          toolStarted = true;
+          streamText = "";
+          return;
+        }
+        if (frame.t === "message" && typeof frame.markdown === "string") {
+          if (toolStarted && String(frame.markdown).includes(expectedText)) finish();
+          return;
+        }
+        if (frame.t === "chunk" && typeof frame.delta === "string") {
+          streamText += String(frame.delta);
+          return;
+        }
+        if (frame.t === "chunk-end" && frame.reason === "complete" && toolStarted && streamText.includes(expectedText)) {
+          finish();
+          return;
+        }
+        if (frame.t === "error") {
+          fail(new Error(`TUI error while observing ${toolName}: ${String(frame.message ?? "unknown")}`));
+        }
+      };
+      const timer = setTimeout(() => {
+        fail(new Error(`timed out after ${timeoutMs}ms waiting for ${toolName} to return ${expectedText}`));
+      }, timeoutMs);
+      const onData = (chunk: Buffer): void => {
+        remainder += chunk.toString("utf-8");
+        const lines = remainder.split("\n");
+        remainder = lines.pop() ?? "";
+        for (const line of lines) {
+          if (line.trim() === "") continue;
+          try {
+            handle(JSON.parse(line) as TuiServerFrame);
+          } catch { /* malformed bounded frame */ }
+          if (settled) return;
+        }
+      };
+      for (const frame of initialFrames) {
+        // `connect` may receive output in the same packet as `ready`; replay
+        // those frames so an active Orc turn cannot be missed at the attach
+        // boundary. `frames` already contains them, so avoid duplicating them.
+        if (frame.t === "tool-start" && frame.name === toolName) {
+          toolStarted = true;
+          streamText = "";
+        } else if (frame.t === "chunk" && typeof frame.delta === "string") {
+          streamText += String(frame.delta);
+        } else if (frame.t === "message" && typeof frame.markdown === "string" && toolStarted && String(frame.markdown).includes(expectedText)) {
+          finish();
+          return;
+        } else if (frame.t === "chunk-end" && frame.reason === "complete" && toolStarted && streamText.includes(expectedText)) {
+          finish();
+          return;
+        } else if (frame.t === "error") {
+          fail(new Error(`TUI error while observing ${toolName}: ${String(frame.message ?? "unknown")}`));
+          return;
+        }
+      }
       socket.on("data", onData);
     });
   }
@@ -1076,7 +1223,8 @@ export async function runFoundation(ctx: ScenarioContext): Promise<RemoteSwarmSc
       return;
     }
     const inboundRequestId = `${baseRequestId}-norelay-inbound`;
-    const inboundGoal = `${runMarker(ctx.runId)} Reply with exactly the single word: ok. Do nothing else.`;
+    const relayRequestId = `${baseRequestId}-norelay-relay`;
+    const inboundGoal = `${REMOTE_SWARM_DEV_TEST_PREFIX} ${runMarker(ctx.runId)} This peer-originated project must not relay. On the next Orc continuation, call peer_ask_help exactly once with peer "${ctx.profile.receiverPeerName}", request_id "${relayRequestId}", goal "reply ok". Report the tool result verbatim and do nothing else.`;
     const inbound = await ctx.delegate(
       // The receiver originates this delegation back to the requester, so the
       // peer name is the requester's, not the receiver's.
@@ -1096,13 +1244,23 @@ export async function runFoundation(ctx: ScenarioContext): Promise<RemoteSwarmSc
       return snap;
     }, 5 * 60_000);
 
-    const goal = `${REMOTE_SWARM_DEV_TEST_PREFIX} ${runMarker(ctx.runId)} You are working on a contribution that arrived from the peer "${ctx.profile.receiverPeerName}". Do not complete it locally. Instead call the peer_ask_help tool to ask a peer for help with it. Report the tool result verbatim. If the tool refuses, quote the refusal exactly.`;
-    const reply = await ctx.orcCall.call(goal, { timeoutMs: 8 * 60_000 });
-    scenario.evidence.push({ kind: "chat", id: reply.sessionId ?? "tui" });
-    if (!reply.reply.includes("peer_relay_blocked")) {
-      throw new Error(`requester Orc did not produce a peer_relay_blocked refusal; bounded reply: ${reply.reply.slice(0, 1_000)}`);
+    // The reverse delegation above creates the real peer-origin O project.
+    // Observe that bound Orc session rather than opening an ordinary A TUI
+    // session: an unbound session deliberately has no orcContext and cannot
+    // exercise the peer-origin no-relay guard.
+    const observation = await ctx.orcCall.observeToolResult("peer_ask_help", "peer_relay_blocked", { timeoutMs: 12 * 60_000 });
+    scenario.evidence.push({ kind: "chat", id: observation.sessionId ?? "orc" });
+
+    const { requester, receiver } = await snapshotBoth(ctx, [inboundRequestId, relayRequestId], ctx.marker);
+    const relayContribution = contributionFor(requester, relayRequestId);
+    const relayRequesterCards = cardsForSourceId(requester, relayRequestId);
+    const relayReceiverHelp = helpRequestFor(receiver, relayRequestId);
+    const relayReceiverCards = cardsForSourceId(receiver, relayRequestId);
+    if (relayContribution || relayRequesterCards.length > 0 || relayReceiverHelp || relayReceiverCards.length > 0) {
+      throw new Error(`bound peer-origin Orc relay request ${relayRequestId} escaped the guard (requester contribution=${relayContribution?.state ?? "missing"}, requester cards=${relayRequesterCards.length}, receiver help=${relayReceiverHelp?.state ?? "missing"}, receiver cards=${relayReceiverCards.length})`);
     }
-    ctx.onEvent({ ts: ctx.now().toISOString(), stage: "no-relay-rejection", node: "requester", message: "peer_relay_blocked observed in requester reply" });
+    scenario.evidence.push({ kind: "request", id: inboundRequestId });
+    ctx.onEvent({ ts: ctx.now().toISOString(), stage: "no-relay-rejection", node: "requester", message: "bound peer-origin Orc observed peer_relay_blocked and no relay request was created" });
   }, 15 * 60_000));
 
   return scenarios;

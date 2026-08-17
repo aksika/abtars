@@ -13,6 +13,7 @@ import { mkdtempSync, writeFileSync, mkdirSync, existsSync, readFileSync, chmodS
 import { join, resolve } from "node:path";
 import { tmpdir } from "node:os";
 import { execFileSync, spawnSync } from "node:child_process";
+import * as net from "node:net";
 import { randomUUID, createHash } from "node:crypto";
 import { DatabaseSync } from "node:sqlite";
 
@@ -35,6 +36,7 @@ import {
   quoteArg,
   LocalCommandPort,
   TmuxCommandPort,
+  TuiOrcClient,
   parseProbeOutput,
   ProbeClient,
   EvidenceWriter,
@@ -655,6 +657,37 @@ describe("tmux command port", () => {
   });
 });
 
+describe("TUI Orc observation", () => {
+  it("attaches query-only and captures a bound tool result at the attach boundary", async () => {
+    const root = tmpdirFixture();
+    const socketPath = join(root, "tui.sock");
+    let attachMode: unknown;
+    const server = net.createServer((socket) => {
+      let input = "";
+      socket.on("data", (chunk) => {
+        input += chunk.toString("utf-8");
+        const line = input.split("\n")[0] ?? "";
+        if (line.length === 0 || !input.includes("\n")) return;
+        attachMode = (JSON.parse(line) as { mode?: unknown }).mode;
+        socket.write([
+          { t: "ready", sessionLabel: "O", sessionId: "orc-session" },
+          { t: "tool-start", id: "tool-1", name: "peer_ask_help" },
+          { t: "message", role: "assistant", markdown: "peer_relay_blocked" },
+        ].map((frame) => JSON.stringify(frame)).join("\n") + "\n");
+      });
+    });
+    await new Promise<void>((resolve) => server.listen(socketPath, resolve));
+    try {
+      const result = await new TuiOrcClient({ socketPath }).observeToolResult("peer_ask_help", "peer_relay_blocked", { timeoutMs: 5_000 });
+      expect(attachMode).toEqual({ kind: "orc" });
+      expect(result.sessionId).toBe("orc-session");
+      expect(result.reply).toContain("peer_relay_blocked");
+    } finally {
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+  });
+});
+
 // ── Real probe against fixture databases ─────────────────────────────────────
 
 describe("real probe (node type-stripped) against fixture state", () => {
@@ -860,7 +893,10 @@ describe("controller foundation profile", () => {
       };
     };
     const orcReplies: OrcCallResult = { reply: "peer_relay_blocked was returned by the tool", sessionId: "sess-1" };
-    const orcCall: OrcCallPort = { call: async () => orcReplies };
+    const orcCall: OrcCallPort = {
+      call: async () => orcReplies,
+      observeToolResult: async () => orcReplies,
+    };
 
     const deps = buildDeps({ runId, profile, requesterPort, receiverPort, delegate, orcCall });
     const result = await runRemoteSwarmLiveE2E(deps);
