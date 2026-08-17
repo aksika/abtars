@@ -443,6 +443,25 @@ describe("projectReviewBrief decision-ready projection (#1620)", () => {
     }
   });
 
+  it("#1677: a parseable snapshot with malformed nested fields is also unreadable, not an escaped throw", async () => {
+    const reviewStoreMod = await import("./project-review-store.js");
+    const { projectReviewBrief } = await import("./project-review-case.js");
+    const store = new reviewStoreMod.ProjectReviewStore();
+    const { id } = store.insertReviewCase(
+      7720,
+      1,
+      1,
+      { schema_version: 1, project_card_id: 7720, generation: 1 },
+      "digest_brief_nested_invalid",
+    );
+
+    expect(projectReviewBrief(id, store)).toEqual({
+      ok: false,
+      code: "review_case_unreadable",
+      error: "review case snapshot is structurally invalid",
+    });
+  });
+
   it("truncates prose but preserves every id and evidence reference", async () => {
     const reviewStoreMod = await import("./project-review-store.js");
     const { projectReviewBrief } = await import("./project-review-case.js");

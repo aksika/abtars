@@ -557,109 +557,118 @@ export function projectReviewBrief(
     return { ok: false, code: "review_case_unreadable", error: "review case snapshot is structurally invalid" };
   }
 
-  const policyByCriterionId = new Map(snapshot.criterion_inputs.map(ci => [ci.criterion_id, ci]));
+  // The immutable snapshot is trusted by the TypeScript type only after the
+  // JSON parse. A corrupt-but-parseable row can still have the four identity
+  // fields above while omitting a nested array/object; keep those failures in
+  // the typed unreadable outcome instead of letting them escape as an
+  // internal_error from the tool boundary.
+  try {
+    const policyByCriterionId = new Map(snapshot.criterion_inputs.map(ci => [ci.criterion_id, ci]));
 
-  const criteria = snapshot.root_contract.criteria.map(c => {
-    const input = policyByCriterionId.get(c.id);
-    return {
-      criterion_id: c.id,
-      description: truncateProse(c.description, BRIEF_DESCRIPTION_MAX),
-      required: c.required,
-      execution_owner: c.execution_owner,
-      evidence_expectation: c.evidence_expectation,
-      coverage_hint: input?.coverage_hint ?? (c.execution_owner === "orc" ? "orc_owned" : "gap"),
-      successful_mapped_child_contract_ids: [...(input?.successful_mapped_child_contract_ids ?? [])],
-      unsuccessful_mapped_child_contract_ids: [...(input?.unsuccessful_mapped_child_contract_ids ?? [])],
-      compatible_evidence: {
-        observed: [...(input?.observed_evidence_ids ?? [])],
-        failed_or_inconclusive: [...(input?.failed_or_inconclusive_check_ids ?? [])],
-        artifacts: [...(input?.artifact_observation_ids ?? [])],
-      },
-    };
-  });
+    const criteria = snapshot.root_contract.criteria.map(c => {
+      const input = policyByCriterionId.get(c.id);
+      return {
+        criterion_id: c.id,
+        description: truncateProse(c.description, BRIEF_DESCRIPTION_MAX),
+        required: c.required,
+        execution_owner: c.execution_owner,
+        evidence_expectation: c.evidence_expectation,
+        coverage_hint: input?.coverage_hint ?? (c.execution_owner === "orc" ? "orc_owned" : "gap"),
+        successful_mapped_child_contract_ids: [...(input?.successful_mapped_child_contract_ids ?? [])],
+        unsuccessful_mapped_child_contract_ids: [...(input?.unsuccessful_mapped_child_contract_ids ?? [])],
+        compatible_evidence: {
+          observed: [...(input?.observed_evidence_ids ?? [])],
+          failed_or_inconclusive: [...(input?.failed_or_inconclusive_check_ids ?? [])],
+          artifacts: [...(input?.artifact_observation_ids ?? [])],
+        },
+      };
+    });
 
-  const outputs = snapshot.root_contract.required_outputs.map(o => ({
-    output_id: o.id,
-    description: truncateProse(o.description, BRIEF_DESCRIPTION_MAX),
-    kind: o.kind,
-    required: o.required,
-  }));
+    const outputs = snapshot.root_contract.required_outputs.map(o => ({
+      output_id: o.id,
+      description: truncateProse(o.description, BRIEF_DESCRIPTION_MAX),
+      kind: o.kind,
+      required: o.required,
+    }));
 
-  // The immutable assembler keeps the full redacted Worker envelope on the
-  // stored snapshot for local evidence derivation. It is not part of the
-  // decision-ready child summary: project only the metadata fields declared by
-  // the brief so raw checks, argv/cwd, artifacts, and Worker prose never cross
-  // the Orc review tool boundary.
-  const children: ProjectReviewChildBriefV1[] = snapshot.child_summaries.map(child => ({
-    card_id: child.card_id,
-    contract_id: child.contract_id,
-    outcome: truncateProse(child.outcome, 64),
-    criterion_statuses: child.criterion_statuses.map(status => ({
-      criterion_id: status.criterion_id,
-      status: truncateProse(status.status, 64),
-    })),
-    attempts: child.attempts,
-    executor_kind: truncateProse(child.executor_kind, 64) as ExecutorKind | "unknown",
-  }));
+    // The immutable assembler keeps the full redacted Worker envelope on the
+    // stored snapshot for local evidence derivation. It is not part of the
+    // decision-ready child summary: project only the metadata fields declared by
+    // the brief so raw checks, argv/cwd, artifacts, and Worker prose never cross
+    // the Orc review tool boundary.
+    const children: ProjectReviewChildBriefV1[] = snapshot.child_summaries.map(child => ({
+      card_id: child.card_id,
+      contract_id: child.contract_id,
+      outcome: truncateProse(child.outcome, 64),
+      criterion_statuses: child.criterion_statuses.map(status => ({
+        criterion_id: status.criterion_id,
+        status: truncateProse(status.status, 64),
+      })),
+      attempts: child.attempts,
+      executor_kind: truncateProse(child.executor_kind, 64) as ExecutorKind | "unknown",
+    }));
 
-  const contradictions: ContradictionCandidate[] = snapshot.contradiction_candidates.map(candidate => ({
-    id: candidate.id,
-    affected_criterion_ids: [...candidate.affected_criterion_ids],
-    description: truncateProse(candidate.description, BRIEF_DESCRIPTION_MAX),
-    evidence_ids: [...candidate.evidence_ids],
-    sources: [...candidate.sources],
-  }));
+    const contradictions: ContradictionCandidate[] = snapshot.contradiction_candidates.map(candidate => ({
+      id: candidate.id,
+      affected_criterion_ids: [...candidate.affected_criterion_ids],
+      description: truncateProse(candidate.description, BRIEF_DESCRIPTION_MAX),
+      evidence_ids: [...candidate.evidence_ids],
+      sources: [...candidate.sources],
+    }));
 
-  // Peer rows are explicitly claims. Preserve their stored references and
-  // bound their prose/metadata before exposing them to the provider.
-  const peerClaims: ProjectReviewBriefV1["peer_claims"] = snapshot.peer_contributions.map(claim => ({
-    card_id: claim.card_id,
-    peer: truncateProse(claim.peer, 128),
-    outcome: truncateProse(claim.outcome, 64),
-    projection_summary: truncateProse(claim.projection_summary, 200),
-    root_criteria: [...claim.root_criteria],
-    provenance: truncateProse(claim.provenance, 1000),
-  }));
+    // Peer rows are explicitly claims. Preserve their stored references and
+    // bound their prose/metadata before exposing them to the provider.
+    const peerClaims: ProjectReviewBriefV1["peer_claims"] = snapshot.peer_contributions.map(claim => ({
+      card_id: claim.card_id,
+      peer: truncateProse(claim.peer, 128),
+      outcome: truncateProse(claim.outcome, 64),
+      projection_summary: truncateProse(claim.projection_summary, 200),
+      root_criteria: [...claim.root_criteria],
+      provenance: truncateProse(claim.provenance, 1000),
+    }));
 
-  const decisionSkeleton = {
-    project_card_id: snapshot.project_card_id,
-    project_generation: snapshot.generation,
-    review_case_id: row.id,
-    criteria: snapshot.root_contract.criteria.map(c => ({
-      criterion_id: c.id,
-      verdict: null,
-      evidence_ids: [],
-      rationale: "",
-    })),
-    outputs: outputs.map(o => ({ output_id: o.output_id, disposition: null, evidence_ids: [] })),
-    contradictions: [],
-    residual_risks: [],
-    synthesis: "",
-  };
-
-  return {
-    ok: true,
-    brief: {
-      schema_version: 1,
+    const decisionSkeleton = {
       project_card_id: snapshot.project_card_id,
       project_generation: snapshot.generation,
       review_case_id: row.id,
-      round: snapshot.round,
-      goal: truncateProse(snapshot.root_contract.goal, BRIEF_GOAL_MAX),
-      criteria,
-      outputs,
-      contradictions,
-      children,
-      peer_claims: peerClaims,
-      uncovered_criteria: [...snapshot.uncovered_criteria],
-      budgets: snapshot.budgets,
-      legal_values: {
-        actions: REVIEW_ACTIONS,
-        criterion_verdicts: CRITERION_VERDICTS,
-        output_dispositions: OUTPUT_DISPOSITIONS,
-        contradiction_dispositions: CONTRADICTION_DISPOSITIONS,
+      criteria: snapshot.root_contract.criteria.map(c => ({
+        criterion_id: c.id,
+        verdict: null,
+        evidence_ids: [],
+        rationale: "",
+      })),
+      outputs: outputs.map(o => ({ output_id: o.output_id, disposition: null, evidence_ids: [] })),
+      contradictions: [],
+      residual_risks: [],
+      synthesis: "",
+    };
+
+    return {
+      ok: true,
+      brief: {
+        schema_version: 1,
+        project_card_id: snapshot.project_card_id,
+        project_generation: snapshot.generation,
+        review_case_id: row.id,
+        round: snapshot.round,
+        goal: truncateProse(snapshot.root_contract.goal, BRIEF_GOAL_MAX),
+        criteria,
+        outputs,
+        contradictions,
+        children,
+        peer_claims: peerClaims,
+        uncovered_criteria: [...snapshot.uncovered_criteria],
+        budgets: snapshot.budgets,
+        legal_values: {
+          actions: REVIEW_ACTIONS,
+          criterion_verdicts: CRITERION_VERDICTS,
+          output_dispositions: OUTPUT_DISPOSITIONS,
+          contradiction_dispositions: CONTRADICTION_DISPOSITIONS,
+        },
+        decision_skeleton: decisionSkeleton,
       },
-      decision_skeleton: decisionSkeleton,
-    },
-  };
+    };
+  } catch {
+    return { ok: false, code: "review_case_unreadable", error: "review case snapshot is structurally invalid" };
+  }
 }
