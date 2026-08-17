@@ -35,9 +35,9 @@ The agent doesn't load every skill into context — just the catalog. Full skill
 ```markdown
 ---
 name: deploy-peer-b
-description: Deploy abTARS to the Mac mini via SSH
+description: Deploy abTARS to a remote instance via SSH
 tags: [deploy, peer-b, ssh]
-related: [deploy-kp, watchdog]
+related: [watchdog]
 ---
 
 ## Steps

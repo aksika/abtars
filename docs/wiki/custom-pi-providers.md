@@ -22,7 +22,7 @@ from there by environment-variable name.
 The filename becomes the env var name. No extension.
 
 ```bash
-echo -n "thk_live_abc123..." > ~/.abtars/secret/TOKENHARBOR_API_KEY
+echo -n "<your-api-key>" > ~/.abtars/secret/TOKENHARBOR_API_KEY
 chmod 600 ~/.abtars/secret/TOKENHARBOR_API_KEY
 ```
 
@@ -158,6 +158,9 @@ curl -s https://tokenharbor.ai/v1/chat/completions \
   -d '{"model":"deepseek-v4-flash:free","messages":[{"role":"user","content":"say OK"}],"max_tokens":10}'
 ```
 
+The `secrets-*.js` glob works on both platforms — always expand it with
+`$HOME` (never hardcode a home directory path).
+
 A non-`200` response with a JSON error body is the provider's own gate, not a
 config problem. Common ones:
 
@@ -177,3 +180,25 @@ config problem. Common ones:
   boot; write directly to `secret/` instead.
 - **Same key, both sides.** abtars reads it via `apiKeyEnv`; pi reads it via
   `$TOKENHARBOR_API_KEY`. Both resolve the same `process.env` value.
+
+## Device Notes (Linux vs macOS)
+
+The steps above run on both platforms, but these specifics differ:
+
+| Item | Linux / WSL | macOS |
+|------|-------------|-------|
+| abtars dir | `~/.abtars/` | `~/.abtars/` (same) |
+| Releases bundle | `~/.abtars-releases/current/bundle/` | `~/.abtars-releases/current/bundle/` (same) |
+| `abtars` on PATH | Already on PATH | `export PATH=/opt/homebrew/bin:$HOME/.local/bin:$HOME/.abtars/bin:$PATH` first |
+| Restart | `abtars stop --force && abtars start` | same |
+
+**macOS pitfalls:**
+
+- **`$HOME` does not expand inside transferred scripts.** When you run a
+  script on the remote host via an encoded/escaped transport, `$HOME` (or `~`)
+  inside the script body stays literal and fails with `FileNotFoundError`.
+  Use the expanded absolute path (`$HOME/.abtars/...` expanded on the remote,
+  e.g. `/Users/<user>/.abtars/...`) inside such scripts.
+- **PATH must be set per-command.** `abtars`/`abmind` live under
+  `/opt/homebrew/bin` (Apple Silicon). Prefix every command with the export
+  above.

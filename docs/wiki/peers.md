@@ -42,7 +42,7 @@ The remote instance processes the message through its full agent pipeline (model
 ```json
 {
   "self": {
-    "name": "kp",
+    "name": "peer-a",
     "signingKey": "<Ed25519 private key for JWT signing>"
   },
   "peers": {

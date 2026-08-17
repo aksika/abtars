@@ -14,9 +14,9 @@ You stay in one conversation. The swarm works in the background.
 You: "Prepare my weekly investment report"
 
 Main agent (orchestrator):
-  +-- Worker A: fetch market data        (Molty — fast internet)
-  +-- Worker B: analyze portfolio         (KP — has broker API)
-  +-- Worker C: check news sentiment      (Molty — has RSS tools)
+  +-- Worker A: fetch market data        (remote peer — fast internet)
+  +-- Worker B: analyze portfolio         (remote peer — has broker API)
+  +-- Worker C: check news sentiment      (remote peer — has RSS tools)
   |
   |   [all run in parallel on different hardware]
   |
@@ -71,7 +71,7 @@ No configuration needed — auto-discovered at boot.
 
 **Multi-step personal tasks** — "Book a restaurant, check weather, plan the route" — three workers in parallel, merged into one answer.
 
-**Distributed monitoring** — KP detects an issue, delegates the fix to Molty (which has the right access). No human coordination.
+**Distributed monitoring** — one instance detects an issue, delegates the fix to a peer (which has the right access). No human coordination.
 
 **Autonomous daily routine** — Morning: finance check + news scan + weather report. All parallel. Delivered as one message when you wake up.
 
@@ -119,7 +119,7 @@ Both must pass. Compromising one doesn't break the other.
 The agent uses `peer_ask` to talk to another instance:
 
 ```
-peer_ask(peer: "molty", message: "What's your current sleep status?")
+peer_ask(peer: "peer-b", message: "What's your current sleep status?")
 --> "I'm awake, last slept 6 hours ago."
 ```
 
@@ -130,7 +130,7 @@ The remote instance processes the message through its full agent pipeline (model
 For background work — fire-and-forget with result delivery via callback:
 
 ```
-peer_delegate(peer: "molty", goal: "Compile the iOS app", priority: "HIGH")
+peer_delegate(peer: "peer-b", goal: "Compile the iOS app", priority: "HIGH")
 --> { local_card_id: 42, remote_task_id: 7 }
 ```
 
@@ -143,11 +143,11 @@ The remote peer completes the work and pushes the result back via callback. Loca
 ```json
 {
   "self": {
-    "name": "kp",
+    "name": "peer-a",
     "signingKey": "<Ed25519 private key for JWT signing>"
   },
   "peers": {
-    "molty": {
+    "peer-b": {
       "host": "<peer-ip-or-hostname>",
       "port": 3100,
       "token": "<shared secret for JWT>",

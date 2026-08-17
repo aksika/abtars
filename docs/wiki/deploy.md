@@ -121,7 +121,7 @@ Recovery: `cp ~/.abtars/config/.pre-update/* ~/.abtars/config/`
 
 `state/update.sentinel` — written before restart (status: "pending"), cleared by bridge on first heartbeat tick (status: "success"). If stale, `abtars status` warns.
 
-## Deploy to remote (Molty)
+## Deploy to a remote instance
 
 Via Telegram:
 ```
@@ -129,9 +129,9 @@ Via Telegram:
 /update deploy         ← builds + deploys + restarts
 ```
 
-Or via SSH/tmux:
+Or over SSH:
 ```bash
-tmux send-keys -t remote 'cd ~/abmind && git pull --ff-only origin dev && npm run build && cd ~/abtars && git pull --ff-only origin dev && abtars update --local' Enter
+ssh remote-host 'cd ~/abmind && git pull --ff-only origin dev && npm run build && cd ~/abtars && git pull --ff-only origin dev && abtars update --local'
 ```
 
 ## Rollback

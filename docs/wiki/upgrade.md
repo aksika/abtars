@@ -11,7 +11,7 @@
 
 Remote deploy flow: `/update pull` → `/update deploy`
 
-## Linux / WSL (KP)
+## Linux / WSL
 
 ```bash
 cd ~/workspace/ab/abtars

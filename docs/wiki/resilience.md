@@ -203,7 +203,7 @@ When doctor self-heals something:
 
 No manual intervention needed in either case.
 
-## Stress Tests (verified 2026-06-17, KP + Molty)
+## Stress Tests (verified 2026-06-17)
 
 The watchdog singleton system (#1035) and instant-death detection (#1042) were stress-tested on both hosts:
 

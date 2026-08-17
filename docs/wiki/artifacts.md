@@ -11,7 +11,7 @@ Workers and Orc exchange small files directly in task payloads. No configuration
 The Orc includes artifacts when delegating:
 
 ```
-peer_delegate(peer: "molty", goal: "Run this script", artifacts: [{name: "config.json", content: "<base64>"}])
+peer_delegate(peer: "peer-b", goal: "Run this script", artifacts: [{name: "config.json", content: "<base64>"}])
 ```
 
 The remote worker finds the file at `~/.abtars/workspace/cards/<cardId>/config.json`.
