@@ -428,3 +428,87 @@ describe("#1671 global progress (real SQLite)", () => {
     expect(events).toHaveLength(0);
   });
 });
+
+// ── #1673: terminal cleanup after a project generation advance (real SQLite) ──
+
+describe("#1673 terminal cleanup after a project generation advance (real SQLite)", () => {
+  it("releases its own run after supervision advances and lets the queued run take the global slot", () => {
+    const h = makeHarness();
+    seedProject(h.store, 31);
+    seedProject(h.store, 32);
+    const events: import("./orc-project-contracts.js").OrcOwnershipReleasedV1[] = [];
+    const observedAtEvent: string[] = [];
+    h.coordinator.onOwnershipReleased((e) => {
+      observedAtEvent.push(h.store.getRun(e.runId)?.state ?? "missing");
+      events.push(e);
+    });
+
+    // claim A and B: A takes the global slot (dispatching), B stays scheduled
+    const a = h.coordinator.scheduleContractAuthoring(31);
+    expect(a.kind).toBe("claimed");
+    const b = h.coordinator.scheduleContractAuthoring(32);
+    expect(b.kind).toBe("claimed");
+    expect(h.starts).toHaveLength(1); // only A was promoted
+    if (a.kind !== "claimed" || b.kind !== "claimed") return;
+
+    // bind A to a real session/execution
+    const bind = h.store.bindExecution(a.context, "sess_31", "exec_31");
+    expect(bind.ok).toBe(true);
+    const boundContext = { ...a.context, sessionId: "sess_31", executionId: "exec_31" };
+
+    // the turn's durable work advanced the project's supervision generation
+    h.store.db.prepare("UPDATE project_supervision SET generation = 2 WHERE project_card_id = 31").run();
+
+    // terminal release happens AFTER the advance — the normal turn ordering
+    const released = h.coordinator.releaseOwnedRun(boundContext, "completed");
+    expect(released).toBe(true);
+
+    // the run row is durable-terminal with the caller's outcome preserved
+    const row = h.store.getRun(a.context.runId);
+    expect(row?.state).toBe("released");
+    expect(row?.outcome).toBe("completed");
+    expect(row?.released_at).not.toBeNull();
+    expect(row?.project_generation).toBe(1);
+
+    // durable terminal precedes the ownership event; exactly one event fires
+    expect(observedAtEvent).toEqual(["released"]);
+    expect(events).toHaveLength(1);
+    expect(events[0]!.outcome).toBe("completed");
+
+    // B acquires the global slot once A's row no longer holds it
+    expect(h.store.getRun(b.context.runId)?.state).toBe("scheduled");
+    h.store.pump();
+    expect(h.store.getRun(b.context.runId)?.state).toBe("dispatching");
+  });
+
+  it("still rejects foreign owner, session, and execution contexts after the advance", () => {
+    const h = makeHarness();
+    seedProject(h.store, 33);
+    const events: import("./orc-project-contracts.js").OrcOwnershipReleasedV1[] = [];
+    h.coordinator.onOwnershipReleased((e) => events.push(e));
+
+    const a = h.coordinator.scheduleContractAuthoring(33);
+    expect(a.kind).toBe("claimed");
+    if (a.kind !== "claimed") return;
+    const bind = h.store.bindExecution(a.context, "sess_33", "exec_33");
+    expect(bind.ok).toBe(true);
+
+    // the project's supervision generation advances past the run's
+    h.store.db.prepare("UPDATE project_supervision SET generation = 2 WHERE project_card_id = 33").run();
+
+    // every identity/ownership fence must still reject a mismatched context
+    expect(h.coordinator.releaseOwnedRun({ ...a.context, ownerInstanceId: "inst_2" }, "completed")).toBe(false);
+    expect(h.coordinator.releaseOwnedRun({ ...a.context, sessionId: "sess_33", executionId: "exec_OTHER" }, "completed")).toBe(false);
+    expect(h.coordinator.releaseOwnedRun({ ...a.context, sessionId: "sess_OTHER", executionId: "exec_33" }, "completed")).toBe(false);
+    expect(h.coordinator.releaseOwnedRun({ ...a.context, ownershipGeneration: a.context.ownershipGeneration + 1 }, "completed")).toBe(false);
+    expect(h.coordinator.releaseOwnedRun({ ...a.context, projectGeneration: 2 }, "completed")).toBe(false);
+
+    expect(h.store.getRun(a.context.runId)?.state).toBe("running");
+    expect(events).toHaveLength(0);
+
+    // the correct bound context still releases after the advance
+    expect(h.coordinator.releaseOwnedRun({ ...a.context, sessionId: "sess_33", executionId: "exec_33" }, "completed")).toBe(true);
+    expect(h.store.getRun(a.context.runId)?.state).toBe("released");
+    expect(events).toHaveLength(1);
+  });
+});

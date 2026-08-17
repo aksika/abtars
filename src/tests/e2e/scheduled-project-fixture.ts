@@ -320,10 +320,11 @@ export function makeScheduledProjectFixture(
         return;
       }
       if (state.reviewMode === "repair") {
-        // Release the review claim BEFORE settleRepair advances the project
-        // generation: release() requires supervision.generation to match the
-        // run's generation (orc-project-run-store.release EXISTS clause).
-        finish("completed");
+        // #1673: production ordering — the review tool settles the repair
+        // inside the turn (advancing the supervision generation), and the
+        // turn's terminal release happens afterwards. release() is terminal
+        // cleanup of the run's own row; it must not run before the settle,
+        // which is exactly the ordering that wedged the global Orc slot.
         store.settleRepair(projectId, openCase.id, {
           action: "repair",
           repair: { items: [{ id: "r1", affected_criterion_ids: ["c1"], strategy: "rework", required_evidence: "synthesis", capabilities: [], budget: { max_attempts: 1 } }] },
@@ -359,6 +360,7 @@ export function makeScheduledProjectFixture(
           } catch { /* best effort */ }
         }
         state.lastTurn = "reviewed";
+        finish("completed");
         return;
       }
       if (state.reviewMode === "blocked") {

@@ -245,6 +245,19 @@ export class OrcProjectRunStore {
     return { ok: true, row };
   }
 
+  /**
+   * #1673: terminal cleanup authority is separate from project mutation
+   * authority. Release retires the caller's own run row and is fenced only on
+   * the run's immutable identity columns (id, ownership generation, owner
+   * instance, project card, the generation the run recorded, live state,
+   * session, execution). It deliberately does NOT compare against current
+   * `project_supervision.generation`: a turn that legitimately advanced its
+   * own project's generation as part of its durable work must still be able to
+   * release the global slot it owns, or the retained row wedges
+   * `idx_one_global_orc_turn` forever. Current-supervision fencing belongs to
+   * `bindExecution`/`validateCurrentContext`/`withCurrentRun`, which gate
+   * mutation of live project state and are unchanged.
+   */
   release(context: OrcInvocationContextV1, outcome: OrcRunOutcome): boolean {
     return this.db.transaction(() => {
       const now = new Date().toISOString();
@@ -256,11 +269,6 @@ export class OrcProjectRunStore {
           AND state IN ('scheduled','dispatching','running')
           AND (session_id IS NULL OR session_id = ?)
           AND (execution_id IS NULL OR execution_id = ?)
-          AND EXISTS (
-            SELECT 1 FROM project_supervision
-            WHERE project_card_id = orc_project_runs.project_card_id
-              AND generation = orc_project_runs.project_generation
-          )
       `).run(outcome, now, now, context.runId, context.ownershipGeneration, context.ownerInstanceId,
         context.projectCardId, context.projectGeneration, context.sessionId ?? null, context.executionId ?? null);
       return result.changes > 0;
@@ -395,25 +403,6 @@ export class OrcProjectRunStore {
       } catch (err) {
         return { ok: false as const, reason: String(err) };
       }
-    });
-  }
-
-  releaseInTransaction(context: OrcInvocationContextV1, outcome: OrcRunOutcome): boolean {
-    return this.db.transaction(() => {
-      const row = this.db.prepare(`SELECT * FROM orc_project_runs WHERE id = ?`).get(context.runId) as unknown as OrcProjectRunRow | undefined;
-      if (!row || row.state === "released" || row.state === "superseded") return false;
-      if (row.ownership_generation !== context.ownershipGeneration) return false;
-      if (row.owner_instance_id !== context.ownerInstanceId || row.project_card_id !== context.projectCardId || row.project_generation !== context.projectGeneration) return false;
-      if (context.sessionId !== undefined && row.session_id !== context.sessionId) return false;
-      if (context.executionId !== undefined && row.execution_id !== context.executionId) return false;
-      const sup = this.db.prepare(`SELECT generation FROM project_supervision WHERE project_card_id = ?`).get(row.project_card_id) as { generation: number } | undefined;
-      if (!sup || sup.generation !== row.project_generation) return false;
-      const now = new Date().toISOString();
-      const result = this.db.prepare(`
-        UPDATE orc_project_runs SET state = 'released', outcome = ?, released_at = ?, updated_at = ?
-        WHERE id = ? AND ownership_generation = ? AND owner_instance_id = ? AND state IN ('scheduled','dispatching','running')
-      `).run(outcome, now, now, context.runId, context.ownershipGeneration, context.ownerInstanceId);
-      return result.changes > 0;
     });
   }
 }

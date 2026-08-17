@@ -214,7 +214,8 @@ describe("OrcProjectRunStore", () => {
     expect(result).toEqual({ kind: "conflict", reason: "origin_invalid" });
   });
 
-  it("fences binding and release to the owning instance and current generation", () => {
+  it("fences binding to the owning instance and current generation, and permits the owner's terminal cleanup after the generation advances", () => {
+    // ── binding is fenced on the owning instance ──
     seedProject(store, 13);
     const claim = store.claimIntent(makeInput({ projectCardId: 13 }), "local_peer", "inst_1");
     expect(claim.kind).toBe("claimed");
@@ -224,11 +225,22 @@ describe("OrcProjectRunStore", () => {
     const foreign = store.bindExecution({ ...claim.context, ownerInstanceId: "inst_2" }, "sess_1", "exec_1");
     expect(foreign).toEqual({ ok: false, reason: "foreign_instance" });
 
+    // ── binding is fenced on the current supervision generation (#1673) ──
+    seedProject(store, 14);
+    const stale = store.claimIntent(makeInput({ projectCardId: 14 }), "local_peer", "inst_1");
+    expect(stale.kind).toBe("claimed");
+    if (stale.kind !== "claimed") return;
+    store.db.prepare("UPDATE project_supervision SET generation = 2 WHERE project_card_id = 14").run();
+    const staleBind = store.bindExecution(stale.context, "sess_14", "exec_14");
+    expect(staleBind).toEqual({ ok: false, reason: "project_generation_mismatch" });
+
+    // ── terminal cleanup is permitted after the owner's generation advanced ──
     const bound = store.bindExecution(claim.context, "sess_1", "exec_1");
     expect(bound.ok).toBe(true);
     store.db.prepare("UPDATE project_supervision SET generation = 2 WHERE project_card_id = 13").run();
-    expect(store.release({ ...claim.context, sessionId: "sess_1", executionId: "exec_1" }, "completed")).toBe(false);
-    expect(store.getRun(claim.context.runId)?.state).toBe("running");
+    expect(store.release({ ...claim.context, sessionId: "sess_1", executionId: "exec_1" }, "completed")).toBe(true);
+    expect(store.getRun(claim.context.runId)?.state).toBe("released");
+    expect(store.getRun(claim.context.runId)?.outcome).toBe("completed");
   });
 });
 
