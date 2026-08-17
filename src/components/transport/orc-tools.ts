@@ -427,7 +427,7 @@ const cancelWorkerTool: ToolDefinition = {
     };
     const cancelled = new WorkerSupervisionStore().cancelProjectChild(cardId, authority, "cancelled by Orc");
     if (!cancelled) return "[err] project mutation rejected: worker cancellation is stale or no longer live";
-    try { nerve.fire("card:failed", cardId); } catch (err) { logAndSwallow(TAG, `fire card:failed for ${cardId}`, err); }
+    try { nerve.fire("card:failed", cardId); } catch (err) { logAndSwallow(TAG, "fire card:failed", err); }
     logInfo(TAG, `cancel_worker card:${cardId} (parent:${projectCardId})`);
     return `x Worker #${cardId} cancelled.`;
   },
@@ -632,7 +632,7 @@ const defineProjectContractTool: ToolDefinition = {
             authority,
           );
           if (record.kind === "blocked") {
-            try { nerve.fire("card:failed", cardId); } catch (err) { logAndSwallow(TAG, `fire card:failed for ${cardId}`, err); }
+            try { nerve.fire("card:failed", cardId); } catch (err) { logAndSwallow(TAG, "fire card:failed", err); }
             return `✗ Project blocked after ${record.total} invalid proposals.\n${errs}`;
           }
           if (record.kind === "ignored") return "[err] project mutation rejected: contract authoring authority is stale";

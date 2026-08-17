@@ -136,7 +136,7 @@ export class HttpTransport implements PeerTransport {
       const { getRemotePiDelivery } = require("./remote-pi-registry.js") as typeof import("./remote-pi-registry.js");
       const delivery = getRemotePiDelivery();
       if (delivery && typeof delivery.drainPeer === "function") {
-        delivery.drainPeer(peer).catch(err => logAndSwallow(TAG, `drain remote-Pi pending events for ${peer}`, err));
+        delivery.drainPeer(peer).catch(err => logAndSwallow(TAG, "drain remote-Pi pending events", err));
       }
     } catch { /* best effort */ }
   }
@@ -248,7 +248,7 @@ export class HttpTransport implements PeerTransport {
   }
 
   dispatchInbound(from: string, message: PeerMessage): void {
-    for (const h of this.handlers) { try { h(from, message); } catch (err) { logAndSwallow(TAG, `dispatch inbound message from ${from} to handler`, err, "warn"); } }
+    for (const h of this.handlers) { try { h(from, message); } catch (err) { logAndSwallow(TAG, "dispatch inbound message to handler", err, "warn"); } }
   }
 
   // ── Peer Help Transport ──────────────────────────────────────────────────

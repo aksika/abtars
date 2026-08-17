@@ -174,7 +174,7 @@ export async function phaseAgentApi(ctx: BootCtx): Promise<PhaseResult> {
             // PiRunStore.createPiCardAndRun inside the same transaction as the
             // run row (mechanism A). Here we only trigger opportunistic push.
             const { getRemotePiDelivery } = await import("../components/peer-transport/remote-pi-registry.js");
-            getRemotePiDelivery()?.pushEvents(result.runId, originPeer).catch(err => logAndSwallow(TAG, `push accepted Pi events for ${result.runId}`, err));
+            getRemotePiDelivery()?.pushEvents(result.runId, originPeer).catch(err => logAndSwallow(TAG, "push accepted Pi events", err));
             return { ok: true, runId: result.runId, cardId: result.cardId, generation: result.generation, sessionId: result.sessionId };
           } catch (err) {
             return { ok: false, error: err instanceof Error ? err.message : String(err) };
@@ -243,7 +243,7 @@ export async function phaseAgentApi(ctx: BootCtx): Promise<PhaseResult> {
                   version: 1,
                   run_id: result.runId,
                   sequence: result.sequence,
-                }).catch(err => logAndSwallow(TAG, `send cumulative ack to ${peer}`, err));
+                }).catch(err => logAndSwallow(TAG, "send cumulative ack", err));
               } else if (result.gapDetected) {
                 // Gap detected — initiate catch-up using the committed
                 // latest_sequence, NOT acknowledged_sequence. Pull missing
@@ -262,7 +262,7 @@ export async function phaseAgentApi(ctx: BootCtx): Promise<PhaseResult> {
                         throw new Error(`Catch-up: failed to reduce event ${e.event_id} for run ${runId}`);
                       }
                     },
-                  ).catch(err => logAndSwallow(TAG, `catch-up push for ${runId}`, err));
+                  ).catch(err => logAndSwallow(TAG, "catch-up push", err));
                 }
               }
             } catch { /* best effort */ }

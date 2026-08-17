@@ -296,12 +296,12 @@ export async function handleInboundMessage(
           if (!effectiveSession.transport) await spin.ensureSessionTransport(effectiveSession);
         } catch (fallbackErr) {
           logWarn(TAG, `A fallback transport attach failed for ${effectiveSessionId}: ${fallbackErr instanceof Error ? fallbackErr.message : String(fallbackErr)}`);
-          await adapter.sendMessage(msg.channelId, `⚠️ ${fallbackErr instanceof Error ? fallbackErr.message : String(fallbackErr)}`, { threadId: msg.threadId }).catch(err => logAndSwallow(TAG, `send fallback-transport error notice to ${msg.channelId}`, err));
+          await adapter.sendMessage(msg.channelId, `⚠️ ${fallbackErr instanceof Error ? fallbackErr.message : String(fallbackErr)}`, { threadId: msg.threadId }).catch(err => logAndSwallow(TAG, "send fallback-transport error notice", err));
           return;
         }
       } else {
         logWarn(TAG, `ensureSessionTransport failed for ${effectiveSessionId}: ${err instanceof Error ? err.message : String(err)}`);
-        await adapter.sendMessage(msg.channelId, `⚠️ ${err instanceof Error ? err.message : String(err)}`, { threadId: msg.threadId }).catch(err2 => logAndSwallow(TAG, `send transport error notice to ${msg.channelId}`, err2));
+        await adapter.sendMessage(msg.channelId, `⚠️ ${err instanceof Error ? err.message : String(err)}`, { threadId: msg.threadId }).catch(err2 => logAndSwallow(TAG, "send transport error notice", err2));
         return;
       }
     }

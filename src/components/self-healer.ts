@@ -37,7 +37,7 @@ function logAutoFix(message: string): void {
 }
 
 function notify(adapter: TelegramAdapter, chatId: string, msg: string): void {
-  try { adapter.sendNotification(chatId, msg); } catch (err) { logAndSwallow(TAG, `send self-heal notification to ${chatId}`, err, "warn"); }
+  try { adapter.sendNotification(chatId, msg); } catch (err) { logAndSwallow(TAG, "send self-heal notification", err, "warn"); }
 }
 
 export function createSelfHealerTask(

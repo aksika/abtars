@@ -448,7 +448,7 @@ export class RemotePiControlHandler {
       // Trigger opportunistic push so the origin sees it promptly.
       try {
         const { getRemotePiDelivery } = await import("./remote-pi-registry.js");
-        getRemotePiDelivery()?.pushEvents(request.run_id, authenticatedPeer.peerName).catch(err => logAndSwallow(TAG, `push events after resume for ${request.run_id}`, err));
+        getRemotePiDelivery()?.pushEvents(request.run_id, authenticatedPeer.peerName).catch(err => logAndSwallow(TAG, "push events after resume", err));
       } catch { /* best effort */ }
       const projection = this._buildPublicProjection(resumedRun);
       return {

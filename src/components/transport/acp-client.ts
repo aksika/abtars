@@ -115,7 +115,7 @@ export class AcpClient extends EventEmitter<AcpClientEvents> {
       this.process.kill("SIGTERM");
       this.process = null;
       this.initialized = false;
-      if (pid) setTimeout(() => { try { process.kill(pid, "SIGKILL"); } catch (err) { if ((err as NodeJS.ErrnoException).code === "ESRCH") return; logAndSwallow(TAG, `force-kill child ${pid} after SIGTERM`, err); } }, 2000).unref();
+      if (pid) setTimeout(() => { try { process.kill(pid, "SIGKILL"); } catch (err) { if ((err as NodeJS.ErrnoException).code === "ESRCH") return; logAndSwallow(TAG, "force-kill child after SIGTERM", err); } }, 2000).unref();
     }
   }
 

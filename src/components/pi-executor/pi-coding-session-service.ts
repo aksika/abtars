@@ -1288,7 +1288,7 @@ export class PiCodingSessionService {
   private cancelTurn(owned: OwnedTurn, reason: string): void {
     if (owned.settling) return;
     owned.settling = true;
-    owned.client.abort().catch(err => logAndSwallow(TAG, `abort process for ${owned.sessionId}`, err));
+    owned.client.abort().catch(err => logAndSwallow(TAG, "abort process", err));
     const graceMs = this.deps.config.abortGraceMs;
     owned.abortTimer = setTimeout(() => {
       if (this.live.get(owned.sessionId) !== owned) return;

@@ -255,7 +255,7 @@ export class SupervisedPiRpcClient {
     if (this.child && !this.child.killed) {
       try { this.child.stdin?.end(); } catch (err) { logAndSwallow(TAG, "end child stdin during close", err); }
       const { pid } = this.child;
-      const killTimer = setTimeout(() => { try { process.kill(pid!, "SIGKILL"); } catch (err) { if ((err as NodeJS.ErrnoException).code === "ESRCH") return; logAndSwallow(TAG, `force-kill child ${pid} after SIGTERM`, err); } }, 5000);
+      const killTimer = setTimeout(() => { try { process.kill(pid!, "SIGKILL"); } catch (err) { if ((err as NodeJS.ErrnoException).code === "ESRCH") return; logAndSwallow(TAG, "force-kill child after SIGTERM", err); } }, 5000);
       this.child.on("exit", () => clearTimeout(killTimer));
       try { this.child.kill("SIGTERM"); } catch (err) { logAndSwallow(TAG, `send SIGTERM to child`, err); }
     }

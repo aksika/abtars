@@ -210,6 +210,8 @@ describe.skipIf(!npmAvailable())("Epic 23 E2E — skill dependency deploy (#1542
       },
       undefined,
       healthMock,
+      () => ({ ok: true }),
+      () => {},
     );
   }
 

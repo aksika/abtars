@@ -11,6 +11,52 @@ function readJsonField(file: string, field: string): unknown {
   try { return JSON.parse(readFileSync(file, "utf-8"))[field]; } catch { return undefined; }
 }
 
+export type DaemonStartResult =
+  | { readonly ok: true }
+  | { readonly ok: false; readonly error: string };
+
+function commandErrorMessage(err: unknown): string {
+  if (err && typeof err === "object" && "stderr" in err) {
+    const stderr = (err as { stderr?: unknown }).stderr;
+    if (Buffer.isBuffer(stderr) && stderr.length > 0) return stderr.toString().trim();
+    if (typeof stderr === "string" && stderr.trim()) return stderr.trim();
+  }
+  return (err instanceof Error ? err.message : String(err)).trim();
+}
+
+/** Start the installed watchdog and report failures to the CLI caller. */
+export function startDaemonService(
+  platform: NodeJS.Platform = process.platform,
+  execFile: typeof execFileSync = execFileSync,
+): DaemonStartResult {
+  if (platform === "darwin") {
+    const plistPath = join(homedir(), "Library", "LaunchAgents", "com.abtars.watchdog.plist");
+    const uid = `gui/${process.getuid?.() ?? 501}`;
+    try {
+      execFile("launchctl", ["bootstrap", uid, plistPath], { timeout: 5000 });
+      return { ok: true };
+    } catch (err) {
+      const message = commandErrorMessage(err);
+      if (/already\s+(?:loaded|bootstrapped)/i.test(message)) return { ok: true };
+      return { ok: false, error: `launchctl bootstrap: ${message.slice(-300)}` };
+    }
+  }
+
+  const commands: Array<[string[], string]> = [
+    [["--user", "unmask", "abtars-watchdog"], "unmask watchdog unit"],
+    [["--user", "enable", "abtars-watchdog"], "enable watchdog unit"],
+    [["--user", "start", "abtars-watchdog"], "start watchdog unit"],
+  ];
+  for (const [args, operation] of commands) {
+    try {
+      execFile("systemctl", args, { timeout: 5000 });
+    } catch (err) {
+      return { ok: false, error: `${operation}: ${commandErrorMessage(err).slice(-300)}` };
+    }
+  }
+  return { ok: true };
+}
+
 export async function start(): Promise<number> {
   await printBanner("start");
   const home = abtarsHome();
@@ -22,14 +68,10 @@ export async function start(): Promise<number> {
   const installMode = readJsonField(join(home, "manifest.json"), "installMode") as string | undefined;
 
   if (installMode === "daemon") {
-    if (process.platform === "darwin") {
-      const plistPath = join(homedir(), "Library", "LaunchAgents", "com.abtars.watchdog.plist");
-      const uid = `gui/${process.getuid!()}`;
-      try { execFileSync("launchctl", ["bootstrap", uid, plistPath], { timeout: 5000 }); } catch { /* watchdog plist may already be loaded; bootstrap is idempotent */ }
-    } else {
-      try { execFileSync("systemctl", ["--user", "unmask", "abtars-watchdog"], { timeout: 5000 }); } catch { /* unit may not be masked; unmask is idempotent */ }
-      try { execFileSync("systemctl", ["--user", "enable", "abtars-watchdog"], { timeout: 5000 }); } catch { /* unit may already be enabled; enable is idempotent */ }
-      try { execFileSync("systemctl", ["--user", "start", "abtars-watchdog"], { timeout: 5000 }); } catch { /* unit may already be started; the watchdog startup is best-effort */ }
+    const serviceResult = startDaemonService();
+    if (!serviceResult.ok) {
+      process.stderr.write(`x Watchdog service start failed: ${serviceResult.error}\n`);
+      return 1;
     }
     process.stdout.write(`+ Service loaded. Watchdog starting...\n`);
     return 0;

@@ -182,7 +182,7 @@ export class ProjectReviewService {
         authority,
       );
       if (record.kind === "blocked") {
-        try { nerve.fire("card:failed", cardId); } catch (err) { logAndSwallow(TAG, `fire card:failed for ${cardId}`, err); }
+        try { nerve.fire("card:failed", cardId); } catch (err) { logAndSwallow(TAG, "fire card:failed", err); }
         return {
           kind: "blocked_invalid",
           decisionId: record.decisionId,
@@ -222,7 +222,7 @@ export class ProjectReviewService {
         );
 
         // Fire events after commit
-        try { nerve.fire("card:done", cardId); } catch (err) { logAndSwallow(TAG, `fire card:done for ${cardId}`, err); }
+        try { nerve.fire("card:done", cardId); } catch (err) { logAndSwallow(TAG, "fire card:done", err); }
         return {
           kind: "accepted",
           decisionId,
@@ -271,7 +271,7 @@ export class ProjectReviewService {
           authority,
         );
         // Fire events after commit
-        try { nerve.fire("card:failed", cardId); } catch (err) { logAndSwallow(TAG, `fire card:failed for ${cardId}`, err); }
+        try { nerve.fire("card:failed", cardId); } catch (err) { logAndSwallow(TAG, "fire card:failed", err); }
         return {
           kind: "blocked",
           decisionId: settledId,

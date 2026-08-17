@@ -202,7 +202,7 @@ export class RequesterContributionService {
       try {
         this.contributionStore.transitionToNonStarted(input.peer, input.request.request_id, "unknown");
         this.kanbanUpdate(proxyCardId, { notes: JSON.stringify({ outcome: "unknown", request_id: input.request.request_id }) });
-      } catch (bookErr) { logAndSwallow(TAG, `record unknown outcome for proxy card ${proxyCardId}`, bookErr); }
+      } catch (bookErr) { logAndSwallow(TAG, "record unknown outcome for proxy card", bookErr); }
       return {
         decision: "unknown",
         projectCardId,

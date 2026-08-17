@@ -6,13 +6,16 @@ import { acquireLock, packagePaths, readManifest, writeManifest, emptyManifest }
 import { activateRelease } from '../deploy-lib/activate.js';
 import { publishCommand, resetRestartCount } from '../../supervisor/state.js';
 import { validateBridgePid } from '../../supervisor/identity.js';
+import { logAndSwallow } from '../../components/log-and-swallow.js';
 
 function resolveReleaseIdentity(releaseDir: string, target: string): { version: string; commit: string | null } {
   let version = target;
   try {
     const pkg = JSON.parse(readFileSync(join(releaseDir, 'package.json'), 'utf-8')) as { version?: string };
     if (typeof pkg.version === 'string' && pkg.version) version = pkg.version;
-  } catch { /* package.json may be absent from the release dir; the target string is a safe fallback */ }
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err;
+  }
   const commit = /^[0-9a-f]{7,40}$/.test(target) ? target : null;
   return { version, commit };
 }
@@ -30,7 +33,21 @@ export async function rollback(opts?: { to?: number }): Promise<number> {
   }
 
   let history: string[] = [];
-  try { history = JSON.parse(readFileSync(historyFile, "utf-8")); } catch { /* history.json may be absent or corrupt; an empty history falls through to the slot-not-found error below */ }
+  try {
+    const parsed: unknown = JSON.parse(readFileSync(historyFile, "utf-8"));
+    if (!Array.isArray(parsed) || !parsed.every((entry): entry is string => typeof entry === "string")) {
+      throw new Error("release history must be an array of strings");
+    }
+    history = parsed;
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === "ENOENT") {
+      // A first install can legitimately have no release history.
+    } else {
+      const message = err instanceof Error ? err.message : String(err);
+      process.stderr.write(`Cannot read release history: ${message.slice(-300)}\n`);
+      return 1;
+    }
+  }
 
   if (history.length <= slot) {
     process.stderr.write(`Nothing at slot ${slot} (history has ${history.length} entries).\n`);
@@ -69,7 +86,11 @@ export async function rollback(opts?: { to?: number }): Promise<number> {
       state.version = targetVersion;
       state.completedAt = new Date().toISOString();
       writeFileSync(statePath, JSON.stringify(state) + '\n');
-    } catch { /* deploy.state may be absent on first boot; the rollback itself already completed */ }
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== "ENOENT") {
+        logAndSwallow("rollback", "update deploy state after activation", err, "warn");
+      }
+    }
 
     const command = publishCommand(paths.home, "rollback", `rollback:${target}`);
     if (command.result === "busy") {
@@ -90,7 +111,16 @@ export async function rollback(opts?: { to?: number }): Promise<number> {
       if (wdPid && wdPid > 0 && wdIdentity && validateBridgePid(wdPid, wdIdentity, ['abtars-watchdog.sh']).safeToSignal) {
         process.kill(wdPid, 'SIGUSR1');
       }
-    } catch { /* bridge.lock may be absent or the processes already gone; the supervisor respawn covers this */ }
+    } catch (err) {
+      const code = (err as NodeJS.ErrnoException).code;
+      if (code === "ENOENT" || code === "ESRCH") {
+        // The lock/process can disappear between the read, identity check, and signal.
+      } else {
+        const message = err instanceof Error ? err.message : String(err);
+        process.stderr.write(`Rollback activated, but bridge restart signaling failed: ${message.slice(-300)}\n`);
+        return 1;
+      }
+    }
 
     process.stdout.write(`+ Bridge killed — WD will respawn from ${target}\n`);
     return 0;

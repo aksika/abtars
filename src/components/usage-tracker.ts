@@ -55,7 +55,7 @@ export function initUsageTracker(home: string): void {
 export function recordUsage(model: string, inputTokens: number, outputTokens: number, agent = "", cache?: { cacheRead?: number; cacheWrite?: number }, correlation?: UsageEntry["_correlation"]): void {
   _totalTokens += inputTokens + outputTokens;
   if (agent) {
-    import("./budget.js").then(({ incrementBudgetCounter }) => incrementBudgetCounter(agent, inputTokens + outputTokens)).catch(err => logAndSwallow(TAG, `increment budget for ${agent}`, err));
+    import("./budget.js").then(({ incrementBudgetCounter }) => incrementBudgetCounter(agent, inputTokens + outputTokens)).catch(err => logAndSwallow(TAG, "increment budget", err));
   }
   if (!usagePath) return;
   const entry: UsageEntry = { ts: Date.now(), model, agent, in: inputTokens, out: outputTokens, cacheRead: cache?.cacheRead, cacheWrite: cache?.cacheWrite };

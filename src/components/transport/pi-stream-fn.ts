@@ -254,7 +254,11 @@ async function* withInactivityTimeout(
     if (abortListener) signal.removeEventListener("abort", abortListener);
     // The provider may ignore abort. Never await its return() here: logical
     // stream timeout must not be coupled to unbounded provider cleanup.
-    try { void Promise.resolve(iterator.return?.()).catch(err => logAndSwallow(TAG, "provider stream return during teardown", err)); } catch { /* best effort */ }
+    try {
+      void Promise.resolve(iterator.return?.()).catch(err => logAndSwallow(TAG, "provider stream return during teardown", err));
+    } catch (err) {
+      logAndSwallow(TAG, "invoke provider stream return during teardown", err);
+    }
   }
 }
 

@@ -786,7 +786,7 @@ export class PiExecutor {
     }, owned.generation)) return;
     this._fireTransition(runId, undefined, "cancelling");
 
-    owned.client.abort().catch(err => logAndSwallow(TAG, `abort process for ${runId}`, err));
+    owned.client.abort().catch(err => logAndSwallow(TAG, "abort process", err));
 
     const graceMs = this.config_.abortGraceMs;
     owned.abortTimer = setTimeout(async () => {

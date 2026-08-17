@@ -81,14 +81,14 @@ export async function handleCodingCallback(data: string, chatId: number): Promis
   const token = data.slice("coding:".length);
   const pending = callbackTokens.get(token);
   if (!pending) {
-    if (api) await api.sendMessage(chatId, "Pi control expired — the request is no longer pending.").catch(err => logAndSwallow(TAG, `send expired-control notice to ${chatId}`, err));
+    if (api) await api.sendMessage(chatId, "Pi control expired — the request is no longer pending.").catch(err => logAndSwallow(TAG, "send expired-control notice", err));
     return true;
   }
   callbackTokens.delete(token);
   const ok = await callbackHandler(pending.sessionId, pending.requestId, pending.value, chatId);
   if (ok) clearRequestTokens(pending.sessionId, pending.requestId);
   if (!ok && api) {
-    await api.sendMessage(chatId, "Pi control expired — the request is no longer pending.").catch(err => logAndSwallow(TAG, `send expired-control notice to ${chatId}`, err));
+    await api.sendMessage(chatId, "Pi control expired — the request is no longer pending.").catch(err => logAndSwallow(TAG, "send expired-control notice", err));
   }
   return true;
 }

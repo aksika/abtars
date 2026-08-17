@@ -294,7 +294,7 @@ export const peerAskHelpTool: ToolDefinition = {
           const notes = (card?.notes ? JSON.parse(card.notes) : {}) as Record<string, unknown>;
           const priorAttempts = Array.isArray(notes.attempts) ? notes.attempts : [];
           kanbanUpdate(localCardId, { notes: JSON.stringify({ ...notes, outcome: "unknown", request_id: activeContributionRequestId ?? requestId, attempts: priorAttempts }) });
-        } catch (bookErr) { logAndSwallow(TAG, `record failure state for card ${localCardId}`, bookErr); }
+        } catch (bookErr) { logAndSwallow(TAG, "record failure state for card", bookErr); }
       }
       logWarn(TAG, `peer_ask_help failed: ${message}`);
       return JSON.stringify({ error: `peer_ask_help failed: ${message}`, outcome: "unknown", request_id: activeContributionRequestId ?? requestId, local_card_id: localCardId });

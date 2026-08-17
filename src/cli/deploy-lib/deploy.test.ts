@@ -4,7 +4,7 @@ const TIMEOUT = 60000;
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync, existsSync, readFileSync, chmodSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { runLaunchctlBootstrap, deployActivation } from "./deploy.js";
+import { runLaunchctlBootstrap, deployActivation, startSystemdWatchdog } from "./deploy.js";
 import type { BootstrapFn } from "./deploy.js";
 import type { StagedRelease } from "../update-sources/types.js";
 
@@ -46,6 +46,30 @@ describe("deploy-lib/runLaunchctlBootstrap", () => {
     expect(calls).toHaveLength(1);
     expect(calls[0]!.cmd).toBe("launchctl");
     expect(calls[0]!.args).toEqual(["bootstrap", "gui/501", "/tmp/test.plist"]);
+  });
+});
+
+describe("deploy-lib/startSystemdWatchdog", () => {
+  it("runs the complete Linux service-start sequence", () => {
+    const calls: string[] = [];
+    const result = startSystemdWatchdog(((command: string) => {
+      calls.push(command);
+    }) as any);
+
+    expect(result).toEqual({ ok: true });
+    expect(calls).toEqual([
+      "systemctl --user unmask abtars-watchdog",
+      "systemctl --user enable abtars-watchdog",
+      "systemctl --user start abtars-watchdog",
+    ]);
+  });
+
+  it("returns the failed operation instead of claiming the daemon started", () => {
+    const result = startSystemdWatchdog(((command: string) => {
+      if (command.endsWith("start abtars-watchdog")) throw new Error("unit failed to start");
+    }) as any);
+
+    expect(result).toEqual({ ok: false, error: "start watchdog unit: unit failed to start" });
   });
 });
 
@@ -141,6 +165,20 @@ describe("deployActivation — bootstrap failure (macOS)", () => {
 
     expect(healthMock.calls).toHaveLength(0);
   });
+
+  it("does not overwrite corrupt release history", { timeout: TIMEOUT }, async () => {
+    Object.defineProperty(process, "platform", { value: "darwin", configurable: true, writable: true });
+    const corruptHistory = "{not-json\n";
+    writeFileSync(join(releasesTmp, "history.json"), corruptHistory);
+    const bootstrapFn: BootstrapFn = () => ({ ok: true });
+    const healthMock = makeHealthMock();
+
+    const code = await deployActivation({ staged, channel: "npm", repoRoot: tmp }, bootstrapFn, healthMock.fn);
+
+    expect(code).toBe(1);
+    expect(readFileSync(join(releasesTmp, "history.json"), "utf-8")).toBe(corruptHistory);
+    expect(healthMock.calls).toHaveLength(0);
+  });
 });
 
 describe("deployActivation — bootstrap success + health healthy (macOS)", () => {
@@ -169,7 +207,7 @@ describe("deployActivation — health unhealthy (Linux)", () => {
     const unhealthyProbe: (...args: any[]) => Promise<{ healthy: false }> = async () => ({ healthy: false });
     const bootstrapFn: BootstrapFn = () => ({ ok: true });
 
-    const code = await deployActivation({ staged, channel: "npm", repoRoot: tmp }, bootstrapFn, unhealthyProbe);
+    const code = await deployActivation({ staged, channel: "npm", repoRoot: tmp }, bootstrapFn, unhealthyProbe, () => ({ ok: true }), () => {});
 
     expect(code).toBe(0);
     const state = JSON.parse(readFileSync(join(tmp, "deploy.state"), "utf-8")) as Record<string, unknown>;

@@ -626,7 +626,7 @@ export class AcpTransport implements IKiroTransport {
             this.sessions.delete(key);
             this.sealedSessionKeys.delete(key);
             try {
-              import("./sealed-acp-bridge.js").then(({ revokeSealedSession }) => revokeSealedSession(key)).catch(err => logAndSwallow(this.tag, `revoke sealed session ${key}`, err));
+              import("./sealed-acp-bridge.js").then(({ revokeSealedSession }) => revokeSealedSession(key)).catch(err => logAndSwallow(this.tag, "revoke sealed session", err));
             } catch { /* bridge may not be wired */ }
           }
           logWarn(this.tag, `Session ${sessionId} expired — invalidated, will recreate`);
@@ -730,7 +730,13 @@ export class AcpTransport implements IKiroTransport {
   private cleanupKiroFiles(kiroSessionId: string): void {
     const dir = join(homedir(), ".kiro", "sessions", "cli");
     for (const ext of [".json", ".jsonl", ".history"]) {
-      try { unlinkSync(join(dir, kiroSessionId + ext)); } catch { /* session file may already be gone (never created or cleaned by another path); removal is best effort */ }
+      try {
+        unlinkSync(join(dir, kiroSessionId + ext));
+      } catch (err) {
+        if ((err as NodeJS.ErrnoException).code !== "ENOENT") {
+          logAndSwallow(this.tag, "remove ACP session file", err);
+        }
+      }
     }
   }
 

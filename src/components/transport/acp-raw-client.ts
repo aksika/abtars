@@ -126,7 +126,7 @@ export class AcpRawClient {
       const pid = this.child.pid;
       this.child.kill("SIGTERM");
       this.child = null;
-      if (pid) setTimeout(() => { try { process.kill(pid, "SIGKILL"); } catch (err) { if ((err as NodeJS.ErrnoException).code === "ESRCH") return; logAndSwallow(TAG, `force-kill child ${pid} after SIGTERM`, err); } }, 2000).unref();
+      if (pid) setTimeout(() => { try { process.kill(pid, "SIGKILL"); } catch (err) { if ((err as NodeJS.ErrnoException).code === "ESRCH") return; logAndSwallow(TAG, "force-kill child after SIGTERM", err); } }, 2000).unref();
     }
     for (const [, p] of this.pending) p.reject(new Error("destroyed"));
     this.pending.clear();

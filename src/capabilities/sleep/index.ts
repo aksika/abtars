@@ -203,7 +203,7 @@ export function createSleepHandle(opts: SleepOpts): SleepHandle {
       if (pending && typeof (pending as Promise<void>).catch === "function") {
         void (pending as Promise<void>).catch(err => logAndSwallow(TAG, "quarantine night session during termination", err));
       }
-    } catch { /* local termination still proceeds */ }
+    } catch (err) { logAndSwallow(TAG, "quarantine night session during termination", err); }
     nightSessionId = undefined;
   }
 

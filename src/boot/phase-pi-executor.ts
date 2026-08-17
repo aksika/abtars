@@ -204,7 +204,7 @@ export async function phasePiExecutor(ctx: BootCtx): Promise<void> {
   executor.onTransition((runId, _fromStatus, _toStatus) => {
     const run = store.get(runId);
     if (!run || !run.originPeer) return; // not a delegated run
-    deliveryManager.pushEvents(runId, run.originPeer!).catch(err => logAndSwallow(TAG, `push events after transition for ${runId}`, err));
+    deliveryManager.pushEvents(runId, run.originPeer!).catch(err => logAndSwallow(TAG, "push events after transition", err));
   });
 
   executor.onProgress((runId, progressPayload) => {
@@ -215,7 +215,7 @@ export async function phasePiExecutor(ctx: BootCtx): Promise<void> {
       originPeer: run.originPeer,
       originRequestId: run.originRequestId ?? run.originChatId ?? run.id,
       progressPayload,
-    }).then(() => deliveryManager.pushEvents(runId, run.originPeer!).catch(err => logAndSwallow(TAG, `push events after progress for ${runId}`, err))).catch(err => {
+    }).then(() => deliveryManager.pushEvents(runId, run.originPeer!).catch(err => logAndSwallow(TAG, "push events after progress", err))).catch(err => {
       logError(TAG, `Failed to produce progress event for ${runId}: ${err instanceof Error ? err.message : String(err)}`);
     });
   });
@@ -335,7 +335,7 @@ export async function phasePiExecutor(ctx: BootCtx): Promise<void> {
     if (pending.length > 0) {
       logInfo(TAG, `Remote Pi recovery: ${pending.length} run(s) with unacknowledged events`);
       for (const row of pending) {
-        deliveryManager.pushEvents(row.run_id, row.origin_peer).catch(err => logAndSwallow(TAG, `recovery push for ${row.run_id}`, err));
+        deliveryManager.pushEvents(row.run_id, row.origin_peer).catch(err => logAndSwallow(TAG, "recovery push", err));
       }
     }
   } catch (err) {

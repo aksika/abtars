@@ -10,21 +10,18 @@
  */
 
 import { logInfo, logWarn, logError, logDebug } from "../components/logger.js";
-import { logAndSwallow } from "../components/log-and-swallow.js";
 import type { BootCtx, PhaseResult } from "./context.js";
 
 export async function phaseCapabilities(ctx: BootCtx): Promise<PhaseResult> {
   const { config, transport, runtime, capabilities, pipelineDeps } = ctx;
 
   // Skills catalog: pure filesystem, no deps — always generate (#996)
-  try {
-    const { SkillWatcher } = await import("../components/skill-watcher.js");
-    const { abtarsHome } = await import("../paths.js");
-    const { join } = await import("node:path");
-    const sw = new SkillWatcher(join(abtarsHome(), "skills"), join(abtarsHome(), "skills", "skills_catalog.md"));
-    // #1542: prepare declared skill dependencies at boot before catalog generation.
-    await sw.prepareAndGenerateCatalog();
-  } catch (err) { logAndSwallow("boot", "skills catalog generation", err); }
+  const { SkillWatcher } = await import("../components/skill-watcher.js");
+  const { abtarsHome } = await import("../paths.js");
+  const { join } = await import("node:path");
+  const sw = new SkillWatcher(join(abtarsHome(), "skills"), join(abtarsHome(), "skills", "skills_catalog.md"));
+  // #1542: prepare declared skill dependencies at boot before catalog generation.
+  await sw.prepareAndGenerateCatalog();
 
   if (!transport || !pipelineDeps) { ctx.phaseHealth.set(phaseCapabilities.name, { status: "skipped", error: "no transport" }); logWarn("boot", `${phaseCapabilities.name}: skipping — transport not available`); return "skipped"; }
 

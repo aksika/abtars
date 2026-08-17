@@ -232,7 +232,7 @@ export async function abortProjectById(projectId: number, reason: string): Promi
 function scheduleOrcReview(generation: ReconcilerGeneration, projectId: number, projectGeneration: number, caseId: string, requestId: string): void {
   const result = generation.deps.coordinator.scheduleReview(projectId, projectGeneration, caseId);
   if (result.kind === "claimed" || result.kind === "idempotent") {
-    try { (new ProjectReviewStore()).bumpReviewRequestAttempt(requestId); } catch (err) { logAndSwallow(TAG, `bump review request attempt ${requestId}`, err); }
+    try { (new ProjectReviewStore()).bumpReviewRequestAttempt(requestId); } catch (err) { logAndSwallow(TAG, "bump review request attempt", err); }
   }
 }
 
@@ -340,7 +340,7 @@ function settleAuthoringExhausted(
     undefined,
     authority,
   );
-  try { nerve.fire("card:failed", projectId); } catch (err) { logAndSwallow(TAG, `fire card:failed for ${projectId}`, err); }
+  try { nerve.fire("card:failed", projectId); } catch (err) { logAndSwallow(TAG, "fire card:failed", err); }
 }
 
 // ── Keyed scheduler (per-card reconciliation) ────────────────────────────────
@@ -973,7 +973,7 @@ async function handleReviewState(generation: ReconcilerGeneration, projectId: nu
       undefined,
       authority,
     );
-    try { nerve.fire("card:failed", projectId); } catch (err) { logAndSwallow(TAG, `fire card:failed for ${projectId}`, err); }
+    try { nerve.fire("card:failed", projectId); } catch (err) { logAndSwallow(TAG, "fire card:failed", err); }
   }
 }
 
@@ -1108,7 +1108,7 @@ function settleCoverageBlocked(
     { authority },
   );
   if (blocked) {
-    try { nerve.fire("card:failed", projectId); } catch (err) { logAndSwallow(TAG, `fire card:failed for ${projectId}`, err); }
+    try { nerve.fire("card:failed", projectId); } catch (err) { logAndSwallow(TAG, "fire card:failed", err); }
   }
   logWarn(TAG, `Project ${projectId}: coverage gate blocked — ${reason}`);
 }
@@ -1350,7 +1350,7 @@ function dispatchPendingReviewRequests(generation: ReconcilerGeneration): number
   for (const req of pending) {
     const result = generation.deps.coordinator.scheduleReview(req.project_card_id, req.generation, req.review_case_id);
     if (result.kind === "claimed" || result.kind === "idempotent") {
-      try { store.bumpReviewRequestAttempt(req.id); } catch (err) { logAndSwallow(TAG, `bump review request attempt ${req.id}`, err); }
+      try { store.bumpReviewRequestAttempt(req.id); } catch (err) { logAndSwallow(TAG, "bump review request attempt", err); }
       dispatched++;
     }
   }
@@ -1851,7 +1851,7 @@ async function abortProject(generation: ReconcilerGeneration, projectId: number,
     },
   );
   if (blocked && !opts?.skipRootFail) {
-    try { nerve.fire("card:failed", projectId); } catch (err) { logAndSwallow(TAG, `fire card:failed for ${projectId}`, err); }
+    try { nerve.fire("card:failed", projectId); } catch (err) { logAndSwallow(TAG, "fire card:failed", err); }
   }
   const store = new WorkerSupervisionStore();
   for (const card of children) {

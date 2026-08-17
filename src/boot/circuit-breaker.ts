@@ -27,7 +27,16 @@ export function checkCircuitBreaker(): void {
   if (restartCount < MAX_DEATHS) return;
 
   let history: string[] = [];
-  try { history = JSON.parse(readFileSync(historyFile, "utf-8")); } catch { /* history file may be absent or corrupt; an empty history falls through to the rollback-unavailable path below */ }
+  try {
+    const parsed: unknown = JSON.parse(readFileSync(historyFile, "utf-8"));
+    if (!Array.isArray(parsed) || !parsed.every((entry): entry is string => typeof entry === "string")) {
+      throw new Error("release history must be an array of strings");
+    }
+    history = parsed;
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    console.error(`[circuit-breaker] Cannot read release history (${message.slice(-300)}) — automatic rollback unavailable`);
+  }
 
   if (history.length < 2) {
     console.error("[circuit-breaker] No previous release to roll back to — continuing anyway");

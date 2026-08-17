@@ -198,7 +198,7 @@ export class ReviewCaseAssembler {
           });
         }
       }
-    } catch (err) { logAndSwallow(TAG, `enrich review case with kanban contributions for project ${projectCardId}`, err); }
+    } catch (err) { logAndSwallow(TAG, "enrich review case with kanban contributions", err); }
 
     try {
       const { requireTaskDatabase } = await import("../tasks/kanban-board.js") as typeof import("../tasks/kanban-board.js");
@@ -221,7 +221,7 @@ export class ReviewCaseAssembler {
           });
         }
       }
-    } catch (err) { logAndSwallow(TAG, `enrich review case with peer contributions for project ${projectCardId}`, err); }
+    } catch (err) { logAndSwallow(TAG, "enrich review case with peer contributions", err); }
 
     // #1605: the coverage read-model is the single source of truth for
     // ownership, child→root mappings, and the uncovered set. The assembler
