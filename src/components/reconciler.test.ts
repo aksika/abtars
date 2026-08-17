@@ -196,7 +196,6 @@ function makeReviewStoreMock() {
     clearInputNotice: vi.fn(),
     insertReviewCase: vi.fn().mockReturnValue({ id: "rc_test_1" }),
     insertReviewRequest: vi.fn().mockReturnValue({ id: "rr_test_1" }),
-    markReviewRequestDispatched: vi.fn().mockReturnValue(true),
     getReviewRequestByCaseId: vi.fn().mockReturnValue(undefined),
     claimCoverageRound: vi.fn().mockReturnValue(true),
     recordCoverageClear: vi.fn(),

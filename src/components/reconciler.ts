@@ -231,8 +231,14 @@ export async function abortProjectById(projectId: number, reason: string): Promi
 
 function scheduleOrcReview(generation: ReconcilerGeneration, projectId: number, projectGeneration: number, caseId: string, requestId: string): void {
   const result = generation.deps.coordinator.scheduleReview(projectId, projectGeneration, caseId);
-  if (result.kind === "claimed" || result.kind === "idempotent") {
-    try { (new ProjectReviewStore()).bumpReviewRequestAttempt(requestId); } catch (err) { logAndSwallow(TAG, "bump review request attempt", err); }
+  // #1678: count real dispatch attempts only. A successful claim clears any
+  // previous failure; a rejected dispatch records its typed reason. An
+  // `idempotent` (run already live) or `busy` (another intent owns the
+  // project) claim is an observation, not an attempt.
+  if (result.kind === "claimed") {
+    try { new ProjectReviewStore().recordReviewRequestDispatchAttempt(requestId, null); } catch (err) { logAndSwallow(TAG, "record review request dispatch attempt", err); }
+  } else if (result.kind === "conflict" || result.kind === "not_actionable") {
+    try { new ProjectReviewStore().recordReviewRequestDispatchAttempt(requestId, result.reason); } catch (err) { logAndSwallow(TAG, "record review request dispatch attempt", err); }
   }
 }
 
@@ -962,6 +968,15 @@ async function handleReviewState(generation: ReconcilerGeneration, projectId: nu
   } else if (existingReq.status === "pending") {
     scheduleOrcReview(generation, projectId, supervision.generation, openCase.id, existingReq.id);
   } else if (existingReq.status === "abandoned") {
+    // #1678: a stale abandoned request at an older generation is inert — it
+    // must neither settle the current generation nor throw from a deep store
+    // assertion. The fence is cheap here; do not rely on the settlement's
+    // internal generation assertion to catch what the caller can see.
+    if (openCase.generation !== supervision.generation || existingReq.generation !== supervision.generation) {
+      logWarn(TAG, `Project ${projectId}: skipping abandoned settlement — stale generation ` +
+        `(case=${openCase.generation} request=${existingReq.generation} current=${supervision.generation})`);
+      return;
+    }
     logWarn(TAG, `Project ${projectId}: review request abandoned — settling blocked`);
     const authority = projectMutationAuthority(projectId, supervision.generation);
     reviewStore.settleBlocked(
@@ -1349,8 +1364,13 @@ function dispatchPendingReviewRequests(generation: ReconcilerGeneration): number
   let dispatched = 0;
   for (const req of pending) {
     const result = generation.deps.coordinator.scheduleReview(req.project_card_id, req.generation, req.review_case_id);
-    if (result.kind === "claimed" || result.kind === "idempotent") {
-      try { store.bumpReviewRequestAttempt(req.id); } catch (err) { logAndSwallow(TAG, "bump review request attempt", err); }
+    // #1678: `dispatched` means "requests acted on this pass" — a real claim or
+    // a rejected dispatch. An `idempotent`/`busy` result observed nothing new.
+    if (result.kind === "claimed") {
+      try { store.recordReviewRequestDispatchAttempt(req.id, null); } catch (err) { logAndSwallow(TAG, "record review request dispatch attempt", err); }
+      dispatched++;
+    } else if (result.kind === "conflict" || result.kind === "not_actionable") {
+      try { store.recordReviewRequestDispatchAttempt(req.id, result.reason); } catch (err) { logAndSwallow(TAG, "record review request dispatch attempt", err); }
       dispatched++;
     }
   }

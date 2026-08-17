@@ -28,6 +28,25 @@ export const VALID_PROJECT_STATES: readonly ProjectState[] = [
 
 export const TERMINAL_PROJECT_STATES: readonly ProjectState[] = ["blocked", "accepted"];
 
+/**
+ * #1678: facts captured at the abandonment decision boundary — the only point
+ * where the live-run guard verdict and the request's composed last_error are
+ * simultaneously true. `liveRunId` must be null after this fix: the guard
+ * never abandons a request whose generation has a live run. Recording it
+ * anyway makes a future regression self-evident rather than silent.
+ */
+export interface AbandonedRequestFactV1 {
+  requestId: string;
+  projectCardId: number;
+  generation: number;
+  reviewCaseId: string;
+  reviewCaseStatus: string;
+  attempts: number;
+  lastError: string | null;
+  cause: "max_attempts" | "deadline";
+  liveRunId: string | null;
+}
+
 // ── #1644: project mutation authority ────────────────────────────────────────
 //
 // Every supervised downstream mutation carries a durable authority tuple: the
@@ -369,6 +388,9 @@ export class ProjectReviewStore {
         project_card_id INTEGER NOT NULL,
         review_case_id TEXT NOT NULL,
         generation INTEGER NOT NULL,
+        -- #1678: 'dispatched' is a never-written legacy value retained for read
+        -- compatibility — liveness lives in orc_project_runs. The CHECK is not
+        -- narrowed (fresh databases would diverge from existing ones).
         status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','dispatched','settled','abandoned')),
         attempts INTEGER NOT NULL DEFAULT 0,
         invalid_proposals INTEGER NOT NULL DEFAULT 0,
@@ -890,40 +912,117 @@ export class ProjectReviewStore {
     `).all(maxAttempts, cooldown) as Array<{ id: string; project_card_id: number; review_case_id: string; generation: number; attempts: number; deadline_at: string | null }>;
   }
 
-  /** Bump attempt counter but keep status pending — allows retry after cooldown */
-  bumpReviewRequestAttempt(requestId: string): boolean {
+  /**
+   * #1678: one writer for a real dispatch attempt. `failureReason` is null on a
+   * successful claim (which also clears any previous failure) and the typed
+   * OrcRunReason when the dispatch was rejected. An `idempotent` or `busy` claim
+   * result is NOT an attempt and must never call this.
+   */
+  recordReviewRequestDispatchAttempt(requestId: string, failureReason: string | null): boolean {
     const result = this.db.prepare(`
-      UPDATE project_review_requests SET attempts = attempts + 1, updated_at = ? WHERE id = ? AND status = 'pending'
-    `).run(new Date().toISOString(), requestId);
+      UPDATE project_review_requests
+         SET attempts = attempts + 1, last_error = ?, updated_at = ?
+       WHERE id = ? AND status = 'pending'
+    `).run(failureReason, new Date().toISOString(), requestId);
     return result.changes > 0;
   }
 
-  abandonExpiredRequests(maxAttempts = 5): number {
+  /**
+   * #1678: abandon requests that exhausted real dispatch attempts or passed
+   * their deadline — but never a request whose generation still has a live Orc
+   * run. The guard runs inside the SQL, not injected by the caller, because
+   * the call site is the `reconciler-resync` heartbeat task body.
+   *
+   * Returns the abandonment facts (inside the same transaction as the two
+   * updates, so they describe exactly the rows abandoned) and logs each one
+   * here at the decision boundary. When both bounds match, `max_attempts`
+   * wins: the attempts branch runs first, and the deadline branch's `status`
+   * predicate no longer sees the already-abandoned row.
+   */
+  abandonExpiredRequests(maxAttempts = 5): AbandonedRequestFactV1[] {
     const now = new Date().toISOString();
-    // Abandon requests that exceeded max attempts or passed deadline
-    const exceededAttempts = this.db.prepare(`
-      UPDATE project_review_requests SET status = 'abandoned', updated_at = ?, last_error = 'exceeded max attempts'
-      WHERE status IN ('pending','dispatched') AND attempts >= ?
-    `).run(now, maxAttempts);
-    const expired = this.db.prepare(`
-      UPDATE project_review_requests SET status = 'abandoned', updated_at = ?, last_error = 'deadline passed'
-      WHERE status IN ('pending','dispatched') AND deadline_at IS NOT NULL AND deadline_at < ?
-    `).run(now, now);
-    return exceededAttempts.changes + expired.changes;
-  }
+    const hasRunTable = this.tableExists("orc_project_runs");
+    // Correlated guard: any live run at the request's generation (any intent
+    // kind — a live input_resume or repair_review turn also owns the project)
+    // makes the request un-abandonable. Omitted when the run table is absent:
+    // no run table means no Orc run can exist, so the guard would match nothing.
+    const guard = (tableRef: string): string => hasRunTable
+      ? `AND NOT EXISTS (
+           SELECT 1 FROM orc_project_runs r
+            WHERE r.project_card_id = ${tableRef}.project_card_id
+              AND r.project_generation = ${tableRef}.generation
+              AND r.state IN ('scheduled','dispatching','running')
+         )`
+      : "";
+    const liveRunSelect = hasRunTable
+      ? `,
+           (SELECT r.id FROM orc_project_runs r
+             WHERE r.project_card_id = req.project_card_id
+               AND r.project_generation = req.generation
+               AND r.state IN ('scheduled','dispatching','running')
+             LIMIT 1) AS live_run_id`
+      : "";
 
-  markReviewRequestDispatched(requestId: string): boolean {
-    const result = this.db.prepare(`
-      UPDATE project_review_requests SET status = 'dispatched', attempts = attempts + 1, updated_at = ? WHERE id = ? AND status = 'pending'
-    `).run(new Date().toISOString(), requestId);
-    return result.changes > 0;
-  }
+    const facts: AbandonedRequestFactV1[] = this.db.transaction(() => {
+      const branch = (wherePredicate: string, cause: "max_attempts" | "deadline", params: unknown[]): AbandonedRequestFactV1[] => {
+        const composed = cause === "max_attempts"
+          ? `'exceeded max attempts (last: ' || COALESCE(NULLIF(last_error, ''), 'none') || ')'`
+          : `'deadline passed (last: ' || COALESCE(NULLIF(last_error, ''), 'none') || ')'`;
+        const candidates = this.db.prepare(`
+          SELECT req.id, req.project_card_id, req.generation, req.review_case_id,
+                 c.status AS review_case_status, req.attempts, req.last_error${liveRunSelect}
+            FROM project_review_requests req
+            LEFT JOIN project_review_cases c ON c.id = req.review_case_id
+           WHERE req.status IN ('pending','dispatched') AND ${wherePredicate} ${guard("req")}
+        `).all(...params) as Array<{
+          id: string;
+          project_card_id: number;
+          generation: number;
+          review_case_id: string;
+          review_case_status: string | null;
+          attempts: number;
+          last_error: string | null;
+          live_run_id: string | null;
+        }>;
 
-  markReviewRequestSettled(requestId: string): boolean {
-    const result = this.db.prepare(`
-      UPDATE project_review_requests SET status = 'settled', updated_at = ? WHERE id = ? AND status IN ('pending','dispatched')
-    `).run(new Date().toISOString(), requestId);
-    return result.changes > 0;
+        this.db.prepare(`
+          UPDATE project_review_requests
+             SET status = 'abandoned', updated_at = ?, last_error = ${composed}
+           WHERE status IN ('pending','dispatched') AND ${wherePredicate} ${guard("project_review_requests")}
+        `).run(now, ...params);
+
+        return candidates.map((row): AbandonedRequestFactV1 => {
+          const reason = row.last_error && row.last_error !== "" ? row.last_error : "none";
+          return {
+            requestId: row.id,
+            projectCardId: row.project_card_id,
+            generation: row.generation,
+            reviewCaseId: row.review_case_id,
+            reviewCaseStatus: row.review_case_status ?? "",
+            attempts: row.attempts,
+            lastError: cause === "max_attempts"
+              ? `exceeded max attempts (last: ${reason})`
+              : `deadline passed (last: ${reason})`,
+            cause,
+            liveRunId: row.live_run_id ?? null,
+          };
+        });
+      };
+
+      return [
+        ...branch(`attempts >= ?`, "max_attempts", [maxAttempts]),
+        ...branch(`deadline_at IS NOT NULL AND deadline_at < ?`, "deadline", [now]),
+      ];
+    });
+
+    for (const fact of facts) {
+      logWarn("project-review-store",
+        `review request abandoned rr=${fact.requestId} project=${fact.projectCardId} ` +
+        `generation=${fact.generation} case=${fact.reviewCaseId} ` +
+        `case_status=${fact.reviewCaseStatus} attempts=${fact.attempts} ` +
+        `cause=${fact.cause} last_error=${fact.lastError} live_run=${fact.liveRunId ?? "none"}`);
+    }
+    return facts;
   }
 
   /**
@@ -1078,8 +1177,8 @@ export class ProjectReviewStore {
     return result;
   }
 
-  getReviewRequestByCaseId(reviewCaseId: string): { id: string; status: string } | undefined {
-    return this.db.prepare(`SELECT id, status FROM project_review_requests WHERE review_case_id = ?`).get(reviewCaseId) as { id: string; status: string } | undefined;
+  getReviewRequestByCaseId(reviewCaseId: string): { id: string; status: string; attempts: number; last_error: string | null; generation: number } | undefined {
+    return this.db.prepare(`SELECT id, status, attempts, last_error, generation FROM project_review_requests WHERE review_case_id = ?`).get(reviewCaseId) as { id: string; status: string; attempts: number; last_error: string | null; generation: number } | undefined;
   }
 
   getPendingAcceptanceOutbox(limit = 20): Array<{ id: string; project_card_id: number; peer: string; payload_json: string; attempts: number }> {
@@ -1376,13 +1475,14 @@ export class ProjectReviewStore {
    * caller's database (partial test databases skip the cleanup statements;
    * production always has them).
    */
-  private invalidateOwnershipInTransaction(projectCardId: number, reviewCaseId: string, now: string): void {
-    const tableExists = (name: string): boolean => {
-      const row = this.db.prepare(`SELECT name FROM sqlite_master WHERE type='table' AND name=?`).get(name);
-      return row !== undefined;
-    };
+  /** Partial test databases skip tables owned by other stores; this guards access. */
+  private tableExists(name: string): boolean {
+    const row = this.db.prepare(`SELECT name FROM sqlite_master WHERE type='table' AND name=?`).get(name);
+    return row !== undefined;
+  }
 
-    if (tableExists("orc_project_runs")) {
+  private invalidateOwnershipInTransaction(projectCardId: number, reviewCaseId: string, now: string): void {
+    if (this.tableExists("orc_project_runs")) {
       // Supersede every live Orc run for the terminal root — a released stale
       // turn from any older generation can no longer claim, bind, or validate.
       this.db.prepare(`
@@ -1403,7 +1503,7 @@ export class ProjectReviewStore {
       WHERE project_card_id = ? AND status = 'open' AND id != ?
     `).run(now, projectCardId, reviewCaseId);
 
-    if (tableExists("worker_attempts")) {
+    if (this.tableExists("worker_attempts")) {
       // Durable cancellation marks for every live descendant attempt. The
       // executor layer observes cancel_requested and stops the
       // processes best-effort; even if it never does, the attempts can no

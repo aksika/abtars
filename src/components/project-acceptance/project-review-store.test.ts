@@ -442,13 +442,109 @@ describe("ProjectReviewStore", () => {
   });
 
   describe("review request maintenance", () => {
-    it("abandons requests at the attempt limit", () => {
+    it("abandons requests at the attempt limit and returns the decision facts", () => {
       const { store: s } = setupProject();
       const requestId = s.insertReviewRequest(123, "case-maintenance", 1).id;
       s.db.prepare("UPDATE project_review_requests SET attempts = ? WHERE id = ?").run(5, requestId);
 
-      expect(s.abandonExpiredRequests()).toBe(1);
+      const facts = s.abandonExpiredRequests();
+      expect(facts).toHaveLength(1);
+      expect(facts[0]).toMatchObject({
+        requestId,
+        projectCardId: 123,
+        generation: 1,
+        reviewCaseId: "case-maintenance",
+        attempts: 5,
+        lastError: "exceeded max attempts (last: none)",
+        cause: "max_attempts",
+        liveRunId: null,
+      });
       expect(s.db.prepare("SELECT status FROM project_review_requests WHERE id = ?").get(requestId)).toEqual({ status: "abandoned" });
+    });
+
+    // #1678: the composed last_error must retain the typed dispatch reason that
+    // explains why dispatch kept failing — never overwrite it.
+    it("preserves the typed dispatch reason inside the composed last_error", () => {
+      const { store: s } = setupProject();
+      const requestId = s.insertReviewRequest(123, "case-reason", 1).id;
+      s.db.prepare("UPDATE project_review_requests SET attempts = ?, last_error = ? WHERE id = ?").run(5, "project_generation_mismatch", requestId);
+
+      const facts = s.abandonExpiredRequests();
+      expect(facts[0]!.lastError).toBe("exceeded max attempts (last: project_generation_mismatch)");
+      const row = s.db.prepare("SELECT last_error FROM project_review_requests WHERE id = ?").get(requestId) as { last_error: string };
+      expect(row.last_error).toBe("exceeded max attempts (last: project_generation_mismatch)");
+    });
+
+    it("composes the deadline branch and gives max_attempts precedence when both bounds match", () => {
+      const { store: s } = setupProject();
+      const attemptsId = s.insertReviewRequest(123, "case-both", 1).id;
+      const deadlineId = s.insertReviewRequest(456, "case-deadline", 1).id;
+      s.db.prepare("UPDATE project_review_requests SET attempts = ? WHERE id = ?").run(5, attemptsId);
+      // deadlines in the past trip the deadline branch only when the attempts
+      // branch has not already abandoned the request
+      s.db.prepare("UPDATE project_review_requests SET deadline_at = ? WHERE id IN (?, ?)").run(new Date(Date.now() - 60_000).toISOString(), attemptsId, deadlineId);
+
+      const facts = s.abandonExpiredRequests();
+      expect(facts).toHaveLength(2);
+      const byId = new Map(facts.map(f => [f.requestId, f]));
+      expect(byId.get(attemptsId)!.cause).toBe("max_attempts");
+      expect(byId.get(attemptsId)!.lastError).toBe("exceeded max attempts (last: none)");
+      expect(byId.get(deadlineId)!.cause).toBe("deadline");
+      expect(byId.get(deadlineId)!.lastError).toBe("deadline passed (last: none)");
+    });
+
+    // #1678: the live-run guard — abandonment requires that no live run owns
+    // the case's project at the case's generation.
+    it("never abandons a request whose generation has a live Orc run", async () => {
+      const { OrcProjectRunStore } = await import("../orc-project/orc-project-run-store.js");
+      const { store: s } = setupProject();
+      const projectId = s.db.prepare("SELECT project_card_id FROM project_supervision LIMIT 1").get() as { project_card_id: number };
+      new OrcProjectRunStore();
+      const now = new Date().toISOString();
+      s.db.prepare("UPDATE orc_project_runs SET state = 'released', released_at = ? WHERE state IN ('scheduled','dispatching','running')").run(now);
+      s.db.prepare("DELETE FROM project_review_requests").run();
+      const requestId = s.insertReviewRequest(projectId.project_card_id, "case-live", 1).id;
+      s.db.prepare("UPDATE project_review_requests SET attempts = ? WHERE id = ?").run(5, requestId);
+      s.db.prepare(`
+        INSERT INTO orc_project_runs
+          (id, intent_key, intent_kind, intent_ref, project_card_id, project_generation,
+           ownership_generation, global_slot, owner_peer, owner_instance_id,
+           origin_kind, state, created_at, updated_at)
+        VALUES (?, ?, 'project_review', ?, ?, 1, 1, 1, 'kp', 'inst', 'local', 'running', ?, ?)
+      `).run("or_guard", "review:case-live", "case-live", projectId.project_card_id, now, now);
+
+      const facts = s.abandonExpiredRequests();
+      expect(facts).toHaveLength(0);
+      const row = s.db.prepare("SELECT status FROM project_review_requests WHERE id = ?").get(requestId) as { status: string };
+      expect(row.status).toBe("pending");
+    });
+
+    it("abandons a request at generation G when the only live run is at G-1", async () => {
+      const { OrcProjectRunStore } = await import("../orc-project/orc-project-run-store.js");
+      const { store: s } = setupProject();
+      const projectId = s.db.prepare("SELECT project_card_id FROM project_supervision LIMIT 1").get() as { project_card_id: number };
+      new OrcProjectRunStore();
+      const now = new Date().toISOString();
+      s.db.prepare("UPDATE orc_project_runs SET state = 'released', released_at = ? WHERE state IN ('scheduled','dispatching','running')").run(now);
+      s.db.prepare("DELETE FROM project_review_requests").run();
+      const requestId = s.insertReviewRequest(projectId.project_card_id, "case-stale-gen", 1).id;
+      s.db.prepare("UPDATE project_review_requests SET attempts = ? WHERE id = ?").run(5, requestId);
+      s.db.prepare(`
+        INSERT INTO orc_project_runs
+          (id, intent_key, intent_kind, intent_ref, project_card_id, project_generation,
+           ownership_generation, global_slot, owner_peer, owner_instance_id,
+           origin_kind, state, created_at, updated_at)
+        VALUES (?, ?, 'project_review', ?, ?, 2, 2, 1, 'kp', 'inst', 'local', 'running', ?, ?)
+      `).run("or_stale_gen", "review:case-stale-gen", "case-stale-gen", projectId.project_card_id, now, now);
+
+      const facts = s.abandonExpiredRequests();
+      expect(facts).toHaveLength(1);
+      expect(facts[0]!.requestId).toBe(requestId);
+      // the verdict the guard evaluated: no live run at the request's
+      // generation (the only live run is at G-1) — so the fact records null
+      expect(facts[0]!.liveRunId).toBe(null);
+      const row = s.db.prepare("SELECT status FROM project_review_requests WHERE id = ?").get(requestId) as { status: string };
+      expect(row.status).toBe("abandoned");
     });
   });
 

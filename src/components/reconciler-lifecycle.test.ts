@@ -591,6 +591,241 @@ describe("startup rollback", () => {
   });
 });
 
+// ── #1678 review-turn liveness ──────────────────────────────────────────────
+
+describe("#1678 single owner of Orc review-turn liveness", () => {
+  /** Seed a supervised root at generation 1 with an open review case + request. */
+  function seedReviewRequest(attempts: number): { projectId: number; caseId: string; requestId: string } {
+    const store = new reviewStoreMod.ProjectReviewStore();
+    const projectId = kanban.kanbanEnqueue("review liveness", "agent", undefined, { type: "O", goal: "root" });
+    kanban.kanbanRunning(projectId);
+    store.ensureAwaitingContract(projectId);
+    store.insertContract({
+      schema_version: 1,
+      id: `ct_live_${projectId}`,
+      digest: `d_${projectId}`,
+      project_card_id: projectId,
+      goal: "root",
+      criteria: [{ id: "c1", description: "c", required: true, evidence_expectation: "synthesis" }],
+      required_outputs: [],
+      constraints: [],
+      limits: { max_tokens: 100000, max_review_rounds: 5, max_repair_rounds: 3 },
+      provenance: { requested_by: "scheduler", authored_by: "orc", created_at: new Date().toISOString() },
+    } as never);
+    store.stateTransition(projectId, ["awaiting_contract"], "executing");
+    store.stateTransition(projectId, ["executing"], "review_ready");
+    store.stateTransition(projectId, ["review_ready"], "review_requested");
+    const { id: caseId } = store.insertReviewCase(projectId, 1, 1, { v: 1 }, "digest");
+    const { id: requestId } = store.insertReviewRequest(projectId, caseId, 1);
+    store.db.prepare("UPDATE project_review_requests SET attempts = ? WHERE id = ?").run(attempts, requestId);
+    return { projectId, caseId, requestId };
+  }
+
+  it("a live review turn is never abandoned by elapsed retry ticks", async () => {
+    const { OrcProjectRunStore } = await import("./orc-project/orc-project-run-store.js");
+    const store = new reviewStoreMod.ProjectReviewStore();
+    const { projectId, caseId, requestId } = seedReviewRequest(4);
+
+    // Claim + bind a live project_review run at generation 1 through the real
+    // run store — the turn is genuinely in flight.
+    const runStore = new OrcProjectRunStore();
+    const claim = runStore.claimIntent(
+      { projectCardId: projectId, intentKind: "project_review", intentRef: caseId, originKind: "local", sourcePeer: null, cardSource: "agent", expectedProjectGeneration: 1 },
+      "kp", "inst-live",
+    );
+    expect(claim.kind).toBe("claimed");
+    if (claim.kind !== "claimed") return;
+    runStore.pump();
+    const bound = runStore.bindExecution(claim.context, "sess-live", "exec-live");
+    expect(bound.ok).toBe(true);
+
+    // Start a generation whose coordinator claims through the same run store,
+    // so a re-schedule of the live intent is observed as idempotent.
+    const coordinator = {
+      getStore: () => runStore,
+      bootRecovery: () => [] as number[],
+      onOwnershipReleased: () => () => {},
+      scheduleContractAuthoring: () => ({ kind: "busy" as const, activeRunId: "or_busy" }),
+      scheduleScheduledProject: () => ({ kind: "busy" as const, activeRunId: "or_busy" }),
+      scheduleReview: (pid: number, gen: number, rc: string) => runStore.claimIntent(
+        { projectCardId: pid, intentKind: "project_review", intentRef: rc, originKind: "local", sourcePeer: null, cardSource: "agent", expectedProjectGeneration: gen },
+        "kp", "inst-live",
+      ),
+    } as never;
+    const h = await startGeneration({ coordinator });
+
+    // Drive retry + abandon cycles well past maxAttempts (5). The 30s cooldown
+    // is bypassed by resetting updated_at so every cycle re-selects the request.
+    for (let i = 0; i < 4; i++) {
+      reconciler.retryPendingReviewRequests();
+      store.db.prepare("UPDATE project_review_requests SET updated_at = ? WHERE id = ?").run(new Date(Date.now() - 60_000).toISOString(), requestId);
+      new reviewStoreMod.ProjectReviewStore().abandonExpiredRequests();
+    }
+
+    // Wake the project so any abandonment would visibly settle blocked.
+    reconciler.requestReconcile(projectId);
+    await flush();
+    await flush();
+
+    const req = store.db.prepare("SELECT status, attempts FROM project_review_requests WHERE id = ?").get(requestId) as { status: string; attempts: number } | undefined;
+    expect(req).toBeDefined();
+    expect(req!.status).toBe("pending");
+    expect(req!.attempts).toBe(4); // observation ticks never advance the counter
+    const supervision = store.getSupervision(projectId);
+    expect(supervision).toBeDefined();
+    expect(supervision!.state).toBe("review_requested");
+    await h.stop();
+  });
+
+  it("genuine dispatch exhaustion still abandons and settles blocked", async () => {
+    const store = new reviewStoreMod.ProjectReviewStore();
+    const { projectId, requestId } = seedReviewRequest(0);
+
+    // Every scheduleReview is rejected with a typed reason; no live run exists.
+    const coordinator = {
+      getStore: () => ({ db: store.db }) as never,
+      bootRecovery: () => [] as number[],
+      onOwnershipReleased: () => () => {},
+      scheduleContractAuthoring: () => ({ kind: "busy" as const, activeRunId: "or_busy" }),
+      scheduleScheduledProject: () => ({ kind: "busy" as const, activeRunId: "or_busy" }),
+      scheduleReview: () => ({ kind: "conflict" as const, reason: "project_generation_mismatch" as const }),
+    } as never;
+    const h = await startGeneration({ coordinator });
+
+    // Each retry records one REAL rejected dispatch. After maxAttempts the
+    // safety valve fires: abandoned with the typed reason preserved.
+    for (let i = 0; i < 8; i++) {
+      reconciler.retryPendingReviewRequests();
+      store.db.prepare("UPDATE project_review_requests SET updated_at = ? WHERE id = ?").run(new Date(Date.now() - 60_000).toISOString(), requestId);
+      new reviewStoreMod.ProjectReviewStore().abandonExpiredRequests();
+    }
+
+    const req = store.db.prepare("SELECT status, attempts, last_error FROM project_review_requests WHERE id = ?").get(requestId) as { status: string; attempts: number; last_error: string } | undefined;
+    expect(req!.status).toBe("abandoned");
+    expect(req!.attempts).toBe(5);
+    expect(req!.last_error).toContain("project_generation_mismatch");
+
+    // A reconcile observes the abandoned request and settles blocked.
+    reconciler.requestReconcile(projectId);
+    await flush();
+    await flush();
+    const supervision = store.getSupervision(projectId);
+    expect(supervision!.state).toBe("blocked");
+    expect(supervision!.blocked_reason).toBe("review_request_abandoned");
+    await h.stop();
+  });
+
+  it("observation ticks never advance the counter while the turn is live", async () => {
+    const { OrcProjectRunStore } = await import("./orc-project/orc-project-run-store.js");
+    const store = new reviewStoreMod.ProjectReviewStore();
+    const { projectId, caseId, requestId } = seedReviewRequest(4);
+
+    const runStore = new OrcProjectRunStore();
+    const claim = runStore.claimIntent(
+      { projectCardId: projectId, intentKind: "project_review", intentRef: caseId, originKind: "local", sourcePeer: null, cardSource: "agent", expectedProjectGeneration: 1 },
+      "kp", "inst-live",
+    );
+    expect(claim.kind).toBe("claimed");
+    if (claim.kind !== "claimed") return;
+    runStore.pump();
+    const bound = runStore.bindExecution(claim.context, "sess-live", "exec-live");
+    expect(bound.ok).toBe(true);
+
+    const coordinator = {
+      getStore: () => runStore,
+      bootRecovery: () => [] as number[],
+      onOwnershipReleased: () => () => {},
+      scheduleContractAuthoring: () => ({ kind: "busy" as const, activeRunId: "or_busy" }),
+      scheduleScheduledProject: () => ({ kind: "busy" as const, activeRunId: "or_busy" }),
+      scheduleReview: (pid: number, gen: number, rc: string) => runStore.claimIntent(
+        { projectCardId: pid, intentKind: "project_review", intentRef: rc, originKind: "local", sourcePeer: null, cardSource: "agent", expectedProjectGeneration: gen },
+        "kp", "inst-live",
+      ),
+    } as never;
+    const h = await startGeneration({ coordinator });
+
+    for (let i = 0; i < 5; i++) {
+      reconciler.retryPendingReviewRequests();
+      store.db.prepare("UPDATE project_review_requests SET updated_at = ? WHERE id = ?").run(new Date(Date.now() - 60_000).toISOString(), requestId);
+    }
+
+    const req = store.db.prepare("SELECT status, attempts FROM project_review_requests WHERE id = ?").get(requestId) as { status: string; attempts: number } | undefined;
+    expect(req!.status).toBe("pending");
+    expect(req!.attempts).toBe(4);
+    await h.stop();
+  });
+
+  it("a live turn's own settlement still terminates the request exactly once", async () => {
+    const { OrcProjectRunStore } = await import("./orc-project/orc-project-run-store.js");
+    const store = new reviewStoreMod.ProjectReviewStore();
+    const { projectId, caseId, requestId } = seedReviewRequest(0);
+
+    const runStore = new OrcProjectRunStore();
+    const claim = runStore.claimIntent(
+      { projectCardId: projectId, intentKind: "project_review", intentRef: caseId, originKind: "local", sourcePeer: null, cardSource: "agent", expectedProjectGeneration: 1 },
+      "kp", "inst-live",
+    );
+    expect(claim.kind).toBe("claimed");
+    if (claim.kind !== "claimed") return;
+    runStore.pump();
+    const bound = runStore.bindExecution(claim.context, "sess-live", "exec-live");
+    expect(bound.ok).toBe(true);
+
+    // The bound review turn submits its decision — the case settles and the
+    // request reaches its terminal status exactly once.
+    store.settleAcceptance(projectId, caseId, { action: "accept", synthesis: "ok" }, "synthesis text");
+    const req = store.db.prepare("SELECT status FROM project_review_requests WHERE id = ?").get(requestId) as { status: string };
+    expect(req.status).toBe("settled");
+    const caseRow = store.getReviewCase(caseId);
+    expect(caseRow!.status).toBe("accepted");
+    expect(store.getSupervision(projectId)!.state).toBe("accepted");
+  });
+
+  it("a stale abandoned request at an older generation is inert", async () => {
+    const store = new reviewStoreMod.ProjectReviewStore();
+    const projectId = kanban.kanbanEnqueue("stale abandoned", "agent", undefined, { type: "O", goal: "root" });
+    kanban.kanbanRunning(projectId);
+    store.ensureAwaitingContract(projectId);
+    store.insertContract({
+      schema_version: 1,
+      id: `ct_stale_${projectId}`,
+      digest: `d_${projectId}`,
+      project_card_id: projectId,
+      goal: "root",
+      criteria: [{ id: "c1", description: "c", required: true, evidence_expectation: "synthesis" }],
+      required_outputs: [],
+      constraints: [],
+      limits: { max_tokens: 100000, max_review_rounds: 5, max_repair_rounds: 3 },
+      provenance: { requested_by: "scheduler", authored_by: "orc", created_at: new Date().toISOString() },
+    } as never);
+    store.stateTransition(projectId, ["awaiting_contract"], "executing");
+    store.stateTransition(projectId, ["executing"], "review_ready");
+    store.stateTransition(projectId, ["review_ready"], "review_requested");
+    // supervision has moved on to generation 2…
+    store.db.prepare("UPDATE project_supervision SET generation = 2 WHERE project_card_id = ?").run(projectId);
+    // …while a stale open case and its abandoned request still sit at gen 1
+    const { id: caseId } = store.insertReviewCase(projectId, 1, 1, { v: 1 }, "digest");
+    const { id: requestId } = store.insertReviewRequest(projectId, caseId, 1);
+    store.db.prepare("UPDATE project_review_requests SET status = 'abandoned', attempts = 5, last_error = 'exceeded max attempts (last: none)' WHERE id = ?").run(requestId);
+
+    const h = await startGeneration();
+    reconciler.requestReconcile(projectId);
+    await flush();
+    await flush();
+
+    // inert: no settleBlocked, no deep store assertion throw, and the current
+    // generation's supervision is untouched
+    const supervision = store.getSupervision(projectId);
+    expect(supervision!.state).toBe("review_requested");
+    expect(supervision!.generation).toBe(2);
+    const caseRow = store.getReviewCase(caseId);
+    expect(caseRow!.status).toBe("open");
+    const req = store.db.prepare("SELECT status FROM project_review_requests WHERE id = ?").get(requestId) as { status: string };
+    expect(req.status).toBe("abandoned");
+    await h.stop();
+  });
+});
+
 // ── Heartbeat decoupling ────────────────────────────────────────────────────
 
 describe("heartbeat decoupling (#1554 approved move)", () => {

@@ -39,8 +39,8 @@ export function registerReconcilerHeartbeatTasks(
     execute: async () => {
       scanActiveProjects();
       const { ProjectReviewStore } = await import("../components/project-acceptance/project-review-store.js");
-      const expired = new ProjectReviewStore().abandonExpiredRequests();
-      return { state: expired > 0 ? "ran" : "idle" as const };
+      const facts = new ProjectReviewStore().abandonExpiredRequests();
+      return { state: facts.length > 0 ? "ran" : "idle" as const };
     },
   });
   heartbeat.registerTask({
