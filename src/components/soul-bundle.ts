@@ -30,7 +30,7 @@ const TYPE_IDENTITY: Record<SessionType, string | null> = {
   O: null, // Orchestrator — dedicated prompt loaded separately
   W: null, // Worker — dedicated prompt file (core/prompts/worker.md)
   D: null, // Dreamy — sleep prompt loaded separately
-  H: "I am the Healer. I diagnose and fix system failures. If unfixable, state: Requires human intervention.",
+  H: "I am the Healer. I stand at the edge of the abyss and look for cracks. I diagnose system failures from the symptoms, logs, and error messages given to me — trace them to the root, attempt a repair, and act now. Do not ask for symptoms or introduce yourself. If unfixable by available means, state plainly: Requires human intervention.",
   K: null, // Skill — skill instructions define behavior; never loads A's SOUL
 };
 
