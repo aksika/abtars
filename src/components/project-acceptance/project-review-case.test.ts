@@ -408,9 +408,39 @@ describe("projectReviewBrief decision-ready projection (#1620)", () => {
 
     const missing = projectReviewBrief("nonexistent", store);
     expect(missing.ok).toBe(false);
+    if (!missing.ok) {
+      expect(missing.code).toBe("review_case_unknown");
+      expect(missing.error).toContain("not found");
+    }
     const closed = projectReviewBrief(id, store);
     expect(closed.ok).toBe(false);
-    if (!closed.ok) expect(closed.error).toContain("not open");
+    if (!closed.ok) {
+      expect(closed.code).toBe("review_case_not_open");
+      expect(closed.error).toContain("not open");
+    }
+  });
+
+  it("#1677: a case whose snapshot is unparseable or structurally invalid maps to review_case_unreadable with unchanged prose", async () => {
+    const reviewStoreMod = await import("./project-review-store.js");
+    const { projectReviewBrief } = await import("./project-review-case.js");
+    const store = new reviewStoreMod.ProjectReviewStore();
+    store.db.prepare(`INSERT INTO project_review_cases (id, project_card_id, generation, round, snapshot_digest, case_json, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?)`)
+      .run("rc_unparseable", 7718, 2, 1, "digest_brief_u", "{ not json", new Date().toISOString());
+    const unparseable = projectReviewBrief("rc_unparseable", store);
+    expect(unparseable.ok).toBe(false);
+    if (!unparseable.ok) {
+      expect(unparseable.code).toBe("review_case_unreadable");
+      expect(unparseable.error).toBe("review case snapshot is unparseable");
+    }
+
+    const { id: invalidId } = store.insertReviewCase(7719, 2, 1, { schema_version: 99, project_card_id: 0 }, "digest_brief_i");
+    const invalid = projectReviewBrief(invalidId, store);
+    expect(invalid.ok).toBe(false);
+    if (!invalid.ok) {
+      expect(invalid.code).toBe("review_case_unreadable");
+      expect(invalid.error).toBe("review case snapshot is structurally invalid");
+    }
   });
 
   it("truncates prose but preserves every id and evidence reference", async () => {

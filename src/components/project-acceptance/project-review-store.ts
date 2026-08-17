@@ -4,6 +4,8 @@ import { logSwarmTrace } from "../swarm-trace.js";
 import { logDebug, logWarn } from "../logger.js";
 import { buildPeerTerminalEvent } from "./peer-terminal-event.js";
 import type { ToolExecutionScope } from "../tasks/task-package.js";
+import { ProjectMutationRejectedError, mapProjectAuthorityRejection } from "./review-turn-authority.js";
+import type { ReviewTurnRejection } from "./review-turn-authority.js";
 
 // ── Project supervision states ────────────────────────────────────────────────
 
@@ -577,15 +579,20 @@ export class ProjectReviewStore {
     if (authority) {
       if (authority.projectCardId !== cardId) {
         emitProjectAuthorityRejection("project_review_mutation", authority, "missing_authority", { cardId });
-        throw new Error("project mutation rejected: project_mismatch");
+        throw new ProjectMutationRejectedError("project mutation rejected: project_mismatch", "project_mismatch");
       }
       const rejection = authorizeActiveProjectWork(this.db, authority);
       if (rejection) {
         emitProjectAuthorityRejection("project_review_mutation", authority, rejection, { cardId });
-        throw new Error(`project mutation rejected: ${rejection}`);
+        throw new ProjectMutationRejectedError(`project mutation rejected: ${rejection}`, mapProjectAuthorityRejection(rejection));
       }
     }
 
+    // #1677: the case ladder stays inline here — the shared predicate checks
+    // supervision state, which the store's assertion historically did not.
+    // Adopting it changed which mutations are rejected (the "missing kanban
+    // card" settlement case), so it was reverted under the spec's escape hatch.
+    // The typed throw below is the vocabulary deliverable; the ladder is not.
     const reviewCase = this.db.prepare(`
       SELECT project_card_id, generation, status
       FROM project_review_cases WHERE id = ?
@@ -597,10 +604,18 @@ export class ProjectReviewStore {
     if (reviewCase.project_card_id !== cardId || reviewCase.status !== "open" ||
         supervision?.generation !== reviewCase.generation ||
         (authority && authority.projectGeneration !== reviewCase.generation)) {
+      // The code that actually held, in the compound's original precedence.
+      const reason: ReviewTurnRejection = reviewCase.project_card_id !== cardId
+        ? "review_case_project_mismatch"
+        : reviewCase.status !== "open"
+          ? "review_case_not_open"
+          : supervision?.generation !== reviewCase.generation
+            ? "review_case_generation_mismatch"
+            : "project_generation_mismatch";
       if (authority) {
         emitProjectAuthorityRejection("project_review_mutation", authority, "generation_mismatch", { cardId });
       }
-      throw new Error(`stale or already-settled review case ${reviewCaseId}`);
+      throw new ProjectMutationRejectedError(`stale or already-settled review case ${reviewCaseId}`, reason);
     }
   }
 
@@ -666,7 +681,10 @@ export class ProjectReviewStore {
           emit: false,
         }, this.db);
         if (outcome.kind !== "applied") {
-          throw new Error(`project ${projectCardId} kanban settlement lost: observed ${outcome.observed ?? "missing"}`);
+          throw new ProjectMutationRejectedError(
+            `project ${projectCardId} kanban settlement lost: observed ${outcome.observed ?? "missing"}`,
+            "settlement_lost",
+          );
         }
       }
       return true;
@@ -1257,7 +1275,7 @@ export class ProjectReviewStore {
           UPDATE project_supervision SET state = 'accepted', accepted_decision_id = ?, updated_at = ?
           WHERE project_card_id = ? AND state NOT IN ('accepted', 'blocked')
         `).run(decisionId, now, cardId);
-      if (state.changes !== 1) throw new Error(`project ${cardId} is already terminal`);
+      if (state.changes !== 1) throw new ProjectMutationRejectedError(`project ${cardId} is already terminal`, "project_terminal");
 
       // #1644: acceptance is terminal — invalidate every stale owner for the
       // terminal root in the same transaction, including owners from older
@@ -1289,8 +1307,9 @@ export class ProjectReviewStore {
         emit: false,
       }, this.db);
       if (outcome.kind !== "applied") {
-        throw new Error(
+        throw new ProjectMutationRejectedError(
           `project ${cardId} kanban settlement lost: observed ${outcome.observed ?? "missing"}`,
+          "settlement_lost",
         );
       }
 
@@ -1447,7 +1466,7 @@ export class ProjectReviewStore {
         UPDATE project_supervision SET state = 'blocked', blocked_reason = ?, accepted_decision_id = ?, updated_at = ?
         WHERE project_card_id = ? AND state NOT IN ('accepted', 'blocked')
       `).run(blockerClass, settledId, now, cardId);
-    if (state.changes !== 1) throw new Error(`project ${cardId} is already terminal`);
+    if (state.changes !== 1) throw new ProjectMutationRejectedError(`project ${cardId} is already terminal`, "project_terminal");
 
     // #1644: blocked is terminal — invalidate every stale owner for the
     // terminal root in the same transaction, including owners from older
@@ -1475,8 +1494,9 @@ export class ProjectReviewStore {
       emit: false,
     }, this.db);
     if (outcome.kind !== "applied") {
-      throw new Error(
+      throw new ProjectMutationRejectedError(
         `project ${cardId} kanban settlement lost: observed ${outcome.observed ?? "missing"}`,
+        "settlement_lost",
       );
     }
 
@@ -1546,7 +1566,7 @@ export class ProjectReviewStore {
         SET state = 'repair_planned', generation = generation + 1, updated_at = ?
         WHERE project_card_id = ? AND generation = ? AND state IN ('review_ready', 'review_requested', 'reviewing')
       `).run(now, cardId, expectedGeneration);
-      if (state.changes !== 1) throw new Error(`stale or already-settled repair for project ${cardId}`);
+      if (state.changes !== 1) throw new ProjectMutationRejectedError(`stale or already-settled repair for project ${cardId}`, "review_ownership_stale");
 
       if (additionalTokens > 0) {
         this.db.prepare(`
@@ -1597,7 +1617,7 @@ export class ProjectReviewStore {
           UPDATE project_supervision SET state = 'needs_input', active_review_case_id = ?, updated_at = ?
           WHERE project_card_id = ? AND state IN ('review_ready', 'review_requested', 'reviewing')
         `).run(reviewCaseId, now, cardId);
-      if (state.changes !== 1) throw new Error(`stale or already-settled input request for project ${cardId}`);
+      if (state.changes !== 1) throw new ProjectMutationRejectedError(`stale or already-settled input request for project ${cardId}`, "review_ownership_stale");
 
       this.db.prepare(`
         INSERT INTO project_input_requests

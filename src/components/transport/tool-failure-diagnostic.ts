@@ -26,12 +26,45 @@ export type ToolFailureReason =
   | "memory_idempotency_conflict"
   | "memory_unavailable"
   | "memory_outcome_unknown"
+  // #1677: typed Orc review-turn rejections (tool envelopes carry `reason`).
+  | "context_missing"
+  | "invalid_arguments"
+  | "project_mismatch"
+  | "supervision_missing"
+  | "project_terminal"
+  | "project_not_reviewable"
+  | "project_generation_mismatch"
+  | "review_case_unknown"
+  | "review_case_project_mismatch"
+  | "review_case_generation_mismatch"
+  | "review_case_not_open"
+  | "review_case_unreadable"
+  | "review_ownership_stale"
+  | "settlement_lost"
+  | "internal_error"
+  | "peer_relay_blocked"
+  | "peer_sandbox"
   | "unknown";
 
 const MEMORY_FAILURE_REASONS: ReadonlySet<string> = new Set([
   "memory_validation", "memory_not_found", "memory_conflict",
   "memory_unauthorized", "memory_idempotency_conflict",
   "memory_unavailable", "memory_outcome_unknown",
+]);
+
+// #1677: the closed set of typed codes a tool result can carry today. Only
+// these map to a typed reason; an unrecognized `reason` falls through to
+// `unknown` exactly as before. The sealed-secret tools' inverted envelopes
+// (`{ error: "<code>", reason: "<prose>" }`) can never match — their prose
+// is not a member — so they keep today's `unknown` classification.
+const ORC_TOOL_FAILURE_REASONS: ReadonlySet<string> = new Set([
+  "context_missing", "invalid_arguments", "project_mismatch",
+  "supervision_missing", "project_terminal", "project_not_reviewable",
+  "project_generation_mismatch", "review_case_unknown",
+  "review_case_project_mismatch", "review_case_generation_mismatch",
+  "review_case_not_open", "review_case_unreadable", "review_ownership_stale",
+  "settlement_lost", "internal_error",
+  "peer_relay_blocked", "peer_sandbox",
 ]);
 
 export interface ToolFailureDiagnosticV1 {
@@ -211,6 +244,22 @@ export function parseToolResultToDiagnostic(
         memory_failure: memoryFailure,
       };
     }
+    // #1677: a typed Orc review-turn rejection maps by its `reason` field —
+    // never fall back to `unknown` when a known code exists. Placed after bash
+    // (bash results with a `reason` keep the bash branch) and after memory,
+    // before the generic `error` fallback.
+    const reason = typeof parsed.reason === "string" ? parsed.reason : "";
+    if (ORC_TOOL_FAILURE_REASONS.has(reason)) {
+      return {
+        version: 1,
+        execution_id: executionId,
+        tool,
+        reason: reason as ToolFailureReason,
+        timed_out: false,
+        aborted: false,
+        stderr_excerpt: typeof parsed.error === "string" ? capAndRedact(parsed.error, STDERR_CAP) : undefined,
+      };
+    }
     if (parsed.error != null) {
       return {
         version: 1,
@@ -342,6 +391,8 @@ export function renderDiagnostic(d: ToolFailureDiagnosticV1): string {
   } else if (d.reason === "prompt_round_limit") {
     parts.push("reason: prompt round limit");
   } else if (MEMORY_FAILURE_REASONS.has(d.reason)) {
+    parts.push(`reason: ${d.reason}`);
+  } else if (ORC_TOOL_FAILURE_REASONS.has(d.reason)) {
     parts.push(`reason: ${d.reason}`);
   } else if (d.reason === "unknown") {
     parts.push("reason: unknown error");

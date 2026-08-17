@@ -540,20 +540,21 @@ function truncateProse(text: string, max: number): string {
 export function projectReviewBrief(
   caseId: string,
   store = new ProjectReviewStore(),
-): { ok: true; brief: ProjectReviewBriefV1 } | { ok: false; error: string } {
+): { ok: true; brief: ProjectReviewBriefV1 }
+  | { ok: false; code: "review_case_unknown" | "review_case_not_open" | "review_case_unreadable"; error: string } {
   const row = store.getReviewCase(caseId);
-  if (!row) return { ok: false, error: `review case "${caseId}" not found` };
-  if (row.status !== "open") return { ok: false, error: `review case "${caseId}" is ${row.status}, not open` };
+  if (!row) return { ok: false, code: "review_case_unknown", error: `review case "${caseId}" not found` };
+  if (row.status !== "open") return { ok: false, code: "review_case_not_open", error: `review case "${caseId}" is ${row.status}, not open` };
 
   let snapshot: ReviewCaseSnapshot;
   try {
     snapshot = JSON.parse(row.case_json) as ReviewCaseSnapshot;
   } catch {
-    return { ok: false, error: "review case snapshot is unparseable" };
+    return { ok: false, code: "review_case_unreadable", error: "review case snapshot is unparseable" };
   }
   if (!snapshot || snapshot.schema_version !== 1 || snapshot.project_card_id === undefined ||
       snapshot.project_card_id !== row.project_card_id || snapshot.generation !== row.generation) {
-    return { ok: false, error: "review case snapshot is structurally invalid" };
+    return { ok: false, code: "review_case_unreadable", error: "review case snapshot is structurally invalid" };
   }
 
   const policyByCriterionId = new Map(snapshot.criterion_inputs.map(ci => [ci.criterion_id, ci]));

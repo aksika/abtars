@@ -158,6 +158,17 @@ describe("ProjectReviewStore", () => {
       expect(s.getSupervision(cid)!.state).toBe("accepted");
     });
 
+    it("#1677: a mutation whose review case row does not exist is still permitted (synthetic blockers)", () => {
+      const { store: s, contract: c } = setupProject();
+      const cid = c.project_card_id;
+      insertKanbanCard(s, cid, "running");
+      // No project_review_cases row at all — the shared predicate must never
+      // turn the intentional absent-case allowance into a rejected mutation.
+      const caseId = `synthetic-${cid}`;
+      expect(() => s.settleBlocked(cid, caseId, { action: "blocked", reason: "x" }, "blocker")).not.toThrow();
+      expect(s.getSupervision(cid)!.state).toBe("blocked");
+    });
+
     it("hasActiveProjectSupervision: awaiting_contract counts as active (the authoring claim owns it)", () => {
       const cid = uniqueCardId();
       store.ensureAwaitingContract(cid);

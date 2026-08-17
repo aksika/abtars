@@ -7,11 +7,13 @@
 
 import type { ToolDefinition, ToolExecutionContext } from "./tool-registry.js";
 import type { SessionDispatch } from "./session-dispatch.js";
-import { logInfo } from "../logger.js";
+import { logInfo, redactSecrets } from "../logger.js";
 import { logAndSwallow } from "../log-and-swallow.js";
 import { logSwarmTrace } from "../swarm-trace.js";
 import { nerve } from "../nerve.js";
 import { REVIEW_PROJECT_PARAMETERS, INVALID_CONTRACT_PROPOSALS_EXHAUSTED } from "../project-acceptance/project-review-contract.js";
+import { evaluateReviewTurnContext, reviewCaseAvailability, ProjectMutationRejectedError } from "../project-acceptance/review-turn-authority.js";
+import type { ReviewTurnRejection } from "../project-acceptance/review-turn-authority.js";
 
 const TAG = "orc-tools";
 
@@ -699,6 +701,17 @@ function numberValue(value: unknown): number | null {
   return null;
 }
 
+// #1677: the review-turn rejection envelope. Only the two genuinely unbounded
+// prose sources (projectReviewBrief errors and String(err) in the catches) are
+// capped; fixed-shape id/generation/status text passes through unchanged so
+// every existing error string stays byte-identical.
+const DETAIL_CAP = 500;
+const capDetail = (s: string): string => redactSecrets(s).slice(0, DETAIL_CAP);
+
+function reviewToolRejection(reason: ReviewTurnRejection, detail: string): string {
+  return JSON.stringify({ error: detail, reason });
+}
+
 /**
  * #1620: read the immutable open review case for the current supervised
  * project. Side-effect-free: repeated reads never transition state and never
@@ -718,41 +731,40 @@ const getProjectReviewCaseTool: ToolDefinition = {
   },
   async execute(args: Record<string, unknown>, context?: ToolExecutionContext): Promise<string> {
     const bound = context?.orcContext;
-    if (!bound) return JSON.stringify({ error: "No active Orc project. get_project_review_case only works during a project review turn." });
-
     const reviewCaseId = stringValue(args.review_case_id);
-    if (!reviewCaseId) return JSON.stringify({ error: "review_case_id is required." });
     const explicitProjectId = numberValue(args.project_card_id);
-    if (explicitProjectId === null) return JSON.stringify({ error: "project_card_id is required and must be a positive integer." });
-    if (explicitProjectId !== bound.projectCardId) {
-      return JSON.stringify({ error: `project_card_id ${explicitProjectId} does not match the bound project ${bound.projectCardId}` });
+
+    const ctx = evaluateReviewTurnContext(bound, { projectCardId: explicitProjectId, reviewCaseId });
+    if (!ctx.ok) {
+      const detail = ctx.code === "context_missing"
+        ? "No active Orc project. get_project_review_case only works during a project review turn."
+        : ctx.detail;
+      return reviewToolRejection(ctx.code, detail);
     }
+    const boundCtx = bound!;
 
     try {
       const { ProjectReviewStore } = await import("../project-acceptance/project-review-store.js");
       const { projectReviewBrief } = await import("../project-acceptance/project-review-case.js");
       const store = new ProjectReviewStore();
 
-      const supervision = store.getSupervision(explicitProjectId);
-      if (!supervision) return JSON.stringify({ error: "No project supervision state found. Is this a supervised project?" });
-      if (typeof bound.projectGeneration === "number" && bound.projectGeneration !== supervision.generation) {
-        return JSON.stringify({ error: `Bound project generation ${bound.projectGeneration} is stale; current generation is ${supervision.generation}` });
+      const supervision = store.getSupervision(ctx.projectCardId);
+      if (!supervision) {
+        return reviewToolRejection("supervision_missing", "No project supervision state found. Is this a supervised project?");
       }
-      if (supervision.state !== "review_ready" && supervision.state !== "review_requested" && supervision.state !== "reviewing") {
-        return JSON.stringify({ error: `Project is in state "${supervision.state}", not ready for review` });
+      if (typeof boundCtx.projectGeneration === "number" && boundCtx.projectGeneration !== supervision.generation) {
+        return reviewToolRejection("project_generation_mismatch", `Bound project generation ${boundCtx.projectGeneration} is stale; current generation is ${supervision.generation}`);
       }
 
-      const openCase = store.getReviewCase(reviewCaseId);
-      if (!openCase) return JSON.stringify({ error: `Review case "${reviewCaseId}" not found` });
-      if (openCase.project_card_id !== explicitProjectId) return JSON.stringify({ error: `Case "${reviewCaseId}" does not belong to project ${explicitProjectId}` });
-      if (openCase.generation !== supervision.generation) return JSON.stringify({ error: `Case generation ${openCase.generation} does not match supervision generation ${supervision.generation}` });
-      if (openCase.status !== "open") return JSON.stringify({ error: `Review case "${reviewCaseId}" is ${openCase.status}, not open` });
+      const availability = reviewCaseAvailability(store.db, { projectCardId: ctx.projectCardId, reviewCaseId: ctx.reviewCaseId });
+      if (!availability.ok) return reviewToolRejection(availability.code, availability.detail);
 
-      const brief = projectReviewBrief(reviewCaseId, store);
-      if (!brief.ok) return JSON.stringify({ error: brief.error });
+      const brief = projectReviewBrief(ctx.reviewCaseId, store);
+      if (!brief.ok) return reviewToolRejection(brief.code, capDetail(brief.error));
       return JSON.stringify(brief.brief);
     } catch (err) {
-      return JSON.stringify({ error: `get_project_review_case error: ${String(err)}` });
+      const rejection = err instanceof ProjectMutationRejectedError ? err.rejection : "internal_error";
+      return reviewToolRejection(rejection, `get_project_review_case error: ${capDetail(String(err))}`);
     }
   },
 };
@@ -774,38 +786,39 @@ const reviewProjectTool: ToolDefinition = {
       }
       const decision = narrowed.decision;
 
-      const projectCardId = decision.project_card_id;
-      const projectGeneration = decision.project_generation;
-
       // #1480: the bound Orc context is the authority for the active project.
       const bound = context?.orcContext;
-      if (!bound) return JSON.stringify({ error: "No active Orc project. review_project only works during a project review turn." });
-      if (projectCardId !== bound.projectCardId) {
-        return JSON.stringify({ error: `project_card_id ${projectCardId} does not match the bound project ${bound.projectCardId}` });
+      const ctx = evaluateReviewTurnContext(bound, { projectCardId: decision.project_card_id, reviewCaseId: decision.review_case_id });
+      if (!ctx.ok) {
+        const detail = ctx.code === "context_missing"
+          ? "No active Orc project. review_project only works during a project review turn."
+          : ctx.detail;
+        return reviewToolRejection(ctx.code, detail);
       }
+      const boundCtx = bound!;
 
       const { ProjectReviewService } = await import("../project-acceptance/project-review-service.js");
       const { ProjectReviewStore } = await import("../project-acceptance/project-review-store.js");
 
       const store = new ProjectReviewStore();
-      const supervision = store.getSupervision(projectCardId);
-      if (!supervision) return JSON.stringify({ error: "No project supervision state found. Is this a supervised project?" });
-      if (typeof bound.projectGeneration === "number" && bound.projectGeneration !== supervision.generation) {
-        return JSON.stringify({ error: `Bound project generation ${bound.projectGeneration} is stale; current generation is ${supervision.generation}` });
+      const supervision = store.getSupervision(ctx.projectCardId);
+      if (!supervision) {
+        return reviewToolRejection("supervision_missing", "No project supervision state found. Is this a supervised project?");
       }
-      if (supervision.generation !== projectGeneration) return JSON.stringify({ error: `Project generation mismatch: expected ${supervision.generation}, got ${projectGeneration}` });
-      if (supervision.state !== "review_ready" && supervision.state !== "review_requested" && supervision.state !== "reviewing") return JSON.stringify({ error: `Project is in state "${supervision.state}", not ready for review` });
+      if (typeof boundCtx.projectGeneration === "number" && boundCtx.projectGeneration !== supervision.generation) {
+        return reviewToolRejection("project_generation_mismatch", `Bound project generation ${boundCtx.projectGeneration} is stale; current generation is ${supervision.generation}`);
+      }
+      if (supervision.generation !== decision.project_generation) {
+        return reviewToolRejection("project_generation_mismatch", `Project generation mismatch: expected ${supervision.generation}, got ${decision.project_generation}`);
+      }
 
-      const openCase = store.getReviewCase(decision.review_case_id);
-      if (!openCase) return JSON.stringify({ error: `Review case "${decision.review_case_id}" not found` });
-      if (openCase.project_card_id !== projectCardId) return JSON.stringify({ error: `Case "${decision.review_case_id}" does not belong to project ${projectCardId}` });
-      if (openCase.generation !== supervision.generation) return JSON.stringify({ error: `Case generation ${openCase.generation} does not match supervision generation ${supervision.generation}` });
-      if (openCase.status !== "open") return JSON.stringify({ error: `Review case "${decision.review_case_id}" is ${openCase.status}, not open` });
+      const availability = reviewCaseAvailability(store.db, { projectCardId: ctx.projectCardId, reviewCaseId: ctx.reviewCaseId });
+      if (!availability.ok) return reviewToolRejection(availability.code, availability.detail);
 
-      const rootCard = store.db.prepare(`SELECT source, source_id FROM kanban_board WHERE id = ?`).get(projectCardId) as { source: string | null; source_id: string | null } | undefined;
+      const rootCard = store.db.prepare(`SELECT source, source_id FROM kanban_board WHERE id = ?`).get(ctx.projectCardId) as { source: string | null; source_id: string | null } | undefined;
       const authority = {
-        projectCardId: bound.projectCardId,
-        projectGeneration: bound.projectGeneration,
+        projectCardId: boundCtx.projectCardId,
+        projectGeneration: boundCtx.projectGeneration,
         ...(rootCard?.source === "task" && rootCard.source_id ? { scheduledRunId: rootCard.source_id } : {}),
       };
 
@@ -813,8 +826,8 @@ const reviewProjectTool: ToolDefinition = {
       // process a structurally complete decision — the narrow step above
       // already guarantees structural completeness.
       if (supervision.state === "review_requested") {
-        const transitioned = store.stateTransition(projectCardId, ["review_requested"], "reviewing", undefined, { authority });
-        if (!transitioned) return JSON.stringify({ error: "project mutation rejected: review ownership is stale" });
+        const transitioned = store.stateTransition(ctx.projectCardId, ["review_requested"], "reviewing", undefined, { authority });
+        if (!transitioned) return reviewToolRejection("review_ownership_stale", "project mutation rejected: review ownership is stale");
       }
 
       const service = new ProjectReviewService();
@@ -840,7 +853,8 @@ const reviewProjectTool: ToolDefinition = {
           });
       }
     } catch (err) {
-      return JSON.stringify({ error: `review_project error: ${String(err)}` });
+      const rejection = err instanceof ProjectMutationRejectedError ? err.rejection : "internal_error";
+      return reviewToolRejection(rejection, `review_project error: ${capDetail(String(err))}`);
     }
   },
 };

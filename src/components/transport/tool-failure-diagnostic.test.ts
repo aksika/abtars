@@ -222,6 +222,57 @@ describe("parseToolResultToDiagnostic", () => {
     expect(d!.stderr_excerpt!.length).toBeLessThanOrEqual(500);
     expect(d!.memory_failure!.request_id).toBe("req-xyz");
   });
+
+  it("#1677 maps every enumerated Orc rejection code to its typed reason with prose in stderr_excerpt", () => {
+    const codes = [
+      "context_missing", "invalid_arguments", "project_mismatch",
+      "supervision_missing", "project_terminal", "project_not_reviewable",
+      "project_generation_mismatch", "review_case_unknown",
+      "review_case_project_mismatch", "review_case_generation_mismatch",
+      "review_case_not_open", "review_case_unreadable", "review_ownership_stale",
+      "settlement_lost", "internal_error", "peer_relay_blocked", "peer_sandbox",
+    ];
+    for (const code of codes) {
+      const result = JSON.stringify({ error: `detail for ${code}`, reason: code });
+      const d = parseToolResultToDiagnostic(result, execId, "review_project");
+      expect(d).not.toBeNull();
+      expect(d!.reason).toBe(code);
+      expect(d!.stderr_excerpt).toBe(`detail for ${code}`);
+      expect(d!.command_preview).toBeUndefined();
+      expect(d!.command_fingerprint).toBeUndefined();
+      expect(renderDiagnostic(d!)).toContain(`reason: ${code}`);
+    }
+  });
+
+  it("#1677 an unrecognized reason still falls through to unknown", () => {
+    const result = JSON.stringify({ error: "some prose", reason: "not_a_known_code" });
+    const d = parseToolResultToDiagnostic(result, execId, "review_project");
+    expect(d).not.toBeNull();
+    expect(d!.reason).toBe("unknown");
+    expect(d!.stderr_excerpt).toContain("some prose");
+  });
+
+  it("#1677 a result with both bash fields and a reason takes the bash branch", () => {
+    const result = JSON.stringify({
+      exit_code: 1, stderr: "bash stderr", command_fingerprint: "abcd1234abcd1234",
+      command_preview: "false", error: "ignored", reason: "project_generation_mismatch",
+    });
+    const d = parseToolResultToDiagnostic(result, execId, "execute_bash");
+    expect(d!.reason).toBe("nonzero_exit");
+    expect(d!.exit_code).toBe(1);
+    expect(d!.stderr_excerpt).toBe("bash stderr");
+  });
+
+  it("#1677 an inverted envelope ({ error: code, reason: prose }) is never misread as a typed reason", () => {
+    // The sealed-secret tools emit the code in `error` and prose in `reason`;
+    // that prose is not a set member, so classification stays `unknown`.
+    const result = JSON.stringify({ error: "sealed_secrets_unavailable", reason: "sealed secret store rejected the request" });
+    const d = parseToolResultToDiagnostic(result, execId, "secret_get");
+    expect(d).not.toBeNull();
+    expect(d!.reason).toBe("unknown");
+    expect(d!.stderr_excerpt).toContain("sealed_secrets_unavailable");
+    expect(d!.command_preview).toBeUndefined();
+  });
 });
 
 describe("buildUnknownDiagnostic", () => {

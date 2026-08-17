@@ -7,9 +7,26 @@ import { ModelHealthRegistry } from "./model-health-registry.js";
 import type { ModelCandidate } from "./model-candidates.js";
 import { buildPolicy } from "../tool-sandbox.js";
 import { PiCoreToolExecutionError } from "./tool-failure-diagnostic.js";
+import type { ToolFailureDiagnosticV1 } from "./tool-failure-diagnostic.js";
 import { createClientRuntime } from "../memory-runtime.js";
 import type { MemoryToolDependenciesHolder } from "../memory-store-quota.js";
 import type { SessionType } from "../spin-types.js";
+
+// #1677: the review-tool rejection envelope carries a `reason` code. Only the
+// registry's execution boundary is overridden here (a canned Orc rejection);
+// every other tool still routes through the real registry execution path.
+vi.mock("./tool-registry.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("./tool-registry.js")>();
+  return {
+    ...actual,
+    executeToolCall: vi.fn(async (name: string, params: Record<string, unknown>, context: unknown) => {
+      if (name === "review_project") {
+        return JSON.stringify({ error: "Project generation mismatch: expected 1, got 2", reason: "project_generation_mismatch" });
+      }
+      return (actual.executeToolCall as (name: string, params: Record<string, unknown>, context: unknown) => Promise<string>)(name, params, context);
+    }),
+  };
+});
 
 function makeRegistry() {
   return new ModelHealthRegistry();
@@ -118,6 +135,27 @@ describe("createPiAgentTools", () => {
       expect(onToolFailure).toHaveBeenCalledWith(
         expect.objectContaining({ reason: "unknown", tool: "secret_get" }),
       );
+    }
+  });
+
+  it("#1677 delivers the typed Orc rejection reason to onToolFailure, never unknown", async () => {
+    const onToolFailure = vi.fn();
+    const ctx = makeContext({
+      sandboxPolicy: buildPolicy("owner"),
+      onToolFailure,
+    });
+    const tools = createPiAgentTools(ctx);
+    const tool = tools.find((t) => t.name === "review_project");
+    expect(tool).toBeDefined();
+    if (tool) {
+      await tool.execute("call_1", {});
+      expect(onToolFailure).toHaveBeenCalledTimes(1);
+      expect(onToolFailure).toHaveBeenCalledWith(
+        expect.objectContaining({ reason: "project_generation_mismatch", tool: "review_project" }),
+      );
+      const diag = onToolFailure.mock.calls[0]![0] as ToolFailureDiagnosticV1;
+      expect(diag.stderr_excerpt).toContain("Project generation mismatch: expected 1, got 2");
+      expect(diag.command_preview).toBeUndefined();
     }
   });
 

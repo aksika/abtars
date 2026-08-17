@@ -106,6 +106,92 @@ function caseTool(): ReturnType<typeof getOrcTools>[number] {
   return getOrcTools().find(t => t.name === "get_project_review_case")!;
 }
 
+/** orcContext with a configurable bound generation. */
+const orcCtx = (pid: number, gen = 1) => ({ userId: "test", orcContext: { projectCardId: pid, projectGeneration: gen } } as never);
+
+/** Flexible project setup for the #1677 rejection-ladder tests. */
+async function setupVariant(
+  pid: number,
+  opts: {
+    state?: string;
+    gen?: number;
+    caseGen?: number;
+    caseStatus?: "open" | "superseded";
+    withCase?: boolean;
+    withCard?: boolean;
+    cardStatus?: string;
+    cardSource?: string;
+    cardSourceId?: string | null;
+    garbageSnapshot?: boolean;
+  } = {},
+): Promise<{ caseId: string | null }> {
+  const {
+    state = "review_ready",
+    gen = 1,
+    caseGen = 1,
+    caseStatus = "open",
+    withCase = true,
+    withCard = true,
+    cardStatus = "running",
+    cardSource = "agent",
+    cardSourceId = null,
+    garbageSnapshot = false,
+  } = opts;
+  const contract = orcOnlyContract(pid);
+  store.insertContract(contract);
+  store.initializeSupervision(pid, String(contract.id), state as never);
+  while (store.getSupervision(pid)!.generation < gen) store.incrementGeneration(pid);
+  if (withCard) {
+    store.db.prepare(`INSERT INTO kanban_board (id, title, source, source_id, status, type, goal, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, 'O', ?, datetime('now'), datetime('now'))`)
+      .run(pid, "tools project", cardSource, cardSourceId, cardStatus, "tools goal");
+  }
+  let caseId: string | null = null;
+  if (withCase) {
+    const snapshot = garbageSnapshot
+      ? { bad: true } as unknown as ReviewCaseSnapshot
+      : makeOrcOnlySnapshot(pid);
+    const { id } = store.insertReviewCase(pid, caseGen, 1, snapshot, `digest_${pid}`);
+    if (caseStatus !== "open") store.supersedeCase(id);
+    caseId = id;
+  }
+  return { caseId };
+}
+
+/** Structurally valid accept decision (from the accepted-journey test). */
+function acceptDecision(pid: number, caseId: string): Record<string, unknown> {
+  return {
+    action: "accept",
+    project_card_id: pid,
+    project_generation: 1,
+    review_case_id: caseId,
+    criteria: [
+      { criterion_id: "synth1", verdict: "satisfied", evidence_ids: [], rationale: "Synthesized from the immutable case" },
+      { criterion_id: "synth2", verdict: "satisfied", evidence_ids: [], rationale: "Quality gate passed on Orc evaluation" },
+    ],
+    outputs: [{ output_id: "out", disposition: "present", evidence_ids: [] }],
+    contradictions: [],
+    residual_risks: [],
+    synthesis: "Analysis complete",
+  };
+}
+
+const orcOnlyContract = (pid: number) => ({
+  schema_version: 2,
+  id: `pc_${pid}`,
+  digest: `d_${pid}`,
+  project_card_id: pid,
+  goal: "Produce the analysis",
+  criteria: [
+    { id: "synth1", description: "Synthesize findings", required: true, execution_owner: "orc", evidence_expectation: "synthesis" },
+    { id: "synth2", description: "Quality gate", required: true, execution_owner: "orc", evidence_expectation: "synthesis" },
+  ],
+  required_outputs: [{ id: "out", description: "analysis report", kind: "file", required: true }],
+  constraints: [],
+  limits: { hard_deadline_at: undefined, max_tokens: 100000, max_cost: undefined, max_review_rounds: 5, max_repair_rounds: 3 },
+  provenance: { requested_by: "user", authored_by: "orc", created_at: new Date().toISOString() },
+});
+
 describe("Orc review tools against a real isolated TaskDatabase (#1620)", () => {
   beforeEach(async () => {
     TEST_HOME = join(tmpdir(), `ab-review-tools-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`);
@@ -120,22 +206,6 @@ describe("Orc review tools against a real isolated TaskDatabase (#1620)", () => 
     if (TEST_HOME && existsSync(TEST_HOME)) {
       rmSync(TEST_HOME, { recursive: true, force: true });
     }
-  });
-
-  const orcOnlyContract = (pid: number) => ({
-    schema_version: 2,
-    id: `pc_${pid}`,
-    digest: `d_${pid}`,
-    project_card_id: pid,
-    goal: "Produce the analysis",
-    criteria: [
-      { id: "synth1", description: "Synthesize findings", required: true, execution_owner: "orc", evidence_expectation: "synthesis" },
-      { id: "synth2", description: "Quality gate", required: true, execution_owner: "orc", evidence_expectation: "synthesis" },
-    ],
-    required_outputs: [{ id: "out", description: "analysis report", kind: "file", required: true }],
-    constraints: [],
-    limits: { hard_deadline_at: undefined, max_tokens: 100000, max_cost: undefined, max_review_rounds: 5, max_repair_rounds: 3 },
-    provenance: { requested_by: "user", authored_by: "orc", created_at: new Date().toISOString() },
   });
 
   describe("get_project_review_case", () => {
@@ -376,6 +446,281 @@ describe("Orc review tools against a real isolated TaskDatabase (#1620)", () => 
       expect(result.outcome).toBe("invalid");
       expect(result.issues.some(i => i.tag === "missing_field")).toBe(true);
       expect(store.hasDecisionForCase(caseId)).toBe(false);
+    });
+  });
+
+  describe("typed rejection vocabulary at the tool boundary (#1677)", () => {
+    const ERROR_CONTEXT_MISSING_GET = "No active Orc project. get_project_review_case only works during a project review turn.";
+    const ERROR_CONTEXT_MISSING_REVIEW = "No active Orc project. review_project only works during a project review turn.";
+    const ERROR_SUPERVISION_MISSING = "No project supervision state found. Is this a supervised project?";
+
+    describe("get_project_review_case — all 13 error-envelope branches", () => {
+      it("context_missing", async () => {
+        const raw = await caseTool().execute({ project_card_id: 1, review_case_id: "x" });
+        const parsed = JSON.parse(raw) as { error: string; reason: string };
+        expect(parsed.error).toBe(ERROR_CONTEXT_MISSING_GET);
+        expect(parsed.reason).toBe("context_missing");
+      });
+
+      it("invalid_arguments — missing review_case_id", async () => {
+        const pid = uniquePid();
+        const raw = await caseTool().execute({ project_card_id: pid }, orcCtx(pid));
+        const parsed = JSON.parse(raw) as { error: string; reason: string };
+        expect(parsed.error).toBe("review_case_id is required.");
+        expect(parsed.reason).toBe("invalid_arguments");
+      });
+
+      it("invalid_arguments — non-positive project_card_id", async () => {
+        const pid = uniquePid();
+        const raw = await caseTool().execute({ project_card_id: "abc", review_case_id: "x" }, orcCtx(pid));
+        const parsed = JSON.parse(raw) as { error: string; reason: string };
+        expect(parsed.error).toBe("project_card_id is required and must be a positive integer.");
+        expect(parsed.reason).toBe("invalid_arguments");
+      });
+
+      it("project_mismatch", async () => {
+        const pid = uniquePid();
+        const raw = await caseTool().execute({ project_card_id: pid + 100, review_case_id: "x" }, orcCtx(pid));
+        const parsed = JSON.parse(raw) as { error: string; reason: string };
+        expect(parsed.error).toContain("does not match the bound project");
+        expect(parsed.reason).toBe("project_mismatch");
+      });
+
+      it("supervision_missing", async () => {
+        const pid = uniquePid();
+        await setupVariant(pid, { withCase: false, withCard: false });
+        // no project_supervision row exists at all
+        const pid2 = uniquePid();
+        const raw = await caseTool().execute({ project_card_id: pid2, review_case_id: "x" }, orcCtx(pid2));
+        const parsed = JSON.parse(raw) as { error: string; reason: string };
+        expect(parsed.error).toBe(ERROR_SUPERVISION_MISSING);
+        expect(parsed.reason).toBe("supervision_missing");
+      });
+
+      it("project_generation_mismatch — stale bound generation", async () => {
+        const pid = uniquePid();
+        await setupVariant(pid, { state: "review_ready", gen: 1 });
+        const raw = await caseTool().execute({ project_card_id: pid, review_case_id: "x" }, orcCtx(pid, 2));
+        const parsed = JSON.parse(raw) as { error: string; reason: string };
+        expect(parsed.error).toBe("Bound project generation 2 is stale; current generation is 1");
+        expect(parsed.reason).toBe("project_generation_mismatch");
+      });
+
+      it("project_not_reviewable — non-review live state", async () => {
+        const pid = uniquePid();
+        await setupVariant(pid, { state: "executing" });
+        const raw = await caseTool().execute({ project_card_id: pid, review_case_id: "x" }, orcCtx(pid));
+        const parsed = JSON.parse(raw) as { error: string; reason: string };
+        expect(parsed.error).toBe('Project is in state "executing", not ready for review');
+        expect(parsed.reason).toBe("project_not_reviewable");
+      });
+
+      it("project_terminal — accepted supervision", async () => {
+        const pid = uniquePid();
+        await setupVariant(pid, { state: "accepted" });
+        const raw = await caseTool().execute({ project_card_id: pid, review_case_id: "x" }, orcCtx(pid));
+        const parsed = JSON.parse(raw) as { error: string; reason: string };
+        expect(parsed.error).toBe('Project is in state "accepted", not ready for review');
+        expect(parsed.reason).toBe("project_terminal");
+      });
+
+      it("review_case_unknown", async () => {
+        const pid = uniquePid();
+        await setupVariant(pid, { state: "review_ready", withCase: false });
+        const raw = await caseTool().execute({ project_card_id: pid, review_case_id: "rc_missing" }, orcCtx(pid));
+        const parsed = JSON.parse(raw) as { error: string; reason: string };
+        expect(parsed.error).toBe('Review case "rc_missing" not found');
+        expect(parsed.reason).toBe("review_case_unknown");
+      });
+
+      it("review_case_project_mismatch", async () => {
+        const pid = uniquePid();
+        const other = uniquePid();
+        await setupVariant(pid, { state: "review_ready" });
+        const { caseId } = await setupVariant(other, { state: "review_ready" });
+        const raw = await caseTool().execute({ project_card_id: pid, review_case_id: caseId! }, orcCtx(pid));
+        const parsed = JSON.parse(raw) as { error: string; reason: string };
+        expect(parsed.error).toContain("does not belong to project");
+        expect(parsed.reason).toBe("review_case_project_mismatch");
+      });
+
+      it("review_case_generation_mismatch", async () => {
+        const pid = uniquePid();
+        const { caseId } = await setupVariant(pid, { state: "review_ready", gen: 1, caseGen: 2 });
+        const raw = await caseTool().execute({ project_card_id: pid, review_case_id: caseId! }, orcCtx(pid));
+        const parsed = JSON.parse(raw) as { error: string; reason: string };
+        expect(parsed.error).toBe("Case generation 2 does not match supervision generation 1");
+        expect(parsed.reason).toBe("review_case_generation_mismatch");
+      });
+
+      it("review_case_not_open", async () => {
+        const pid = uniquePid();
+        const { caseId } = await setupVariant(pid, { state: "review_ready", caseStatus: "superseded" });
+        const raw = await caseTool().execute({ project_card_id: pid, review_case_id: caseId! }, orcCtx(pid));
+        const parsed = JSON.parse(raw) as { error: string; reason: string };
+        expect(parsed.error).toContain("not open");
+        expect(parsed.reason).toBe("review_case_not_open");
+      });
+
+      it("brief race — an unreadable snapshot forwards brief.code, never collapsing to one code", async () => {
+        const pid = uniquePid();
+        const { caseId } = await setupVariant(pid, { state: "review_ready", garbageSnapshot: true });
+        const raw = await caseTool().execute({ project_card_id: pid, review_case_id: caseId! }, orcCtx(pid));
+        const parsed = JSON.parse(raw) as { error: string; reason: string };
+        expect(parsed.error).toBe("review case snapshot is structurally invalid");
+        expect(parsed.reason).toBe("review_case_unreadable");
+      });
+
+      it("catch — an unclassified throw surfaces internal_error with bounded prose", async () => {
+        const pid = uniquePid();
+        await setupVariant(pid, { state: "review_ready", withCase: false, withCard: false });
+        const spy = vi.spyOn(ProjectReviewStore.prototype, "getSupervision").mockImplementation(() => { throw new Error("boom"); });
+        try {
+          const raw = await caseTool().execute({ project_card_id: pid, review_case_id: "rc_missing" }, orcCtx(pid));
+          const parsed = JSON.parse(raw) as { error: string; reason: string };
+          expect(parsed.error).toContain("get_project_review_case error:");
+          expect(parsed.reason).toBe("internal_error");
+        } finally {
+          spy.mockRestore();
+        }
+      });
+    });
+
+    describe("review_project — all 12 error-envelope branches plus the settlement race", () => {
+      it("context_missing", async () => {
+        const pid = uniquePid();
+        const raw = await reviewTool().execute(acceptDecision(pid, "rc_x"));
+        const parsed = JSON.parse(raw) as { error: string; reason: string };
+        expect(parsed.error).toBe(ERROR_CONTEXT_MISSING_REVIEW);
+        expect(parsed.reason).toBe("context_missing");
+      });
+
+      it("project_mismatch", async () => {
+        const pid = uniquePid();
+        const raw = await reviewTool().execute(acceptDecision(pid + 100, "rc_x"), orcCtx(pid));
+        const parsed = JSON.parse(raw) as { error: string; reason: string };
+        expect(parsed.error).toContain("does not match the bound project");
+        expect(parsed.reason).toBe("project_mismatch");
+      });
+
+      it("supervision_missing", async () => {
+        const pid = uniquePid();
+        const pid2 = uniquePid();
+        const raw = await reviewTool().execute(acceptDecision(pid2, "rc_x"), orcCtx(pid2));
+        const parsed = JSON.parse(raw) as { error: string; reason: string };
+        expect(parsed.error).toBe(ERROR_SUPERVISION_MISSING);
+        expect(parsed.reason).toBe("supervision_missing");
+      });
+
+      it("project_generation_mismatch — stale bound generation", async () => {
+        const pid = uniquePid();
+        await setupVariant(pid, { state: "review_ready", gen: 1 });
+        const raw = await reviewTool().execute(acceptDecision(pid, "rc_x"), orcCtx(pid, 2));
+        const parsed = JSON.parse(raw) as { error: string; reason: string };
+        expect(parsed.error).toBe("Bound project generation 2 is stale; current generation is 1");
+        expect(parsed.reason).toBe("project_generation_mismatch");
+      });
+
+      it("project_generation_mismatch — declared generation differs from supervision", async () => {
+        const pid = uniquePid();
+        const { caseId } = await setupVariant(pid, { state: "review_ready", gen: 1 });
+        const decision = acceptDecision(pid, caseId!) as { project_generation: number };
+        decision.project_generation = 2;
+        const raw = await reviewTool().execute(decision, orcCtx(pid, 1));
+        const parsed = JSON.parse(raw) as { error: string; reason: string };
+        expect(parsed.error).toBe("Project generation mismatch: expected 1, got 2");
+        expect(parsed.reason).toBe("project_generation_mismatch");
+      });
+
+      it("project_not_reviewable — non-review live state", async () => {
+        const pid = uniquePid();
+        const { caseId } = await setupVariant(pid, { state: "executing" });
+        const raw = await reviewTool().execute(acceptDecision(pid, caseId!), orcCtx(pid));
+        const parsed = JSON.parse(raw) as { error: string; reason: string };
+        expect(parsed.error).toBe('Project is in state "executing", not ready for review');
+        expect(parsed.reason).toBe("project_not_reviewable");
+      });
+
+      it("review_case_unknown", async () => {
+        const pid = uniquePid();
+        await setupVariant(pid, { state: "review_ready", withCase: false });
+        const raw = await reviewTool().execute(acceptDecision(pid, "rc_missing"), orcCtx(pid));
+        const parsed = JSON.parse(raw) as { error: string; reason: string };
+        expect(parsed.error).toBe('Review case "rc_missing" not found');
+        expect(parsed.reason).toBe("review_case_unknown");
+      });
+
+      it("review_case_project_mismatch", async () => {
+        const pid = uniquePid();
+        const other = uniquePid();
+        await setupVariant(pid, { state: "review_ready" });
+        const { caseId } = await setupVariant(other, { state: "review_ready" });
+        const raw = await reviewTool().execute(acceptDecision(pid, caseId!), orcCtx(pid));
+        const parsed = JSON.parse(raw) as { error: string; reason: string };
+        expect(parsed.error).toContain("does not belong to project");
+        expect(parsed.reason).toBe("review_case_project_mismatch");
+      });
+
+      it("review_case_generation_mismatch", async () => {
+        const pid = uniquePid();
+        const { caseId } = await setupVariant(pid, { state: "review_ready", gen: 1, caseGen: 2 });
+        const raw = await reviewTool().execute(acceptDecision(pid, caseId!), orcCtx(pid));
+        const parsed = JSON.parse(raw) as { error: string; reason: string };
+        expect(parsed.error).toContain("does not match supervision generation");
+        expect(parsed.reason).toBe("review_case_generation_mismatch");
+      });
+
+      it("review_case_not_open", async () => {
+        const pid = uniquePid();
+        const { caseId } = await setupVariant(pid, { state: "review_ready", caseStatus: "superseded" });
+        const raw = await reviewTool().execute(acceptDecision(pid, caseId!), orcCtx(pid));
+        const parsed = JSON.parse(raw) as { error: string; reason: string };
+        expect(parsed.error).toContain("not open");
+        expect(parsed.reason).toBe("review_case_not_open");
+      });
+
+      it("review_ownership_stale — lost review_requested -> reviewing CAS", async () => {
+        const pid = uniquePid();
+        // A scheduled root whose task_runs row does not exist makes the
+        // transition's authority check fail (run_mismatch) after the preflight
+        // passed — the ownership-stale race, deterministically.
+        store.db.exec(`CREATE TABLE IF NOT EXISTS task_runs (run_id TEXT PRIMARY KEY, finished_at INTEGER, outcome TEXT)`);
+        const { caseId } = await setupVariant(pid, {
+          state: "review_requested",
+          cardSource: "task",
+          cardSourceId: "run_missing",
+        });
+        const raw = await reviewTool().execute(acceptDecision(pid, caseId!), orcCtx(pid));
+        const parsed = JSON.parse(raw) as { error: string; reason: string };
+        expect(parsed.error).toBe("project mutation rejected: review ownership is stale");
+        expect(parsed.reason).toBe("review_ownership_stale");
+      });
+
+      it("store ProjectMutationRejectedError race — lost kanban settlement surfaces its typed code", async () => {
+        const pid = uniquePid();
+        // The preflight passes (open case, review_ready) but the card is
+        // already terminal, so settlement loses its durable kanban CAS inside
+        // processDecision and must surface the typed code, not internal_error.
+        const { caseId } = await setupVariant(pid, { state: "review_ready", cardStatus: "done" });
+        const raw = await reviewTool().execute(acceptDecision(pid, caseId!), orcCtx(pid));
+        const parsed = JSON.parse(raw) as { error: string; reason: string };
+        expect(parsed.error).toContain("kanban settlement lost: observed done");
+        expect(parsed.reason).toBe("settlement_lost");
+      });
+
+      it("catch — an unclassified throw surfaces internal_error with bounded prose", async () => {
+        const pid = uniquePid();
+        await setupVariant(pid, { state: "review_ready", withCase: false, withCard: false });
+        const spy = vi.spyOn(ProjectReviewStore.prototype, "getSupervision").mockImplementation(() => { throw new Error("boom"); });
+        try {
+          const raw = await reviewTool().execute(acceptDecision(pid, "rc_missing"), orcCtx(pid));
+          const parsed = JSON.parse(raw) as { error: string; reason: string };
+          expect(parsed.error).toContain("review_project error:");
+          expect(parsed.reason).toBe("internal_error");
+        } finally {
+          spy.mockRestore();
+        }
+      });
     });
   });
 });
