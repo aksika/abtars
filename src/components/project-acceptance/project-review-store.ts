@@ -1009,19 +1009,23 @@ export class ProjectReviewStore {
         });
       };
 
-      return [
+      const facts = [
         ...branch(`attempts >= ?`, "max_attempts", [maxAttempts]),
         ...branch(`deadline_at IS NOT NULL AND deadline_at < ?`, "deadline", [now]),
       ];
-    });
 
-    for (const fact of facts) {
-      logWarn("project-review-store",
-        `review request abandoned rr=${fact.requestId} project=${fact.projectCardId} ` +
-        `generation=${fact.generation} case=${fact.reviewCaseId} ` +
-        `case_status=${fact.reviewCaseStatus} attempts=${fact.attempts} ` +
-        `cause=${fact.cause} last_error=${fact.lastError} live_run=${fact.liveRunId ?? "none"}`);
-    }
+      // Keep the decision log inside the same transaction as both updates. If
+      // the transaction rolls back, no log may claim that these rows were
+      // abandoned.
+      for (const fact of facts) {
+        logWarn("project-review-store",
+          `review request abandoned rr=${fact.requestId} project=${fact.projectCardId} ` +
+          `generation=${fact.generation} case=${fact.reviewCaseId} ` +
+          `case_status=${fact.reviewCaseStatus} attempts=${fact.attempts} ` +
+          `cause=${fact.cause} last_error=${fact.lastError} live_run=${fact.liveRunId ?? "none"}`);
+      }
+      return facts;
+    });
     return facts;
   }
 

@@ -462,6 +462,39 @@ describe("ProjectReviewStore", () => {
       expect(s.db.prepare("SELECT status FROM project_review_requests WHERE id = ?").get(requestId)).toEqual({ status: "abandoned" });
     });
 
+    it("logs the abandonment fact inside the decision transaction", async () => {
+      const logger = await import("../logger.js");
+      const warnSpy = vi.spyOn(logger, "logWarn").mockImplementation(() => {});
+      const { store: s } = setupProject();
+      const requestId = s.insertReviewRequest(123, "case-log-boundary", 1).id;
+      s.db.prepare("UPDATE project_review_requests SET attempts = ? WHERE id = ?").run(5, requestId);
+
+      let inTransaction = false;
+      const transaction = s.db.transaction.bind(s.db);
+      s.db.transaction = <T>(fn: () => T): T => transaction(() => {
+        inTransaction = true;
+        try {
+          return fn();
+        } finally {
+          inTransaction = false;
+        }
+      });
+      warnSpy.mockImplementation(() => {
+        expect(inTransaction).toBe(true);
+      });
+
+      try {
+        const facts = s.abandonExpiredRequests();
+        expect(facts).toHaveLength(1);
+        expect(warnSpy).toHaveBeenCalledWith(
+          "project-review-store",
+          expect.stringContaining(`rr=${requestId}`),
+        );
+      } finally {
+        warnSpy.mockRestore();
+      }
+    });
+
     // #1678: the composed last_error must retain the typed dispatch reason that
     // explains why dispatch kept failing — never overwrite it.
     it("preserves the typed dispatch reason inside the composed last_error", () => {
