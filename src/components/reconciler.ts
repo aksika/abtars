@@ -267,7 +267,9 @@ const CONTRACT_AUTHORING_UNSTARTABLE = "contract_authoring_unstartable";
  * Decision order: unavailable coordinator → started-turn ceiling →
  * consecutive-unstartable ceiling → minimum claim interval → claim.
  * Returns a discriminated result so callers can distinguish a deferred
- * (busy) claim from an owned one.
+ * (busy) claim from an owned one. An existing live authoring row is always
+ * re-entered: that path is an idempotent observation/promotion, not a new
+ * retry claim, and is required for #1675 slot-release wakes.
  */
 function scheduleContractAuthoringOrSettle(generation: ReconcilerGeneration, projectId: number): AuthoringScheduleResult {
   const reviewStore = new ProjectReviewStore();
@@ -294,10 +296,17 @@ function scheduleContractAuthoringOrSettle(generation: ReconcilerGeneration, pro
     return { kind: "settled", blockerClass: CONTRACT_AUTHORING_UNSTARTABLE };
   }
 
-  const lastClaimAt = runStore.lastAuthoringClaimAt(projectId, projectGeneration);
-  if (lastClaimAt && Date.now() - Date.parse(lastClaimAt) < MIN_AUTHORING_CLAIM_INTERVAL_MS) {
-    logWarn(TAG, `Project ${projectId}: authoring claim within interval — deferring (last claim ${lastClaimAt})`);
-    return { kind: "deferred", reason: "claim_interval" };
+  // Keep lightweight coordinator test doubles and older injected stores
+  // compatible; production OrcProjectRunStore always provides this method.
+  const liveRun = runStore.getLiveRunForProject?.(projectId);
+  const hasLiveAuthoringRun = liveRun?.project_generation === projectGeneration
+    && liveRun.intent_kind === "contract_authoring";
+  if (!hasLiveAuthoringRun) {
+    const lastClaimAt = runStore.lastAuthoringClaimAt(projectId, projectGeneration);
+    if (lastClaimAt && Date.now() - Date.parse(lastClaimAt) < MIN_AUTHORING_CLAIM_INTERVAL_MS) {
+      logWarn(TAG, `Project ${projectId}: authoring claim within interval — deferring (last claim ${lastClaimAt})`);
+      return { kind: "deferred", reason: "claim_interval" };
+    }
   }
 
   const result = generation.deps.coordinator.scheduleContractAuthoring(projectId);
@@ -1936,6 +1945,41 @@ export function requestReconcileForProject(cardId: number): void {
   wakeCard(generation, cardId);
 }
 
+/**
+ * #1675: a released global slot can belong to a different project than the
+ * run that is next in line. The ownership event names the releasing project,
+ * but a project that already has a scheduled run may be running on the
+ * Kanban board and therefore absent from the stranded-queued sweep. Re-wake
+ * every currently scheduled owner from the event/startup path so each owner
+ * can perform its own scoped promotion. This is event-driven; it is not a
+ * heartbeat or polling source.
+ */
+function scheduledOrcProjectIds(generation: ReconcilerGeneration): number[] {
+  try {
+    const store = generation.deps.coordinator.getStore();
+    if (typeof store.getLiveRuns !== "function") return [];
+    return [...new Set(
+      store.getLiveRuns()
+        .filter((run) => run.state === "scheduled")
+        .map((run) => run.project_card_id),
+    )].sort((a, b) => a - b);
+  } catch (err) {
+    logWarn(TAG, `Unable to inspect scheduled Orc runs for a slot-free wake: ${err instanceof Error ? err.message : String(err)}`);
+    return [];
+  }
+}
+
+function wakeScheduledOrcProjects(generation: ReconcilerGeneration): void {
+  for (const projectId of scheduledOrcProjectIds(generation)) {
+    requestReconcileForProject(projectId);
+  }
+}
+
+function wakeScheduledOrcProjectsAfterTerminalRoot(generation: ReconcilerGeneration, cardId: number): void {
+  const card = kanbanGetCard(cardId);
+  if (card?.type === "O" && card.parent_id === null) wakeScheduledOrcProjects(generation);
+}
+
 export function retryPendingReviewRequests(): number {
   const generation = activeGeneration;
   if (!generation || generation.phase !== "running") {
@@ -2017,8 +2061,14 @@ export async function startReconciler(deps: ReconcilerDeps): Promise<ReconcilerH
   try {
     // 3. Named Nerve listeners with exact removal functions.
     const onQueued = (cardId: number) => requestReconcileForProject(cardId);
-    const onDone = (cardId: number) => requestReconcileForProject(cardId);
-    const onFailed = (cardId: number) => requestReconcileForProject(cardId);
+    const onDone = (cardId: number) => {
+      requestReconcileForProject(cardId);
+      wakeScheduledOrcProjectsAfterTerminalRoot(generation, cardId);
+    };
+    const onFailed = (cardId: number) => {
+      requestReconcileForProject(cardId);
+      wakeScheduledOrcProjectsAfterTerminalRoot(generation, cardId);
+    };
     nerve.on("card:queued", onQueued);
     nerve.on("card:done", onDone);
     nerve.on("card:failed", onFailed);
@@ -2032,10 +2082,16 @@ export async function startReconciler(deps: ReconcilerDeps): Promise<ReconcilerH
     const onOwnershipReleased = (event: OrcOwnershipReleasedV1): void => {
       if (generation.phase === "starting") {
         generation.pendingProjectWakes.add(event.projectCardId);
+        wakeScheduledOrcProjects(generation);
         return;
       }
-      if (event.intentKind !== "contract_authoring") { requestReconcile(event.projectCardId); return; }
+      if (event.intentKind !== "contract_authoring") {
+        requestReconcile(event.projectCardId);
+        wakeScheduledOrcProjects(generation);
+        return;
+      }
       requestReconcileForProject(event.projectCardId);
+      wakeScheduledOrcProjects(generation);
     };
     generation.disposers.push(deps.coordinator.onOwnershipReleased(onOwnershipReleased));
 
@@ -2064,11 +2120,16 @@ export async function startReconciler(deps: ReconcilerDeps): Promise<ReconcilerH
     // 9. Active-project scan queues into pendingProjectWakes while starting;
     // the flush below runs the quarantine-aware wake path after running.
     const activeIds = [...new Set([...kanbanRunningProjectIds(), ...kanbanStrandedQueuedProjectIds()])];
+    // #1675: a scheduled run may belong to a running root and thus be absent
+    // from both active-project sets. Its owner still needs the startup wake
+    // after boot recovery frees the global slot.
+    const scheduledIds = scheduledOrcProjectIds(generation);
 
     // 10. Running — then flush the deduplicated/sorted union of coordinator
-    // recovery ids, queued startup wakes, and the active-project scan.
+    // recovery ids, queued startup wakes, scheduled Orc owners, and the
+    // active-project scan.
     generation.phase = "running";
-    const wakeIds = [...new Set([...coordinatorRecovered, ...generation.pendingProjectWakes, ...activeIds])].sort((a, b) => a - b);
+    const wakeIds = [...new Set([...coordinatorRecovered, ...generation.pendingProjectWakes, ...scheduledIds, ...activeIds])].sort((a, b) => a - b);
     generation.pendingProjectWakes.clear();
     let count = 0;
     const skipped: number[] = [];

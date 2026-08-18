@@ -186,6 +186,54 @@ describe("#1628 Orc authoring recovery (real stores)", () => {
     expect(runStore.getRun(run1.id)!.state).toBe("released");
   });
 
+  it("#1675: a released slot wakes another project that already has a scheduled run", async () => {
+    const starts: Array<{ projectCardId: number; runId: string }> = [];
+    const coordinator = makeCoordinator(async (ctx: { projectCardId: number; runId: string }) => {
+      starts.push({ projectCardId: ctx.projectCardId, runId: ctx.runId });
+    });
+    const releasingProjectId = await seedProject({ cardStatus: "running" });
+    const queuedProjectId = await seedProject({ cardStatus: "running" });
+    await startGeneration(coordinator);
+    const runStore = new runStoreMod.OrcProjectRunStore();
+
+    await flush();
+    await flush();
+
+    const releasingRun = runStore.getLiveRunForProject(releasingProjectId);
+    const queuedRun = runStore.getLiveRunForProject(queuedProjectId);
+    expect(releasingRun?.state).toBe("dispatching");
+    expect(queuedRun?.state).toBe("scheduled");
+    expect(starts).toEqual([{ projectCardId: releasingProjectId, runId: releasingRun!.id }]);
+
+    // Make the releasing project terminal so its own ownership-release wake
+    // cannot immediately claim the newly free slot again. The other active
+    // project must be reached by the production ownership event.
+    runStore.db.prepare(`
+      UPDATE project_supervision SET state = 'accepted'
+       WHERE project_card_id = ?
+    `).run(releasingProjectId);
+
+    expect(coordinator.releaseOwnedRun({
+      ...starts[0]!,
+      version: 1,
+      runId: releasingRun!.id,
+      projectCardId: releasingProjectId,
+      projectGeneration: releasingRun!.project_generation,
+      ownershipGeneration: releasingRun!.ownership_generation,
+      ownerPeer: releasingRun!.owner_peer,
+      ownerInstanceId: releasingRun!.owner_instance_id,
+      origin: releasingRun!.origin_kind === "peer"
+        ? { kind: "peer", peer: releasingRun!.origin_peer! }
+        : { kind: "local" },
+    } as never, "completed")).toBe(true);
+
+    await flush();
+    await flush();
+
+    expect(runStore.getRun(queuedRun!.id)?.state).toBe("dispatching");
+    expect(starts).toContainEqual({ projectCardId: queuedProjectId, runId: queuedRun!.id });
+  });
+
   it("race 2: boot supersession of an unbound run reclaims the queued root after listener registration", async () => {
     const rootId = await seedProject({ cardStatus: "queued" });
     const runStore = new runStoreMod.OrcProjectRunStore();
