@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { normalize, isSystemEntry, SYSTEM_ACTIONS, formatTaskLabel, isValidTaskId } from "./task-types.js";
+import { normalize, isSystemEntry, SYSTEM_ACTIONS, formatTaskLabel, isValidTaskId, MAX_SCHEDULED_AGENTS } from "./task-types.js";
 import type { ScheduledTask } from "./task-types.js";
 
 const NOW = new Date("2026-07-11T02:00:00Z").getTime();
@@ -330,38 +330,44 @@ describe("normalize + validation", () => {
       expect(r.entry.orchestration).toEqual({ maxAgents: 1 });
     });
 
-    it("accepts explicit maxAgents 4", () => {
-      const r = normalize(baseAgent({ orchestration: { maxAgents: 4 } }), NOW);
+    it("accepts explicit maxAgents 5 (daily-ai 4 lanes + Orc)", () => {
+      const r = normalize(baseAgent({ orchestration: { maxAgents: 5 } }), NOW);
       if (!r.ok) throw new Error(`expected ok: ${r.error}`);
-      expect(r.entry.orchestration).toEqual({ maxAgents: 4 });
+      expect(r.entry.orchestration).toEqual({ maxAgents: 5 });
+    });
+
+    it("accepts explicit maxAgents 6 (the runtime ceiling)", () => {
+      const r = normalize(baseAgent({ orchestration: { maxAgents: 6 } }), NOW);
+      if (!r.ok) throw new Error(`expected ok: ${r.error}`);
+      expect(r.entry.orchestration).toEqual({ maxAgents: 6 });
     });
 
     it.each([
       ["null", null],
       ["array", [1]],
-      ["string", "4"],
+      ["string", "6"],
       ["boolean", true],
       ["fraction", 2.5],
       ["zero", 0],
       ["negative", -1],
-      ["above cap", 5],
       ["NaN", Number.NaN],
     ])("rejects malformed orchestration %s", (_label, value) => {
       const r = normalize(baseAgent({ orchestration: value }), NOW);
       expect(r.ok).toBe(false);
     });
 
-    it("rejects maxAgents above the cap inside an object", () => {
-      const r = normalize(baseAgent({ orchestration: { maxAgents: 5 } }), NOW);
-      expect(r.ok).toBe(false);
+    it("clamps maxAgents above the cap inside an object to the ceiling instead of quarantining", () => {
+      const r = normalize(baseAgent({ orchestration: { maxAgents: 7 } }), NOW);
+      expect(r.ok).toBe(true);
+      if (r.ok) expect(r.entry.orchestration).toEqual({ maxAgents: MAX_SCHEDULED_AGENTS });
     });
 
     it("round-trips a normalized entry through normalize() unchanged", () => {
-      const first = normalize(baseAgent({ orchestration: { maxAgents: 4 } }), NOW);
+      const first = normalize(baseAgent({ orchestration: { maxAgents: 6 } }), NOW);
       if (!first.ok) throw new Error("expected ok");
       const second = normalize(first.entry, NOW);
       if (!second.ok) throw new Error("expected ok");
-      expect(second.entry.orchestration).toEqual({ maxAgents: 4 });
+      expect(second.entry.orchestration).toEqual({ maxAgents: 6 });
     });
 
     it("keeps a legacy production-shaped agent task runnable without orchestration", () => {

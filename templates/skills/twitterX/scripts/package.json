@@ -1,1 +1,6 @@
-{ "type": "module" }
+{
+  "type": "module",
+  "dependencies": {
+    "rettiwt-api": "7.1.3"
+  }
+}

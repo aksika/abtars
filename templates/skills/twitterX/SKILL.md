@@ -60,6 +60,7 @@ node {baseDir}/scripts/abtars-tweet.js --user <handle>
 
 - **Follows:** `~/.abtars/workspace/twitterX/base.follows.json` + `agent.follows.json`
 - **Cookies:** `~/.abtars/secret/x-cookies.json` (encrypted at rest, required for full mode)
+- **Dependency:** `rettiwt-api` (pinned in `scripts/package.json`). Install with: `npm install --prefix ~/.abtars` (or `npm install --prefix ~/.abtars rettiwt-api@7.1.3` on a fresh machine). Requires Node 22+.
 - **Output:** `~/.abtars/workspace/twitterX/output/` (daily JSON reports)
 - **Newsletter:** `~/.abtars/workspace/twitterX/newsletter/AI-Daily-{date}.md` (passed via `--output` when running `--format md`)
 
@@ -78,7 +79,9 @@ Before running full mode commands, decrypt cookies via get_secret tool:
 TWITTER_COOKIES=$(get_secret x-cookies.json) node {baseDir}/scripts/abtars-tweet.js --feed
 ```
 
-If cookies are missing or expired (exit code 2), tell the user — this requires manual browser export.
+If cookies are missing or expired (exit code 2), tell the user — this requires
+manual browser export. Point the human at `COOKIES.md` (same directory) for the
+step-by-step export and storage instructions.
 
 ## Use cases
 
