@@ -246,21 +246,13 @@ export function createSleepHandle(opts: SleepOpts): SleepHandle {
     }
   }
 
-  async function providerPump(): Promise<void> {
-    let ownedLeaseId: string | undefined;
+  async function providerPump(leaseId: string): Promise<void> {
     try {
-      const openResult = await client.sleep.runtime.open("abtars");
-      if (openResult.status !== "ok" || !openResult.leaseId) {
-        logWarn("sleep", `Runtime provider open failed: ${openResult.status}`);
-        return;
-      }
-      ownedLeaseId = openResult.leaseId;
-
       let nextRpcErrors = 0;
-      while (!abortController.signal.aborted && ownedLeaseId) {
+      while (!abortController.signal.aborted) {
         let nextResult: Awaited<ReturnType<AbmindClientLike["sleep"]["runtime"]["next"]>>;
         try {
-          nextResult = await client.sleep.runtime.next(ownedLeaseId, RUNTIME_NEXT_WAIT_MS);
+          nextResult = await client.sleep.runtime.next(leaseId, RUNTIME_NEXT_WAIT_MS);
         } catch (err) {
           // #1603 recovery finding: a transient RPC failure on the long-poll
           // must not kill a healthy cycle — the daemon may simply have had a
@@ -288,7 +280,7 @@ export function createSleepHandle(opts: SleepOpts): SleepHandle {
         const providerDeadlineAt = req.deadline - SLEEP_PROVIDER_CLEANUP_HEADROOM_MS;
         const providerRemainingMs = providerDeadlineAt - Date.now();
         if (providerRemainingMs <= 0) {
-          await terminateOnFailure(ownedLeaseId, req, "provider_timeout", "provider window already exhausted");
+          await terminateOnFailure(leaseId, req, "provider_timeout", "provider window already exhausted");
           break;
         }
 
@@ -311,15 +303,15 @@ export function createSleepHandle(opts: SleepOpts): SleepHandle {
         } catch (err) {
           // spin() itself rejected before/while opening the transport —
           // terminal for the logical step.
-          await terminateOnFailure(ownedLeaseId, req, "provider_failed", (err as Error).message);
+          await terminateOnFailure(leaseId, req, "provider_failed", (err as Error).message);
           break;
         }
         if (spinResult.kind === "timed_out") {
-          await terminateOnFailure(ownedLeaseId, req, "provider_timeout", "deadline reached while awaiting the model");
+          await terminateOnFailure(leaseId, req, "provider_timeout", "deadline reached while awaiting the model");
           break;
         }
         if (spinResult.kind === "failed") {
-          await terminateOnFailure(ownedLeaseId, req, "provider_failed", spinResult.error.message);
+          await terminateOnFailure(leaseId, req, "provider_failed", spinResult.error.message);
           break;
         }
         if (spinResult.value.sessionId && !nightSessionId) nightSessionId = spinResult.value.sessionId;
@@ -329,7 +321,7 @@ export function createSleepHandle(opts: SleepOpts): SleepHandle {
         // defensive check at this external boundary even though the typed
         // facade requires the field.
         if (spinResult.value.result === undefined) {
-          await terminateOnFailure(ownedLeaseId, req, "provider_failed", "spin settled without a semantic result");
+          await terminateOnFailure(leaseId, req, "provider_failed", "spin settled without a semantic result");
           break;
         }
         // #1651 v2 narrows #1611: rejection, timeout and a missing result field
@@ -346,15 +338,15 @@ export function createSleepHandle(opts: SleepOpts): SleepHandle {
         }
 
         const completeResult = await runUntilDeadline(
-          () => client.sleep.runtime.complete(ownedLeaseId!, req.completionId, completion),
+          () => client.sleep.runtime.complete(leaseId, req.completionId, completion),
           settlementDeadlineAt(req.deadline),
         );
         if (completeResult.kind === "timed_out") {
-          await terminateOnFailure(ownedLeaseId, req, "provider_timeout", "completion settlement reached the broker deadline");
+          await terminateOnFailure(leaseId, req, "provider_timeout", "completion settlement reached the broker deadline");
           break;
         }
         if (completeResult.kind === "failed") {
-          await terminateOnFailure(ownedLeaseId, req, "provider_failed", completeResult.error.message);
+          await terminateOnFailure(leaseId, req, "provider_failed", completeResult.error.message);
           break;
         }
         if (completeResult.value.status !== "ok") {
@@ -362,17 +354,17 @@ export function createSleepHandle(opts: SleepOpts): SleepHandle {
           // pump shutdown — nothing authorizes polling for another completion.
           const code = Date.now() >= req.deadline ? "provider_timeout" : "provider_failed";
           quarantineCurrentSession(code);
-          logWarn("sleep", `Completion rejected (${completeResult.value.status}) for ${req.completionId} (run=${req.runId} step=${req.stepId} lease=${ownedLeaseId}) — quarantining session and stopping sleep`);
+          logWarn("sleep", `Completion rejected (${completeResult.value.status}) for ${req.completionId} (run=${req.runId} step=${req.stepId} lease=${leaseId}) — quarantining session and stopping sleep`);
           break;
         }
       }
     } catch (err) {
       logError("sleep", "Runtime provider pump error", err);
     } finally {
-      if (ownedLeaseId) {
-        try { await client.sleep.runtime.close(ownedLeaseId); } catch { /* best effort */ }
-        ownedLeaseId = undefined;
-      }
+      // #1681: the pump owns the handed-off lease — it closes it exactly once
+      // on every terminal path. A close failure is best-effort; the cycle has
+      // already settled.
+      try { await client.sleep.runtime.close(leaseId); } catch { /* best effort */ }
     }
   }
 
@@ -460,69 +452,123 @@ export function createSleepHandle(opts: SleepOpts): SleepHandle {
       settleCompletion(outcome);
     };
 
-    const startPromise = mode === "resume"
-      ? client.sleep.resume(undefined, level)
-      : client.sleep.start(mode, level, fresh);
+    /** #1681: pre-handoff failure/cancellation cleanup — settle the local
+     *  outcome truthfully, restore sleep state, finalize the session, and
+     *  fire onCycleEnd exactly once. Never starts a daemon run. */
+    const finishBeforeRun = (outcome: SleepCycleOutcome["status"], detail: string): void => {
+      settle({ status: outcome, failedSteps: [], report: undefined });
+      cleanup();
+      try { opts.onCycleEnd?.(); } catch (err) { logWarn("sleep", `onCycleEnd callback threw: ${(err as Error).message}`); }
+      logWarn("sleep", `Sleep did not start (${outcome}): ${detail}`);
+    };
 
-    startPromise.then((result: { status: string; runId?: string; reason?: string }) => {
-      if (result.status === "accepted" && result.runId) {
-        currentRunId = result.runId;
-        const failedSteps: string[] = [];
-        const poller = eventPoller(options?.onProgress, failedSteps).catch(() => null);
-        Promise.all([
-          providerPump(),
-          poller,
-        ]).finally(async () => {
-          // #1603: resolve the outcome — the observed cycle_finished event
-          // first, then the daemon's own status (which also carries the
-          // report), then "unknown" when neither is available.
-          const observed = await poller;
-          const terminalSet: ReadonlySet<string> = new Set(["completed", "no_work", "partial", "failed", "cancelled"]);
-          let status: SleepCycleOutcome["status"] = observed && terminalSet.has(observed) ? observed as SleepCycleOutcome["status"] : "unknown";
-          let report: string | undefined;
-          try {
-            const st = await client.sleep.status();
-            if (!observed && st.last?.status) status = st.last.status as SleepCycleOutcome["status"];
-            report = st.last?.report;
-          } catch { /* status unavailable */ }
-          const outcome: SleepCycleOutcome = { status, failedSteps: [...failedSteps], report };
-          // Deliver the report and fire onComplete BEFORE the host's awaited
-          // completion resolves, so the scheduled run settles only after its
-          // side channels are drained. Host callbacks are wrapped so a
-          // throwing host cannot change the outcome.
-          // #1653: exactly-once delivery — degraded outcomes (partial/failed)
-          // go to the Dreamy agent-notice channel, every other report uses the
-          // plain system-event path. The branches are mutually exclusive; the
-          // two APIs share one buffer, so routing a report through both would
-          // duplicate Main context.
-          try {
-            if (outcome.report) {
-              if (outcome.status === "partial" || outcome.status === "failed") {
-                await opts.bufferAgentNotice("dreamy", outcome.report);
-              } else {
-                await opts.bufferSystemEvent(outcome.report);
-              }
+    /** Close a lease acquired during bootstrap. A close failure is observed
+     *  and logged but never hides the original start/open outcome. */
+    const closeOwnedLease = async (leaseId: string): Promise<void> => {
+      try {
+        await client.sleep.runtime.close(leaseId);
+      } catch (err) {
+        logWarn("sleep", `Lease close failed during pre-run cleanup (lease=${leaseId}): ${(err as Error).message}`);
+      }
+    };
+
+    const failureMessage = (err: unknown): string => (err instanceof Error ? err.message : String(err));
+
+    /** #1681: the accepted cycle starts its event poller and provider pump
+     *  together, as before; the pump now owns a lease that was already opened
+     *  by the bootstrap. */
+    const runAcceptedCycle = (runId: string, pump: Promise<void>): void => {
+      currentRunId = runId;
+      const failedSteps: string[] = [];
+      const poller = eventPoller(options?.onProgress, failedSteps).catch(() => null);
+      Promise.all([pump, poller]).finally(async () => {
+        // #1603: resolve the outcome — the observed cycle_finished event
+        // first, then the daemon's own status (which also carries the
+        // report), then "unknown" when neither is available.
+        const observed = await poller;
+        const terminalSet: ReadonlySet<string> = new Set(["completed", "no_work", "partial", "failed", "cancelled"]);
+        let status: SleepCycleOutcome["status"] = observed && terminalSet.has(observed) ? observed as SleepCycleOutcome["status"] : "unknown";
+        let report: string | undefined;
+        try {
+          const st = await client.sleep.status();
+          if (!observed && st.last?.status) status = st.last.status as SleepCycleOutcome["status"];
+          report = st.last?.report;
+        } catch { /* status unavailable */ }
+        const outcome: SleepCycleOutcome = { status, failedSteps: [...failedSteps], report };
+        // Deliver the report and fire onComplete BEFORE the host's awaited
+        // completion resolves, so the scheduled run settles only after its
+        // side channels are drained. Host callbacks are wrapped so a
+        // throwing host cannot change the outcome.
+        // #1653: exactly-once delivery — degraded outcomes (partial/failed)
+        // go to the Dreamy agent-notice channel, every other report uses the
+        // plain system-event path. The branches are mutually exclusive; the
+        // two APIs share one buffer, so routing a report through both would
+        // duplicate Main context.
+        try {
+          if (outcome.report) {
+            if (outcome.status === "partial" || outcome.status === "failed") {
+              await opts.bufferAgentNotice("dreamy", outcome.report);
+            } else {
+              await opts.bufferSystemEvent(outcome.report);
             }
-          } catch (err) { logWarn("sleep", `Report delivery failed: ${(err as Error).message}`); }
-          try {
-            if (outcome.status === "completed" || outcome.status === "partial" || outcome.status === "no_work") opts.onComplete();
-          } catch (err) { logWarn("sleep", `onComplete callback threw: ${(err as Error).message}`); }
-          settle(outcome);
-          cleanup();
-          opts.onCycleEnd?.();
-        });
-      } else {
-        settle({ status: "unknown", failedSteps: [], report: undefined });
+          }
+        } catch (err) { logWarn("sleep", `Report delivery failed: ${(err as Error).message}`); }
+        try {
+          if (outcome.status === "completed" || outcome.status === "partial" || outcome.status === "no_work") opts.onComplete();
+        } catch (err) { logWarn("sleep", `onComplete callback threw: ${(err as Error).message}`); }
+        settle(outcome);
         cleanup();
         opts.onCycleEnd?.();
-        logWarn("sleep", `Sleep not accepted: ${result.status}${result.reason ? ": " + result.reason : ""}`);
+      });
+    };
+
+    // #1681: acquire and validate the runtime-provider lease BEFORE issuing
+    // sleep.start/sleep.resume. The daemon must observe hasProvider true by
+    // the time the first model-backed step can be dispatched. The bootstrap
+    // owns the lease until the daemon accepts a run with a runId; every
+    // pre-handoff exit closes an acquired lease, and only then is the lease
+    // handed to the pump (whose existing terminal finally path closes it).
+    const bootstrap = async (): Promise<void> => {
+      let leaseId: string | undefined;
+      let leaseHandedToPump = false;
+      try {
+        const opened = await client.sleep.runtime.open("abtars");
+        if (opened.status !== "ok" || !opened.leaseId) {
+          finishBeforeRun("unknown", `runtime open failed: ${opened.status}`);
+          return;
+        }
+        leaseId = opened.leaseId;
+
+        // #1681: a cancellation that landed before the daemon start/resume
+        // request is issued must not start a daemon run — close the lease and
+        // settle the local outcome as cancelled.
+        if (abortController.signal.aborted) {
+          await closeOwnedLease(leaseId);
+          leaseId = undefined;
+          finishBeforeRun("cancelled", "cancelled before daemon start");
+          return;
+        }
+
+        const result = mode === "resume"
+          ? await client.sleep.resume(undefined, level)
+          : await client.sleep.start(mode, level, fresh);
+
+        if (result.status !== "accepted" || !result.runId) {
+          await closeOwnedLease(leaseId);
+          leaseId = undefined;
+          finishBeforeRun("unknown", `sleep not accepted: ${result.status}${result.reason ? ": " + result.reason : ""}`);
+          return;
+        }
+
+        leaseHandedToPump = true;
+        runAcceptedCycle(result.runId, providerPump(leaseId));
+      } catch (err) {
+        if (leaseId && !leaseHandedToPump) await closeOwnedLease(leaseId);
+        finishBeforeRun("unknown", failureMessage(err));
       }
-    }).catch((err: unknown) => {
-      settle({ status: "unknown", failedSteps: [], report: undefined });
-      cleanup();
-      opts.onCycleEnd?.();
-      logWarn("sleep", `Sleep start failed: ${(err as Error).message}`);
-    });
+    };
+
+    void bootstrap();
 
     return { status: "accepted", completion };
   }

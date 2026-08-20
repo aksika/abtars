@@ -37,6 +37,7 @@ describe("client-backed sleep handle lifetime (#1381)", () => {
 
   it("manual start calls client.sleep.start with fresh mode", async () => {
     const client = makeFakeClient();
+    client.sleep.runtime.open.mockResolvedValue({ status: "ok", leaseId: "lease-1" });
     client.sleep.start.mockResolvedValue({ status: "accepted", runId: "run-1" });
 
     const handle = createSleepHandle({
@@ -46,12 +47,13 @@ describe("client-backed sleep handle lifetime (#1381)", () => {
 
     const result = handle.startManual({ fresh: true, resume: false });
     expect(result.status).toBe("accepted");
-    expect(client.sleep.start).toHaveBeenCalledWith("manual", "ultimate", true);
     await settle();
+    expect(client.sleep.start).toHaveBeenCalledWith("manual", "ultimate", true);
   });
 
   it("scheduled start calls client.sleep.start with scheduled mode", async () => {
     const client = makeFakeClient();
+    client.sleep.runtime.open.mockResolvedValue({ status: "ok", leaseId: "lease-2" });
     client.sleep.start.mockResolvedValue({ status: "accepted", runId: "run-2" });
 
     const handle = createSleepHandle({
@@ -61,8 +63,8 @@ describe("client-backed sleep handle lifetime (#1381)", () => {
 
     const result = handle.startScheduled();
     expect(result.status).toBe("accepted");
-    expect(client.sleep.start).toHaveBeenCalled();
     await settle();
+    expect(client.sleep.start).toHaveBeenCalled();
   });
 
   it("handle does not call abmind() after construction", async () => {
@@ -70,6 +72,7 @@ describe("client-backed sleep handle lifetime (#1381)", () => {
     const abmindSpy = vi.spyOn(lazy, "abmind");
 
     const client = makeFakeClient();
+    client.sleep.runtime.open.mockResolvedValue({ status: "ok", leaseId: "lease-3" });
     client.sleep.start.mockResolvedValue({ status: "accepted", runId: "run-3" });
 
     const handle = createSleepHandle({
