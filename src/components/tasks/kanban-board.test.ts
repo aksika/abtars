@@ -454,10 +454,10 @@ describe("kanbanSearch (#1298)", () => {
 });
 
 describe("kanban-board #1516 bounded agent orchestration", () => {
-  it("rejects an invalid maxAgents at the write boundary", () => {
-    const id = mod.kanbanEnqueue("Capped", "task", undefined, { type: "O", maxAgents: 5 });
-    expect(id).toBe(0);
-    expect(mod.kanbanList("*")).toHaveLength(0);
+  it("clamps an over-configured maxAgents at the write boundary instead of rejecting the card", () => {
+    const id = mod.kanbanEnqueue("Capped", "task", undefined, { type: "O", maxAgents: 7 });
+    expect(id).toBeGreaterThan(0);
+    expect(mod.kanbanGetCard(id)!.max_agents).toBe(6);
   });
 
   it("admits up to maxAgents-1 concurrent workers and refuses the next", () => {

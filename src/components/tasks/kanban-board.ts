@@ -534,17 +534,21 @@ export function kanbanEnqueue(title: string, source: string, sourceId?: string, 
   const raw = opts?.delivery ?? opts?.deliveryMode ?? "deliver";
   const deliveryMode = raw === "report" ? "deliver" : raw;
   const priority = normalizePriority(opts?.priority);
-  // #1516: validate the durable agent cap at the write boundary.
+  // #1516: clamp the durable agent cap at the write boundary. An over-configured
+  // cap is scaled to the runtime ceiling instead of rejecting the card — the
+  // daily-ai Aug 18 quarantine was caused by config saying 5 while the runtime
+  // capped at 4.
   const maxAgents = opts?.maxAgents;
-  if (maxAgents !== undefined && (!Number.isInteger(maxAgents) || maxAgents < 1 || maxAgents > MAX_SCHEDULED_AGENTS)) {
-    logWarn("kanban", `rejected invalid max_agents=${String(maxAgents)} (must be an integer 1..${MAX_SCHEDULED_AGENTS})`);
+  if (maxAgents !== undefined && (!Number.isInteger(maxAgents) || maxAgents < 1)) {
+    logWarn("kanban", `rejected invalid max_agents=${String(maxAgents)} (must be a positive integer)`);
     return 0;
   }
+  const cappedMaxAgents = maxAgents === undefined ? undefined : Math.min(maxAgents, MAX_SCHEDULED_AGENTS);
   const stmt = d.prepare(
     `INSERT INTO kanban_board (title, source, source_id, priority, type, goal, labels, due_at, parent_id, notes, delivery_mode, blocked_by, chat_id, source_peer, max_agents, delivery_ready)
      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
   );
-  const result = stmt.run(title, source, sourceId ?? null, priority, opts?.type ?? null, opts?.goal ?? null, opts?.labels ?? null, opts?.due_at ?? null, opts?.parent_id ?? null, opts?.notes ?? null, deliveryMode, opts?.blocked_by ?? null, opts?.chatId ?? null, opts?.sourcePeer ?? null, maxAgents ?? null, opts?.deliveryReady === false ? 0 : 1);
+  const result = stmt.run(title, source, sourceId ?? null, priority, opts?.type ?? null, opts?.goal ?? null, opts?.labels ?? null, opts?.due_at ?? null, opts?.parent_id ?? null, opts?.notes ?? null, deliveryMode, opts?.blocked_by ?? null, opts?.chatId ?? null, opts?.sourcePeer ?? null, cappedMaxAgents ?? null, opts?.deliveryReady === false ? 0 : 1);
   const id = Number(result.lastInsertRowid);
   nerve.fire("card:queued", id);
   return id;
