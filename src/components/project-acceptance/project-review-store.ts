@@ -1,8 +1,10 @@
-import { requireTaskDatabase, kanbanTransition, kanbanGetCard, sqliteNow, type TaskDatabase } from "../tasks/kanban-board.js";
+import { requireTaskDatabase, kanbanTransition, sqliteNow, type TaskDatabase } from "../tasks/kanban-board.js";
 import type { ProjectAcceptanceContract } from "./project-contract.js";
 import { logSwarmTrace } from "../swarm-trace.js";
-import { logDebug, logWarn } from "../logger.js";
-import { buildPeerTerminalEvent } from "./peer-terminal-event.js";
+import { logWarn } from "../logger.js";
+import { buildPeerTerminalEvent, type PeerTerminalEvent, type PeerTerminalRecipe } from "./peer-terminal-event.js";
+import { readPeerTerminalIdentity } from "../peer-help/store.js";
+import { loadPeerConfig } from "../peer-config.js";
 import type { ToolExecutionScope } from "../tasks/task-package.js";
 import { ProjectMutationRejectedError, mapProjectAuthorityRejection } from "./review-turn-authority.js";
 import type { ReviewTurnRejection } from "./review-turn-authority.js";
@@ -1065,7 +1067,7 @@ export class ProjectReviewStore {
     maxInvalidProposals: number,
     decision: unknown,
     blockerClass: string,
-    peerEvent: { peer: string; payload: unknown } | undefined,
+    recipe: PeerTerminalRecipe | undefined,
     decisionId: string,
     authority?: ProjectMutationAuthority,
   ): InvalidProposalRecord {
@@ -1090,7 +1092,7 @@ export class ProjectReviewStore {
 
       const now = new Date().toISOString();
       if (request.invalid_proposals >= maxInvalidProposals) {
-        this.settleBlockedInTransaction(cardId, reviewCaseId, decision, blockerClass, peerEvent, decisionId, now, authority);
+        this.settleBlockedInTransaction(cardId, reviewCaseId, decision, blockerClass, recipe, decisionId, now, authority);
         return { kind: "blocked", total: request.invalid_proposals, requestId: request.id, decisionId };
       }
       const incremented = this.db.prepare(`
@@ -1109,7 +1111,7 @@ export class ProjectReviewStore {
         return { kind: "counted", total: updated.invalid_proposals, requestId: request.id };
       }
 
-      this.settleBlockedInTransaction(cardId, reviewCaseId, decision, blockerClass, peerEvent, decisionId, now, authority);
+      this.settleBlockedInTransaction(cardId, reviewCaseId, decision, blockerClass, recipe, decisionId, now, authority);
       return { kind: "blocked", total: updated.invalid_proposals, requestId: request.id, decisionId };
     });
 
@@ -1344,6 +1346,79 @@ export class ProjectReviewStore {
   }
 
   /**
+   * #1680: derive the peer terminal event inside the settlement transaction.
+   * Only a peer-origin root (durable `source = 'peer'`) requires one. A
+   * non-peer root returns null (no outbox row). A peer root fails closed when
+   * there is no unique, matching accepted help identity — the rejection
+   * happens BEFORE any terminal supervision/card mutation so the transaction
+   * rollback leaves the case/request/project retryable. The correlation lookup
+   * and the outbox insert run on this same connection inside this transaction.
+   */
+  private resolveTerminalPeerEventInTransaction(
+    cardId: number,
+    decisionId: string,
+    recipe: PeerTerminalRecipe,
+  ): PeerTerminalEvent | null {
+    const root = this.db.prepare(`SELECT source, source_peer FROM kanban_board WHERE id = ?`)
+      .get(cardId) as { source: string | null; source_peer: string | null } | undefined;
+    if (!root || root.source !== "peer") return null;
+
+    if (!root.source_peer || root.source_peer.length === 0) {
+      throw new ProjectMutationRejectedError(
+        `peer project ${cardId} has no durable source peer`,
+        "peer_terminal_identity_missing",
+      );
+    }
+
+    const identity = readPeerTerminalIdentity(this.db, cardId);
+    if (!identity) {
+      // Distinguish a mismatched identity (an accepted row exists but its
+      // origin peer does not match the card's durable source peer) from a
+      // missing one. Zero rows, duplicate rows, and blank fields are missing.
+      const accepted = this.db.prepare(
+        `SELECT origin_peer FROM peer_help_requests WHERE local_card_id = ? AND state = 'accepted'`
+      ).all(cardId) as Array<{ origin_peer: string }>;
+      const code: ReviewTurnRejection = accepted.length === 1 && accepted[0]!.origin_peer !== root.source_peer
+        ? "peer_terminal_identity_mismatch"
+        : "peer_terminal_identity_missing";
+      throw new ProjectMutationRejectedError(
+        `peer project ${cardId} has no unique matching accepted help identity (${code})`,
+        code,
+      );
+    }
+
+    // The receiver_peer is the RECEIVER's own logical name — the sender of
+    // this event as the requester knows it.
+    let receiverPeer = root.source_peer;
+    try {
+      receiverPeer = loadPeerConfig().self.name;
+    } catch { /* keep source_peer fallback */ }
+
+    return buildPeerTerminalEvent({
+      cardId,
+      decisionId,
+      kind: recipe.kind,
+      summary: recipe.summary,
+      receiverPeer,
+      identity,
+      evidenceSource: recipe.evidenceSource,
+      failureReason: recipe.failureReason,
+    });
+  }
+
+  /** Insert the resolved terminal event into the acceptance outbox (same transaction). */
+  private insertAcceptanceOutboxInTransaction(cardId: number, decisionId: string, event: PeerTerminalEvent, now: string): void {
+    const payload = event.payload && typeof event.payload === "object"
+      ? { ...(event.payload as unknown as Record<string, unknown>), acceptance_id: decisionId }
+      : event.payload;
+    this.db.prepare(`
+      INSERT OR IGNORE INTO project_acceptance_outbox
+        (id, project_card_id, peer, payload_json, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?)
+    `).run(`ao_${decisionId}`, cardId, event.peer, JSON.stringify(payload), now, now);
+  }
+
+  /**
    * Atomically settle an accepted decision: persist decision, set supervision to
    * accepted, and update kanban card to done — all in one transaction.
    * Returns the decision ID. Caller must fire nerve events after commit.
@@ -1353,7 +1428,7 @@ export class ProjectReviewStore {
     reviewCaseId: string,
     decision: unknown,
     synthesis: string,
-    peerEvent?: { peer: string; payload: unknown },
+    recipe?: PeerTerminalRecipe,
     acceptanceId?: string,
     authority?: ProjectMutationAuthority,
   ): { decisionId: string } {
@@ -1365,6 +1440,16 @@ export class ProjectReviewStore {
       this.assertReviewMutationAuthorityInTransaction(cardId, reviewCaseId, authority);
       // Insert decision (idempotent per review case)
       decisionId = this.persistReviewDecisionInTransaction(reviewCaseId, decision, decisionDigest, now, decisionId);
+
+      // #1680: resolve the terminal event before terminal state mutates. A
+      // peer root with no unique matching accepted help identity rejects here
+      // and the whole settlement rolls back.
+      const event = this.resolveTerminalPeerEventInTransaction(cardId, decisionId, {
+        kind: recipe?.kind ?? "completed",
+        summary: recipe?.summary ?? synthesis,
+        evidenceSource: recipe?.evidenceSource,
+        failureReason: recipe?.failureReason,
+      });
 
       // Set supervision to accepted only while the project is live. An abort
       // freezes it in blocked state before cancelling executors, so a late Orc
@@ -1428,15 +1513,8 @@ export class ProjectReviewStore {
         WHERE project_card_id = ? AND generation = ? AND review_case_id = ? AND status IN ('pending', 'dispatched')
       `).run(now, cardId, settledSupervision?.generation ?? 1, reviewCaseId);
 
-      if (peerEvent) {
-        const payload = peerEvent.payload && typeof peerEvent.payload === "object"
-          ? { ...(peerEvent.payload as Record<string, unknown>), acceptance_id: decisionId }
-          : peerEvent.payload;
-        this.db.prepare(`
-          INSERT OR IGNORE INTO project_acceptance_outbox
-            (id, project_card_id, peer, payload_json, created_at, updated_at)
-          VALUES (?, ?, ?, ?, ?, ?)
-        `).run(`ao_${decisionId}`, cardId, peerEvent.peer, JSON.stringify(payload), now, now);
+      if (event) {
+        this.insertAcceptanceOutboxInTransaction(cardId, decisionId, event, now);
       }
     });
 
@@ -1454,14 +1532,14 @@ export class ProjectReviewStore {
     reviewCaseId: string,
     decision: unknown,
     blockerClass: string,
-    peerEvent?: { peer: string; payload: unknown },
+    recipe?: PeerTerminalRecipe,
     decisionId?: string,
     authority?: ProjectMutationAuthority,
   ): { decisionId: string } {
     const settledId = decisionId ?? `rd_block_${cardId}_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
     const now = new Date().toISOString();
 
-    this.db.transaction(() => this.settleBlockedInTransaction(cardId, reviewCaseId, decision, blockerClass, peerEvent, settledId, now, authority));
+    this.db.transaction(() => this.settleBlockedInTransaction(cardId, reviewCaseId, decision, blockerClass, recipe, settledId, now, authority));
 
     logSwarmTrace({ event: "project_blocked", project: cardId, reviewCase: reviewCaseId, decision: settledId, reason: blockerClass });
 
@@ -1552,7 +1630,7 @@ export class ProjectReviewStore {
     reviewCaseId: string,
     decision: unknown,
     blockerClass: string,
-    peerEvent: { peer: string; payload: unknown } | undefined,
+    recipe: PeerTerminalRecipe | undefined,
     settledId: string,
     now: string,
     authority?: ProjectMutationAuthority,
@@ -1560,6 +1638,22 @@ export class ProjectReviewStore {
     this.assertReviewMutationAuthorityInTransaction(cardId, reviewCaseId, authority);
     const decisionDigest = `sd_blk_${cardId}_${reviewCaseId}_${Date.now()}`;
     settledId = this.persistReviewDecisionInTransaction(reviewCaseId, decision, decisionDigest, now, settledId);
+
+    // #1680: resolve the terminal event before terminal state mutates. A peer
+    // root with no unique matching accepted help identity rejects here and the
+    // whole settlement rolls back. A non-peer root resolves to null (no outbox).
+    // Auto-derive a failed event when the caller supplied no recipe so a blocked
+    // peer-origin root always terminates the requester's contribution.
+    const event = this.resolveTerminalPeerEventInTransaction(cardId, settledId, {
+      kind: recipe?.kind ?? "failed",
+      summary: recipe?.summary ?? `Project blocked: ${blockerClass}`,
+      evidenceSource: recipe?.evidenceSource,
+      failureReason: recipe?.failureReason ?? (
+        typeof (decision as { reason?: unknown })?.reason === "string"
+          ? (decision as { reason: string }).reason
+          : undefined
+      ),
+    });
 
     const state = authority
       ? this.db.prepare(`
@@ -1615,36 +1709,10 @@ export class ProjectReviewStore {
 
     // #1618: a failed terminal event row lands in the same transaction that
     // wins the blocked settlement — duplicate settlement cannot create a
-    // second row (outbox is UNIQUE per project_card_id).
-    // #1630: auto-derive the failed terminal event when the caller did not
-    // supply one, so a blocked peer-origin root always terminates the
-    // requester's contribution. An explicitly supplied rich event always wins.
-    let effectivePeerEvent = peerEvent;
-    if (!effectivePeerEvent) {
-      effectivePeerEvent = buildPeerTerminalEvent({
-        cardId,
-        decisionId: settledId,
-        kind: "failed",
-        summary: `Project blocked: ${blockerClass}`,
-        failureReason: typeof (decision as { reason?: unknown })?.reason === "string"
-          ? (decision as { reason: string }).reason
-          : undefined,
-      });
-      if (!effectivePeerEvent) {
-        if (kanbanGetCard(cardId)?.source_peer) {
-          logDebug("project-review-store", `auto-derived terminal event unavailable for peer project ${cardId}`);
-        }
-      }
-    }
-    if (effectivePeerEvent) {
-      const payload = effectivePeerEvent.payload && typeof effectivePeerEvent.payload === "object"
-        ? { ...(effectivePeerEvent.payload as Record<string, unknown>), acceptance_id: settledId }
-        : effectivePeerEvent.payload;
-      this.db.prepare(`
-        INSERT OR IGNORE INTO project_acceptance_outbox
-          (id, project_card_id, peer, payload_json, created_at, updated_at)
-        VALUES (?, ?, ?, ?, ?, ?)
-      `).run(`ao_${settledId}`, cardId, effectivePeerEvent.peer, JSON.stringify(payload), now, now);
+    // second row (outbox is UNIQUE per project_card_id). Non-peer roots have
+    // no event and no outbox row.
+    if (event) {
+      this.insertAcceptanceOutboxInTransaction(cardId, settledId, event, now);
     }
   }
 

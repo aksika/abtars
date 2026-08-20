@@ -406,6 +406,41 @@ describe("PeerHelpStore", () => {
       store.reserve("kp", "req1", "hash1");
       expect(store.getPublicStatus("kp", "req1", "wrong_ref")).toBeNull();
     });
+
+    it("#1680 emits an ISO-8601 updated_at that passes the strict requester parser", async () => {
+      const { store } = await makeStore();
+      store.reserve("kp", "req1", "hash1");
+      const { local_card_id } = store.acceptGeneric(
+        { originPeer: "kp", requestId: "req1", requestHash: "hash1" },
+        { goal: "do x", title: "[help:kp] do x", sourcePeer: "kp", sourceId: "req1", deliveryMode: "silent" },
+        { version: 1, request_id: "req1", decision: "accepted", contribution_ref: "help_abc" },
+      );
+      db.prepare("UPDATE kanban_board SET status = 'done', result_summary = 'done' WHERE id = ?").run(local_card_id);
+
+      const s = store.getPublicStatus("kp", "req1", "help_abc");
+      expect(s).not.toBeNull();
+      // SQLite's datetime('now') storage representation is 'YYYY-MM-DD HH:MM:SS'.
+      const stored = db.prepare("SELECT updated_at FROM peer_help_requests WHERE origin_peer = 'kp' AND request_id = 'req1'").get() as { updated_at: string };
+      expect(stored.updated_at).toMatch(/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/);
+      // The public boundary emits ISO-8601 with timezone.
+      expect(s!.updated_at).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/);
+
+      const { parseHelpStatus } = await import("./contract.js");
+      const parsed = parseHelpStatus(s);
+      expect(parsed.ok).toBe(true);
+    });
+
+    it("#1680 rejects a malformed persisted timestamp rather than emitting a contract-violating response", async () => {
+      const { store } = await makeStore();
+      store.reserve("kp", "req1", "hash1");
+      store.acceptGeneric(
+        { originPeer: "kp", requestId: "req1", requestHash: "hash1" },
+        { goal: "do x", title: "[help:kp] do x", sourcePeer: "kp", sourceId: "req1", deliveryMode: "silent" },
+        { version: 1, request_id: "req1", decision: "accepted", contribution_ref: "help_abc" },
+      );
+      db.prepare("UPDATE peer_help_requests SET updated_at = 'not-a-timestamp' WHERE origin_peer = 'kp' AND request_id = 'req1'").run();
+      expect(() => store.getPublicStatus("kp", "req1", "help_abc")).toThrow(/invalid persisted help timestamp/);
+    });
   });
 
   describe("contribution_ref UNIQUE constraint", () => {

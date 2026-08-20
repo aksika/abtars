@@ -65,6 +65,42 @@ describe("ProjectReviewStore", () => {
     s.db.prepare(`INSERT INTO kanban_board (${cols.join(", ")}) VALUES (${cols.map(() => "?").join(", ")})`).run(...vals);
   }
 
+  /** #1680: a peer-origin root card with a durable source_peer. */
+  function insertPeerKanbanCard(s: ProjectReviewStore, cardId: number, status: string, extra: Record<string, string | number | null> = {}, sourcePeer = "kp"): void {
+    const cols = ["id", "title", "source", "source_peer", "status", "type", "goal", "created_at", "updated_at", ...Object.keys(extra)];
+    const vals: unknown[] = [cardId, `p${cardId}`, "peer", sourcePeer, status, "O", "goal", new Date().toISOString().replace("T", " ").slice(0, 19), new Date().toISOString().replace("T", " ").slice(0, 19), ...Object.values(extra)];
+    s.db.prepare(`INSERT INTO kanban_board (${cols.join(", ")}) VALUES (${cols.map(() => "?").join(", ")})`).run(...vals);
+  }
+
+  /** #1680: migrate the receiver help ledger so the identity resolver has a home. */
+  function migratePeerHelpTable(s: ProjectReviewStore): void {
+    s.db.exec(`
+      CREATE TABLE IF NOT EXISTS peer_help_requests (
+        origin_peer TEXT NOT NULL,
+        request_id TEXT NOT NULL,
+        request_hash TEXT NOT NULL,
+        state TEXT NOT NULL CHECK(state IN ('pending','accepted','declined','deferred','unknown')),
+        contribution_ref TEXT,
+        local_card_id INTEGER,
+        local_run_id TEXT,
+        response_json TEXT,
+        withdrawn_at TEXT,
+        created_at TEXT NOT NULL DEFAULT (datetime('now')),
+        updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+        PRIMARY KEY (origin_peer, request_id),
+        UNIQUE (contribution_ref)
+      )
+    `);
+  }
+
+  /** #1680: seed the accepted receiver help identity keyed by the local card. */
+  function seedPeerHelp(s: ProjectReviewStore, cardId: number, originPeer: string, requestId: string, contributionRef: string): void {
+    s.db.prepare(`
+      INSERT INTO peer_help_requests (origin_peer, request_id, request_hash, state, contribution_ref, local_card_id, response_json, created_at, updated_at)
+      VALUES (?, ?, ?, 'accepted', ?, ?, '{}', datetime('now'), datetime('now'))
+    `).run(originPeer, requestId, `hash_${requestId}`, contributionRef, cardId);
+  }
+
   describe("root contracts", () => {
     it("inserts and retrieves a contract", () => {
       const c = makeContract();
@@ -601,100 +637,122 @@ describe("ProjectReviewStore", () => {
   });
 
   describe("#1618 terminal event outbox", () => {
-    it("settleAcceptance with a peer event creates exactly one completed outbox row", () => {
+    it("settleAcceptance with a peer recipe creates exactly one completed outbox row", () => {
       const { store: s, contract: c } = setupProject();
       const cid = c.project_card_id;
-      insertKanbanCard(s, cid, "running");
+      insertPeerKanbanCard(s, cid, "running");
+      migratePeerHelpTable(s);
+      seedPeerHelp(s, cid, "kp", `r_${cid}`, `ref_${cid}`);
       const caseId = `case-accept-${cid}`;
-      const event = { peer: "kp", payload: { event_id: `accept_1_${cid}`, kind: "completed", request_id: "r1", contribution_ref: "c1" } };
-      s.settleAcceptance(cid, caseId, { action: "accept", synthesis: "ok" }, "ok", event, `rd_settle_${cid}`);
+      s.settleAcceptance(cid, caseId, { action: "accept", synthesis: "ok" }, "ok", { kind: "completed", summary: "ok" }, `rd_settle_${cid}`);
 
       const rows = s.db.prepare("SELECT id, project_card_id, peer, payload_json FROM project_acceptance_outbox WHERE project_card_id = ?").all(cid) as any[];
       expect(rows).toHaveLength(1);
       expect(rows[0]!.peer).toBe("kp");
       const payload = JSON.parse(rows[0]!.payload_json) as Record<string, unknown>;
       expect(payload.kind).toBe("completed");
+      expect(payload.request_id).toBe(`r_${cid}`);
+      expect(payload.contribution_ref).toBe(`ref_${cid}`);
       expect(payload.acceptance_id).toBe(`rd_settle_${cid}`);
     });
 
-    it("settleBlocked with a peer event creates a FAILED row and never a completed one", () => {
+    it("settleBlocked with a peer recipe creates a FAILED row and never a completed one", () => {
       const { store: s, contract: c } = setupProject();
       const cid = c.project_card_id;
-      insertKanbanCard(s, cid, "running");
+      insertPeerKanbanCard(s, cid, "running");
+      migratePeerHelpTable(s);
+      seedPeerHelp(s, cid, "kp", `r_${cid}`, `ref_${cid}`);
       const caseId = `case-block-${cid}`;
-      const event = { peer: "kp", payload: { event_id: `fail_1_${cid}`, kind: "failed", request_id: "r1", contribution_ref: "c1", summary: "blocked: blocker" } };
-      s.settleBlocked(cid, caseId, { action: "blocked", reason: "x" }, "blocker", event, `rd_block_${cid}`);
+      s.settleBlocked(cid, caseId, { action: "blocked", reason: "x" }, "blocker", { kind: "failed", summary: "blocked: blocker" }, `rd_block_${cid}`);
 
       const rows = s.db.prepare("SELECT payload_json FROM project_acceptance_outbox WHERE project_card_id = ?").all(cid) as any[];
       expect(rows).toHaveLength(1);
       const payload = JSON.parse(rows[0]!.payload_json) as Record<string, unknown>;
       expect(payload.kind).toBe("failed");
+      expect(payload.request_id).toBe(`r_${cid}`);
+      expect(payload.contribution_ref).toBe(`ref_${cid}`);
       expect(payload.acceptance_id).toBe(`rd_block_${cid}`);
     });
 
     it("duplicate settlement cannot create a second outbox row", () => {
       const { store: s, contract: c } = setupProject();
       const cid = c.project_card_id;
-      insertKanbanCard(s, cid, "running");
+      insertPeerKanbanCard(s, cid, "running");
+      migratePeerHelpTable(s);
+      seedPeerHelp(s, cid, "kp", `r_${cid}`, `ref_${cid}`);
       const caseId = `case-dup-${cid}`;
-      const event = { peer: "kp", payload: { kind: "completed", request_id: "r1", contribution_ref: "c1" } };
-      s.settleAcceptance(cid, caseId, { action: "accept", synthesis: "ok" }, "ok", event, `rd_dup_${cid}`);
-      expect(() => s.settleAcceptance(cid, `case-dup2-${cid}`, { action: "accept", synthesis: "ok" }, "ok", event, `rd_dup2_${cid}`)).toThrow();
+      s.settleAcceptance(cid, caseId, { action: "accept", synthesis: "ok" }, "ok", { kind: "completed", summary: "ok" }, `rd_dup_${cid}`);
+      expect(() => s.settleAcceptance(cid, `case-dup2-${cid}`, { action: "accept", synthesis: "ok" }, "ok", { kind: "completed", summary: "ok" }, `rd_dup2_${cid}`)).toThrow();
 
       const rows = s.db.prepare("SELECT COUNT(*) as cnt FROM project_acceptance_outbox WHERE project_card_id = ?").get(cid) as any;
       expect(rows.cnt).toBe(1);
     });
 
-    // #1630 Task 2 verify: an explicitly supplied rich peerEvent always wins
-    // over auto-derivation — its projection evidence must survive untouched.
-    it("an explicit rich peerEvent is not overwritten by auto-derivation and its evidence survives", () => {
+    // #1680: the recipe's summary and failure reason survive; the projection is
+    // rebuilt from the durable identity, never from mutable card notes.
+    it("a recipe's summary and failure reason survive derivation", () => {
       const { store: s, contract: c } = setupProject();
       const cid = c.project_card_id;
-      insertKanbanCard(s, cid, "running");
+      insertPeerKanbanCard(s, cid, "running");
+      migratePeerHelpTable(s);
+      seedPeerHelp(s, cid, "kp", `r_${cid}`, `ref_${cid}`);
       const caseId = `case-rich-${cid}`;
-      const event = {
-        peer: "kp",
-        payload: {
-          version: 1,
-          event_id: `fail_rich_${cid}`,
-          kind: "failed",
-          request_id: "r1",
-          contribution_ref: "c1",
-          summary: "explicit rich summary",
-          projection: {
-            schema_version: 1,
-            outcome: "failed",
-            summary: "explicit rich projection",
-            evidence: [{ id: "e1", kind: "check", summary: "observed", observed_by: "kp" }],
-            artifacts: [],
-            provenance: { receiver_peer: "kp", receiver_project_ref: "project_1", acceptance_id: "rd_rich", accepted_at: new Date().toISOString() },
-          },
-        },
-      };
-      s.settleBlocked(cid, caseId, { action: "blocked", reason: "x" }, "rich_blocker", event, `rd_rich_${cid}`);
+      s.settleBlocked(
+        cid, caseId, { action: "blocked", reason: "rich failure reason" }, "rich_blocker",
+        { kind: "failed", summary: "explicit rich summary", failureReason: "rich failure reason" },
+        `rd_rich_${cid}`,
+      );
 
       const rows = s.db.prepare("SELECT payload_json FROM project_acceptance_outbox WHERE project_card_id = ?").all(cid) as any[];
       expect(rows).toHaveLength(1);
       const payload = JSON.parse(rows[0]!.payload_json) as any;
       expect(payload.summary).toBe("explicit rich summary");
-      expect(payload.projection.summary).toBe("explicit rich projection");
-      expect(payload.projection.evidence).toEqual([{ id: "e1", kind: "check", summary: "observed", observed_by: "kp" }]);
+      expect(payload.projection.summary).toContain("explicit rich summary");
+      expect(payload.projection.summary).toContain("rich failure reason");
       expect(payload.acceptance_id).toBe(`rd_rich_${cid}`);
     });
 
     it("rollback on a decision conflict leaves no outbox row", () => {
       const { store: s, contract: c } = setupProject();
       const cid = c.project_card_id;
-      insertKanbanCard(s, cid, "running");
+      insertPeerKanbanCard(s, cid, "running");
+      migratePeerHelpTable(s);
+      seedPeerHelp(s, cid, "kp", `r_${cid}`, `ref_${cid}`);
       const caseId = `case-roll-${cid}`;
-      const event = { peer: "kp", payload: { kind: "failed", request_id: "r1", contribution_ref: "c1" } };
-      s.settleBlocked(cid, caseId, { action: "blocked", reason: "x" }, "blocker", event, `rd_roll_${cid}`);
+      const recipe = { kind: "failed" as const, summary: "blocked: blocker" };
+      s.settleBlocked(cid, caseId, { action: "blocked", reason: "x" }, "blocker", recipe, `rd_roll_${cid}`);
       // same review case again → UNIQUE(review_case_id) on decisions rolls the
       // whole transaction back, including the outbox insert
-      expect(() => s.settleBlocked(cid, caseId, { action: "blocked", reason: "y" }, "blocker", event, `rd_roll2_${cid}`)).toThrow();
+      expect(() => s.settleBlocked(cid, caseId, { action: "blocked", reason: "y" }, "blocker", recipe, `rd_roll2_${cid}`)).toThrow();
 
       const rows = s.db.prepare("SELECT COUNT(*) as cnt FROM project_acceptance_outbox WHERE project_card_id = ?").get(cid) as any;
       expect(rows.cnt).toBe(1);
+    });
+
+    it("#1680 a peer root with no accepted help identity fails closed and rolls back", () => {
+      const { store: s, contract: c } = setupProject();
+      const cid = c.project_card_id;
+      insertPeerKanbanCard(s, cid, "running");
+      migratePeerHelpTable(s);
+      const caseId = `case-failclosed-${cid}`;
+
+      expect(() => s.settleBlocked(cid, caseId, { action: "blocked", reason: "x" }, "blocker", { kind: "failed", summary: "s" }, `rd_fc_${cid}`))
+        .toThrow(/peer_terminal_identity_missing/);
+      expect(s.getSupervision(cid)!.state).toBe("executing");
+      expect(s.hasDecisionForCase(caseId)).toBe(false);
+      expect(s.db.prepare("SELECT COUNT(*) as cnt FROM project_acceptance_outbox WHERE project_card_id = ?").get(cid) as any).toMatchObject({ cnt: 0 });
+    });
+
+    it("#1680 a non-peer root settles with no outbox row", () => {
+      const { store: s, contract: c } = setupProject();
+      const cid = c.project_card_id;
+      insertKanbanCard(s, cid, "running"); // source = agent
+      migratePeerHelpTable(s);
+      const caseId = `case-nonpeer-${cid}`;
+      s.settleBlocked(cid, caseId, { action: "blocked", reason: "x" }, "blocker", { kind: "failed", summary: "s" }, `rd_np_${cid}`);
+
+      expect(s.getSupervision(cid)!.state).toBe("blocked");
+      expect(s.db.prepare("SELECT COUNT(*) as cnt FROM project_acceptance_outbox WHERE project_card_id = ?").get(cid) as any).toMatchObject({ cnt: 0 });
     });
   });
 
@@ -704,7 +762,9 @@ describe("ProjectReviewStore", () => {
     function setupQueuedProject(status: "queued" | "running", extra: Record<string, string | number | null> = {}) {
       const { store: s, contract: c } = setupProject();
       const cid = c.project_card_id;
-      insertKanbanCard(s, cid, status, extra);
+      insertPeerKanbanCard(s, cid, status, extra);
+      migratePeerHelpTable(s);
+      seedPeerHelp(s, cid, "kp", `r_${cid}`, `ref_${cid}`);
       s.stateTransition(cid, ["executing"], "reviewing");
       const { id: caseId } = s.insertReviewCase(cid, 1, 1, { v: 1 }, "digest");
       s.insertReviewRequest(cid, caseId, 1);
@@ -713,9 +773,9 @@ describe("ProjectReviewStore", () => {
 
     it("queued acceptance terminalizes the card to done with synthesis, cleared stale fields, and one journal row", () => {
       const { store: s, cardId, caseId } = setupQueuedProject("queued", { error: "stale failed-turn", next_retry_at: future(), retry_count: 2 });
-      const event = { peer: "kp", payload: { kind: "completed", request_id: "r1", contribution_ref: "c1" } };
+      const recipe = { kind: "completed" as const, summary: "synthesis text" };
 
-      s.settleAcceptance(cardId, caseId, { action: "accept", synthesis: "ok" }, "synthesis text", event, `rd_settle_${cardId}`);
+      s.settleAcceptance(cardId, caseId, { action: "accept", synthesis: "ok" }, "synthesis text", recipe, `rd_settle_${cardId}`);
 
       const card = s.db.prepare("SELECT status, result_summary, error, next_retry_at, completed_at FROM kanban_board WHERE id = ?").get(cardId) as any;
       expect(card.status).toBe("done");
@@ -737,9 +797,9 @@ describe("ProjectReviewStore", () => {
 
     it("queued blocking terminalizes the card to failed with the blocker error and clears the retry date", () => {
       const { store: s, cardId, caseId } = setupQueuedProject("queued", { next_retry_at: future(), retry_count: 1 });
-      const event = { peer: "kp", payload: { kind: "failed", request_id: "r1", contribution_ref: "c1" } };
+      const recipe = { kind: "failed" as const, summary: "blocked: blocker" };
 
-      s.settleBlocked(cardId, caseId, { action: "blocked", reason: "x" }, "blocker", event, `rd_block_${cardId}`);
+      s.settleBlocked(cardId, caseId, { action: "blocked", reason: "x" }, "blocker", recipe, `rd_block_${cardId}`);
 
       const card = s.db.prepare("SELECT status, error, next_retry_at, completed_at FROM kanban_board WHERE id = ?").get(cardId) as any;
       expect(card.status).toBe("failed");
@@ -772,9 +832,9 @@ describe("ProjectReviewStore", () => {
       const { store: s, cardId, caseId } = setupQueuedProject("queued");
       // card escapes to done outside settlement (e.g. a concurrent writer)
       s.db.prepare("UPDATE kanban_board SET status = 'done', updated_at = datetime('now') WHERE id = ?").run(cardId);
-      const event = { peer: "kp", payload: { kind: "completed", request_id: "r1", contribution_ref: "c1" } };
+      const recipe = { kind: "completed" as const, summary: "syn" };
 
-      expect(() => s.settleAcceptance(cardId, caseId, { action: "accept", synthesis: "ok" }, "syn", event, `rd_lost_${cardId}`))
+      expect(() => s.settleAcceptance(cardId, caseId, { action: "accept", synthesis: "ok" }, "syn", recipe, `rd_lost_${cardId}`))
         .toThrow(/kanban settlement lost: observed done/);
 
       expect(s.hasDecisionForCase(caseId)).toBe(false);

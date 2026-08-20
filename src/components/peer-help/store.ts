@@ -1,5 +1,65 @@
 import type { HelpDecision, PeerHelpResponseV1, PeerHelpStatusV1 } from "./contract.js";
 import { generateContributionRef } from "./contract.js";
+import type { TaskDatabase } from "../tasks/kanban-board.js";
+
+/**
+ * #1680: durable receiver terminal identity. Resolved from the accepted help
+ * ledger, never from mutable card notes. Card notes remain operator/execution
+ * metadata and must never authorize protocol identity.
+ */
+export interface PeerTerminalIdentity {
+  requesterPeer: string;
+  requestId: string;
+  contributionRef: string;
+}
+
+/**
+ * #1680: exact accepted-help lookup keyed by the receiver's local card id.
+ * Returns a value only when exactly one accepted row exists whose contribution
+ * reference is non-empty and whose origin peer matches the card's durable
+ * source peer. Zero rows, multiple rows, blank fields, or a mismatched origin
+ * peer are invalid for a peer root and yield `undefined`.
+ *
+ * Database-only and read-only: constructs no store, migrates nothing, and is
+ * safe to call inside the caller's transaction.
+ */
+export function readPeerTerminalIdentity(
+  db: TaskDatabase,
+  localCardId: number,
+): PeerTerminalIdentity | undefined {
+  const rows = db.prepare(`
+    SELECT p.origin_peer, p.request_id, p.contribution_ref, b.source_peer
+      FROM peer_help_requests p
+      JOIN kanban_board b ON b.id = p.local_card_id
+     WHERE p.local_card_id = ?
+       AND p.state = 'accepted'
+       AND p.contribution_ref IS NOT NULL AND p.contribution_ref != ''
+  `).all(localCardId) as Array<{
+    origin_peer: string | null;
+    request_id: string | null;
+    contribution_ref: string;
+    source_peer: string | null;
+  }>;
+  if (rows.length !== 1) return undefined;
+  const row = rows[0]!;
+  if (!row.origin_peer || !row.request_id || !row.contribution_ref) return undefined;
+  if (row.origin_peer !== row.source_peer) return undefined;
+  return {
+    requesterPeer: row.origin_peer,
+    requestId: row.request_id,
+    contributionRef: row.contribution_ref,
+  };
+}
+
+/** #1680: SQLite UTC text (`datetime('now')`) → ISO-8601 at the public boundary. */
+function sqliteUtcToIso(value: string): string {
+  const candidate = /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/.test(value)
+    ? `${value.replace(" ", "T")}Z`
+    : value;
+  const time = Date.parse(candidate);
+  if (!Number.isFinite(time)) throw new Error("invalid persisted help timestamp");
+  return new Date(time).toISOString();
+}
 
 export type HelpRowState = "pending" | "accepted" | "declined" | "deferred" | "unknown";
 
@@ -289,7 +349,7 @@ export class PeerHelpStore {
       request_id: requestId,
       contribution_ref: contributionRef,
       state,
-      updated_at: row.updated_at,
+      updated_at: sqliteUtcToIso(row.updated_at),
     };
   }
 

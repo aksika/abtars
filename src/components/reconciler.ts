@@ -28,6 +28,7 @@ import { ReviewCaseAssembler } from "./project-acceptance/project-review-case.js
 import { readProjectCriterionCoverage, coverageSignature } from "./project-acceptance/project-criterion-coverage.js";
 import { delegatedCriterionIds } from "./project-acceptance/project-contract.js";
 import { OrcProjectRunStore } from "./orc-project/orc-project-run-store.js";
+import { hasLiveContributionForProject } from "./peer-help/contribution-store.js";
 import { REVIEW_REQUEST_ABANDONED } from "./project-acceptance/project-review-contract.js";
 import { readEntries } from "./tasks/task-store.js";
 import { readState } from "./tasks/task-state-store.js";
@@ -577,6 +578,7 @@ type OwnerInspection =
   | "repair"
   | "executing_terminal_children"
   | "orc_claim"
+  | "contribution_wait"
   | "none";
 
 type BranchResult = "transitioned" | "owned" | "none";
@@ -676,6 +678,17 @@ function inspectProjectOwnership(projectId: number, supervision: ProjectSupervis
     const liveRun = new OrcProjectRunStore().getLiveRunForProject(projectId);
     if (liveRun && liveRun.project_generation === supervision.generation) return "orc_claim";
   } catch { /* fail-closed: no live-claim observation */ }
+
+  // #1680: after every existing owner and a live Orc claim, an executing root
+  // with a live accepted/running contribution and a non-terminal proxy waits.
+  // This owner is a no-op — it never polls, never dispatches a Worker or Orc,
+  // never schedules a timer, and never mutates contribution state. The peer's
+  // terminal event atomically settles the ledger/proxy and wakes the parent.
+  try {
+    if (supervision.state === "executing" && hasLiveContributionForProject(reviewStore.db, projectId)) {
+      return "contribution_wait";
+    }
+  } catch { /* fail closed to no new owner; existing containment/logging applies */ }
 
   return "none";
 }
@@ -1336,6 +1349,12 @@ async function reconcileProject(generation: ReconcilerGeneration, projectId: num
         return;
       case "orc_claim":
         return; // existing live Orc row owns the project
+      case "contribution_wait":
+        // #1680: waiting on the peer's terminal event. No status call, no
+        // Worker dispatch, no Orc claim, no timer — the terminal event reducer
+        // settles the ledger/proxy and wakes the parent into terminal-child
+        // review. Repeated resync wakes are idempotent no-ops.
+        return;
       case "review":
         await handleReviewState(generation, projectId, supervision, reviewStore);
         return;

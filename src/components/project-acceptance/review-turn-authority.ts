@@ -42,6 +42,8 @@ export type ReviewTurnRejection =
   | "review_case_unreadable"          // snapshot unparseable or structurally invalid
   | "review_ownership_stale"          // a supervision/ownership CAS was lost
   | "settlement_lost"                 // durable kanban settlement race
+  | "peer_terminal_identity_missing"  // peer root with no unique accepted help identity
+  | "peer_terminal_identity_mismatch" // accepted help identity does not match the card's source peer
   | "internal_error";                 // unclassified throw
 
 /**

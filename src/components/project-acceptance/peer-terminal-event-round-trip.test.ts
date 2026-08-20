@@ -6,6 +6,7 @@ import { vi } from "vitest";
 import { kanbanEnqueue, requireTaskDatabase } from "../tasks/kanban-board.js";
 import { ProjectReviewStore } from "./project-review-store.js";
 import { ContributionStore } from "../peer-help/contribution-store.js";
+import { PeerHelpStore } from "../peer-help/store.js";
 import {
   parseContributionEvent,
   contributionEventDigest,
@@ -15,6 +16,7 @@ import {
   INVALID_CONTRACT_PROPOSALS_EXHAUSTED,
   REVIEW_REQUEST_ABANDONED,
 } from "./project-review-contract.js";
+import { ProjectMutationRejectedError } from "./review-turn-authority.js";
 
 const TEST_HOME = join(tmpdir(), `ab-peer-terminal-roundtrip-${process.pid}-${Date.now()}`);
 
@@ -31,6 +33,8 @@ const noopKanban = {
   kanbanFail: () => {},
 };
 
+const noopNerve = { fire: () => {} };
+
 afterEach(() => {
   if (existsSync(TEST_HOME)) rmSync(TEST_HOME, { recursive: true, force: true });
 });
@@ -44,22 +48,36 @@ afterEach(() => {
  */
 function setup(requestId: string, contributionRef: string): { cardId: number; store: ProjectReviewStore } {
   mkdirSync(TEST_HOME, { recursive: true });
+  // #1680: the escaped receiver card had its notes replaced with non-JSON
+  // text. The fixture recreates that exact shape BEFORE acceptance so the
+  // settlement proves it derives the terminal event from the durable help
+  // ledger, never from card notes.
   const cardId = kanbanEnqueue("peer project", "peer", undefined, {
     type: "O",
     sourcePeer: "kp",
-    notes: JSON.stringify({ request_id: requestId, contribution_ref: contributionRef }),
+    notes: "{not-json",
   });
   const store = new ProjectReviewStore();
   store.initializeSupervision(cardId, `contract_${cardId}`, "awaiting_contract");
+  // Migrate the receiver help ledger so the durable identity lookup has a home.
+  new PeerHelpStore(requireTaskDatabase(), noopKanban as never, noopNerve as never);
   return { cardId, store };
 }
 
-function seedAcceptedContribution(requestId: string, contributionRef: string): void {
+function seedAcceptedContribution(cardId: number, requestId: string, contributionRef: string): void {
+  // Requester-side ledger (what the requester will reduce).
   const contributions = new ContributionStore(requireTaskDatabase(), noopKanban as never);
   const reserve = contributions.reserve("kp", requestId, `hash_${requestId}`, null, null, null);
   expect(reserve.status).toBe("new");
   contributions.adoptContributionRef("kp", requestId, contributionRef);
   expect(contributions.transitionToAccepted("kp", requestId)).toBe(true);
+
+  // Receiver-side accepted help identity keyed by the local card (what the
+  // settlement resolver reads). #1680: the correlation authority.
+  requireTaskDatabase().prepare(`
+    INSERT INTO peer_help_requests (origin_peer, request_id, request_hash, state, contribution_ref, local_card_id, response_json, created_at, updated_at)
+    VALUES ('kp', ?, ?, 'accepted', ?, ?, '{}', datetime('now'), datetime('now'))
+  `).run(requestId, `hash_${requestId}`, contributionRef, cardId);
 }
 
 function applyOutboxEvent(cardId: number, requestId: string, contributionRef: string, expectedReasonPart: string): void {
@@ -93,7 +111,7 @@ describe("blocked settlement → requester round trip (#1630)", () => {
     const requestId = "req_invalid_proposals";
     const contributionRef = "ref_invalid_proposals";
     const { cardId } = setup(requestId, contributionRef);
-    seedAcceptedContribution(requestId, contributionRef);
+    seedAcceptedContribution(cardId, requestId, contributionRef);
 
     const { getOrcTools } = await import("../transport/orc-tools.js");
     const defineTool = getOrcTools().find(t => t.name === "define_project_contract");
@@ -124,7 +142,7 @@ describe("blocked settlement → requester round trip (#1630)", () => {
     const requestId = "req_abandoned";
     const contributionRef = "ref_abandoned";
     const { cardId, store } = setup(requestId, contributionRef);
-    seedAcceptedContribution(requestId, contributionRef);
+    seedAcceptedContribution(cardId, requestId, contributionRef);
 
     // Exactly the decision payload and constant the reconciler's abandoned
     // review path passes to settleBlocked (reconciler.ts handleReviewState).
@@ -152,6 +170,7 @@ describe("blocked settlement → requester round trip (#1630)", () => {
 
   it("outbox UNIQUE(project_card_id) guard keeps exactly one row under a second insert", () => {
     const { cardId, store } = setup("req_dup", "ref_dup");
+    seedAcceptedContribution(cardId, "req_dup", "ref_dup");
     store.settleBlocked(cardId, `case_dup_${cardId}`, { action: "blocked", reason: "r" }, "dup_block");
     const pending = store.getPendingAcceptanceOutbox(100);
     expect(pending.filter(r => r.project_card_id === cardId).length).toBe(1);
@@ -166,5 +185,101 @@ describe("blocked settlement → requester round trip (#1630)", () => {
       VALUES (?, ?, ?, ?, ?, ?)
     `).run(`ao_stray_${cardId}`, cardId, existing.peer, existing.payload_json, new Date().toISOString(), new Date().toISOString());
     expect(store.getPendingAcceptanceOutbox(100).filter(r => r.project_card_id === cardId).length).toBe(1);
+  });
+
+  it("#1680 accepted settlement on a peer card with overwritten non-JSON notes commits one supervision/card transition and one correlated outbox row", () => {
+    const requestId = "req_accept";
+    const contributionRef = "ref_accept";
+    const { cardId, store } = setup(requestId, contributionRef);
+    seedAcceptedContribution(cardId, requestId, contributionRef);
+
+    // The review/card transition runs inside the same transaction as the
+    // outbox insert; the notes are corrupt and must be irrelevant.
+    store.settleAcceptance(
+      cardId,
+      `case_accept_${cardId}`,
+      { action: "accept", synthesis: "peer finished" },
+      "peer finished",
+      { kind: "completed", summary: "peer finished" },
+      `rd_settle_accept_${cardId}`,
+    );
+
+    const supervision = store.getSupervision(cardId);
+    expect(supervision?.state).toBe("accepted");
+    const card = requireTaskDatabase().prepare("SELECT status FROM kanban_board WHERE id = ?").get(cardId) as { status: string };
+    expect(card.status).toBe("done");
+
+    const pending = store.getPendingAcceptanceOutbox(100);
+    const rows = pending.filter(r => r.project_card_id === cardId);
+    expect(rows).toHaveLength(1);
+    const raw = JSON.parse(rows[0]!.payload_json) as any;
+    expect(raw.kind).toBe("completed");
+    expect(raw.request_id).toBe(requestId);
+    expect(raw.contribution_ref).toBe(contributionRef);
+    expect(raw.acceptance_id).toContain("rd_settle_accept");
+  });
+
+  it("#1680 fail-closed: peer settlement with no accepted help identity rolls back decision, supervision, card, and outbox", () => {
+    const { cardId, store } = setup("req_missing", "ref_missing");
+
+    let thrown: unknown;
+    try {
+      store.settleBlocked(cardId, `case_missing_${cardId}`, { action: "blocked", reason: "r" }, "block_class");
+    } catch (err) {
+      thrown = err;
+    }
+    expect(thrown).toBeInstanceOf(ProjectMutationRejectedError);
+    expect((thrown as ProjectMutationRejectedError).rejection).toBe("peer_terminal_identity_missing");
+
+    const supervision = store.getSupervision(cardId);
+    expect(supervision?.state).toBe("awaiting_contract"); // not terminal
+    const card = requireTaskDatabase().prepare("SELECT status FROM kanban_board WHERE id = ?").get(cardId) as { status: string };
+    expect(card.status).toBe("queued"); // not terminal
+    expect(store.getPendingAcceptanceOutbox(100).filter(r => r.project_card_id === cardId)).toHaveLength(0);
+    expect(store.hasDecisionForCase(`case_missing_${cardId}`)).toBe(false);
+  });
+
+  it("#1680 fail-closed: a mismatched accepted identity rejects with peer_terminal_identity_mismatch", () => {
+    const { cardId, store } = setup("req_mismatch", "ref_mismatch");
+    // Seed an accepted row whose origin peer differs from the card's source_peer.
+    requireTaskDatabase().prepare(`
+      INSERT INTO peer_help_requests (origin_peer, request_id, request_hash, state, contribution_ref, local_card_id, response_json, created_at, updated_at)
+      VALUES ('molty', 'req_mismatch', 'h', 'accepted', 'ref_mismatch', ?, '{}', datetime('now'), datetime('now'))
+    `).run(cardId);
+
+    let thrown: unknown;
+    try {
+      store.settleBlocked(cardId, `case_mismatch_${cardId}`, { action: "blocked", reason: "r" }, "block_class");
+    } catch (err) {
+      thrown = err;
+    }
+    expect(thrown).toBeInstanceOf(ProjectMutationRejectedError);
+    expect((thrown as ProjectMutationRejectedError).rejection).toBe("peer_terminal_identity_mismatch");
+
+    const supervision = store.getSupervision(cardId);
+    expect(supervision?.state).toBe("awaiting_contract");
+    expect(store.getPendingAcceptanceOutbox(100).filter(r => r.project_card_id === cardId)).toHaveLength(0);
+  });
+
+  it("#1680 fail-closed: duplicate accepted identities reject as missing (no unique mapping)", () => {
+    const { cardId, store } = setup("req_dup2", "ref_dup2");
+    requireTaskDatabase().prepare(`
+      INSERT INTO peer_help_requests (origin_peer, request_id, request_hash, state, contribution_ref, local_card_id, response_json, created_at, updated_at)
+      VALUES ('kp', 'req_dup2', 'h', 'accepted', 'ref_dup2', ?, '{}', datetime('now'), datetime('now'))
+    `).run(cardId);
+    requireTaskDatabase().prepare(`
+      INSERT INTO peer_help_requests (origin_peer, request_id, request_hash, state, contribution_ref, local_card_id, response_json, created_at, updated_at)
+      VALUES ('kp', 'req_dup2b', 'h', 'accepted', 'ref_dup2b', ?, '{}', datetime('now'), datetime('now'))
+    `).run(cardId);
+
+    let thrown: unknown;
+    try {
+      store.settleBlocked(cardId, `case_dup2_${cardId}`, { action: "blocked", reason: "r" }, "block_class");
+    } catch (err) {
+      thrown = err;
+    }
+    expect(thrown).toBeInstanceOf(ProjectMutationRejectedError);
+    expect((thrown as ProjectMutationRejectedError).rejection).toBe("peer_terminal_identity_missing");
+    expect(store.getPendingAcceptanceOutbox(100).filter(r => r.project_card_id === cardId)).toHaveLength(0);
   });
 });

@@ -1,5 +1,31 @@
 import type { PeerContributionEventV1 } from "./contract.js";
 import { randomUUID } from "node:crypto";
+import type { TaskDatabase } from "../tasks/kanban-board.js";
+
+/**
+ * #1680: read-only durable predicate over the contribution ledger and its
+ * proxy card. True only when the project has an accepted/running contribution
+ * whose proxy card is still queued or running — the requester is waiting for
+ * the peer's terminal event and must not spawn a post-contract Orc
+ * continuation. Database-only, constructs no store, duplicates no SQL, and
+ * fails closed to false when the tables/read are unavailable.
+ */
+export function hasLiveContributionForProject(db: TaskDatabase, projectCardId: number): boolean {
+  try {
+    const row = db.prepare(`
+      SELECT 1
+        FROM peer_contributions AS pc
+        JOIN kanban_board AS proxy ON proxy.id = pc.proxy_card_id
+       WHERE pc.project_card_id = ?
+         AND pc.state IN ('accepted', 'running')
+         AND proxy.status IN ('queued', 'running')
+       LIMIT 1
+    `).get(projectCardId);
+    return row !== undefined;
+  } catch {
+    return false;
+  }
+}
 
 export type ContributionState =
   | "pending" | "accepted" | "running"

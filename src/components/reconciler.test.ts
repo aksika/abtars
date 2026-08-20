@@ -258,6 +258,12 @@ vi.mock("./orc-project/orc-project-run-store.js", () => ({
   }),
 }));
 
+const hasLiveContributionForProjectMock = vi.fn().mockReturnValue(false);
+vi.mock("./peer-help/contribution-store.js", () => ({
+  ContributionStore: vi.fn(),
+  hasLiveContributionForProject: hasLiveContributionForProjectMock,
+}));
+
 // ── Import after mocks ─────────────────────────────────────────────────────────
 
 let mod: typeof import("./reconciler.js");
@@ -367,6 +373,8 @@ async function swapTestGeneration(
   kanbanPromoteDueRetryMock.mockReturnValue(false);
   getLiveRunForProjectMock.mockReset();
   getLiveRunForProjectMock.mockReturnValue(undefined);
+  hasLiveContributionForProjectMock.mockReset();
+  hasLiveContributionForProjectMock.mockReturnValue(false);
   spawnChildMock.mockReset();
   mod = await import("./reconciler.js");
   activeTestHandle = await startTestGeneration();
@@ -1445,6 +1453,89 @@ describe("Reconciler — #1546 scheduled-root driver", () => {
     await flush();
 
     expect(claims).toHaveLength(1);
+  });
+
+  it("#1680 waits under contribution_wait when an accepted contribution proxy is live — repeated wakes create no continuation", async () => {
+    const claims: Array<{ projectCardId: number; goal: string }> = [];
+    await fakeCoordinator(claims);
+    setupExecutingProject({ children: [{ ...makeCard({ id: 2, status: "running", type: "contribution" }), parent_id: 1 }] });
+    hasLiveContributionForProjectMock.mockReturnValue(true);
+
+    mod.requestReconcile(1);
+    await flush();
+    await new Promise(r => setTimeout(r, 10));
+    await flush();
+
+    expect(claims).toHaveLength(0); // no post-contract Orc continuation
+    expect(kanbanFailMock).not.toHaveBeenCalled(); // no terminal settlement
+
+    // Repeated resync wakes remain idempotent no-ops.
+    mod.requestReconcile(1);
+    await flush();
+    mod.requestReconcile(1);
+    await flush();
+    await new Promise(r => setTimeout(r, 10));
+    await flush();
+    expect(claims).toHaveLength(0);
+  });
+
+  it("#1680 a live Orc row still owns its turn over contribution_wait", async () => {
+    const claims: Array<{ projectCardId: number; goal: string }> = [];
+    await fakeCoordinator(claims);
+    setupExecutingProject({ children: [{ ...makeCard({ id: 2, status: "running", type: "contribution" }), parent_id: 1 }] });
+    hasLiveContributionForProjectMock.mockReturnValue(true);
+    getLiveRunForProjectMock.mockReturnValue({ project_generation: 1, id: "or_live" });
+
+    mod.requestReconcile(1);
+    await flush();
+    await new Promise(r => setTimeout(r, 10));
+    await flush();
+
+    // The live Orc wins before contribution_wait — no continuation claim.
+    expect(claims).toHaveLength(0);
+  });
+
+  it("#1680 applying the terminal event advances the next owner to review — no post-contract continuation", async () => {
+    const claims: Array<{ projectCardId: number; goal: string }> = [];
+    await swapTestGeneration({
+      coordinator: {
+        getStore: makeFakeRunStore,
+        scheduleScheduledProject: (projectCardId: number, goal: string) => {
+          claims.push({ projectCardId, goal });
+          return { kind: "claimed" as const, context: { runId: `or_${projectCardId}`, projectCardId } };
+        },
+        scheduleReview: (projectCardId: number, _gen: number, _caseId: string) => {
+          claims.push({ projectCardId, goal: "review" });
+          return { kind: "claimed" as const, context: { runId: "or_review", projectCardId } };
+        },
+      } as never,
+    });
+    setupExecutingProject({ children: [{ ...makeCard({ id: 2, status: "running", type: "contribution" }), parent_id: 1 }] });
+    hasLiveContributionForProjectMock.mockReturnValue(true);
+    reviewStoreMock.stateTransition.mockReturnValue(true);
+
+    // While the contribution is live the reconciler waits — no continuation claim.
+    mod.requestReconcile(1);
+    await flush();
+    await new Promise(r => setTimeout(r, 10));
+    await flush();
+    expect(claims.filter(c => c.goal !== "review")).toHaveLength(0);
+
+    // The terminal event settles the ledger and terminalizes the proxy (the
+    // reducer's job — simulated here by the durable-state change).
+    hasLiveContributionForProjectMock.mockReturnValue(false);
+    kanbanGetChildrenMock.mockReturnValue([{ ...makeCard({ id: 2, status: "done", type: "contribution" }), parent_id: 1 }]);
+
+    mod.requestReconcile(1);
+    await flush();
+    await new Promise(r => setTimeout(r, 10));
+    await flush();
+
+    // The next owner is terminal-child review — review cases/requests are
+    // created and the review is dispatched; no post-contract continuation.
+    expect(reviewStoreMock.stateTransition).toHaveBeenCalledWith(1, ["executing", "review_ready"], "review_ready", { review_round: 1 }, { authority: { projectCardId: 1, projectGeneration: 1, scheduledRunId: "run-1" } });
+    expect(claims.filter(c => c.goal !== "review")).toHaveLength(0);
+    expect(claims.filter(c => c.goal === "review").length).toBeGreaterThan(0);
   });
 
   it("never settles on a busy claim — the existing live run owns the project", async () => {

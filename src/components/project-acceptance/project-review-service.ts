@@ -3,7 +3,6 @@ import type { ProjectMutationAuthority } from "./project-review-store.js";
 import { ProjectReviewValidator, type ProjectReviewDecisionV1 } from "./project-review-validator.js";
 import type { ValidationIssue } from "./project-review-contract.js";
 import type { ReviewCaseSnapshot } from "./project-review-case.js";
-import { buildPeerTerminalEvent } from "./peer-terminal-event.js";
 import { nerve } from "../nerve.js";
 import { randomUUID } from "node:crypto";
 import { logAndSwallow } from "../log-and-swallow.js";
@@ -25,7 +24,14 @@ export async function drainAcceptanceOutbox(): Promise<number> {
   let sent = 0;
   for (const row of pending) {
     try {
-      await broker.sendRequest(row.peer, "help.event.v1", JSON.parse(row.payload_json));
+      // #1680: transport request resolution is NOT delivery success. Only the
+      // requester's literal `{ ok: true }` application ACK authorizes `sent_at`.
+      // A negative, malformed, or timed-out response keeps the row pending.
+      const ack = await broker.sendRequest<unknown>(row.peer, "help.event.v1", JSON.parse(row.payload_json));
+      const isRecord = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null;
+      if (!isRecord(ack) || ack.ok !== true) {
+        throw new Error("help_event_not_applied");
+      }
       if (store.markAcceptanceOutboxSent(row.id)) sent++;
     } catch (err) {
       store.markAcceptanceOutboxAttempt(row.id, err instanceof Error ? err.message : String(err));
@@ -165,7 +171,7 @@ export class ProjectReviewService {
       const cardId = caseRow.project_card_id;
       const decisionId = `rd_block_${cardId}_${Date.now()}_${randomUUID().slice(0, 8)}`;
       const summary = `Project blocked after ${MAX_INVALID_PROPOSALS} invalid proposals: review_protocol_exhausted; no valid semantic decision was produced`;
-      const peerEvent = buildPeerTerminalEvent({ cardId, decisionId, kind: "failed", summary, evidenceSource: caseSnapshot });
+      const recipe = { kind: "failed" as const, summary, evidenceSource: caseSnapshot };
       const exhaustionDecision = {
         action: "blocked",
         blocker_class: REVIEW_PROTOCOL_EXHAUSTED,
@@ -177,7 +183,7 @@ export class ProjectReviewService {
         MAX_INVALID_PROPOSALS,
         { ...exhaustionDecision, invalid_proposals: MAX_INVALID_PROPOSALS },
         REVIEW_PROTOCOL_EXHAUSTED,
-        peerEvent,
+        recipe,
         decisionId,
         authority,
       );
@@ -210,13 +216,13 @@ export class ProjectReviewService {
         const deliveredSynthesis = renderAcceptedSynthesis(decision, caseSnapshot);
         // Atomic settlement: decision + supervision + kanban in one transaction
         const acceptanceId = `rd_settle_${cardId}_${Date.now()}_${randomUUID().slice(0, 8)}`;
-        const peerEvent = buildPeerTerminalEvent({ cardId, decisionId: acceptanceId, kind: "completed", summary: deliveredSynthesis, evidenceSource: caseSnapshot });
+        const recipe = { kind: "completed" as const, summary: deliveredSynthesis, evidenceSource: caseSnapshot };
         const { decisionId } = this.store.settleAcceptance(
           cardId,
           decision.review_case_id,
           decision,
           deliveredSynthesis,
-          peerEvent,
+          recipe,
           acceptanceId,
           authority,
         );
@@ -259,14 +265,14 @@ export class ProjectReviewService {
         // #1618: a blocked receiver settlement emits a FAILED terminal event —
         // never false success — in the same transaction as the settlement.
         const decisionId = `rd_block_${cardId}_${Date.now()}_${randomUUID().slice(0, 8)}`;
-        const peerEvent = buildPeerTerminalEvent({ cardId, decisionId, kind: "failed", summary: `Project blocked: ${blocker.blocker_class}`, evidenceSource: caseSnapshot });
+        const recipe = { kind: "failed" as const, summary: `Project blocked: ${blocker.blocker_class}`, evidenceSource: caseSnapshot };
         // Atomic settlement: decision + supervision + kanban in one transaction
         const { decisionId: settledId } = this.store.settleBlocked(
           cardId,
           decision.review_case_id,
           decision,
           blocker.blocker_class,
-          peerEvent,
+          recipe,
           decisionId,
           authority,
         );

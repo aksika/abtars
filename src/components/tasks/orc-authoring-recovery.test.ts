@@ -364,6 +364,30 @@ describe("#1628 Orc authoring recovery (real stores)", () => {
       sourcePeer: "kp",
       notes: { request_id: "req_peer_1", contribution_ref: "ref_peer_1" },
     });
+    // #1680: the receiver's accepted help ledger is the correlation authority.
+    // Seed the durable identity row; the settlement resolver must NOT read the
+    // (mutable) card notes.
+    requireTaskDatabase().exec(`
+      CREATE TABLE IF NOT EXISTS peer_help_requests (
+        origin_peer TEXT NOT NULL,
+        request_id TEXT NOT NULL,
+        request_hash TEXT NOT NULL,
+        state TEXT NOT NULL,
+        contribution_ref TEXT,
+        local_card_id INTEGER,
+        local_run_id TEXT,
+        response_json TEXT,
+        withdrawn_at TEXT,
+        created_at TEXT NOT NULL DEFAULT (datetime('now')),
+        updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+        PRIMARY KEY (origin_peer, request_id),
+        UNIQUE (contribution_ref)
+      )
+    `);
+    requireTaskDatabase().prepare(`
+      INSERT INTO peer_help_requests (origin_peer, request_id, request_hash, state, contribution_ref, local_card_id, response_json, created_at, updated_at)
+      VALUES ('kp', 'req_peer_1', 'hash_peer_1', 'accepted', 'ref_peer_1', ?, '{}', datetime('now'), datetime('now'))
+    `).run(rootId);
     await startGeneration(makeCoordinator(async () => {}));
     const old = new Date(Date.now() - 600_000).toISOString();
     seedRun(rootId, 1, { started: true, createdAt: old });

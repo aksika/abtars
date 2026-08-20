@@ -163,9 +163,11 @@ describe("Peer round trip — production-shaped two-node (#1618)", () => {
         // the sender, from the requester's perspective, is the receiver's own
         // logical name ("molty") — row.peer is the receiver's view of the
         // requester, not the wire identity the requester sees
-        await requesterReducerService.handleContributionEvent("molty", payload);
-        if (reviewStore.markAcceptanceOutboxSent(row.id)) sent++;
-      } catch {}
+        // #1680: only the requester's literal `{ ok: true }` ACK authorizes
+        // `sent_at`; the drain returns that actual result, never a synthetic one.
+        const result = await requesterReducerService.handleContributionEvent("molty", payload);
+        if (result.ok === true && reviewStore.markAcceptanceOutboxSent(row.id)) sent++;
+      } catch { /* transport/rejection — row retained for the next drain */ }
     }
     return sent;
   }
@@ -248,7 +250,7 @@ describe("Peer round trip — production-shaped two-node (#1618)", () => {
     const decisionId = `rd_settle_${receiverCard.id}_t1`;
     reviewStore.settleAcceptance(
       receiverCard.id, `case_${receiverCard.id}`, { action: "accept", synthesis: "peer finished" },
-      "peer finished", { peer: "kp", payload: terminalEventPayload("completed", decisionId, "peer finished") }, decisionId,
+      "peer finished", { kind: "completed", summary: "peer finished" }, decisionId,
     );
     const supAfter = receiver.db.prepare("SELECT state FROM project_supervision WHERE project_card_id = ?").get(receiverCard.id) as any;
     expect(supAfter.state).toBe("accepted");
@@ -292,7 +294,7 @@ describe("Peer round trip — production-shaped two-node (#1618)", () => {
     const receiverCard = receiver.db.prepare("SELECT * FROM kanban_board WHERE source = 'peer' AND type = 'O'").get() as any;
 
     const decisionId = `rd_block_${receiverCard.id}_t1`;
-    reviewStore.settleBlocked(receiverCard.id, `case_${receiverCard.id}`, { action: "blocked", blocker: { blocker_class: "task_failed" } }, "task_failed", { peer: "kp", payload: terminalEventPayload("failed", decisionId, "Project blocked: task_failed", "r2") }, decisionId);
+    reviewStore.settleBlocked(receiverCard.id, `case_${receiverCard.id}`, { action: "blocked", blocker: { blocker_class: "task_failed" } }, "task_failed", { kind: "failed", summary: "Project blocked: task_failed" }, decisionId);
     expect(await drainReceiverOutbox()).toBe(1);
 
     const ledger = contributionStore.getContribution("molty", "r2");
@@ -319,8 +321,8 @@ describe("Peer round trip — production-shaped two-node (#1618)", () => {
     const receiverCard = receiver.db.prepare("SELECT * FROM kanban_board WHERE source = 'peer' AND type = 'O'").get() as any;
     acceptedRef = delegated.contributionRef;
     const decisionId = `rd_settle_${receiverCard.id}_t1`;
+    reviewStore.settleAcceptance(receiverCard.id, `case_${receiverCard.id}`, { action: "accept", synthesis: "peer finished" }, "peer finished", { kind: "completed", summary: "peer finished" }, decisionId);
     const event = terminalEventPayload("completed", decisionId, "peer finished", "r3");
-    reviewStore.settleAcceptance(receiverCard.id, `case_${receiverCard.id}`, { action: "accept", synthesis: "peer finished" }, "peer finished", { peer: "kp", payload: event }, decisionId);
 
     // disconnect once: delivery fails, row retained
     const failedDelivery = await requesterReducerService.handleContributionEvent("kp", event);

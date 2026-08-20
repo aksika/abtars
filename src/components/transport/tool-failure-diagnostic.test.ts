@@ -230,7 +230,8 @@ describe("parseToolResultToDiagnostic", () => {
       "project_generation_mismatch", "review_case_unknown",
       "review_case_project_mismatch", "review_case_generation_mismatch",
       "review_case_not_open", "review_case_unreadable", "review_ownership_stale",
-      "settlement_lost", "internal_error", "peer_relay_blocked", "peer_sandbox",
+      "settlement_lost", "peer_terminal_identity_missing", "peer_terminal_identity_mismatch",
+      "internal_error", "peer_relay_blocked", "peer_sandbox",
     ];
     for (const code of codes) {
       const result = JSON.stringify({ error: `detail for ${code}`, reason: code });

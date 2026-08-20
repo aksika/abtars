@@ -596,6 +596,9 @@ describe("#1618 acceptance outbox drain retry", () => {
     ProjectReviewStore = mod.ProjectReviewStore;
     await import("./project-review-service.js");
     store = new ProjectReviewStore();
+    // The task database is a module-level singleton shared across tests in this
+    // describe; clear durable rows so each test starts from an empty outbox.
+    store.db.prepare("DELETE FROM project_acceptance_outbox").run();
   });
 
   afterEach(() => {
@@ -609,7 +612,7 @@ describe("#1618 acceptance outbox drain retry", () => {
     return svcMod.drainAcceptanceOutbox();
   }
 
-  it("retains the row on broker failure and marks it sent only after success", async () => {
+  it("retains the row on broker failure and marks it sent only after a positive application ACK", async () => {
     const cardId = 91001;
     store.db.prepare(
       `INSERT INTO project_acceptance_outbox (id, project_card_id, peer, payload_json, created_at, updated_at)
@@ -623,11 +626,45 @@ describe("#1618 acceptance outbox drain retry", () => {
     expect(afterFailure.attempts).toBe(1);
     expect(afterFailure.last_error).toContain("network down");
 
+    // #1680: `undefined` is NOT a success — only literal `{ ok: true }` is.
     broker.sendRequest.mockResolvedValueOnce(undefined);
+    expect(await drain()).toBe(0);
+    const afterUndefined = store.db.prepare("SELECT sent_at, attempts, last_error FROM project_acceptance_outbox WHERE id = 'ao_1'").get() as any;
+    expect(afterUndefined.sent_at).toBeNull();
+    expect(afterUndefined.attempts).toBe(2);
+    expect(afterUndefined.last_error).toBe("help_event_not_applied");
+
+    broker.sendRequest.mockResolvedValueOnce({ ok: true });
     expect(await drain()).toBe(1);
     const afterSuccess = store.db.prepare("SELECT sent_at FROM project_acceptance_outbox WHERE id = 'ao_1'").get() as any;
     expect(afterSuccess.sent_at).not.toBeNull();
     expect(broker.sendRequest).toHaveBeenCalledWith("kp", "help.event.v1", expect.objectContaining({ kind: "completed" }));
+  });
+
+  it("#1680: negative, malformed, and non-object ACKs retain the row and increment attempts", async () => {
+    const cases: Array<{ label: string; ack: unknown }> = [
+      { label: "ok:false", ack: { ok: false } },
+      { label: "non-object", ack: "nope" },
+      { label: "null", ack: null },
+      { label: "array", ack: [{ ok: true }] },
+      { label: "missing ok", ack: { sent: true } },
+    ];
+    let seq = 0;
+    for (const c of cases) {
+      const cardId = 91010 + (++seq);
+      const id = `ao_case_${cardId}`;
+      store.db.prepare(
+        `INSERT INTO project_acceptance_outbox (id, project_card_id, peer, payload_json, created_at, updated_at)
+         VALUES (?, ?, 'kp', ?, datetime('now'), datetime('now'))`,
+      ).run(id, cardId, JSON.stringify({ event_id: `accept_${id}`, kind: "completed" }));
+
+      broker.sendRequest.mockResolvedValueOnce(c.ack);
+      expect(await drain()).toBe(0);
+      const row = store.db.prepare("SELECT sent_at, attempts, last_error FROM project_acceptance_outbox WHERE id = ?").get(id) as any;
+      expect(row.sent_at, `${c.label}: sent_at must stay null`).toBeNull();
+      expect(row.attempts, `${c.label}: attempts must increment`).toBe(1);
+      expect(row.last_error).toBe("help_event_not_applied");
+    }
   });
 
   it("does not resend a row already marked sent", async () => {
@@ -637,7 +674,7 @@ describe("#1618 acceptance outbox drain retry", () => {
        VALUES ('ao_2', ?, 'kp', ?, datetime('now'), datetime('now'), datetime('now'))`,
     ).run(cardId, JSON.stringify({ event_id: "accept_2", kind: "completed" }));
 
-    broker.sendRequest.mockResolvedValueOnce(undefined);
+    broker.sendRequest.mockResolvedValueOnce({ ok: true });
     expect(await drain()).toBe(0);
     expect(broker.sendRequest).not.toHaveBeenCalled();
   });
