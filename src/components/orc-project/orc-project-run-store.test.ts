@@ -262,6 +262,31 @@ describe("OrcProjectRunStore", () => {
     expect(store.getRun(claim.context.runId)?.state).toBe("released");
     expect(store.getRun(claim.context.runId)?.outcome).toBe("completed");
   });
+
+  it("withCurrentRun invokes the callback on a valid current context and blocks stale-generation work (#1679)", () => {
+    seedProject(store, 42);
+    const claim = store.claimIntent(makeInput({ projectCardId: 42 }), "local_peer", "inst_1");
+    expect(claim.kind).toBe("claimed");
+    if (claim.kind !== "claimed") return;
+
+    let invoked = 0;
+    const result = store.withCurrentRun(claim.context, (row) => {
+      invoked += 1;
+      return `goal=${row.goal}`;
+    });
+    expect(result).toEqual({ ok: true, value: "goal=Define acceptance contract for project #1" });
+    expect(invoked).toBe(1);
+
+    // after the supervision generation advances, the callback must never run
+    store.db.prepare("UPDATE project_supervision SET generation = 2 WHERE project_card_id = 42").run();
+    let invokedStale = 0;
+    const stale = store.withCurrentRun(claim.context, () => {
+      invokedStale += 1;
+      return "MUTATION";
+    });
+    expect(stale).toEqual({ ok: false, reason: "project_generation_mismatch" });
+    expect(invokedStale).toBe(0);
+  });
 });
 
 // ── #1628: authoring attempt counts ───────────────────────────────────────────

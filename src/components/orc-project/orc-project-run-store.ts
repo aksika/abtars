@@ -9,6 +9,34 @@ import type {
 } from "./orc-project-contracts.js";
 import { deriveIntentKey } from "./orc-project-contracts.js";
 
+/**
+ * #1679: the read-side owner fence, defined once. Every method composes these
+ * facts in its own precedence order; session/execution use the optional-context
+ * semantics (absent passes, present must equal the bound row value).
+ */
+interface OrcOwnerFenceFacts {
+  readonly ownerInstanceMatches: boolean;
+  readonly projectCardMatches: boolean;
+  readonly projectGenerationMatches: boolean;
+  readonly ownershipGenerationMatches: boolean;
+  readonly sessionMatches: boolean;
+  readonly executionMatches: boolean;
+}
+
+function evaluateOwnerFence(
+  row: OrcProjectRunRow,
+  context: OrcInvocationContextV1,
+): OrcOwnerFenceFacts {
+  return {
+    ownerInstanceMatches: row.owner_instance_id === context.ownerInstanceId,
+    projectCardMatches: row.project_card_id === context.projectCardId,
+    projectGenerationMatches: row.project_generation === context.projectGeneration,
+    ownershipGenerationMatches: row.ownership_generation === context.ownershipGeneration,
+    sessionMatches: context.sessionId === undefined || row.session_id === context.sessionId,
+    executionMatches: context.executionId === undefined || row.execution_id === context.executionId,
+  };
+}
+
 export class OrcProjectRunStore {
   readonly db: TaskDatabase;
 
@@ -186,15 +214,15 @@ export class OrcProjectRunStore {
       }
       if (row.state === "running") return { ok: false as const, reason: "session_mismatch" as const };
       if (row.state === "released" || row.state === "superseded") return { ok: false as const, reason: "run_released" as const };
-      if (row.owner_instance_id !== context.ownerInstanceId) return { ok: false as const, reason: "foreign_instance" as const };
-      if (row.project_card_id !== context.projectCardId || row.project_generation !== context.projectGeneration) {
+      const fence = evaluateOwnerFence(row, context);
+      if (!fence.ownerInstanceMatches) return { ok: false as const, reason: "foreign_instance" as const };
+      if (!fence.projectCardMatches || !fence.projectGenerationMatches) {
         return { ok: false as const, reason: "project_generation_mismatch" as const };
       }
-      if (row.ownership_generation !== context.ownershipGeneration) {
+      if (!fence.ownershipGenerationMatches) {
         return { ok: false as const, reason: "ownership_generation_mismatch" as const };
       }
-      const sup = this.db.prepare(`SELECT generation FROM project_supervision WHERE project_card_id = ?`).get(row.project_card_id) as { generation: number } | undefined;
-      if (!sup || sup.generation !== row.project_generation) {
+      if (!this.currentSupervisionMatches(row)) {
         return { ok: false as const, reason: "project_generation_mismatch" as const };
       }
       const now = new Date().toISOString();
@@ -220,26 +248,23 @@ export class OrcProjectRunStore {
     if (row.state === "released" || row.state === "superseded") {
       return { ok: false as const, reason: "run_released" as const };
     }
-    if (row.owner_instance_id !== context.ownerInstanceId) {
+    const fence = evaluateOwnerFence(row, context);
+    if (!fence.ownerInstanceMatches) {
       return { ok: false as const, reason: "foreign_instance" as const };
     }
-    if (row.project_card_id !== context.projectCardId) {
+    if (!fence.projectCardMatches) {
       return { ok: false as const, reason: "project_mismatch" as const };
     }
-    if (row.project_generation !== context.projectGeneration) {
+    if (!fence.projectGenerationMatches || !this.currentSupervisionMatches(row)) {
       return { ok: false as const, reason: "project_generation_mismatch" as const };
     }
-    const currentSup = this.db.prepare(`SELECT generation FROM project_supervision WHERE project_card_id = ?`).get(row.project_card_id) as { generation: number } | undefined;
-    if (!currentSup || currentSup.generation !== row.project_generation) {
-      return { ok: false as const, reason: "project_generation_mismatch" as const };
-    }
-    if (row.ownership_generation !== context.ownershipGeneration) {
+    if (!fence.ownershipGenerationMatches) {
       return { ok: false as const, reason: "ownership_generation_mismatch" as const };
     }
-    if (context.sessionId !== undefined && row.session_id !== context.sessionId) {
+    if (!fence.sessionMatches) {
       return { ok: false as const, reason: "session_mismatch" as const };
     }
-    if (context.executionId !== undefined && row.execution_id !== context.executionId) {
+    if (!fence.executionMatches) {
       return { ok: false as const, reason: "execution_mismatch" as const };
     }
 
@@ -252,8 +277,9 @@ export class OrcProjectRunStore {
    * the run's immutable identity columns (id, ownership generation, owner
    * instance, project card, the generation the run recorded, live state,
    * session, execution). It deliberately does NOT compare against current
-   * `project_supervision.generation`: a turn that legitimately advanced its
-   * own project's generation as part of its durable work must still be able to
+   * `project_supervision.generation` — i.e. it never calls
+   * `currentSupervisionMatches`: a turn that legitimately advanced its own
+   * project's generation as part of its durable work must still be able to
    * release the global slot it owns, or the retained row wedges
    * `idx_one_global_orc_turn` forever. Current-supervision fencing belongs to
    * `bindExecution`/`validateCurrentContext`/`withCurrentRun`, which gate
@@ -371,6 +397,17 @@ export class OrcProjectRunStore {
     return row.at;
   }
 
+  /**
+   * #1679: current-supervision fence — the row still belongs to the
+   * authoritative project_supervision generation. Callers gate project
+   * mutation on this. Terminal cleanup (`release`) deliberately never calls
+   * it; see the #1673 comment on `release`.
+   */
+  private currentSupervisionMatches(row: OrcProjectRunRow): boolean {
+    const sup = this.db.prepare(`SELECT generation FROM project_supervision WHERE project_card_id = ?`).get(row.project_card_id) as { generation: number } | undefined;
+    return sup !== undefined && sup.generation === row.project_generation;
+  }
+
   withCurrentRun<T>(context: OrcInvocationContextV1, fn: (row: OrcProjectRunRow) => T): { ok: true; value: T } | { ok: false; reason: string } {
     const validation = this.validateCurrentContext(context);
     if (!validation.ok) return { ok: false as const, reason: validation.reason };
@@ -379,23 +416,23 @@ export class OrcProjectRunStore {
       if (!revalidated || revalidated.state === "released" || revalidated.state === "superseded") {
         return { ok: false as const, reason: "run_released" };
       }
-      if (revalidated.owner_instance_id !== context.ownerInstanceId) {
+      const fence = evaluateOwnerFence(revalidated, context);
+      if (!fence.ownerInstanceMatches) {
         return { ok: false as const, reason: "foreign_instance" };
       }
-      if (revalidated.project_card_id !== context.projectCardId || revalidated.project_generation !== context.projectGeneration) {
+      if (!fence.projectCardMatches || !fence.projectGenerationMatches) {
         return { ok: false as const, reason: "project_generation_mismatch" };
       }
-      if (revalidated.ownership_generation !== context.ownershipGeneration) {
+      if (!fence.ownershipGenerationMatches) {
         return { ok: false as const, reason: "ownership_generation_mismatch" };
       }
-      if (context.sessionId !== undefined && revalidated.session_id !== context.sessionId) {
+      if (!fence.sessionMatches) {
         return { ok: false as const, reason: "session_mismatch" };
       }
-      if (context.executionId !== undefined && revalidated.execution_id !== context.executionId) {
+      if (!fence.executionMatches) {
         return { ok: false as const, reason: "execution_mismatch" };
       }
-      const sup = this.db.prepare(`SELECT state, generation FROM project_supervision WHERE project_card_id = ?`).get(revalidated.project_card_id) as { state: string; generation: number } | undefined;
-      if (!sup || sup.generation !== revalidated.project_generation) {
+      if (!this.currentSupervisionMatches(revalidated)) {
         return { ok: false as const, reason: "project_generation_mismatch" };
       }
       try {
