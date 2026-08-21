@@ -37,73 +37,94 @@ The watchdog itself is supervised by the OS (launchd on macOS, systemd on Linux)
 
 ## Runtime Self-Healer
 
-Two self-healing paths that keep the bridge healthy without human intervention.
+The runtime self-healer supplies bounded log signals to SHA; it does not own
+agent sessions, fix execution, or incident state.
 
 ### Log-based (background watcher)
 
-A heartbeat task that detects recurring errors in the bridge log and either auto-fixes them or notifies the owner.
+A heartbeat task tails the bridge log and forwards eligible records to SHA.
+SHA applies the configured mode, classification, durable deduplication, and
+known-fix policy before any action is considered.
 
 **How it works:**
 
-1. Tails the bridge log file in real-time
-2. Matches ERROR lines against known patterns
-3. For fixable patterns → runs an auto-fix action (e.g. restart a subsystem)
-4. For unfixable patterns → sends a ⚠️ notification to the owner via Telegram
+1. Tails the bridge log file with a durable cursor
+2. Normalizes, redacts, and bounds eligible ERROR records
+3. Sends one typed signal to SHA; duplicate cursor keys are ignored
+4. SHA either suppresses, recommends a verified known fix, or opens a staged
+   incident for supervised RCA/design/solution work
 
 **Notification throttling:**
 
 | Rule | Value |
 |------|-------|
-| Cooldown per error key | 2 hours (same error won't notify again within 2h) |
-| Daily cap | 12 notifications/day total |
-| Auto-fix circuit breaker | 3 failures → pauses auto-fix for that pattern (24h reset) |
+| Incident identity | Durable fingerprint + event key in SQLite |
+| Known-fix cooldown | Per-rule `cooldownMin` in `sha_fault_state` |
+| Operator reset | `/healing reset` clears known-fix counters |
 
-**Auto-fix rules** are pattern-based. When a known error fires, the self-healer runs a predefined repair action. If the repair fails 3 times in a row, the circuit breaker trips and the owner gets a "paused" notification.
+Known-fix rules are pattern-based. Automatic execution requires `full` mode,
+`verified: true`, an argv-only action, and an independent verifier. Action exit
+zero is not reported as fixed; only a successful verifier produces
+`known_fix_verified`.
 
-**Toggle:** `/healing` command enables/disables the self-healer. `/healing reset` clears circuit breakers.
+`/healing` reports operational state. Use `/healing reset` to clear durable
+known-fix counters; mode changes require configuration and a bridge restart.
 
 ### SHA: Self-Healing Agent
 
-When a scheduled task fails, a dedicated self-healing agent session diagnoses and attempts to fix the issue programmatically.
+When a scheduled task fails, SHA records a durable incident and may dispatch
+supervised Pi coding workers according to the configured mode.
 
 **Enable/disable:**
 
 ```bash
-# Enable (add to ~/.abtars/config/.env)
-SELFHEAL_ENABLED=true
+# Investigation: RCA and design only
+SELFHEAL_MODE=investigation
 
-# Disable
-SELFHEAL_ENABLED=false    # or remove the line (default: off)
+# Full: RCA, design, and isolated solution proposal
+SELFHEAL_MODE=full
+
+# Disable (or remove the line; default: off)
+SELFHEAL_MODE=off
 ```
 
 SHA also requires `~/.abtars/config/sha-policy.json` (seeded automatically during install). If the policy file is missing, SHA auto-disables at boot with a single log message — no repeated warnings. To re-enable: restore the policy file and restart the bridge.
 
-Or at runtime: `/healing` command toggles the self-healer on/off. `/healing reset` clears circuit breakers.
+Mode changes take effect after restart. `/healing` is read-only; policy
+actions remain available as `/healing reset|list|approve|disable`.
 
 **Flow:**
 
 1. Task fails → user sees `⚠️ <task> failed`
-2. SHA fires in an isolated `_S_` (System) session → user sees `🔧 Calling self-healing agent`
-3. SHA diagnoses root cause and attempts programmatic fix
-4. If fixed → task succeeds on next tick
-5. If unfixable → SHA reports `"Requires human intervention: <reason>"`
-6. After 3 consecutive failures → task auto-pauses, user sees `⛔ Needs manual fix`
+2. SHA classifies the failure and emits one bounded admission outcome
+3. Unknown actionable failures create one supervised `O` incident with
+   sequential RCA → design → (full only) solution workers
+4. The existing Orc review accepts or blocks the proposal; SHA never applies
+   generated code to the canonical checkout
 
-**Three-state concurrency guard:**
+**Incident concurrency and identity:**
 
-| State | On failure | Rationale |
-|-------|-----------|-----------|
-| `idle` | Fire SHA with all pending failures | Normal path |
-| `running` | Drop entirely (no count, no notify) | SHA might be fixing it right now |
-| `cooldown` (60s) | Count + notify, skip SHA | Let fix propagate before retrying |
+| Condition | Result | Rationale |
+|-----------|--------|-----------|
+| Same event key | No second notice or incident mutation | Exactly-once source replay |
+| Same fingerprint, active episode | Attach and increment occurrence count | One active episode per fault |
+| New known-fix event during cooldown | Recommendation only | Avoid repeated automatic action |
 
 **What SHA can and cannot do:**
 
-SHA is forbidden from modifying vital config files (`transport.json`, `.env`, `peers.json`, `users.json`) unless the bridge is in a crash loop. It can fix JSON corruption, pause tasks, and repair scripts. The full rules are in its system prompt at `src/boot/phase-pipeline-deps.ts`.
+SHA workers use only the configured disposable `sha` Git checkout with
+`projectTrust="never"`. RCA/design must leave it clean; solution evidence is
+copied privately and the checkout is restored. SHA never applies generated
+patches to the canonical checkout or writes `.env`, secrets, runtime state,
+deployment roots, or other protected files.
 
-**Auto-fix whitelist:** Pattern-based rules live in `src/components/self-healer/`. When a known error matches, a predefined repair action runs. Custom rules can be added there.
+**Known-fix policy:** Pattern rules live in
+`~/.abtars/config/sha-policy.json`; self-generated rules use
+`sha-policy-self.json` and remain recommendation-only until approved with a
+verifier.
 
-**Isolation:** SHA runs in a System session (`_S_` type) — no access to user memory, no memory storage, minimal SOUL prompt. Cannot pollute the user's conversation context.
+**Isolation:** SHA stages run through supervised Worker contracts in the fixed
+`sha` workspace alias, separate from the canonical checkout and user session.
 
 ## Model Fallbacks
 

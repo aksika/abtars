@@ -71,6 +71,8 @@ export type AdmitResult =
   | { kind: "attached"; incidentId: number; occurrenceCount: number; rootCardId: number | null }
   | { kind: "created"; incidentId: number; episode: number; rootCardId: null };
 
+export type CooldownAdmitResult = AdmitResult | { kind: "cooldown"; remainingMs: number };
+
 export type TransitionResult =
   | { ok: true; toState: ShaIncidentState; version: number }
   | { ok: false; kind: "stale" | "illegal"; reason: string };
@@ -204,6 +206,44 @@ CREATE TABLE IF NOT EXISTS sha_fault_state (
     return this.db.transactionImmediate(() => this.admitEventInTx(params));
   }
 
+  /**
+   * #1688 R8: known-fix admission plus cooldown reservation in one
+   * BEGIN IMMEDIATE transaction. Duplicate/replayed events and events that
+   * attach to an already-active episode do not consume a new attempt. A new
+   * episode is created only after the cooldown gate has admitted it.
+   */
+  admitEventWithCooldown(params: {
+    eventKey: string;
+    fingerprint: string;
+    workflowKind: ShaWorkflowKind;
+    source: ShaSourceKind;
+    sourceScope: string;
+    taskKind?: TaskKind;
+    mode: "investigation" | "full";
+    diagnosticJson: string;
+    occurredAt: number;
+  }, policyKey: string, scope: string, cooldownMin: number, at = new Date().toISOString()): CooldownAdmitResult {
+    return this.db.transactionImmediate(() => {
+      // Check the durable event key before the active/terminal episode lookup.
+      // This keeps replay idempotent even after the original episode ended.
+      const existing = this.db.prepare(
+        "SELECT 1 AS present FROM sha_incident_events WHERE event_key = ?",
+      ).get(params.eventKey);
+      if (existing) return { kind: "duplicate_event" };
+
+      if (this.activeByFingerprint(params.fingerprint)) {
+        return this.admitEventInTx(params);
+      }
+
+      const remainingMs = this.cooldownRemainingInTx(policyKey, scope, cooldownMin, at);
+      if (remainingMs > 0) return { kind: "cooldown", remainingMs };
+
+      const admitted = this.admitEventInTx(params);
+      if (admitted.kind === "created") this.recordAttemptInTx(policyKey, scope, at);
+      return admitted;
+    });
+  }
+
   admitEventInTx(params: {
     eventKey: string;
     fingerprint: string;
@@ -220,14 +260,15 @@ CREATE TABLE IF NOT EXISTS sha_fault_state (
     const boundedJson = params.diagnosticJson.slice(0, MAX_DIAGNOSTIC_JSON_BYTES);
     const taskKind = params.taskKind ?? null;
 
+    // Replays of a terminal episode still resolve to the original event and
+    // must remain a no-op rather than colliding with the primary key below.
+    const existingEvent = this.db.prepare(
+      "SELECT 1 AS present FROM sha_incident_events WHERE event_key = ?",
+    ).get(params.eventKey);
+    if (existingEvent) return { kind: "duplicate_event" };
+
     const active = this.activeByFingerprint(params.fingerprint);
     if (active) {
-      const existingEvent = this.db.prepare(
-        "SELECT 1 AS present FROM sha_incident_events WHERE event_key = ?",
-      ).get(params.eventKey);
-      if (existingEvent) {
-        return { kind: "duplicate_event" };
-      }
       const insert = this.db.prepare(
         "INSERT OR IGNORE INTO sha_incident_events (event_key, incident_id, occurred_at, diagnostic_json, created_at) VALUES (?, ?, ?, ?, ?)",
       ).run(params.eventKey, active.id, occurred, boundedJson, now);
@@ -395,6 +436,10 @@ CREATE TABLE IF NOT EXISTS sha_fault_state (
   // ── sha_fault_state (mutable policy cooldowns/counters) ──────────────────
 
   recordAttempt(policyKey: string, scope: string, at = new Date().toISOString()): void {
+    this.db.transactionImmediate(() => this.recordAttemptInTx(policyKey, scope, at));
+  }
+
+  private recordAttemptInTx(policyKey: string, scope: string, at: string): void {
     this.db.prepare(
       `INSERT INTO sha_fault_state (policy_key, scope, attempts, total_runs, last_attempt_at)
        VALUES (?, ?, 1, 1, ?)
@@ -403,6 +448,18 @@ CREATE TABLE IF NOT EXISTS sha_fault_state (
          total_runs = total_runs + 1,
          last_attempt_at = excluded.last_attempt_at`,
     ).run(policyKey, scope, at);
+  }
+
+  private cooldownRemainingInTx(policyKey: string, scope: string, cooldownMin: number, at: string): number {
+    if (cooldownMin <= 0) return 0;
+    const row = this.db.prepare(
+      "SELECT last_attempt_at FROM sha_fault_state WHERE policy_key = ? AND scope = ?",
+    ).get(policyKey, scope);
+    const lastAttemptAt = row?.["last_attempt_at"];
+    if (typeof lastAttemptAt !== "string") return 0;
+    const elapsed = Date.parse(at) - Date.parse(lastAttemptAt);
+    if (!Number.isFinite(elapsed) || elapsed < 0) return cooldownMin * 60_000;
+    return Math.max(0, cooldownMin * 60_000 - elapsed);
   }
 
   recordResult(policyKey: string, scope: string, ok: boolean, error?: string, at = new Date().toISOString()): void {

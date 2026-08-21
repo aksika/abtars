@@ -412,7 +412,7 @@ beforeEach(async () => {
     }
     return { status: "ok", detail: "cycle handled" };
   });
-});
+}, 60_000);
 
 afterEach(async () => {
   await activeTestHandle?.stop();
@@ -2117,13 +2117,17 @@ describe("#1688 SHA incident workflow E2E — settler → coordinator → Kanban
     const contract = shaSupervision.getContract(attempt.contract_id)!;
     const contractJson = JSON.parse(contract.contract_json) as { digest?: string };
     const now = new Date().toISOString();
+    const artifacts = [{ artifact_id: artifactId, exists: true, kind: "file" as const, ref, digest }];
+    if (ref === "sha/solution.patch") {
+      artifacts.push({ artifact_id: "sha-verification-json", exists: true, kind: "file", ref: "sha/verification.json", digest });
+    }
     const envelope = {
       schema_version: 1,
       attempt: { id: attempt.id, ordinal: attempt.ordinal, contract_id: attempt.contract_id, contract_digest: contractJson.digest ?? "d", executor_kind: "pi", executor_id: "e2e-pi-run", started_at: now, finished_at: now },
       outcome: "completed",
       criteria: [{ criterion_id: "sha-" + artifactId.slice(4).split(".")[0], status: "passed", evidence_ids: [artifactId] }],
       checks: [],
-      artifacts: [{ artifact_id: artifactId, exists: true, kind: "file", ref, digest }],
+      artifacts,
       worker_report: { summary: "e2e stage done", claims: [], unresolved_risks: [] },
     } as import("../../components/worker-contract.js").WorkerResultEnvelopeV1;
     // The Pi process boundary: write the evidence artifact into the real
@@ -2182,6 +2186,8 @@ describe("#1688 SHA incident workflow E2E — settler → coordinator → Kanban
     // 4. Evidence copied privately; disposable workspace restored to baseline;
     // canonical fixture files untouched.
     const evidenceDir = join(TEST_HOME, "state", "sha", "incidents", String(incident.id));
+    expect(existsSync(join(evidenceDir, "rca", "rca.json"))).toBe(true);
+    expect(existsSync(join(evidenceDir, "design", "design.md"))).toBe(true);
     expect(existsSync(join(evidenceDir, "solution", "solution.patch"))).toBe(true);
     const { execFileSync } = await import("node:child_process");
     const status = execFileSync("git", ["status", "--porcelain"], { cwd: shaWs, encoding: "utf-8" });
@@ -2242,6 +2248,8 @@ describe("#1688 SHA incident workflow E2E — settler → coordinator → Kanban
     await vi.waitFor(() => expect(new shaStore.ShaIncidentStore(board.requireTaskDatabase()).findById(incident.id)!.state).toBe("review"), { timeout: 10_000 });
     board.kanbanTransition({ cardId: root.id, from: ["queued", "running"], to: "done", actor: "e2e", reason: "accepted" });
     await vi.waitFor(() => expect(new shaStore.ShaIncidentStore(board.requireTaskDatabase()).findById(incident.id)!.state).toBe("investigation_complete"), { timeout: 10_000 });
+    const status = (await import("node:child_process")).execFileSync("git", ["status", "--porcelain"], { cwd: shaWs, encoding: "utf-8" });
+    expect(status.trim()).toBe("");
   });
 
   it("off mode: ordinary notice only, zero SHA writes, no registration of work", { timeout: 60_000 }, async () => {
@@ -2282,7 +2290,6 @@ describe("#1688 SHA incident workflow E2E — settler → coordinator → Kanban
   it("known fix with a failing verifier is never reported fixed", { timeout: 60_000 }, async () => {
     await setupShaWorkspace();
     const { ShaIncidentCoordinator } = await import("../../components/sha/sha-incident-coordinator.js");
-    const { ShaKnownFixRunner } = await import("../../components/sha/sha-known-fix-runner.js");
     const { shaAdmissionNotice } = await import("../../components/sha/sha-admission-notice.js");
     shaStore = await import("../../components/sha/sha-incident-store.js");
     const rule = {
@@ -2293,7 +2300,6 @@ describe("#1688 SHA incident workflow E2E — settler → coordinator → Kanban
     shaCoordinator = new ShaIncidentCoordinator({
       modeProvider: () => "full",
       policyView: () => ({ fixes: [rule], logAdmissionAllowed: true }),
-      knownFixRunner: new ShaKnownFixRunner(),
       noticeSink: { send: () => {} },
     });
     const event = { source: "scheduled" as const, entryId: "sha-agent-task", runId: "run-kf-1", taskKind: "agent" as const, diagnostic: makeDiagnosticShaBoom(), occurredAt: Date.now() };

@@ -206,6 +206,60 @@ describe("fault state cooldowns (R8)", () => {
     expect(store.faultState("autofix-unknown", "p1")).not.toBeNull();
     expect(store.resetFaultState()).toBe(1);
   });
+
+  it("atomically gates a new known-fix episode and preserves replay no-op", () => {
+    const first = store.admitEventWithCooldown({
+      eventKey: "known-fix-event-1",
+      fingerprint: "known-fix-fingerprint",
+      workflowKind: "known_fix",
+      source: "scheduled",
+      sourceScope: "daily-ai",
+      taskKind: "agent",
+      mode: "full",
+      diagnosticJson: "{}",
+      occurredAt: Date.now(),
+    }, "autofix-known", "known-fix", 30, "2026-08-21T10:00:00.000Z");
+    expect(first.kind).toBe("created");
+    expect(store.faultState("autofix-known", "known-fix")?.totalRuns).toBe(1);
+
+    const replay = store.admitEventWithCooldown({
+      eventKey: "known-fix-event-1",
+      fingerprint: "known-fix-fingerprint",
+      workflowKind: "known_fix",
+      source: "scheduled",
+      sourceScope: "daily-ai",
+      taskKind: "agent",
+      mode: "full",
+      diagnosticJson: "{}",
+      occurredAt: Date.now(),
+    }, "autofix-known", "known-fix", 30, "2026-08-21T10:01:00.000Z");
+    expect(replay.kind).toBe("duplicate_event");
+
+    // End the first episode so the next distinct event reaches the cooldown
+    // gate rather than attaching to the active one.
+    if (first.kind === "created") {
+      store.transition({
+        incidentId: first.incidentId,
+        expectedVersion: 1,
+        fromStates: ["provisioning"],
+        toState: "known_fix_failed",
+        reason: "test terminal",
+      });
+    }
+    const blocked = store.admitEventWithCooldown({
+      eventKey: "known-fix-event-2",
+      fingerprint: "known-fix-fingerprint-2",
+      workflowKind: "known_fix",
+      source: "scheduled",
+      sourceScope: "daily-ai",
+      taskKind: "agent",
+      mode: "full",
+      diagnosticJson: "{}",
+      occurredAt: Date.now(),
+    }, "autofix-known", "known-fix", 30, "2026-08-21T10:02:00.000Z");
+    expect(blocked.kind).toBe("cooldown");
+    expect(store.faultState("autofix-known", "known-fix")?.totalRuns).toBe(1);
+  });
 });
 
 describe("recovery reads (R5)", () => {

@@ -101,7 +101,7 @@ Types: **A**=Main, **B**=Browse, **C**=Code, **T**=Task.
 |---------|-------------|
 | `/full` | Raw output, TTS disabled |
 | `/short` | Clean responses (default) |
-| `/healing` | Toggle self-healer on/off |
+| `/healing` | Show SHA mode, policy, and active incidents (read-only) |
 
 ## Platform-specific
 

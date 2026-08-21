@@ -15,7 +15,22 @@ const VERIFIER_TIMEOUT_MS = 2 * 60_000;
 const MAX_OUTPUT_CHARS = 4000;
 
 /** #1688 R8: conservative executable allowlist for known-fix commands. */
-export const SHA_ALLOWED_EXECUTABLES: readonly string[] = ["abtars-edit", "abtars-cli", "git", "kill", "pkill", "rm", "systemctl"];
+export const SHA_ALLOWED_EXECUTABLES: readonly string[] = ["abtars-edit", "abtars-cli", "git"];
+
+/**
+ * Narrow workspace port so this runner stays independent of Pi/config
+ * implementation details. The coordinator supplies the real
+ * ShaWorkspaceManager in production; unit tests may supply a fake executor
+ * without a workspace.
+ */
+export interface KnownFixWorkspaceGuard {
+  preflight(): Promise<
+    | { ok: true; canonicalPath: string }
+    | { ok: false; error: string }
+  >;
+  validateExecutionPath?(canonicalPath: string): Promise<{ ok: true } | { ok: false; error: string }>;
+  validateCommand?(argv: readonly string[], canonicalPath: string): { ok: true } | { ok: false; error: string };
+}
 
 export interface FixCommandResult {
   ok: boolean;
@@ -30,16 +45,37 @@ export interface KnownFixOutcome {
   verifier: FixCommandResult | null;
 }
 
-export type ExecFn = (cmd: string, args: readonly string[], opts: { timeoutMs: number }) => Promise<{
+export type ExecFn = (cmd: string, args: readonly string[], opts: {
+  timeoutMs: number;
+  cwd?: string;
+  /** Explicitly filtered; known fixes never inherit the bridge environment. */
+  env?: NodeJS.ProcessEnv;
+}) => Promise<{
   stdout: string;
   stderr: string;
   code: number | null;
   timedOut: boolean;
 }>;
 
+const SAFE_ENV_KEYS = ["HOME", "PATH", "TMPDIR", "TMP", "TEMP", "LANG", "LC_ALL"] as const;
+
+function safeChildEnv(): NodeJS.ProcessEnv {
+  const env: NodeJS.ProcessEnv = {};
+  for (const key of SAFE_ENV_KEYS) {
+    const value = process.env[key];
+    if (value !== undefined) env[key] = value;
+  }
+  return env;
+}
+
 const defaultExec: ExecFn = (cmd, args, opts) =>
   new Promise((resolve) => {
-    execFile(cmd, [...args], { timeout: opts.timeoutMs, maxBuffer: 1_048_576 }, (err, stdout, stderr) => {
+    execFile(cmd, [...args], {
+      cwd: opts.cwd,
+      env: opts.env,
+      timeout: opts.timeoutMs,
+      maxBuffer: 1_048_576,
+    }, (err, stdout, stderr) => {
       const code = err && typeof (err as { code?: unknown }).code === "number" ? (err as { code: number }).code : err ? null : 0;
       const timedOut = Boolean(err && (err as { killed?: boolean }).killed) || Boolean(err && (err as { code?: unknown }).code === null && (err as { signal?: unknown }).signal);
       resolve({ stdout: String(stdout), stderr: String(stderr), code, timedOut });
@@ -48,9 +84,11 @@ const defaultExec: ExecFn = (cmd, args, opts) =>
 
 export class ShaKnownFixRunner {
   private readonly exec: ExecFn;
+  private readonly workspaceGuard?: KnownFixWorkspaceGuard;
 
-  constructor(exec: ExecFn = defaultExec) {
+  constructor(exec: ExecFn = defaultExec, workspaceGuard?: KnownFixWorkspaceGuard) {
     this.exec = exec;
+    this.workspaceGuard = workspaceGuard;
   }
 
   /**
@@ -66,12 +104,21 @@ export class ShaKnownFixRunner {
   }
 
   /** Bounded argv-only execution of one command. */
-  async runCommand(argv: readonly string[], timeoutMs: number): Promise<FixCommandResult> {
+  async runCommand(argv: readonly string[], timeoutMs: number, cwd?: string): Promise<FixCommandResult> {
+    if (!argv[0]) {
+      return { ok: false, timedOut: false, exitCode: null, output: "known-fix command is empty" };
+    }
     const allowed = SHA_ALLOWED_EXECUTABLES.includes(basename(argv[0] ?? ""));
     if (!allowed) {
       return { ok: false, timedOut: false, exitCode: null, output: `executable "${argv[0]}" is not allowlisted for SHA known fixes` };
     }
-    const result = await this.exec(argv[0]!, argv.slice(1), { timeoutMs });
+    if (cwd && this.workspaceGuard?.validateCommand) {
+      const commandCheck = this.workspaceGuard.validateCommand(argv, cwd);
+      if (!commandCheck.ok) {
+        return { ok: false, timedOut: false, exitCode: null, output: `known-fix command refused: ${commandCheck.error}` };
+      }
+    }
+    const result = await this.exec(argv[0], argv.slice(1), { timeoutMs, cwd, env: safeChildEnv() });
     return {
       ok: result.code === 0 && !result.timedOut,
       timedOut: result.timedOut,
@@ -92,11 +139,46 @@ export class ShaKnownFixRunner {
         verifier: null,
       };
     }
-    const action = await this.runCommand(rule.command!, ACTION_TIMEOUT_MS);
+    let cwd: string | undefined;
+    if (this.workspaceGuard) {
+      const preflight = await this.workspaceGuard.preflight();
+      if (!preflight.ok) {
+        return {
+          state: "known_fix_failed",
+          action: { ok: false, timedOut: false, exitCode: null, output: `known-fix workspace preflight failed: ${preflight.error}` },
+          verifier: null,
+        };
+      }
+      cwd = preflight.canonicalPath;
+      if (this.workspaceGuard.validateExecutionPath) {
+        const pathCheck = await this.workspaceGuard.validateExecutionPath(cwd);
+        if (!pathCheck.ok) {
+          return {
+            state: "known_fix_failed",
+            action: { ok: false, timedOut: false, exitCode: null, output: `known-fix workspace refused: ${pathCheck.error}` },
+            verifier: null,
+          };
+        }
+      }
+    }
+    const action = await this.runCommand(rule.command!, ACTION_TIMEOUT_MS, cwd);
     if (!action.ok) {
       return { state: "known_fix_failed", action, verifier: null };
     }
-    const verifier = await this.runCommand(rule.verifyCommand!, VERIFIER_TIMEOUT_MS);
+    // Re-check the path before the verifier as well: the action may have
+    // changed or replaced the checkout, and the verifier must never follow a
+    // path that escaped the original preflight.
+    if (cwd && this.workspaceGuard?.validateExecutionPath) {
+      const pathCheck = await this.workspaceGuard.validateExecutionPath(cwd);
+      if (!pathCheck.ok) {
+        return {
+          state: "known_fix_unverified",
+          action,
+          verifier: { ok: false, timedOut: false, exitCode: null, output: `known-fix workspace refused: ${pathCheck.error}` },
+        };
+      }
+    }
+    const verifier = await this.runCommand(rule.verifyCommand!, VERIFIER_TIMEOUT_MS, cwd);
     return {
       state: verifier.ok ? "known_fix_verified" : "known_fix_unverified",
       action,

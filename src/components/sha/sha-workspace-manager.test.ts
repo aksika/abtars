@@ -9,12 +9,14 @@ import type { PiExecutorConfig } from "../pi-executor/config.js";
 const savedHome = process.env["ABTARS_HOME"];
 let tmpRoot: string;
 
-function makeConfig(aliases: PiExecutorConfig["workspaceAliases"]): PiExecutorConfig {
+function makeConfig(aliases: PiExecutorConfig["workspaceAliases"], addDefaultRoot = true): PiExecutorConfig {
   return {
     enabled: true,
     command: "pi",
     fixedArgs: [],
-    workspaceAliases: aliases,
+    workspaceAliases: addDefaultRoot
+      ? Object.fromEntries(Object.entries(aliases).map(([name, mapping]) => [name, { ...mapping, root: mapping.root ?? tmpRoot }]))
+      : aliases,
     allowedEnv: [],
     maxConcurrent: 1,
     maxWallClockMs: 1_800_000,
@@ -63,6 +65,14 @@ describe("ShaWorkspaceManager preflight (R7)", () => {
 
     const noAlias = new ShaWorkspaceManager({ loadPiConfig: () => makeConfig({}) });
     expect((await noAlias.preflight()).ok).toBe(false);
+
+    mkdirSync(join(tmpRoot, "sha-ws"), { recursive: true });
+    const noRoot = new ShaWorkspaceManager({
+      loadPiConfig: () => makeConfig({ sha: { path: join(tmpRoot, "sha-ws"), projectTrust: "never" } }, false),
+    });
+    const noRootResult = await noRoot.preflight();
+    expect(noRootResult.ok).toBe(false);
+    if (!noRootResult.ok) expect(noRootResult.error).toContain("containing root");
 
     const trustAlways = new ShaWorkspaceManager({
       loadPiConfig: () => makeConfig({ sha: { path: "/tmp/x", projectTrust: "always" } }),
@@ -244,5 +254,46 @@ describe("ShaKnownFixRunner (R8)", () => {
     const exec: ExecFn = async (_cmd, _args, _opts) => ({ stdout: "x".repeat(20_000), stderr: "", code: 0, timedOut: false });
     const outcome = await new ShaKnownFixRunner(exec).execute({ pattern: "p", action: "run", command: ["git", "a"], verifyCommand: ["git", "v"], cooldownMin: 1, verified: true });
     expect(outcome.action.output.length).toBeLessThanOrEqual(4000);
+  });
+
+  it("preflights known fixes, pins cwd, filters env, and rejects escaping args", async () => {
+    const ws = join(tmpRoot, "sha-ws");
+    mkdirSync(ws, { recursive: true });
+    mkdirSync(join(ws, ".git"));
+    const workspaceExec = makeExec({});
+    const manager = new ShaWorkspaceManager({
+      loadPiConfig: () => makeConfig({ sha: { path: ws, projectTrust: "never" } }),
+      exec: workspaceExec.exec,
+    });
+    const calls: Array<{ cwd?: string; env?: NodeJS.ProcessEnv }> = [];
+    const runner = new ShaKnownFixRunner(async (_cmd, _args, opts) => {
+      calls.push({ cwd: opts.cwd, env: opts.env });
+      return { stdout: "", stderr: "", code: 0, timedOut: false };
+    }, manager);
+    const outcome = await runner.execute({
+      pattern: "safe command",
+      action: "run",
+      command: ["git", "status"],
+      verifyCommand: ["git", "status"],
+      cooldownMin: 1,
+      verified: true,
+    });
+    expect(outcome.state).toBe("known_fix_verified");
+    expect(calls).toHaveLength(2);
+    expect(calls.every((call) => call.cwd === realpathSync(ws))).toBe(true);
+    expect(calls[0]?.env?.PATH).toBe(process.env["PATH"]);
+    expect(calls[0]?.env?.ABTARS_HOME).toBeUndefined();
+
+    const escaping = await runner.execute({
+      pattern: "escape command",
+      action: "run",
+      command: ["git", "--work-tree=/etc", "status"],
+      verifyCommand: ["git", "status"],
+      cooldownMin: 1,
+      verified: true,
+    });
+    expect(escaping.state).toBe("known_fix_failed");
+    expect(escaping.action.output).toContain("escapes");
+    expect(calls).toHaveLength(2);
   });
 });

@@ -35,6 +35,8 @@ import {
   stagesForMode,
 } from "./sha-stage-contracts.js";
 import { join } from "node:path";
+import { realpathSync, statSync } from "node:fs";
+import { isPathWithinRoot } from "../workspace-paths.js";
 import type { ShaStage } from "./sha-stage-contracts.js";
 import type { SelfHealMode, ShaAdmissionOutcome, ShaFailureSignal } from "./sha-types.js";
 import type { TaskKind } from "../tasks/task-types.js";
@@ -87,7 +89,7 @@ export class ShaIncidentCoordinator {
     this.workerService = deps.workerService ?? new WorkerSupervisionService(this.db);
     this.supervisionStore = deps.supervisionStore ?? new WorkerSupervisionStore(this.db);
     this.workspaceManager = deps.workspaceManager ?? new ShaWorkspaceManager();
-    this.knownFixRunner = deps.knownFixRunner ?? new ShaKnownFixRunner();
+    this.knownFixRunner = deps.knownFixRunner ?? new ShaKnownFixRunner(undefined, this.workspaceManager);
     this.modeProvider = deps.modeProvider;
     this.policyView = deps.policyView ?? (() => ({ fixes: loadMergedFixes(), logAdmissionAllowed: logAdmissionAllowed() }));
     this.noticeSink = deps.noticeSink;
@@ -171,18 +173,18 @@ export class ShaIncidentCoordinator {
       return { kind: "known_fix_recommended" };
     }
     const identity = this.eventIdentity(signal);
-    const admitted = this.store.admitEvent({
+    const admitted = this.store.admitEventWithCooldown({
       ...identity,
       workflowKind: "known_fix",
       mode: "full",
-    });
+    }, "autofix-known", rule.pattern, rule.cooldownMin);
     if (admitted.kind === "duplicate_event") return { kind: "duplicate_event" };
+    if (admitted.kind === "cooldown") return { kind: "known_fix_recommended" };
     if (admitted.kind === "attached") {
       // Existing running episode: the new event attaches; execution continues.
       return { kind: "known_fix_started", incidentId: admitted.incidentId };
     }
     const incidentId = admitted.incidentId;
-    this.store.recordAttempt("autofix-known", rule.pattern);
     const started = this.store.transition({
       incidentId,
       expectedVersion: 1,
@@ -485,7 +487,7 @@ private async advanceStage(
 
   const expectedArtifact = artifactForStage(stage);
   const artifact = envelope.artifacts?.find((a) => a.artifact_id === expectedArtifact.id);
-  if (!artifact || !artifact.digest) {
+  if (!artifact || !artifact.exists || !artifact.digest) {
     this.blockIncident(incident.id, incident.rootCardId ?? 0, `stage ${stage} missing expected artifact ${expectedArtifact.ref}`, incident.version);
     return;
   }
@@ -504,8 +506,36 @@ private async advanceStage(
       this.blockIncident(incident.id, incident.rootCardId ?? 0, `stage ${stage} mutated the workspace: ${clean.error}`, incident.version);
       return;
     }
+    // The disposable checkout is reset before the next stage. Preserve the
+    // accepted analysis artifact first; the root review must not depend on a
+    // file that has already been deleted from the worker workspace.
+    const copied = await this.workspaceManager.copyEvidence(
+      preflight,
+      incident.id,
+      stage,
+      join(preflight.canonicalPath, expectedArtifact.ref),
+    );
+    if (!copied.ok) {
+      this.blockIncident(incident.id, incident.rootCardId ?? 0, `${stage} evidence copy failed: ${copied.error}`, incident.version);
+      return;
+    }
+    // Investigation ends after design, so there is no next-stage binding to
+    // perform the normal baseline reset. Restore the disposable checkout
+    // before entering review just as the full-mode path does.
+    if (stage === "design" && incident.mode === "investigation") {
+      const restored = await this.workspaceManager.prepareStage(preflight);
+      if (!restored.ok) {
+        this.blockIncident(incident.id, incident.rootCardId ?? 0, `workspace restore failed: ${restored.error}`, incident.version);
+        return;
+      }
+    }
   } else {
     const verification = solutionVerificationArtifact();
+    const verificationArtifact = envelope.artifacts?.find((a) => a.artifact_id === verification.id);
+    if (!verificationArtifact || !verificationArtifact.exists || !verificationArtifact.digest) {
+      this.blockIncident(incident.id, incident.rootCardId ?? 0, `stage ${stage} missing expected artifact ${verification.ref}`, incident.version);
+      return;
+    }
     const patchPath = join(preflight.canonicalPath, artifact.ref);
     const verificationPath = join(preflight.canonicalPath, verification.ref);
     const copiedPatch = await this.workspaceManager.copyEvidence(preflight, incident.id, "solution", patchPath);
@@ -692,8 +722,18 @@ private recoverOne(incident: import("./sha-incident-store.js").IncidentRow): voi
     return;
   }
   if (root.status === "done" || root.status === "delivered") {
+    if (incident.state !== "review") {
+      this.store.transition({
+        incidentId: incident.id,
+        expectedVersion: incident.version,
+        fromStates: [incident.state],
+        toState: "blocked",
+        reason: `recovery: root ${root.status} before final review (state=${incident.state})`,
+      });
+      return;
+    }
     const toState = incident.mode === "investigation" ? "investigation_complete" : "accepted";
-    this.store.transition({ incidentId: incident.id, expectedVersion: incident.version, fromStates: ["review", "rca", "design", "solution"], toState, reason: `boot: root ${root.status}` });
+    this.store.transition({ incidentId: incident.id, expectedVersion: incident.version, fromStates: ["review"], toState, reason: `boot: root ${root.status}` });
     return;
   }
   if (incident.state === "provisioning") {
@@ -730,7 +770,7 @@ private recoverOne(incident: import("./sha-incident-store.js").IncidentRow): voi
     this.blockIncident(incident.id, rootCardId, `recovery: stage card #${stageCardId} failed`, incident.version);
     return;
   }
-  if (stageCard.status === "done") {
+  if (stageCard.status === "done" || stageCard.status === "delivered") {
     const stage = this.stageOf(incident, stageCardId);
     if (stage) {
       void this.advanceStage(incident, stageCardId);
@@ -780,5 +820,17 @@ export function ShaWorkspaceManagerAliasCheck(): string | null {
   const mapping = config.workspaceAliases[SHA_WORKSPACE_ALIAS];
   if (!mapping) return `workspace alias "${SHA_WORKSPACE_ALIAS}" is not configured`;
   if (mapping.projectTrust !== "never") return `alias "${SHA_WORKSPACE_ALIAS}" must set projectTrust="never"`;
+  if (!mapping.root) return `alias "${SHA_WORKSPACE_ALIAS}" must configure a containing root`;
+  try {
+    const canonicalRoot = realpathSync(mapping.root);
+    const canonicalPath = realpathSync(mapping.path);
+    if (!statSync(canonicalRoot).isDirectory()) return `configured root "${canonicalRoot}" is not a directory`;
+    if (!statSync(canonicalPath).isDirectory()) return `workspace path "${canonicalPath}" is not a directory`;
+    if (canonicalRoot === canonicalPath || !isPathWithinRoot(canonicalRoot, canonicalPath)) {
+      return `workspace alias "${SHA_WORKSPACE_ALIAS}" must be strictly inside configured root`;
+    }
+  } catch {
+    return `workspace alias "${SHA_WORKSPACE_ALIAS}" path or root does not exist`;
+  }
   return null;
 }

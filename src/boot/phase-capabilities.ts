@@ -45,8 +45,9 @@ export async function phaseCapabilities(ctx: BootCtx): Promise<PhaseResult> {
     for (const { name, load } of individualCaps) {
       if (disabled.has(name)) continue;
       try {
-        // #1688: sha-tracker is gone; a bounded in-memory cooldown covers the
-        // missing-dependency retry path for this boot fallback (never durable).
+        // #1688: the legacy SHA fault tracker is gone; a bounded in-memory
+        // cooldown covers the missing-dependency retry path for this boot
+        // fallback (never durable).
         const last = missingDepCooldowns.get(name);
         if (last !== undefined && Date.now() - last < 60_000) {
           logDebug("capabilities", `Skipped "${name}": cooldown active`);

@@ -10,7 +10,7 @@
  */
 import { execFile } from "node:child_process";
 import { realpathSync, statSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { join, basename } from "node:path";
+import { join, basename, resolve } from "node:path";
 import { loadPiConfig } from "../pi-executor/config.js";
 import type { PiExecutorConfig } from "../pi-executor/config.js";
 import { abtarsHome, abtarsRoot } from "../../paths.js";
@@ -84,6 +84,50 @@ export class ShaWorkspaceManager {
   }
 
   /**
+   * #1688 R8: re-check the canonical workspace immediately before a known
+   * fix command. This deliberately does not require a clean tree because a
+   * verified action may be the operation that changes it.
+   */
+  async validateExecutionPath(expectedPath: string): Promise<WorkspaceStageResult> {
+    let canonical: string;
+    try {
+      canonical = realpathSync(expectedPath);
+    } catch {
+      return { ok: false, error: `workspace path "${expectedPath}" no longer resolves` };
+    }
+    if (canonical !== expectedPath) {
+      return { ok: false, error: `workspace path identity changed (${expectedPath} → ${canonical})` };
+    }
+    for (const protectedRoot of this.protectedRoots()) {
+      if (canonical === protectedRoot || isPathWithinRoot(protectedRoot, canonical) || isPathWithinRoot(canonical, protectedRoot)) {
+        return { ok: false, error: `workspace path intersects protected root "${protectedRoot}"` };
+      }
+    }
+    return { ok: true };
+  }
+
+  /**
+   * #1688 R8: commands may not smuggle an absolute or escaping path past the
+   * workspace cwd. Bare Git refs remain valid; path-shaped arguments are
+   * resolved against the validated checkout and must stay inside it.
+   */
+  validateCommand(argv: readonly string[], canonicalPath: string): WorkspaceStageResult {
+    for (const arg of argv.slice(1)) {
+      const value = arg.includes("=") ? arg.slice(arg.indexOf("=") + 1) : arg;
+      if (!value || value === "--") continue;
+      const pathShaped = value.startsWith("/") || value.startsWith("~") || value === "." || value === ".."
+        || value.startsWith("./") || value.startsWith("../") || value.includes("/");
+      if (!pathShaped) continue;
+      if (value.startsWith("~")) return { ok: false, error: `command argument "${arg}" uses a home-relative path` };
+      const candidate = resolve(canonicalPath, value);
+      if (!isPathWithinRoot(canonicalPath, candidate)) {
+        return { ok: false, error: `command argument "${arg}" escapes the SHA workspace` };
+      }
+    }
+    return { ok: true };
+  }
+
+  /**
    * #1688 R7: resolve the alias without the cleanliness requirement when a
    * stage has legitimately written its evidence artifact (solution copy,
    * post-stage postcondition checks). Identity/protected-root checks always
@@ -106,20 +150,18 @@ export class ShaWorkspaceManager {
     const st = statSync(canonicalPath);
     if (!st.isDirectory()) return { ok: false, error: `workspace path "${canonicalPath}" is not a directory` };
 
-    let root: string | null = null;
-    if (mapping.root) {
-      let canonicalRoot: string;
-      try {
-        canonicalRoot = realpathSync(mapping.root);
-      } catch {
-        return { ok: false, error: `configured root "${mapping.root}" not found` };
-      }
-      if (!statSync(canonicalRoot).isDirectory()) return { ok: false, error: `configured root "${canonicalRoot}" is not a directory` };
-      if (!isPathWithinRoot(canonicalRoot, canonicalPath)) {
-        return { ok: false, error: `workspace path escapes configured root "${canonicalRoot}"` };
-      }
-      root = canonicalRoot;
+    if (!mapping.root) return { ok: false, error: `workspace alias "${SHA_WORKSPACE_ALIAS}" must configure a containing root` };
+    let canonicalRoot: string;
+    try {
+      canonicalRoot = realpathSync(mapping.root);
+    } catch {
+      return { ok: false, error: `configured root "${mapping.root}" not found` };
     }
+    if (!statSync(canonicalRoot).isDirectory()) return { ok: false, error: `configured root "${canonicalRoot}" is not a directory` };
+    if (canonicalRoot === canonicalPath || !isPathWithinRoot(canonicalRoot, canonicalPath)) {
+      return { ok: false, error: `workspace path must be strictly inside configured root "${canonicalRoot}"` };
+    }
+    const root: string | null = canonicalRoot;
 
     // Protected-root rejection in both directions: the alias may not live
     // inside a protected root, and no protected root may live inside the

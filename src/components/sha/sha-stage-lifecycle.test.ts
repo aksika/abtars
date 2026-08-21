@@ -87,6 +87,10 @@ function completeStageEnvelope(attemptId: string, artifactId: string, digest = "
   const attempt = supervision.getAttempt(attemptId)!;
   const contract = supervision.getContract(attempt.contract_id)!;
   const contractJson = JSON.parse(contract.contract_json) as { digest?: string; id?: string };
+  const artifacts = [{ artifact_id: artifactId, exists: true, kind: "file" as const, ref: `sha/${artifactId.replace("sha-", "")}`, digest }];
+  if (artifactId === "sha-solution-patch") {
+    artifacts.push({ artifact_id: "sha-verification-json", exists: true, kind: "file", ref: "sha/verification.json", digest });
+  }
   return {
     schema_version: 1,
     attempt: {
@@ -97,7 +101,7 @@ function completeStageEnvelope(attemptId: string, artifactId: string, digest = "
     outcome: "completed",
     criteria: [{ criterion_id: "sha-rca", status: "passed", evidence_ids: [artifactId] }],
     checks: [],
-    artifacts: [{ artifact_id: artifactId, exists: true, kind: "file", ref: `sha/${artifactId.replace("sha-", "")}`, digest }],
+    artifacts,
     worker_report: { summary: "done", claims: [], unresolved_risks: [] },
   };
 }

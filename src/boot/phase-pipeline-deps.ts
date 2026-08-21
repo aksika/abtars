@@ -86,7 +86,10 @@ export async function phasePipelineDeps(ctx: BootCtx): Promise<PhaseResult> {
   // sink; it no longer owns SHA state or dispatches S sessions.
   const { ShaIncidentCoordinator } = await import("../components/sha/sha-incident-coordinator.js");
   const { shaAdmissionNotice } = await import("../components/sha/sha-admission-notice.js");
-  const shaCoordinator = new ShaIncidentCoordinator({
+  // R1: off mode must not even initialize the SHA store/schema. Scheduled
+  // history and its ordinary failure notice remain active, but SHA admission
+  // is absent until the next boot with a non-off mode.
+  const shaCoordinator = getEnv().selfhealMode === "off" ? null : new ShaIncidentCoordinator({
     modeProvider: () => getEnv().selfhealMode,
     noticeSink: {
       send: (notice) => {
@@ -97,7 +100,7 @@ export async function phasePipelineDeps(ctx: BootCtx): Promise<PhaseResult> {
     },
   });
   ctx.shaCoordinator = shaCoordinator;
-  ctx._shaStageSubscriberDisposer = shaCoordinator.subscribe();
+  ctx._shaStageSubscriberDisposer = shaCoordinator?.subscribe();
 
   // #1588/#1688: the exactly-once failure cascade. Fires once per settled
   // failed/timed_out run, delivering the structured diagnostic to the
@@ -107,6 +110,7 @@ export async function phasePipelineDeps(ctx: BootCtx): Promise<PhaseResult> {
     if (ctx.telegramAdapter) {
       ctx.telegramAdapter.sendNotification(String(getEnv().mainChatId), buildFailureNotification(event));
     }
+    if (!shaCoordinator) return;
     const outcome = shaCoordinator.admit(event);
     const notice = shaAdmissionNotice(event, outcome);
     if (notice && ctx.telegramAdapter) {
