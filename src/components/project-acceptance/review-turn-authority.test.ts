@@ -11,7 +11,7 @@ import {
   ProjectMutationRejectedError,
 } from "./review-turn-authority.js";
 import type { ReviewCaseAvailability } from "./review-turn-authority.js";
-import type { OrcInvocationContextV1 } from "../orc-project/orc-project-contracts.js";
+import type { OrcInvocationContextV2 } from "../orc-project/orc-project-contracts.js";
 
 let TEST_HOME: string;
 let ProjectReviewStore: typeof import("./project-review-store.js").ProjectReviewStore;
@@ -160,10 +160,11 @@ describe("reviewCaseAvailability (#1677)", () => {
 });
 
 describe("evaluateReviewTurnContext (#1677)", () => {
-  const bound = (overrides?: Partial<OrcInvocationContextV1>): OrcInvocationContextV1 => ({
-    version: 1,
+  const bound = (overrides?: Partial<OrcInvocationContextV2>): OrcInvocationContextV2 => ({
+    version: 2,
     runId: "run_1",
     intentKey: "k",
+    intentKind: "project_review",
     projectCardId: 42,
     projectGeneration: 1,
     ownershipGeneration: 1,

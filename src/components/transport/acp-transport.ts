@@ -87,6 +87,10 @@ export class AcpTransport implements IKiroTransport {
   private updateChains = new Map<string, Promise<void>>();
   /** #1338: acpSessionId → call-local output observer (removed in finally). */
   private outputObservers = new Map<string, OutputObserver | undefined>();
+  /** #1680: host-owned turn control per active prompt session — consumed at
+   *  tool_call_update boundaries so a durable intent completion ends the ACP
+   *  turn instead of waiting for another CLI round. */
+  private orcTurnControls = new Map<string, import("../orc-project/orc-project-contracts.js").OrcTurnControl>();
   private lastContextPercent = -1;
   private static _rawMode = false;
   private _rawClient: import("./acp-raw-client.js").AcpRawClient | null = null;
@@ -408,6 +412,9 @@ export class AcpTransport implements IKiroTransport {
     // agent_message_chunk / tool_call mirrors below actually reach the feed.
     // Cleared in the finally block alongside responseChunks.
     this.outputObservers.set(sessionId, context?.outputObserver);
+    // #1680: bind the host-owned turn control for this prompt; the
+    // tool_call_update handler consumes it when the durable intent completes.
+    if (context?.orcTurnControl) this.orcTurnControls.set(sessionId, context.orcTurnControl);
 
     logDebug(this.tag, `Sending prompt to session ${sessionId}: "${message.replace(/\n/g, " ").slice(0, 80)}…"`);
 
@@ -843,6 +850,17 @@ export class AcpTransport implements IKiroTransport {
           } else if (update.status === "failed") {
             this.toolMeta = null;
           }
+        }
+        // #1680: when the durable intent postcondition won (e.g. the contract
+        // committed), stop the CLI turn here — the bridge-side tool execution
+        // gate already rejects any later call, and the run CAS rejects late
+        // events. ACP tools execute inside the CLI, so the interrupt is the
+        // only host signal available at this boundary.
+        const control = this.orcTurnControls.get(sessionId);
+        if (control?.completed?.kind === "intent_satisfied") {
+          this.orcTurnControls.delete(sessionId);
+          logInfo(this.tag, `Intent satisfied (${control.completed.code}) — interrupting ACP turn ${sessionId}`);
+          void this.sendInterrupt();
         }
         break;
       }

@@ -18,7 +18,7 @@
 
 import type { TaskDatabase } from "../tasks/kanban-board.js";
 import type { ReviewCaseRow, ProjectAuthorityRejection } from "./project-review-store.js";
-import type { OrcInvocationContextV1 } from "../orc-project/orc-project-contracts.js";
+import type { OrcInvocationContextV2 } from "../orc-project/orc-project-contracts.js";
 
 // ── Vocabulary ────────────────────────────────────────────────────────────────
 
@@ -151,7 +151,7 @@ export type ReviewTurnContext =
  * different context-missing messages today).
  */
 export function evaluateReviewTurnContext(
-  bound: OrcInvocationContextV1 | undefined,
+  bound: OrcInvocationContextV2 | undefined,
   args: { projectCardId: number | null; reviewCaseId: string | null },
 ): ReviewTurnContext {
   if (!bound) {

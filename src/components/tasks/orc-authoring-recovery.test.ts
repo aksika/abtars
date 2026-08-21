@@ -115,11 +115,11 @@ function seedRun(
   );
 }
 
-function makeCoordinator(startPort: (ctx: unknown, goal: string) => Promise<void>): InstanceType<typeof coordinatorMod.OrcProjectCoordinator> {
+function makeCoordinator(startPort: (spec: import("../orc-project/orc-project-contracts.js").OrcTurnSpec) => Promise<void>): InstanceType<typeof coordinatorMod.OrcProjectCoordinator> {
   return new coordinatorMod.OrcProjectCoordinator({
     ownerPeer: "kp",
     ownerInstanceId: "inst-test",
-    startPort: startPort as never,
+    startPort,
   });
 }
 
@@ -151,8 +151,8 @@ async function startGeneration(coordinator: InstanceType<typeof coordinatorMod.O
 
 describe("#1628 Orc authoring recovery (real stores)", () => {
   it("race 1: a busy claim from card:queued is dropped and the post-release event produces a fresh claim", async () => {
-    const starts: Array<{ runId: string }> = [];
-    const coordinator = makeCoordinator(async (ctx: { runId: string }) => { starts.push(ctx); });
+    const starts: Array<import("../orc-project/orc-project-contracts.js").OrcInvocationContextV2> = [];
+    const coordinator = makeCoordinator(async (spec) => { starts.push(spec.context); });
     const rootId = await seedProject({ cardStatus: "queued" });
     await startGeneration(coordinator);
     const runStore = new runStoreMod.OrcProjectRunStore();
@@ -188,8 +188,8 @@ describe("#1628 Orc authoring recovery (real stores)", () => {
 
   it("#1675: a released slot wakes another project that already has a scheduled run", async () => {
     const starts: Array<{ projectCardId: number; runId: string }> = [];
-    const coordinator = makeCoordinator(async (ctx: { projectCardId: number; runId: string }) => {
-      starts.push({ projectCardId: ctx.projectCardId, runId: ctx.runId });
+    const coordinator = makeCoordinator(async (spec) => {
+      starts.push({ projectCardId: spec.context.projectCardId, runId: spec.context.runId });
     });
     const releasingProjectId = await seedProject({ cardStatus: "running" });
     const queuedProjectId = await seedProject({ cardStatus: "running" });
@@ -215,7 +215,8 @@ describe("#1628 Orc authoring recovery (real stores)", () => {
 
     expect(coordinator.releaseOwnedRun({
       ...starts[0]!,
-      version: 1,
+      version: 2,
+      intentKind: releasingRun!.intent_kind,
       runId: releasingRun!.id,
       projectCardId: releasingProjectId,
       projectGeneration: releasingRun!.project_generation,

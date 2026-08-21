@@ -14,7 +14,7 @@
  */
 
 import type { OrcProjectCoordinator } from "../../components/orc-project/orc-project-coordinator.js";
-import type { OrcInvocationContextV1 } from "../../components/orc-project/orc-project-contracts.js";
+import type { OrcInvocationContextV2 } from "../../components/orc-project/orc-project-contracts.js";
 import type { ProjectAcceptanceContractV1 } from "../../components/project-acceptance/project-contract.js";
 
 export interface FixtureModules {
@@ -105,7 +105,7 @@ export function makeScheduledProjectFixture(
     reviewMode: options.reviewMode,
     lastTurn: "none" as ScheduledProjectScript["lastTurn"],
     admittedRoot: undefined as number | undefined,
-    staleSpawn: undefined as { goal: string; context: OrcInvocationContextV1 } | undefined,
+    staleSpawn: undefined as { goal: string; context: OrcInvocationContextV2 } | undefined,
     // #1686: durable contract ids of the authoring-turn lane Workers — the
     // repair item must reference one of them as its source contract.
     laneContractIds: [] as string[],
@@ -255,7 +255,9 @@ export function makeScheduledProjectFixture(
 
   const orc = new OrcCtor({
     ownerPeer: "test-fixture",
-    startPort: async (context: OrcInvocationContextV1, goal: string): Promise<void> => {
+    startPort: async (spec: import("../../components/orc-project/orc-project-contracts.js").OrcTurnSpec): Promise<void> => {
+      const context = spec.context;
+      const goal = spec.goal;
       const projectId = context.projectCardId;
       state.admittedRoot = projectId;
       const store = new ReviewStore();

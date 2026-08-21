@@ -130,7 +130,7 @@ export class OrcProjectRunStore {
       }
       this.db.exec(`
         DROP TABLE IF EXISTS orc_project_runs_new;
-        ${replacement.replace("CREATE TABLE", "CREATE TABLE orc_project_runs_new", 1)}
+        ${replacement.replace("CREATE TABLE orc_project_runs", "CREATE TABLE orc_project_runs_new")}
       `);
       // Explicit-column copy: every column of the old table, preserving all
       // rows (historical terminal rows and live runs included).
@@ -158,7 +158,7 @@ export class OrcProjectRunStore {
           ON orc_project_runs(global_slot)
           WHERE state IN ('dispatching','running');
       `);
-    })();
+    });
   }
 
   claimIntent(input: OrcClaimInput, ownerPeer: string, ownerInstanceId: string): OrcRunClaimResult {

@@ -102,7 +102,7 @@ async function startGeneration(overrides: GenerationOverrides = {}): Promise<imp
       bootRecovery: () => [] as number[],
       onOwnershipReleased: () => () => {},
       scheduleContractAuthoring: () => ({ kind: "busy" as const, activeRunId: "or_busy" }),
-      scheduleScheduledProject: () => ({ kind: "busy" as const, activeRunId: "or_busy" }),
+      scheduleProjectExecution: () => ({ kind: "busy" as const, activeRunId: "or_busy" }),
       scheduleReview: () => ({ kind: "busy" as const, activeRunId: "or_busy" }),
     }) as never,
     wakeScheduler: scheduler,
@@ -646,7 +646,7 @@ describe("#1678 single owner of Orc review-turn liveness", () => {
       bootRecovery: () => [] as number[],
       onOwnershipReleased: () => () => {},
       scheduleContractAuthoring: () => ({ kind: "busy" as const, activeRunId: "or_busy" }),
-      scheduleScheduledProject: () => ({ kind: "busy" as const, activeRunId: "or_busy" }),
+      scheduleProjectExecution: () => ({ kind: "busy" as const, activeRunId: "or_busy" }),
       scheduleReview: (pid: number, gen: number, rc: string) => runStore.claimIntent(
         { projectCardId: pid, intentKind: "project_review", intentRef: rc, goal: "review-wake", originKind: "local", sourcePeer: null, cardSource: "agent", expectedProjectGeneration: gen },
         "kp", "inst-live",
@@ -687,7 +687,7 @@ describe("#1678 single owner of Orc review-turn liveness", () => {
       bootRecovery: () => [] as number[],
       onOwnershipReleased: () => () => {},
       scheduleContractAuthoring: () => ({ kind: "busy" as const, activeRunId: "or_busy" }),
-      scheduleScheduledProject: () => ({ kind: "busy" as const, activeRunId: "or_busy" }),
+      scheduleProjectExecution: () => ({ kind: "busy" as const, activeRunId: "or_busy" }),
       scheduleReview: () => ({ kind: "conflict" as const, reason: "project_generation_mismatch" as const }),
     } as never;
     const h = await startGeneration({ coordinator });
@@ -736,7 +736,7 @@ describe("#1678 single owner of Orc review-turn liveness", () => {
       bootRecovery: () => [] as number[],
       onOwnershipReleased: () => () => {},
       scheduleContractAuthoring: () => ({ kind: "busy" as const, activeRunId: "or_busy" }),
-      scheduleScheduledProject: () => ({ kind: "busy" as const, activeRunId: "or_busy" }),
+      scheduleProjectExecution: () => ({ kind: "busy" as const, activeRunId: "or_busy" }),
       scheduleReview: (pid: number, gen: number, rc: string) => runStore.claimIntent(
         { projectCardId: pid, intentKind: "project_review", intentRef: rc, goal: "review-wake", originKind: "local", sourcePeer: null, cardSource: "agent", expectedProjectGeneration: gen },
         "kp", "inst-live",

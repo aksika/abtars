@@ -67,7 +67,7 @@ async function fakeCoordinator(): Promise<Array<{ projectCardId: number; goal: s
     getStore: () => ({ countStartedAuthoringTurns: () => 0, countConsecutiveUnstartableAuthoringTurns: () => 0, lastAuthoringClaimAt: () => null, lastAuthoringFailureCode: () => null }),
     bootRecovery: () => [] as number[],
     onOwnershipReleased: () => () => {},
-    scheduleScheduledProject(projectCardId: number, goal: string) {
+    scheduleProjectExecution(projectCardId: number, goal: string) {
       claims.push({ projectCardId, goal });
       // a real claim is durable — the shared driver observes the live row
       try {

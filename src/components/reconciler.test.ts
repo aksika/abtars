@@ -301,7 +301,7 @@ function makeTestCoordinator(overrides: Record<string, unknown> = {}) {
     bootRecovery: () => [] as number[],
     onOwnershipReleased: () => () => {},
     scheduleContractAuthoring: () => ({ kind: "busy" as const, activeRunId: "or_unused" }),
-    scheduleScheduledProject: () => ({ kind: "busy" as const, activeRunId: "or_unused" }),
+    scheduleProjectExecution: () => ({ kind: "busy" as const, activeRunId: "or_unused" }),
     scheduleReview: () => ({ kind: "busy" as const, activeRunId: "or_review" }),
     ...overrides,
   };
@@ -784,7 +784,7 @@ describe("Reconciler — #1411 domain guard", () => {
         coordinator: {
           getStore: makeFakeRunStore,
           scheduleContractAuthoring: () => ({ kind: "busy" as const, activeRunId: "or_unused" }),
-          scheduleScheduledProject: () => ({ kind: "busy" as const, activeRunId: "or_unused" }),
+          scheduleProjectExecution: () => ({ kind: "busy" as const, activeRunId: "or_unused" }),
           scheduleReview: (projectCardId: number, projectGeneration: number, reviewCaseId: string) => {
             reviewClaims.push([projectCardId, projectGeneration, reviewCaseId]);
             return { kind: "claimed" as const, context: { runId: `or_review_${projectCardId}`, projectCardId } };
@@ -876,7 +876,7 @@ describe("Reconciler — #1546 scheduled-root driver", () => {
           getLiveRunForProjectMock.mockReturnValue({ project_generation: 1, id: `or_${projectCardId}` });
           return { kind: "claimed" as const, context: { runId: `or_${projectCardId}`, projectCardId } };
         },
-        scheduleScheduledProject: (projectCardId: number, goal: string) => {
+        scheduleProjectExecution: (projectCardId: number, goal: string) => {
           claims.push({ projectCardId, goal });
           // a real claim creates the durable live Orc row the next pass observes
           getLiveRunForProjectMock.mockReturnValue({ project_generation: 1, id: `or_${projectCardId}` });
@@ -1407,7 +1407,7 @@ describe("Reconciler — #1546 scheduled-root driver", () => {
     await swapTestGeneration({
       coordinator: {
         getStore: makeFakeRunStore,
-        scheduleScheduledProject: (projectCardId: number, goal: string) => {
+        scheduleProjectExecution: (projectCardId: number, goal: string) => {
           claims.push({ projectCardId, goal });
           return { kind: "claimed" as const, context: { runId: "or_1", projectCardId } };
         },
@@ -1508,7 +1508,7 @@ describe("Reconciler — #1546 scheduled-root driver", () => {
     await swapTestGeneration({
       coordinator: {
         getStore: makeFakeRunStore,
-        scheduleScheduledProject: (projectCardId: number, goal: string) => {
+        scheduleProjectExecution: (projectCardId: number, goal: string) => {
           claims.push({ projectCardId, goal });
           return { kind: "claimed" as const, context: { runId: `or_${projectCardId}`, projectCardId } };
         },
@@ -1551,7 +1551,7 @@ describe("Reconciler — #1546 scheduled-root driver", () => {
     await swapTestGeneration({
       coordinator: {
         getStore: makeFakeRunStore,
-        scheduleScheduledProject: (projectCardId: number, _goal: string) => {
+        scheduleProjectExecution: (projectCardId: number, _goal: string) => {
           claims.push({ projectCardId, goal: _goal });
           // busy means a live row exists — the next pass observes it as an owner
           getLiveRunForProjectMock.mockReturnValue({ project_generation: 1, id: "or_busy" });
@@ -1575,7 +1575,7 @@ describe("Reconciler — #1546 scheduled-root driver", () => {
     await swapTestGeneration({
       coordinator: {
         getStore: makeFakeRunStore,
-        scheduleScheduledProject: (projectCardId: number, goal: string) => {
+        scheduleProjectExecution: (projectCardId: number, goal: string) => {
           claims.push({ projectCardId, goal });
           if (conflictFirst) {
             conflictFirst = false;
@@ -1609,7 +1609,7 @@ describe("Reconciler — #1546 scheduled-root driver", () => {
     await swapTestGeneration({
       coordinator: {
         getStore: makeFakeRunStore,
-        scheduleScheduledProject: (projectCardId: number, goal: string) => {
+        scheduleProjectExecution: (projectCardId: number, goal: string) => {
           claims.push({ projectCardId, goal });
           // another writer advanced the project during the claim attempt
           reviewStoreMock.getSupervision.mockReturnValue(supervision({ state: "accepted" }));

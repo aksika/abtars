@@ -1646,7 +1646,7 @@ export class Spin {
    */
   private reportFailedOrcRelease(
     store: import("./orc-project/orc-project-run-store.js").OrcProjectRunStore,
-    context: import("./orc-project/orc-project-contracts.js").OrcInvocationContextV1,
+    context: import("./orc-project/orc-project-contracts.js").OrcInvocationContextV2,
   ): void {
     const { classifyFailedRelease } = require("./orc-project/orc-project-coordinator.js") as typeof import("./orc-project/orc-project-coordinator.js");
     const failure = classifyFailedRelease(store, context);

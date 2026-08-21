@@ -206,7 +206,7 @@ async function startTestGeneration(coordinator?: unknown): Promise<void> {
       bootRecovery: () => [] as number[],
       onOwnershipReleased: () => () => {},
       scheduleContractAuthoring: () => ({ kind: "busy" as const, activeRunId: "or_unused" }),
-      scheduleScheduledProject: () => ({ kind: "busy" as const, activeRunId: "or_unused" }),
+      scheduleProjectExecution: () => ({ kind: "busy" as const, activeRunId: "or_unused" }),
       scheduleReview: () => ({ kind: "busy" as const, activeRunId: "or_review" }),
       ...(coordinator as Record<string, unknown> | undefined),
     }) as never,
@@ -263,7 +263,7 @@ async function installFakeCoordinator(claims: Array<{ kind: string; pid: number;
       claims.push({ kind: "authoring", pid });
       return { kind: "claimed" as const, context: { runId: `or_${pid}_fake`, projectCardId: pid } };
     },
-    scheduleScheduledProject: (pid: number, goal: string) => {
+    scheduleProjectExecution: (pid: number, goal: string) => {
       claims.push({ kind: "coverage", pid, goal });
       return { kind: "claimed" as const, context: { runId: `or_${pid}_fake`, projectCardId: pid } };
     },

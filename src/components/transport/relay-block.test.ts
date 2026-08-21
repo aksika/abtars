@@ -18,9 +18,10 @@ beforeEach(() => {
 });
 
 const peerContext = {
-  version: 1 as const,
+  version: 2 as const,
   runId: "missing",
-  intentKey: "review:1",
+  intentKey: "operator:1",
+  intentKind: "operator_turn" as const,
   projectCardId: 1,
   projectGeneration: 1,
   ownershipGeneration: 1,

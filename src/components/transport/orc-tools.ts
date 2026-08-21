@@ -213,7 +213,7 @@ const spawnWorkerTool: ToolDefinition = {
           projectCardId: context.orcContext.projectCardId,
           projectGeneration: context.orcContext.projectGeneration,
           ...(projectCard?.source === "task" && projectCard.source_id
-            // `OrcInvocationContextV1.runId` identifies the durable Orc
+            // `OrcInvocationContextV2.runId` identifies the durable Orc
             // ownership row. Scheduled-project authority instead carries the
             // task-run correlation stored on the root card; using the Orc run
             // ID here would reject every valid scheduled child as run-stale.
@@ -677,6 +677,12 @@ const defineProjectContractTool: ToolDefinition = {
       const delegatedText = delegatedIds.length > 0 ? delegatedIds.join(", ") : "(none)";
       const orcText = orcOwnedIds.length > 0 ? orcOwnedIds.join(", ") : "(none)";
       const optionalText = optionalIds.length > 0 ? `; optional (required: false) criteria: ${optionalIds.join(", ")}` : "";
+      // #1680: the durable intent is satisfied by the committed contract —
+      // the host-owned turn control re-reads the postcondition (contract exists
+      // and supervision is `executing`) before it wins, and the transport
+      // stops the turn instead of waiting for another provider round. A tool
+      // result string is never accepted as proof.
+      context?.orcTurnControl?.complete({ kind: "intent_satisfied", code: "contract_defined" });
       return `✓ Root contract defined (${normalized.contract.id}, digest: ${normalized.contract.digest.slice(0, 12)}…). Delegated criteria: ${delegatedText}; Orc-owned criteria: ${orcText}${optionalText}. Every spawn_worker must pass supports_root_criteria using only delegated ids; Orc-owned criteria are evaluated by you in review_project, never mapped to Workers.`;
     } catch (err) {
       return `[err] define_project_contract error: ${String(err)}`;
@@ -835,14 +841,19 @@ const reviewProjectTool: ToolDefinition = {
 
       switch (result.kind) {
         case "accepted":
+          context?.orcTurnControl?.complete({ kind: "intent_satisfied", code: "review_case_consumed" });
           return JSON.stringify({ outcome: "accepted", decision_id: result.decisionId, summary: result.summary, warnings: result.warnings ?? [] });
         case "repair":
+          context?.orcTurnControl?.complete({ kind: "intent_satisfied", code: "repair_decision_advanced" });
           return JSON.stringify({ outcome: "repair", decision_id: result.decisionId, summary: result.summary, warnings: result.warnings ?? [] });
         case "blocked":
+          context?.orcTurnControl?.complete({ kind: "intent_satisfied", code: "review_case_consumed" });
           return JSON.stringify({ outcome: "blocked", decision_id: result.decisionId, summary: result.summary, warnings: result.warnings ?? [] });
         case "needs_input":
+          context?.orcTurnControl?.complete({ kind: "intent_satisfied", code: "review_case_consumed" });
           return JSON.stringify({ outcome: "needs_input", decision_id: result.decisionId, summary: result.summary, warnings: result.warnings ?? [] });
         case "blocked_invalid":
+          context?.orcTurnControl?.complete({ kind: "intent_satisfied", code: "review_case_consumed" });
           return JSON.stringify({ outcome: "blocked_invalid", decision_id: result.decisionId, summary: result.summary, invalid_proposal_count: result.invalidProposalCount });
         case "invalid":
           return JSON.stringify({

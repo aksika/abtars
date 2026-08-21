@@ -3,7 +3,7 @@ import { mkdirSync, rmSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { vi } from "vitest";
-import type { OrcInvocationContextV1 } from "./orc-project-contracts.js";
+import type { OrcInvocationContextV2, OrcTurnSpec } from "./orc-project-contracts.js";
 import { authorizePeerEgress } from "./orc-project-context.js";
 
 let TEST_HOME: string;
@@ -57,18 +57,18 @@ function seedProject(store: import("./orc-project-run-store.js").OrcProjectRunSt
 interface Harness {
   coordinator: InstanceType<typeof CoordinatorType>;
   store: import("./orc-project-run-store.js").OrcProjectRunStore;
-  starts: Array<{ context: OrcInvocationContextV1; goal: string }>;
+  starts: Array<{ spec: OrcTurnSpec }>;
   setRootIdentity: (id: { source: string; sourcePeer: string | null }) => void;
 }
 
 function makeHarness(): Harness {
-  const starts: Array<{ context: OrcInvocationContextV1; goal: string }> = [];
+  const starts: Array<{ spec: OrcTurnSpec }> = [];
   let rootIdentity = { source: "agent", sourcePeer: null };
   const coordinator = new CoordinatorType({
     ownerPeer: "kp",
     ownerInstanceId: "inst_1",
     getRootIdentity: () => rootIdentity,
-    startPort: async (context: OrcInvocationContextV1, goal: string) => { starts.push({ context, goal }); },
+    startPort: async (spec: OrcTurnSpec) => { starts.push({ spec }); },
   });
   ensureSupervisionTable(coordinator.getStore() as any);
   coordinator.getStore().db.exec(`DELETE FROM orc_project_runs`);
@@ -100,8 +100,8 @@ describe("OrcProjectCoordinator origin derivation (#1618)", () => {
     expect(row.origin_peer).toBe("molty");
 
     expect(h.starts).toHaveLength(1);
-    expect(h.starts[0]!.context.origin.kind).toBe("peer");
-    expect(h.starts[0]!.context.origin.peer).toBe("molty");
+    expect(h.starts[0]!.spec.context.origin.kind).toBe("peer");
+    expect(h.starts[0]!.spec.context.origin.peer).toBe("molty");
   });
 
   it("fails closed on a peer root without an authenticated source peer", () => {
@@ -537,12 +537,12 @@ describe("#1675 a run is only promoted by the caller that starts it", () => {
     expect(h.store.getRun(queued.kind === "claimed" ? queued.context.runId : "")?.state).toBe("scheduled");
 
     const goal42 = "DEFINE-42-MARKER-GOAL";
-    const claim42 = h.coordinator.scheduleScheduledProject(42, goal42);
+    const claim42 = h.coordinator.scheduleProjectExecution(42, goal42);
     expect(claim42.kind).toBe("claimed");
 
     // #1675: a fresh claim on 42 must promote 42's own run — never 41's
     // queued run — and never bind 42's goal to 41's context.
-    const wrongPairing = h.starts.find((s) => s.context.projectCardId === 41 && s.goal === goal42);
+    const wrongPairing = h.starts.find((s) => s.spec.context.projectCardId === 41 && s.spec.goal === goal42);
     expect(wrongPairing).toBeUndefined();
   });
 
@@ -556,17 +556,17 @@ describe("#1675 a run is only promoted by the caller that starts it", () => {
     if (slot.kind !== "claimed") return;
 
     // G1 claims project 51 first — the run is created for G1 but stays queued.
-    const g1 = h.coordinator.scheduleScheduledProject(51, "G1-OWNER-GOAL");
+    const g1 = h.coordinator.scheduleProjectExecution(51, "G1-OWNER-GOAL");
     expect(g1.kind).toBe("claimed");
     if (g1.kind !== "claimed") return;
     const g1RunId = g1.context.runId;
-    expect(h.starts.some((s) => s.context.runId === g1RunId)).toBe(false);
+    expect(h.starts.some((s) => s.spec.context.runId === g1RunId)).toBe(false);
 
-    // The reconciler's generic authoring wake — different goal G2, same
-    // contract_authoring intent key — is idempotent against G1's run.
-    const g2 = h.coordinator.scheduleContractAuthoring(51);
+    // A later project_execution wake with a different goal G2 — same intent
+    // key — is idempotent against G1's run.
+    const g2 = h.coordinator.scheduleProjectExecution(51, "G2-LATER-GOAL");
     expect(g2.kind).toBe("idempotent");
-    expect(h.starts.some((s) => s.context.runId === g1RunId)).toBe(false);
+    expect(h.starts.some((s) => s.spec.context.runId === g1RunId)).toBe(false);
 
     // Free the global slot through the production ownership path.
     const bind = h.store.bindExecution(slot.context, "sess_40", "exec_40");
@@ -576,12 +576,12 @@ describe("#1675 a run is only promoted by the caller that starts it", () => {
 
     // The project's own wake re-enters scheduleX; the idempotent claim promotes
     // the queued run — with the persisted first-claimant goal, never G2.
-    const wake = h.coordinator.scheduleContractAuthoring(51);
+    const wake = h.coordinator.scheduleProjectExecution(51, "G2-LATER-GOAL");
     expect(wake.kind).toBe("idempotent");
 
-    const started = h.starts.find((s) => s.context.runId === g1RunId);
+    const started = h.starts.find((s) => s.spec.context.runId === g1RunId);
     expect(started).toBeDefined();
-    expect(started!.goal).toBe("G1-OWNER-GOAL");
+    expect(started!.spec.goal).toBe("G1-OWNER-GOAL");
   });
 
   it("a freed slot reaches a queued run through the production wake path", () => {
@@ -594,7 +594,7 @@ describe("#1675 a run is only promoted by the caller that starts it", () => {
     if (a.kind !== "claimed") return;
 
     const goal61 = "QUEUED-61-GOAL";
-    const b = h.coordinator.scheduleScheduledProject(61, goal61);
+    const b = h.coordinator.scheduleProjectExecution(61, goal61);
     expect(b.kind).toBe("claimed");
     if (b.kind !== "claimed") return;
     expect(h.starts).toHaveLength(1);
@@ -609,13 +609,13 @@ describe("#1675 a run is only promoted by the caller that starts it", () => {
     // The queued project's own wake re-enters its scheduleX (the reconciler's
     // requestReconcileForProject path) — the idempotent claim promotes it.
     // No test-only store.pump() is called anywhere in this scenario.
-    const wake = h.coordinator.scheduleScheduledProject(61, goal61);
+    const wake = h.coordinator.scheduleProjectExecution(61, goal61);
     expect(wake.kind).toBe("idempotent");
 
     expect(h.store.getRun(b.context.runId)?.state).toBe("dispatching");
-    const started = h.starts.find((s) => s.context.runId === b.context.runId);
+    const started = h.starts.find((s) => s.spec.context.runId === b.context.runId);
     expect(started).toBeDefined();
-    expect(started!.goal).toBe(goal61);
+    expect(started!.spec.goal).toBe(goal61);
   });
 
   it("an idempotent re-claim never starts a live run twice", () => {
@@ -625,7 +625,7 @@ describe("#1675 a run is only promoted by the caller that starts it", () => {
     const first = h.coordinator.scheduleContractAuthoring(70);
     expect(first.kind).toBe("claimed");
     if (first.kind !== "claimed") return;
-    expect(h.starts.filter((s) => s.context.runId === first.context.runId)).toHaveLength(1);
+    expect(h.starts.filter((s) => s.spec.context.runId === first.context.runId)).toHaveLength(1);
 
     const bind = h.store.bindExecution(first.context, "sess_70", "exec_70");
     expect(bind.ok).toBe(true);
@@ -633,7 +633,7 @@ describe("#1675 a run is only promoted by the caller that starts it", () => {
     const again = h.coordinator.scheduleContractAuthoring(70);
     expect(again.kind).toBe("idempotent");
 
-    expect(h.starts.filter((s) => s.context.runId === first.context.runId)).toHaveLength(1);
+    expect(h.starts.filter((s) => s.spec.context.runId === first.context.runId)).toHaveLength(1);
     expect(h.store.getRun(first.context.runId)?.state).toBe("running");
   });
 
@@ -658,5 +658,74 @@ describe("#1675 a run is only promoted by the caller that starts it", () => {
     expect(h.store.getRun(claim.context.runId)?.state).toBe("superseded");
     expect(h.store.getLiveRuns()).toHaveLength(0);
     expect(h.starts).toHaveLength(1); // the mock start is recorded, nothing re-started
+  });
+});
+
+describe("#1680 durable bounded run diagnostics (failure_code)", () => {
+  it("a start-port rejection persists the stable start_port_rejected code through the funnel", async () => {
+    const h = makeHarness();
+    seedProject(h.store, 90);
+    // The start port throws synchronously → the coordinator's catch releases
+    // the promoted run failed with start_port_rejected and publishes the
+    // ownership-released event.
+    const releases: Array<{ runId: string; outcome: string; failureCode: string | null }> = [];
+    const coordinator = new CoordinatorType({
+      ownerPeer: "kp",
+      ownerInstanceId: "inst_1",
+      getRootIdentity: () => ({ source: "agent", sourcePeer: null }),
+      startPort: async () => { throw new Error("port unavailable"); },
+    });
+    ensureSupervisionTable(coordinator.getStore() as any);
+    coordinator.getStore().db.prepare(`
+      INSERT OR IGNORE INTO project_supervision (project_card_id, contract_id, state, generation, updated_at)
+      VALUES (90, '', 'executing', 1, ?)
+    `).run(new Date().toISOString());
+    coordinator.onOwnershipReleased((event) => releases.push({ runId: event.runId, outcome: event.outcome, failureCode: null }));
+
+    const claim = coordinator.scheduleContractAuthoring(90);
+    expect(claim.kind).toBe("claimed");
+    if (claim.kind !== "claimed") return;
+    await new Promise((r) => setTimeout(r, 50));
+
+    const row = coordinator.getStore().getRun(claim.context.runId);
+    expect(row?.state).toBe("released");
+    expect(row?.outcome).toBe("failed");
+    expect(row?.failure_code).toBe("start_port_rejected");
+    expect(row?.started_at).toBeNull();
+    expect(releases).toHaveLength(1);
+    expect(releases[0]!.outcome).toBe("failed");
+  });
+
+  it("the release CAS writes the bounded failure code and success always writes NULL", () => {
+    const h = makeHarness();
+    seedProject(h.store, 91);
+    const claim = h.coordinator.scheduleContractAuthoring(91);
+    expect(claim.kind).toBe("claimed");
+    if (claim.kind !== "claimed") return;
+
+    const failed = h.store.release({ ...claim.context, sessionId: "s_1", executionId: "e_1" }, "failed", "provider_failure");
+    expect(failed).toBe(true);
+    expect(h.store.getRun(claim.context.runId)?.failure_code).toBe("provider_failure");
+    // The production diagnostic is the read of a real written value.
+    expect(h.store.lastAuthoringFailureCode(91, 1)).toBe("provider_failure");
+
+    const claim2 = h.coordinator.scheduleContractAuthoring(91);
+    expect(claim2.kind).toBe("claimed");
+    if (claim2.kind !== "claimed") return;
+    const completed = h.store.release({ ...claim2.context, sessionId: "s_2", executionId: "e_2" }, "completed");
+    expect(completed).toBe(true);
+    const row = h.store.getRun(claim2.context.runId);
+    expect(row?.outcome).toBe("completed");
+    expect(row?.failure_code).toBeNull();
+  });
+
+  it("a failed release without a stated reason defaults to provider_failure", () => {
+    const h = makeHarness();
+    seedProject(h.store, 92);
+    const claim = h.coordinator.scheduleContractAuthoring(92);
+    expect(claim.kind).toBe("claimed");
+    if (claim.kind !== "claimed") return;
+    expect(h.store.release({ ...claim.context, sessionId: "s_3", executionId: "e_3" }, "failed")).toBe(true);
+    expect(h.store.getRun(claim.context.runId)?.failure_code).toBe("provider_failure");
   });
 });

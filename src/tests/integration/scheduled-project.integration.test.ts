@@ -85,7 +85,7 @@ async function startGeneration(coordinator: unknown): Promise<void> {
 
     const claims: Array<{ projectCardId: number; goal: string }> = [];
     await startGeneration({
-      scheduleScheduledProject(projectCardId: number, goal: string) {
+      scheduleProjectExecution(projectCardId: number, goal: string) {
         claims.push({ projectCardId, goal });
         return { kind: "claimed", context: { runId: "or_test", projectCardId } };
       },
@@ -198,7 +198,7 @@ async function startGeneration(coordinator: unknown): Promise<void> {
     mkdirSync(join(home, "workspace", "stale-task"), { recursive: true });
 
     await startGeneration({
-      scheduleScheduledProject() {
+      scheduleProjectExecution() {
         return { kind: "claimed", context: { runId: "or_test", projectCardId: 1 } };
       },
     } as never);

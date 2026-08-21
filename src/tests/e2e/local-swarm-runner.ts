@@ -241,15 +241,17 @@ async function startTestReconciler(
   const peerName = loadPeerConfig().self.name;
   const coordinator = deps.coordinator ?? new OrcProjectCoordinator({
     ownerPeer: peerName,
-    startPort: async (context, goal) => {
+    startPort: async (spec) => {
       await spin.spin({
         type: "O",
-        goal,
-        sessionId: context.sessionId,
-        cardId: context.projectCardId,
+        goal: spec.goal,
+        sessionId: spec.context.sessionId,
+        cardId: spec.context.projectCardId,
         settlementOwner: "spin",
         source: "agent",
-        orcContext: context,
+        orcContext: spec.context,
+        orcTurnControl: spec.turnControl,
+        orcMaxPromptRounds: spec.maxPromptRounds,
       });
     },
   });

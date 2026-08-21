@@ -1077,9 +1077,15 @@ export async function executeToolCall(name: string, args: Record<string, unknown
   const availability = checkToolAvailability(name, context ?? {});
   if (!availability.allowed) {
     auditDeny(name, undefined, context?.authorizationMode ?? "unknown", availability.reason!);
+    // #1680: an Orc intent-surface denial is distinct from the scheduled
+    // delivery denial — the stable reason lets tests and operators tell a
+    // forged/stale project-bound call from an unattended delivery.
+    const reason = availability.reason?.includes("intent") === true
+      ? "orc_intent_surface"
+      : "unattended_scheduled_delivery";
     return JSON.stringify({
       error: `Tool '${name}' is not available in this session`,
-      reason: "unattended_scheduled_delivery",
+      reason,
       detail: availability.reason,
     });
   }
