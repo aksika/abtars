@@ -197,6 +197,28 @@ describe("OrcProjectRunStore", () => {
     if (!validation.ok) expect(validation.reason).toBe("run_released");
   });
 
+  it("rejects intent and origin substitution on a live context", () => {
+    seedProject(store, 71);
+    const claim = store.claimIntent(makeInput({ projectCardId: 71 }), "local_peer", "inst_1");
+    expect(claim.kind).toBe("claimed");
+    if (claim.kind !== "claimed") return;
+
+    const forgedIntent = store.validateCurrentContext({
+      ...claim.context,
+      intentKind: "operator_turn",
+    });
+    expect(forgedIntent).toEqual({ ok: false, reason: "intent_mismatch" });
+
+    const forgedOrigin = store.validateCurrentContext({
+      ...claim.context,
+      origin: { kind: "peer", peer: "molty" },
+    });
+    expect(forgedOrigin).toEqual({ ok: false, reason: "origin_invalid" });
+
+    expect(store.release({ ...claim.context, intentKind: "operator_turn" }, "completed")).toBe(false);
+    expect(store.getRun(claim.context.runId)?.state).toBe("scheduled");
+  });
+
   it("supersedes a live run", () => {
     seedProject(store, 8);
     const claim = store.claimIntent(makeInput({ projectCardId: 8 }), "local_peer", "inst_1");

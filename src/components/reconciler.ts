@@ -28,6 +28,7 @@ import { ReviewCaseAssembler } from "./project-acceptance/project-review-case.js
 import { readProjectCriterionCoverage, coverageSignature } from "./project-acceptance/project-criterion-coverage.js";
 import { delegatedCriterionIds } from "./project-acceptance/project-contract.js";
 import { OrcProjectRunStore } from "./orc-project/orc-project-run-store.js";
+import { intentPolicyFor, readOrcProjectSnapshot } from "./orc-project/orc-intent-policy.js";
 import { hasLiveContributionForProject } from "./peer-help/contribution-store.js";
 import { REVIEW_REQUEST_ABANDONED, REPAIR_SOURCE_CONTRACT_INVALID } from "./project-acceptance/project-review-contract.js";
 import { deriveRepairContract } from "./retry/retry-directive.js";
@@ -693,10 +694,20 @@ function inspectProjectOwnership(projectId: number, supervision: ProjectSupervis
   }
 
   // R3.2: a live Orc row matching the current supervision generation is an
-  // existing durable owner — never a fresh claim.
+  // existing durable owner — never a fresh claim — only while its persisted
+  // intent remains actionable. A consumed authoring run must not mask the
+  // contribution_wait owner after its contract has committed.
   try {
-    const liveRun = new OrcProjectRunStore().getLiveRunForProject(projectId);
-    if (liveRun && liveRun.project_generation === supervision.generation) return "orc_claim";
+    const liveRunStore = new OrcProjectRunStore();
+    const liveRun = liveRunStore.getLiveRunForProject(projectId);
+    if (liveRun && liveRun.project_generation === supervision.generation) {
+      // Keep lightweight injected run-store doubles fail-compatible while
+      // production rows always carry the persisted intent kind.
+      if (typeof (liveRun as { intent_kind?: unknown }).intent_kind !== "string") return "orc_claim";
+      const snapshot = readOrcProjectSnapshot(liveRunStore.db, projectId);
+      if (intentPolicyFor(liveRun.intent_kind).isActionable(snapshot)) return "orc_claim";
+      logWarn(TAG, `Project ${projectId}: live Orc run ${liveRun.id} is no longer actionable — continuing owner inspection`);
+    }
   } catch { /* fail-closed: no live-claim observation */ }
 
   // #1680: after every existing owner and a live Orc claim, an executing root
@@ -755,6 +766,15 @@ function claimOrcContinuation(generation: ReconcilerGeneration, projectId: numbe
       return "settled";
     }
     case "not_actionable":
+      // A project_execution claim is intentionally limited to an executing
+      // root with no higher-priority owner. A non-executing supervision state
+      // can still be a valid recovery state whose owner is represented by a
+      // later wake (for example, reviewing without its request row). Do not
+      // turn that phase guard into a terminal last-resort settlement.
+      if (reviewStore.getSupervision(projectId)?.state !== "executing") {
+        logWarn(TAG, `Project ${projectId}: continuation not actionable outside executing — deferring to the phase owner`);
+        return "owned";
+      }
       logWarn(TAG, `Project ${projectId}: scheduled continuation not actionable (${result.reason}) — settling as last resort`);
       settleProjectLastResortFor(generation, projectId);
       return "settled";

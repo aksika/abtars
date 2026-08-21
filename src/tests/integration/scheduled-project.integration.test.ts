@@ -83,10 +83,24 @@ async function startGeneration(coordinator: unknown): Promise<void> {
     const artifactPath = join(home, "workspace", "brief-task", "brief.md");
     mkdirSync(join(home, "workspace", "brief-task"), { recursive: true });
 
-    const claims: Array<{ projectCardId: number; goal: string }> = [];
+    const claims: Array<{ projectCardId: number; goal: string; intentKind: "contract_authoring" | "project_execution" }> = [];
+    let claimedProjectCardId: number | undefined;
     await startGeneration({
-      scheduleProjectExecution(projectCardId: number, goal: string) {
-        claims.push({ projectCardId, goal });
+      getStore: () => ({
+        countStartedAuthoringTurns: () => 0,
+        countConsecutiveUnstartableAuthoringTurns: () => 0,
+        lastAuthoringClaimAt: () => null,
+        lastAuthoringFailureCode: () => null,
+        getLiveRunForProject: (projectCardId: number) => claimedProjectCardId === projectCardId
+          ? { project_generation: 1, intent_kind: "contract_authoring" }
+          : undefined,
+      }),
+      scheduleContractAuthoring(projectCardId: number, goal = "contract_authoring") {
+        if (claimedProjectCardId === projectCardId) {
+          return { kind: "idempotent", context: { runId: "or_test", projectCardId } };
+        }
+        claimedProjectCardId = projectCardId;
+        claims.push({ projectCardId, goal, intentKind: "contract_authoring" });
         return { kind: "claimed", context: { runId: "or_test", projectCardId } };
       },
     } as never);
@@ -110,6 +124,7 @@ async function startGeneration(coordinator: unknown): Promise<void> {
       await new Promise(resolve => setTimeout(resolve, 10));
     }
     expect(claims).toHaveLength(1);
+    expect(claims[0]!.intentKind).toBe("contract_authoring");
     const rootId = claims[0]!.projectCardId;
     expect(claims[0]!.goal).toContain("Agent budget: 4 total agents (1 Orc + up to 3");
     expect(claims[0]!.goal).toContain("sole writer");
@@ -198,7 +213,7 @@ async function startGeneration(coordinator: unknown): Promise<void> {
     mkdirSync(join(home, "workspace", "stale-task"), { recursive: true });
 
     await startGeneration({
-      scheduleProjectExecution() {
+      scheduleContractAuthoring() {
         return { kind: "claimed", context: { runId: "or_test", projectCardId: 1 } };
       },
     } as never);

@@ -216,6 +216,8 @@ describe("#1628 Orc authoring recovery (real stores)", () => {
     expect(coordinator.releaseOwnedRun({
       ...starts[0]!,
       version: 2,
+      intentKey: releasingRun!.intent_key,
+      intentRef: releasingRun!.intent_ref ?? undefined,
       intentKind: releasingRun!.intent_kind,
       runId: releasingRun!.id,
       projectCardId: releasingProjectId,

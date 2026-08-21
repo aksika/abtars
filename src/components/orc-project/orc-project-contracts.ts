@@ -69,6 +69,7 @@ export type OrcRunReason =
   | "ownership_generation_mismatch"
   | "session_mismatch"
   | "execution_mismatch"
+  | "intent_mismatch"
   | "origin_invalid"
   | "project_terminal"
   | "intent_not_actionable"
@@ -222,6 +223,7 @@ export function formatRunReason(reason: OrcRunReason): string {
     case "ownership_generation_mismatch": return "Ownership generation has been superseded";
     case "session_mismatch": return "Session ID does not match the bound run";
     case "execution_mismatch": return "Execution ID does not match the bound run";
+    case "intent_mismatch": return "Intent identity does not match the bound run";
     case "origin_invalid": return "Project origin is missing or inconsistent with authenticated admission";
     case "project_terminal": return "Project is in a terminal state";
     case "intent_not_actionable": return "Underlying intent is no longer actionable";

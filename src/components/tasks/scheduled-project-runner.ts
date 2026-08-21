@@ -127,7 +127,7 @@ export async function scheduledProjectRunner(request: ScheduledProjectRequest): 
       // over a generic Reconciler authoring wake for the same card.
       const coordinator = getActiveOrcCoordinator();
       if (!coordinator) throw new Error("scheduled project admission failed: Orc coordinator unavailable");
-      const claim = coordinator.scheduleProjectExecution(rootCardId, goal);
+      const claim = coordinator.scheduleContractAuthoring(rootCardId, goal);
       if (claim.kind === "conflict" || claim.kind === "not_actionable") {
         throw new Error(`scheduled project admission failed: ${claim.reason}`);
       }
@@ -177,7 +177,7 @@ export async function scheduledProjectRunner(request: ScheduledProjectRequest): 
   const supervision = reviewStore.getSupervision(rootCardId);
   const needsAuthoringTurn = !supervision || supervision.state === "awaiting_contract";
   if (needsAuthoringTurn) {
-    const claim = coordinator.scheduleProjectExecution(rootCardId, goal);
+    const claim = coordinator.scheduleContractAuthoring(rootCardId, goal);
     if (claim.kind === "conflict" || claim.kind === "not_actionable") {
       throw new Error(`scheduled project admission failed: ${claim.reason}`);
     }

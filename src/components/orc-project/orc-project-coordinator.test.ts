@@ -44,14 +44,36 @@ function ensureSupervisionTable(store: import("./orc-project-run-store.js").OrcP
       blocked_reason TEXT,
       updated_at TEXT NOT NULL
     );
+    CREATE TABLE IF NOT EXISTS project_contracts (
+      project_card_id INTEGER PRIMARY KEY
+    );
+    CREATE TABLE IF NOT EXISTS project_review_cases (
+      project_card_id INTEGER NOT NULL,
+      status TEXT NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS project_input_requests (
+      project_card_id INTEGER NOT NULL,
+      status TEXT NOT NULL
+    );
   `);
 }
 
-function seedProject(store: import("./orc-project-run-store.js").OrcProjectRunStore, cardId: number, state = "executing"): void {
+function seedProject(store: import("./orc-project-run-store.js").OrcProjectRunStore, cardId: number, state = "awaiting_contract"): void {
   store.db.prepare(`
     INSERT OR IGNORE INTO project_supervision (project_card_id, contract_id, state, generation, updated_at)
     VALUES (?, '', ?, 1, ?)
   `).run(cardId, state, new Date().toISOString());
+  if (state === "executing") {
+    store.db.prepare(`INSERT OR IGNORE INTO project_contracts (project_card_id) VALUES (?)`).run(cardId);
+  }
+}
+
+function seedReviewCase(store: import("./orc-project-run-store.js").OrcProjectRunStore, cardId: number): void {
+  store.db.prepare(`INSERT INTO project_review_cases (project_card_id, status) VALUES (?, 'open')`).run(cardId);
+}
+
+function seedInputRequest(store: import("./orc-project-run-store.js").OrcProjectRunStore, cardId: number): void {
+  store.db.prepare(`INSERT INTO project_input_requests (project_card_id, status) VALUES (?, 'pending')`).run(cardId);
 }
 
 interface Harness {
@@ -74,6 +96,9 @@ function makeHarness(): Harness {
   coordinator.getStore().db.exec(`DELETE FROM orc_project_runs`);
   coordinator.getStore().db.exec(`DELETE FROM orc_project_ownership_counters`);
   coordinator.getStore().db.exec(`DELETE FROM project_supervision`);
+  coordinator.getStore().db.exec(`DELETE FROM project_contracts`);
+  coordinator.getStore().db.exec(`DELETE FROM project_review_cases`);
+  coordinator.getStore().db.exec(`DELETE FROM project_input_requests`);
   return {
     coordinator,
     store: coordinator.getStore() as any,
@@ -120,9 +145,11 @@ describe("OrcProjectCoordinator origin derivation (#1618)", () => {
     const h = makeHarness();
     h.setRootIdentity({ source: "task", sourcePeer: null });
     seedProject(h.store, 1);
-    seedProject(h.store, 2);
-    seedProject(h.store, 3);
-    seedProject(h.store, 4);
+    seedProject(h.store, 2, "executing");
+    seedReviewCase(h.store, 2);
+    seedProject(h.store, 3, "repair_planned");
+    seedProject(h.store, 4, "needs_input");
+    seedInputRequest(h.store, 4);
     seedProject(h.store, 5);
 
     const c1 = h.coordinator.scheduleContractAuthoring(1);
@@ -161,6 +188,39 @@ describe("OrcProjectCoordinator origin derivation (#1618)", () => {
 
     const rows = h.store.db.prepare(`SELECT COUNT(*) as cnt FROM orc_project_runs WHERE project_card_id = 1`).get() as any;
     expect(rows.cnt).toBe(1);
+  });
+
+  it("preserves the caller goal and rejects phase-invalid intent claims", () => {
+    const h = makeHarness();
+    seedProject(h.store, 1);
+
+    const authoring = h.coordinator.scheduleContractAuthoring(1, "machine-derived scheduled goal");
+    expect(authoring.kind).toBe("claimed");
+    if (authoring.kind !== "claimed") return;
+    expect(h.store.getRun(authoring.context.runId)?.goal).toBe("machine-derived scheduled goal");
+    expect(h.starts[0]!.spec.goal).toBe("machine-derived scheduled goal");
+
+    expect(h.store.release(authoring.context, "completed")).toBe(true);
+    expect(h.coordinator.scheduleProjectExecution(1, "too early").kind).toBe("not_actionable");
+
+    seedProject(h.store, 2, "executing");
+    expect(h.coordinator.scheduleContractAuthoring(2).kind).toBe("not_actionable");
+    seedReviewCase(h.store, 2);
+    expect(h.coordinator.scheduleProjectExecution(2, "higher owner exists").kind).toBe("not_actionable");
+  });
+
+  it("does not complete a turn after its exact run has been released", () => {
+    const h = makeHarness();
+    seedProject(h.store, 3);
+    const claim = h.coordinator.scheduleContractAuthoring(3);
+    expect(claim.kind).toBe("claimed");
+    if (claim.kind !== "claimed") return;
+
+    h.store.db.prepare(`INSERT INTO project_contracts (project_card_id) VALUES (3)`).run();
+    h.store.db.prepare(`UPDATE project_supervision SET state = 'executing' WHERE project_card_id = 3`).run();
+    const control = h.starts[0]!.spec.turnControl;
+    expect(h.store.release(claim.context, "completed")).toBe(true);
+    expect(control.complete({ kind: "intent_satisfied", code: "contract_defined" })).toBe(false);
   });
 
   it("blocks peer-origin egress through the Orc context (no-relay)", () => {
@@ -520,7 +580,7 @@ describe("#1675 a run is only promoted by the caller that starts it", () => {
     const h = makeHarness();
     seedProject(h.store, 40); // holds the global slot
     seedProject(h.store, 41); // queued behind the slot
-    seedProject(h.store, 42); // fresh claimant
+    seedProject(h.store, 42, "executing"); // fresh claimant
 
     const slot = h.coordinator.scheduleContractAuthoring(40);
     expect(slot.kind).toBe("claimed");
@@ -549,7 +609,7 @@ describe("#1675 a run is only promoted by the caller that starts it", () => {
   it("starts the run created for the first claimant's goal with its persisted goal, never a later caller's goal", () => {
     const h = makeHarness();
     seedProject(h.store, 40); // holds the global slot
-    seedProject(h.store, 51);
+    seedProject(h.store, 51, "executing");
 
     const slot = h.coordinator.scheduleContractAuthoring(40);
     expect(slot.kind).toBe("claimed");
@@ -587,7 +647,7 @@ describe("#1675 a run is only promoted by the caller that starts it", () => {
   it("a freed slot reaches a queued run through the production wake path", () => {
     const h = makeHarness();
     seedProject(h.store, 60);
-    seedProject(h.store, 61);
+    seedProject(h.store, 61, "executing");
 
     const a = h.coordinator.scheduleContractAuthoring(60);
     expect(a.kind).toBe("claimed");

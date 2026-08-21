@@ -14,6 +14,8 @@ import { getMasterUserId } from "../master-user.js";
 import { isDefinitivePreDispatchFailure } from "../memory-runtime.js";
 import type { ToolExecutionScope } from "../tasks/task-package.js";
 import type { OrcInvocationContextV2 } from "../orc-project/orc-project-contracts.js";
+import { formatRunReason } from "../orc-project/orc-project-contracts.js";
+import { OrcProjectRunStore } from "../orc-project/orc-project-run-store.js";
 import { orcToolAllowedOnIntent } from "../orc-project/orc-intent-policy.js";
 import { checkCommand, classifyCommand } from "../guardrails.js";
 import { SealedSecretHandles as staticSealedHandles } from "../sealed-secret-handles.js";
@@ -106,6 +108,29 @@ export function checkToolAvailability(toolName: string, context: ToolAvailabilit
         allowed: false,
         reason: `Tool '${toolName}' is outside the ${bound.intentKind} intent surface`,
       };
+    }
+
+    // #1680: an Orc context is only usable after Spin has bound it to a live
+    // execution. The coordinator's pre-bind context is suitable for composing
+    // a turn spec, but it must never authorize a direct/provider-bypassed tool
+    // call. Re-read the exact run row here so released, superseded, foreign,
+    // generation-stale, or intent-substituted contexts fail closed before the
+    // tool implementation is reached.
+    if (bound.sessionId !== undefined || bound.executionId !== undefined) {
+      try {
+        const validation = new OrcProjectRunStore().validateCurrentContext(bound);
+        if (!validation.ok) {
+          return {
+            allowed: false,
+            reason: `Orc invocation context is not current: ${formatRunReason(validation.reason)}`,
+          };
+        }
+      } catch {
+        return {
+          allowed: false,
+          reason: "Orc invocation context could not be validated against durable ownership",
+        };
+      }
     }
   }
   return { allowed: true };
@@ -1080,9 +1105,12 @@ export async function executeToolCall(name: string, args: Record<string, unknown
     // #1680: an Orc intent-surface denial is distinct from the scheduled
     // delivery denial — the stable reason lets tests and operators tell a
     // forged/stale project-bound call from an unattended delivery.
-    const reason = availability.reason?.includes("intent") === true
+    const reason = availability.reason?.includes("no intent kind") === true
+      || availability.reason?.includes("intent surface") === true
       ? "orc_intent_surface"
-      : "unattended_scheduled_delivery";
+      : availability.reason?.startsWith("Orc invocation context") === true
+        ? "orc_context_invalid"
+        : "unattended_scheduled_delivery";
     return JSON.stringify({
       error: `Tool '${name}' is not available in this session`,
       reason,

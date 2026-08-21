@@ -295,6 +295,14 @@ describe("#1680 escaped turn boundary (real Spin/coordinator/stores/tools)", () 
     expect(row?.outcome).toBe("completed");
     expect(row?.failure_code).toBeNull();
 
+    // A transport-bypassed late tool call must be rejected at the shared
+    // execution gate after the exact run has released; it must not reach the
+    // shell/tool implementation merely because its intent surface was valid.
+    const late = JSON.parse(await toolRegistry.executeToolCall("define_project_contract", {}, {
+      userId: "test-user", orcContext: bound, authorizationMode: "interactive",
+    })) as { reason?: string };
+    expect(late.reason).toBe("orc_context_invalid");
+
     // A still-actionable live row would outrank the wait owner (orc_claim);
     // once consumed, the accepted contribution wins the wake.
     expect(policyMod.readOrcProjectSnapshot(runStore.db, rootId).contributionActive).toBe(true);

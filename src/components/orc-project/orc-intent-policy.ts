@@ -94,7 +94,7 @@ const POLICIES: Record<OrcIntentKind, OrcIntentPolicy> = {
     intentKind: "contract_authoring",
     maxPromptRounds: 3,
     allowedTools: AUTHORING_TOOLS,
-    isActionable: (s) => !s.contractExists && (s.supervisionState === null || s.supervisionState === "awaiting_contract"),
+    isActionable: (s) => !s.contractExists && s.supervisionState === "awaiting_contract",
     // A committed contract that advanced supervision to `executing` satisfies
     // the authoring intent durably.
     completion: (s) => s.contractExists && s.supervisionState === "executing"
@@ -105,7 +105,13 @@ const POLICIES: Record<OrcIntentKind, OrcIntentPolicy> = {
     intentKind: "project_execution",
     maxPromptRounds: 25,
     allowedTools: EXECUTION_TOOLS,
-    isActionable: (s) => s.contractExists && !s.projectTerminal,
+    isActionable: (s) => s.supervisionState === "executing"
+      && s.contractExists
+      && !s.projectTerminal
+      && !s.workerOwnedChild
+      && !s.contributionActive
+      && !s.openReviewCase
+      && !s.inputRequestsOutstanding,
     // A durable owner (Worker/contribution/review) or a terminal project means
     // the execution intent has handed off; synthesis without any durable owner
     // is unsatisfied.
@@ -231,6 +237,7 @@ export function readOrcProjectSnapshot(db: TaskDatabase, projectCardId: number):
         FROM kanban_board AS k
         JOIN worker_contracts AS wc ON wc.card_id = k.id
        WHERE k.parent_id = ?
+         AND k.status IN ('queued', 'running')
        LIMIT 1
     `).get(projectCardId);
     workerOwnedChild = row !== undefined;

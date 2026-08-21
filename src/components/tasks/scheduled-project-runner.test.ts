@@ -62,26 +62,35 @@ async function startGeneration(coordinator: unknown): Promise<void> {
 }
 
 async function fakeCoordinator(): Promise<Array<{ projectCardId: number; goal: string }>> {
-  const claims: Array<{ projectCardId: number; goal: string }> = [];
+  const claims: Array<{ projectCardId: number; goal: string; intentKind: "contract_authoring" | "project_execution" }> = [];
   await startGeneration({
     getStore: () => ({ countStartedAuthoringTurns: () => 0, countConsecutiveUnstartableAuthoringTurns: () => 0, lastAuthoringClaimAt: () => null, lastAuthoringFailureCode: () => null }),
     bootRecovery: () => [] as number[],
     onOwnershipReleased: () => () => {},
     scheduleProjectExecution(projectCardId: number, goal: string) {
-      claims.push({ projectCardId, goal });
+      claims.push({ projectCardId, goal, intentKind: "project_execution" });
       // a real claim is durable — the shared driver observes the live row
       try {
-        new runStoreMod.OrcProjectRunStore().claimIntent(
-          { projectCardId, intentKind: "contract_authoring", goal: "runner test goal", originKind: "local", cardSource: "task", sourcePeer: null },
+        return new runStoreMod.OrcProjectRunStore().claimIntent(
+          { projectCardId, intentKind: "project_execution", goal, originKind: "local", cardSource: "task", sourcePeer: null },
           "test-peer",
           "test-instance",
         );
       } catch { /* best effort — the driver still observes the claim result */ }
       return { kind: "claimed", context: { runId: "or_test", projectCardId } };
     },
-    scheduleContractAuthoring(projectCardId: number) {
-      claims.push({ projectCardId, goal: "contract_authoring" });
-      return { kind: "claimed", context: { runId: "or_authoring", projectCardId } };
+    scheduleContractAuthoring(projectCardId: number, goal?: string) {
+      const persistedGoal = goal ?? "contract_authoring";
+      claims.push({ projectCardId, goal: persistedGoal, intentKind: "contract_authoring" });
+      try {
+        return new runStoreMod.OrcProjectRunStore().claimIntent(
+          { projectCardId, intentKind: "contract_authoring", goal: persistedGoal, originKind: "local", cardSource: "task", sourcePeer: null },
+          "test-peer",
+          "test-instance",
+        );
+      } catch {
+        return { kind: "claimed", context: { runId: "or_authoring", projectCardId } };
+      }
     },
   } as never);
   return claims;
@@ -146,6 +155,7 @@ describe("scheduled-project-runner #1516", () => {
     const pending = mod.scheduledProjectRunner(request);
 
     expect(claims).toHaveLength(1);
+    expect(claims[0]!.intentKind).toBe("contract_authoring");
     expect(claims[0]!.goal).toContain("Agent budget: 4 total agents (1 Orc + up to 3");
     expect(claims[0]!.goal).toContain("sole writer");
     expect(claims[0]!.goal).toContain("Daily-Briefing");

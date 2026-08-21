@@ -126,7 +126,7 @@ export class OrcProjectCoordinator {
     return { originKind: "local", originPeer: null };
   }
 
-  scheduleContractAuthoring(projectCardId: number): OrcRunClaimResult {
+  scheduleContractAuthoring(projectCardId: number, goal?: string): OrcRunClaimResult {
     const origin = this.deriveOrigin(projectCardId);
     if (!origin) return { kind: "conflict" as const, reason: "origin_invalid" as const };
     return this.scheduleInternal({
@@ -135,7 +135,7 @@ export class OrcProjectCoordinator {
       originKind: origin.originKind,
       cardSource: this.getRootIdentity(projectCardId).source,
       sourcePeer: origin.originPeer,
-    }, `Define acceptance contract for project #${projectCardId}; call define_project_contract with project_card_id=${projectCardId}`);
+    }, goal ?? `Define acceptance contract for project #${projectCardId}; call define_project_contract with project_card_id=${projectCardId}`);
   }
 
   /**
@@ -394,6 +394,8 @@ function buildTurnSpec(
       // proof. Read failures fail closed to unsatisfied.
       if (terminal.kind !== "intent_satisfied") return true;
       try {
+        const current = store.getRun(run.id);
+        if (!current || !isExactLiveRun(current, run)) return false;
         const completion = policy.completion(readOrcProjectSnapshot(store.db, run.project_card_id));
         return completion.satisfied;
       } catch {
@@ -401,6 +403,25 @@ function buildTurnSpec(
       }
     }),
   };
+}
+
+/** #1680: durable identity fence for a turn-control completion callback. */
+function isExactLiveRun(
+  current: import("./orc-project-contracts.js").OrcProjectRunRow,
+  expected: import("./orc-project-contracts.js").OrcProjectRunRow,
+): boolean {
+  if (current.state !== "dispatching" && current.state !== "running") return false;
+  return current.id === expected.id
+    && current.intent_key === expected.intent_key
+    && current.intent_kind === expected.intent_kind
+    && current.intent_ref === expected.intent_ref
+    && current.project_card_id === expected.project_card_id
+    && current.project_generation === expected.project_generation
+    && current.ownership_generation === expected.ownership_generation
+    && current.owner_peer === expected.owner_peer
+    && current.owner_instance_id === expected.owner_instance_id
+    && current.origin_kind === expected.origin_kind
+    && current.origin_peer === expected.origin_peer;
 }
 
 /**

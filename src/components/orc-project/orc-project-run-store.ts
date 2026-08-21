@@ -20,6 +20,8 @@ interface OrcOwnerFenceFacts {
   readonly projectCardMatches: boolean;
   readonly projectGenerationMatches: boolean;
   readonly ownershipGenerationMatches: boolean;
+  readonly intentMatches: boolean;
+  readonly originMatches: boolean;
   readonly sessionMatches: boolean;
   readonly executionMatches: boolean;
 }
@@ -33,6 +35,11 @@ function evaluateOwnerFence(
     projectCardMatches: row.project_card_id === context.projectCardId,
     projectGenerationMatches: row.project_generation === context.projectGeneration,
     ownershipGenerationMatches: row.ownership_generation === context.ownershipGeneration,
+    intentMatches: row.intent_key === context.intentKey
+      && row.intent_kind === context.intentKind
+      && (row.intent_ref ?? undefined) === context.intentRef,
+    originMatches: row.origin_kind === context.origin.kind
+      && (row.origin_peer ?? undefined) === context.origin.peer,
     sessionMatches: context.sessionId === undefined || row.session_id === context.sessionId,
     executionMatches: context.executionId === undefined || row.execution_id === context.executionId,
   };
@@ -120,7 +127,7 @@ export class OrcProjectRunStore {
     `).get() as { sql: string } | undefined;
     if (!raw || raw.sql.includes("'project_execution'")) return;
 
-    this.db.transaction(() => {
+    this.db.transactionImmediate(() => {
       const replacement = raw.sql.replace(
         "('contract_authoring','project_review',",
         "('contract_authoring','project_execution','project_review',",
@@ -269,12 +276,14 @@ export class OrcProjectRunStore {
     return this.db.transaction(() => {
       const row = this.db.prepare(`SELECT * FROM orc_project_runs WHERE id = ?`).get(context.runId) as unknown as OrcProjectRunRow | undefined;
       if (!row) return { ok: false as const, reason: "run_unknown" as const };
+      const fence = evaluateOwnerFence(row, context);
+      if (!fence.intentMatches) return { ok: false as const, reason: "intent_mismatch" as const };
+      if (!fence.originMatches) return { ok: false as const, reason: "origin_invalid" as const };
       if (row.state === "running" && row.session_id === sessionId && row.execution_id === executionId) {
         return { ok: true as const, row };
       }
       if (row.state === "running") return { ok: false as const, reason: "session_mismatch" as const };
       if (row.state === "released" || row.state === "superseded") return { ok: false as const, reason: "run_released" as const };
-      const fence = evaluateOwnerFence(row, context);
       if (!fence.ownerInstanceMatches) return { ok: false as const, reason: "foreign_instance" as const };
       if (!fence.projectCardMatches || !fence.projectGenerationMatches) {
         return { ok: false as const, reason: "project_generation_mismatch" as const };
@@ -309,6 +318,12 @@ export class OrcProjectRunStore {
       return { ok: false as const, reason: "run_released" as const };
     }
     const fence = evaluateOwnerFence(row, context);
+    if (!fence.intentMatches) {
+      return { ok: false as const, reason: "intent_mismatch" as const };
+    }
+    if (!fence.originMatches) {
+      return { ok: false as const, reason: "origin_invalid" as const };
+    }
     if (!fence.ownerInstanceMatches) {
       return { ok: false as const, reason: "foreign_instance" as const };
     }
@@ -334,9 +349,9 @@ export class OrcProjectRunStore {
   /**
    * #1673: terminal cleanup authority is separate from project mutation
    * authority. Release retires the caller's own run row and is fenced only on
-   * the run's immutable identity columns (id, ownership generation, owner
-   * instance, project card, the generation the run recorded, live state,
-   * session, execution). It deliberately does NOT compare against current
+   * the run's immutable identity columns (id, intent, origin, ownership
+   * generation, owner, project card, the generation the run recorded, live
+   * state, session, execution). It deliberately does NOT compare against current
    * `project_supervision.generation` — i.e. it never calls
    * `currentSupervisionMatches`: a turn that legitimately advanced its own
    * project's generation as part of its durable work must still be able to
@@ -365,11 +380,15 @@ export class OrcProjectRunStore {
         SET state = 'released', outcome = ?, failure_code = ?, released_at = ?, updated_at = ?
         WHERE id = ? AND ownership_generation = ? AND owner_instance_id = ?
           AND project_card_id = ? AND project_generation = ?
+          AND intent_key = ? AND intent_kind = ? AND intent_ref IS ?
+          AND origin_kind = ? AND origin_peer IS ? AND owner_peer = ?
           AND state IN ('scheduled','dispatching','running')
           AND (session_id IS NULL OR session_id = ?)
           AND (execution_id IS NULL OR execution_id = ?)
       `).run(outcome, code, now, now, context.runId, context.ownershipGeneration, context.ownerInstanceId,
-        context.projectCardId, context.projectGeneration, context.sessionId ?? null, context.executionId ?? null);
+        context.projectCardId, context.projectGeneration, context.intentKey, context.intentKind,
+        context.intentRef ?? null, context.origin.kind, context.origin.peer ?? null, context.ownerPeer,
+        context.sessionId ?? null, context.executionId ?? null);
       return result.changes > 0;
     });
   }
@@ -489,6 +508,12 @@ export class OrcProjectRunStore {
         return { ok: false as const, reason: "run_released" };
       }
       const fence = evaluateOwnerFence(revalidated, context);
+      if (!fence.intentMatches) {
+        return { ok: false as const, reason: "intent_mismatch" };
+      }
+      if (!fence.originMatches) {
+        return { ok: false as const, reason: "origin_invalid" };
+      }
       if (!fence.ownerInstanceMatches) {
         return { ok: false as const, reason: "foreign_instance" };
       }
