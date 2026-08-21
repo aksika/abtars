@@ -172,10 +172,20 @@ describe("narrowReviewProjectArgs (#1620)", () => {
     const repair = narrowReviewProjectArgs({
       ...validRaw,
       action: "repair",
-      repair: { items: [{ id: "r1", affected_criterion_ids: ["c1"], required_evidence: "observed", strategy: "rework", do_not_repeat: [], capabilities: [], budget: { max_tokens: 5000 } }], rationale: "needs evidence" },
+      repair: { items: [{ id: "r1", source_contract_id: "c_lane1", affected_criterion_ids: ["c1"], required_evidence: "observed", strategy: "rework", do_not_repeat: [], capabilities: [], budget: { max_tokens: 5000 } }], rationale: "needs evidence" },
     });
     expect(repair.ok).toBe(true);
     if (repair.ok) expect(repair.decision.repair?.items[0]!.budget.max_tokens).toBe(5000);
+
+    // #1686: a repair item without a source contract reference is a structural
+    // payload defect — rejected before any semantic validation.
+    const noSource = narrowReviewProjectArgs({
+      ...validRaw,
+      action: "repair",
+      repair: { items: [{ id: "r1", affected_criterion_ids: ["c1"], required_evidence: "observed", strategy: "rework", do_not_repeat: [], capabilities: [], budget: { max_tokens: 5000 } }], rationale: "needs evidence" },
+    });
+    expect(noSource.ok).toBe(false);
+    if (!noSource.ok) expect(noSource.issues.some(i => i.path === "$.repair.items[].source_contract_id")).toBe(true);
 
     const blocked = narrowReviewProjectArgs({
       ...validRaw,

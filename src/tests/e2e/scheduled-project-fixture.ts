@@ -106,6 +106,9 @@ export function makeScheduledProjectFixture(
     lastTurn: "none" as ScheduledProjectScript["lastTurn"],
     admittedRoot: undefined as number | undefined,
     staleSpawn: undefined as { goal: string; context: OrcInvocationContextV1 } | undefined,
+    // #1686: durable contract ids of the authoring-turn lane Workers — the
+    // repair item must reference one of them as its source contract.
+    laneContractIds: [] as string[],
   };
 
   const workersOfRoot = (): ReturnType<typeof kanban.kanbanGetChildren> => {
@@ -294,6 +297,7 @@ export function makeScheduledProjectFixture(
                 attemptId: `att_fixture_${workerId}`,
               });
               if (!("error" in created)) {
+                state.laneContractIds.push(created.contract.id);
                 const pending = new WorkerStore().getAttempt(created.attemptId);
                 const claim = pending
                   ? new WorkerStore().claimAttempt(workerId, created.contract.id, pending.executor_kind, pending.executor_id, 1)
@@ -326,23 +330,28 @@ export function makeScheduledProjectFixture(
         // turn's terminal release happens afterwards. release() is terminal
         // cleanup of the run's own row; it must not run before the settle,
         // which is exactly the ordering that wedged the global Orc slot.
+        // #1686: the repair item references the durable source contract of
+        // the lane it repairs — a repair without a usable source can never
+        // authorize a Worker.
+        const sourceContractId = state.laneContractIds[0] ?? "";
         store.settleRepair(projectId, openCase.id, {
           action: "repair",
-          repair: { items: [{ id: "r1", affected_criterion_ids: ["c1"], strategy: "rework", required_evidence: "synthesis", capabilities: [], budget: { max_attempts: 1 } }] },
+          repair: { items: [{ id: "r1", source_contract_id: sourceContractId, affected_criterion_ids: ["c1"], strategy: "rework", required_evidence: "synthesis", capabilities: [], budget: { max_attempts: 1 } }] },
         }, supervision.generation, 0);
         // The reconciler would spawn repair workers via spin.spawnChild; the
-        // fixture creates the valid repair worker rows directly.
+        // fixture creates the valid repair worker rows directly, carrying the
+        // #1686 item marker and the source lineage.
         const repairWorkerId = kanban.kanbanEnqueue("fixture-repair-worker", "agent", undefined, {
           parent_id: projectId,
           type: "W",
-          goal: "Repair: rework",
+          goal: "Repair: rework [repair-item:r1]",
           delivery: "silent",
         });
         if (repairWorkerId !== 0) {
           kanban.kanbanRunning(repairWorkerId);
           try {
             const svc = new WorkerSvc();
-            const created = svc.createChild("Repair: rework", projectId, "fixture-orc", {
+            const created = svc.createChild("Repair: rework [repair-item:r1]", projectId, "fixture-orc", {
               cardId: repairWorkerId,
               criteria: [{ id: "w1", description: "repair done" }],
               expectedArtifacts: [{ id: "a1", kind: "file", ref: "out/repair.md", required: true, criterion_ids: ["w1"] }],
@@ -350,6 +359,22 @@ export function makeScheduledProjectFixture(
               supportsRootCriteria: ["c1"],
               limits: options.workerLimits,
               attemptId: `att_fixture_repair_${repairWorkerId}`,
+              // #1686: lineage points at the source contract the item names.
+              revisionMeta: {
+                revision: 1,
+                root_contract_id: sourceContractId,
+                parent_contract_id: sourceContractId,
+                retry_context: {
+                  directive_id: "repair-item:r1",
+                  mode: "repair",
+                  instruction: "rework",
+                  do_not_repeat: [],
+                  prior_evidence_ids: [],
+                  failed_criterion_ids: ["c1"],
+                  unresolved_risks: [],
+                  required_evidence: "synthesis",
+                },
+              },
             });
             if (!("error" in created)) {
               const pending = new WorkerStore().getAttempt(created.attemptId);

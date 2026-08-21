@@ -1,6 +1,7 @@
 import { describe, it, expect } from "vitest";
-import { buildDirective, deriveContractRevision, validateDirective, validateContractRevision, computeDirectiveFingerprint } from "./retry-directive.js";
+import { buildDirective, deriveContractRevision, deriveRepairContract, validateDirective, validateContractRevision, computeDirectiveFingerprint } from "./retry-directive.js";
 import type { WorkerAcceptanceContractV1 } from "../worker-contract.js";
+import { validateContract } from "../worker-contract.js";
 
 const sampleContract: WorkerAcceptanceContractV1 = {
   schema_version: 1,
@@ -192,5 +193,124 @@ describe("retry-directive", () => {
       authoredBy: "policy",
     });
     expect(d1.semantic_change_fingerprint).not.toBe(d2.semantic_change_fingerprint);
+  });
+});
+
+describe("#1686 deriveRepairContract — evidence-preserving derivation", () => {
+  const item = {
+    id: "r1",
+    source_contract_id: "c_source_1",
+    affected_criterion_ids: ["lane1-x"],
+    required_evidence: "observed candidate list",
+    strategy: "rework the feed fetch",
+    do_not_repeat: ["never re-run the feed twice"],
+    capabilities: ["browser"],
+    budget: { max_tokens: 5000 },
+  };
+
+  function sourceContract(overrides?: Partial<WorkerAcceptanceContractV1>): WorkerAcceptanceContractV1 {
+    return {
+      schema_version: 1,
+      id: "c_source_1",
+      digest: "sd1",
+      goal: "lane 1",
+      criteria: [{ id: "w1", description: "fetch the feed" }],
+      expected_artifacts: [{ id: "a1", kind: "file", ref: "lane1-x-handoff.md", required: true, criterion_ids: ["w1"] }],
+      verification_commands: [{ id: "v1", argv: ["test", "-f", "lane1-x-handoff.md"], timeout_ms: 30000, criterion_ids: ["w1"] }],
+      required_capabilities: ["twitter-x"],
+      limits: { max_tokens: 1000, max_duration_ms: 600000 },
+      provenance: { root_card_id: 1, card_id: 2, authored_by: "orc", created_at: new Date().toISOString() },
+      ...overrides,
+    };
+  }
+
+  it("clones the source evidence paths, root mapping, capabilities, and limits", () => {
+    const derived = deriveRepairContract({
+      sourceContract: sourceContract(),
+      sourceAttemptId: "a_9",
+      item,
+      rootCardId: 1,
+      pendingCardId: 0,
+      now: "2026-08-21T00:00:00.000Z",
+      enclosingLimits: { max_tokens: 100000 },
+    });
+    expect(derived.criteria).toEqual(sourceContract().criteria);
+    expect(derived.expected_artifacts).toEqual(sourceContract().expected_artifacts);
+    expect(derived.verification_commands).toEqual(sourceContract().verification_commands);
+    expect(derived.supports_root_criteria).toEqual(["lane1-x"]);
+    expect(derived.goal).toBe("Repair: rework the feed fetch [repair-item:r1]");
+    // Capabilities are additive — source requirements are preserved.
+    expect(derived.required_capabilities).toContain("twitter-x");
+    expect(derived.required_capabilities).toContain("browser");
+    // Limits copy the source; the item budget cannot expand the source bound.
+    expect(derived.limits.max_duration_ms).toBe(600000);
+    expect(derived.limits.max_tokens).toBe(1000);
+    expect(derived.provenance.root_card_id).toBe(1);
+  });
+
+  it("applies the item budget only within source and enclosing bounds", () => {
+    const derived = deriveRepairContract({
+      sourceContract: sourceContract(),
+      item: { ...item, budget: { max_tokens: 9000 } },
+      rootCardId: 1,
+      pendingCardId: 0,
+      now: "2026-08-21T00:00:00.000Z",
+      enclosingLimits: { max_tokens: 5000 },
+    });
+    // 9000 clamped by source 1000 → 1000; then clamped by enclosing 5000 → 1000.
+    expect(derived.limits.max_tokens).toBe(1000);
+
+    const unbounded = deriveRepairContract({
+      sourceContract: sourceContract({ limits: { max_duration_ms: 600000 } }),
+      item: { ...item, budget: { max_tokens: 4000 } },
+      rootCardId: 1,
+      pendingCardId: 0,
+      now: "2026-08-21T00:00:00.000Z",
+      enclosingLimits: { max_tokens: 3000 },
+    });
+    // No source max_tokens — the enclosing bound clamps.
+    expect(unbounded.limits.max_tokens).toBe(3000);
+  });
+
+  it("records the source lineage and retry context in revision_meta", () => {
+    const derived = deriveRepairContract({
+      sourceContract: sourceContract(),
+      sourceAttemptId: "a_9",
+      item,
+      rootCardId: 1,
+      pendingCardId: 0,
+      now: "2026-08-21T00:00:00.000Z",
+    });
+    expect(derived.revision_meta?.parent_contract_id).toBe("c_source_1");
+    expect(derived.revision_meta?.root_contract_id).toBe("c_source_1");
+    expect(derived.revision_meta?.source_attempt_id).toBe("a_9");
+    expect(derived.revision_meta?.retry_context?.mode).toBe("repair");
+    expect(derived.revision_meta?.retry_context?.instruction).toBe(item.strategy);
+    expect(derived.revision_meta?.retry_context?.required_evidence).toBe(item.required_evidence);
+    expect(derived.revision_meta?.retry_context?.do_not_repeat).toEqual(item.do_not_repeat);
+    expect(derived.revision_meta?.retry_context?.failed_criterion_ids).toEqual(["lane1-x"]);
+  });
+
+  it("preserves the workspace alias (executor routing) from the source", () => {
+    const derived = deriveRepairContract({
+      sourceContract: sourceContract({ workspace_alias: "repo-a" }),
+      item,
+      rootCardId: 1,
+      pendingCardId: 0,
+      now: "2026-08-21T00:00:00.000Z",
+    });
+    expect(derived.workspace_alias).toBe("repo-a");
+  });
+
+  it("derived contracts pass the shared worker-contract validator", () => {
+    const derived = deriveRepairContract({
+      sourceContract: sourceContract(),
+      item,
+      rootCardId: 1,
+      pendingCardId: 0,
+      now: "2026-08-21T00:00:00.000Z",
+    });
+    const validated = validateContract(derived as unknown as Record<string, unknown>);
+    expect(validated.ok).toBe(true);
   });
 });

@@ -112,6 +112,10 @@ vi.mock("./reconcile-quarantine-store.js", () => ({
 
 const getLatestAttemptMock = vi.fn().mockReturnValue(null);
 const getResultByAttemptMock = vi.fn().mockReturnValue(undefined);
+/** #1686: durable source-contract reads for the repair path. */
+const getContractMock = vi.fn().mockReturnValue(undefined);
+const getAttemptsForCardMock = vi.fn().mockReturnValue([]);
+const getContractByCardIdMock = vi.fn().mockReturnValue(undefined);
 /** #1656: lifecycle the adapter mock reports after a synchronous start settle. */
 let attemptLifecycleOverride: string | null = null;
 const workerContractExistsMock = vi.fn().mockReturnValue(true);
@@ -150,6 +154,10 @@ vi.mock("./worker-supervision-store.js", () => {
       terminalSettlement = terminalSettlementMock;
       claimAttemptWithinLimits = claimAttemptWithinLimitsMock;
       deferClaimAfterProvenNoStart = deferClaimAfterProvenNoStartMock;
+      // #1686: repair source-contract resolution reads.
+      getContract = getContractMock;
+      getAttemptsForCard = getAttemptsForCardMock;
+      getContractByCardId = getContractByCardIdMock;
     },
   };
 });
@@ -1731,27 +1739,90 @@ describe("Reconciler — #1546 scheduled-root driver", () => {
         action: "repair",
         repair: {
           items: [
-            { id: "r1", affected_criterion_ids: ["c1"], strategy: "rework", required_evidence: "synthesis", capabilities: [], budget: { max_tokens: 1000 } },
-            { id: "r2", affected_criterion_ids: ["c2"], strategy: "rewrite", required_evidence: "synthesis", capabilities: [], budget: { max_tokens: 1000 } },
+            { id: "r1", source_contract_id: "c_source1", affected_criterion_ids: ["c1"], strategy: "rework", required_evidence: "synthesis", capabilities: [], budget: { max_tokens: 1000 } },
+            { id: "r2", source_contract_id: "c_source2", affected_criterion_ids: ["c2"], strategy: "rewrite", required_evidence: "synthesis", capabilities: [], budget: { max_tokens: 1000 } },
           ],
         },
       }),
       decision_digest: "d",
       created_at: new Date().toISOString(),
     });
+    const sourceContract = (id: string, root: number, supports: string[]) => ({
+      id,
+      contract_json: JSON.stringify({
+        schema_version: 1,
+        id,
+        digest: "d1",
+        goal: "lane",
+        criteria: [{ id: "w1", description: "fetch" }],
+        expected_artifacts: [{ id: "a1", kind: "file", ref: "lane1-x-handoff.md", required: true, criterion_ids: ["w1"] }],
+        verification_commands: [],
+        required_capabilities: [],
+        supports_root_criteria: supports,
+        limits: { max_tokens: 1000 },
+        provenance: { root_card_id: root, card_id: 2, authored_by: "orc", created_at: new Date().toISOString() },
+      }),
+    });
+    getContractMock.mockImplementation((id: string) => {
+      if (id === "c_source1") return sourceContract("c_source1", 1, ["c1"]);
+      if (id === "c_source2") return sourceContract("c_source2", 1, ["c2"]);
+      return undefined;
+    });
+    getContractByCardIdMock.mockImplementation((cardId: number) => {
+      if (cardId === 2) {
+        return {
+          id: "c_existing_repair",
+          contract_json: JSON.stringify({
+            schema_version: 1,
+            id: "c_existing_repair",
+            digest: "d2",
+            goal: "Repair: rework [repair-item:r1]",
+            revision_meta: { revision: 1, root_contract_id: "c_source1", parent_contract_id: "c_source1" },
+            criteria: [{ id: "w1", description: "fetch" }],
+            expected_artifacts: [{ id: "a1", kind: "file", ref: "lane1-x-handoff.md", required: true, criterion_ids: ["w1"] }],
+            verification_commands: [],
+            required_capabilities: [],
+            supports_root_criteria: ["c1"],
+            limits: {},
+            provenance: { root_card_id: 1, card_id: 2, authored_by: "orc", created_at: new Date().toISOString() },
+          }),
+        };
+      }
+      if (cardId === 3) {
+        return {
+          id: "c_new_repair",
+          contract_json: JSON.stringify({
+            schema_version: 1,
+            id: "c_new_repair",
+            digest: "d3",
+            goal: "Repair: rewrite [repair-item:r2]",
+            revision_meta: { revision: 1, root_contract_id: "c_source2", parent_contract_id: "c_source2" },
+            criteria: [{ id: "w1", description: "fetch" }],
+            expected_artifacts: [{ id: "a1", kind: "file", ref: "lane1-x-handoff.md", required: true, criterion_ids: ["w1"] }],
+            verification_commands: [],
+            required_capabilities: [],
+            supports_root_criteria: ["c2"],
+            limits: {},
+            provenance: { root_card_id: 1, card_id: 3, authored_by: "orc", created_at: new Date().toISOString() },
+          }),
+        };
+      }
+      return undefined;
+    });
 
-    const existingRepair = { ...makeCard({ id: 2, status: "queued", type: "W", goal: "Repair: rework" }), parent_id: 1 };
-    kanbanGetChildrenMock.mockReturnValue([existingRepair]);
-    getContractForCardMock.mockImplementation((cardId: number) => cardId === 2 ? {
-      id: "c_existing_repair",
-      goal: "Repair: rework",
-      supports_root_criteria: ["c1"],
-      provenance: { root_card_id: 1 },
-    } : undefined);
+    const existingRepair = { ...makeCard({ id: 2, status: "queued", type: "W", goal: "Repair: rework [repair-item:r1]" }), parent_id: 1 };
+    // After the spawn call, the durable children include the new r2 Worker —
+    // the reconciler re-reads children before the repair_planned → repairing CAS.
+    kanbanGetChildrenMock.mockImplementation(() => {
+      const children = [existingRepair];
+      if (spawnChildMock.mock.calls.length > 0) {
+        children.push({ ...makeCard({ id: 3, status: "queued", type: "W", goal: "Repair: rewrite [repair-item:r2]" }), parent_id: 1 });
+      }
+      return children;
+    });
 
     mod.requestReconcile(1);
     await flush();
-
     expect(spawnChildMock).toHaveBeenCalledTimes(1);
     expect(spawnChildMock).toHaveBeenCalledWith(1, expect.objectContaining({
       goal: expect.stringContaining("[repair-item:r2]"),
@@ -1789,13 +1860,30 @@ describe("Reconciler — #1546 scheduled-root driver", () => {
         action: "repair",
         repair: {
           items: [
-            { id: "r1", affected_criterion_ids: ["c1"], strategy: "rework", required_evidence: "synthesis", capabilities: [], budget: { max_tokens: 1000 } },
+            { id: "r1", source_contract_id: "c_source1", affected_criterion_ids: ["c1"], strategy: "rework", required_evidence: "synthesis", capabilities: [], budget: { max_tokens: 1000 } },
           ],
         },
       }),
       decision_digest: "d",
       created_at: new Date().toISOString(),
     });
+    getContractMock.mockReturnValue({
+      id: "c_source1",
+      contract_json: JSON.stringify({
+        schema_version: 1,
+        id: "c_source1",
+        digest: "d1",
+        goal: "lane",
+        criteria: [{ id: "w1", description: "fetch" }],
+        expected_artifacts: [{ id: "a1", kind: "file", ref: "lane1-x-handoff.md", required: true, criterion_ids: ["w1"] }],
+        verification_commands: [],
+        required_capabilities: [],
+        supports_root_criteria: ["c1"],
+        limits: { max_tokens: 1000 },
+        provenance: { root_card_id: 1, card_id: 2, authored_by: "orc", created_at: new Date().toISOString() },
+      }),
+    });
+    getContractByCardIdMock.mockReturnValue(undefined);
     reviewStoreMock.getContractByProjectCardId.mockReturnValue({
       id: "pc_root_1",
       contract_json: JSON.stringify({ schema_version: 2, criteria: [{ id: "c1", description: "d" }] }),
@@ -1808,6 +1896,291 @@ describe("Reconciler — #1546 scheduled-root driver", () => {
     expect(resolveRootIdMock).toHaveBeenCalledWith(1);
     expect(spawnChildMock).toHaveBeenCalledTimes(1);
     expect(spawnChildMock.mock.calls[0]?.[1]?.contract?.provenance?.root_card_id).toBe(7);
+  });
+
+  // ── #1686: truthful, restart-safe repair lifecycle ──────────────────────────
+
+  function sourceContractRow(id: string, supports: string[]) {
+    return {
+      id,
+      contract_json: JSON.stringify({
+        schema_version: 1,
+        id,
+        digest: `digest_${id}`,
+        goal: "lane",
+        criteria: [{ id: "w1", description: "fetch" }],
+        expected_artifacts: [{ id: "a1", kind: "file", ref: "lane1-x-handoff.md", required: true, criterion_ids: ["w1"] }],
+        verification_commands: [],
+        required_capabilities: [],
+        supports_root_criteria: supports,
+        limits: { max_tokens: 1000 },
+        provenance: { root_card_id: 1, card_id: 2, authored_by: "orc", created_at: new Date().toISOString() },
+      }),
+    };
+  }
+
+  function repairWorkerRow(cardId: number, goal: string, sourceId: string, supports: string[]) {
+    return {
+      id: `c_repair_${cardId}`,
+      contract_json: JSON.stringify({
+        schema_version: 1,
+        id: `c_repair_${cardId}`,
+        digest: `digest_repair_${cardId}`,
+        goal,
+        revision_meta: { revision: 1, root_contract_id: sourceId, parent_contract_id: sourceId },
+        criteria: [{ id: "w1", description: "fetch" }],
+        expected_artifacts: [{ id: "a1", kind: "file", ref: "lane1-x-handoff.md", required: true, criterion_ids: ["w1"] }],
+        verification_commands: [],
+        required_capabilities: [],
+        supports_root_criteria: supports,
+        limits: {},
+        provenance: { root_card_id: 1, card_id: cardId, authored_by: "orc", created_at: new Date().toISOString() },
+      }),
+    };
+  }
+
+  it("#1686: a failed repair dispatch leaves the project in repair_planned — no repairing transition", async () => {
+    const claims: Array<{ projectCardId: number; goal: string }> = [];
+    await fakeCoordinator(claims);
+    setupExecutingProject();
+    reviewStoreMock.getSupervision.mockReturnValue(supervision({ state: "repair_planned" }));
+    reviewStoreMock.stateTransition.mockReturnValue(false);
+    reviewStoreMock.getLatestDecisionForProject.mockReturnValue({
+      id: "rd_partial_1",
+      review_case_id: "rc_1",
+      decision_json: JSON.stringify({
+        action: "repair",
+        repair: {
+          items: [
+            { id: "r1", source_contract_id: "c_source1", affected_criterion_ids: ["c1"], strategy: "rework", required_evidence: "synthesis", capabilities: [], budget: { max_tokens: 1000 } },
+            { id: "r2", source_contract_id: "c_source2", affected_criterion_ids: ["c2"], strategy: "rewrite", required_evidence: "synthesis", capabilities: [], budget: { max_tokens: 1000 } },
+          ],
+        },
+      }),
+      decision_digest: "d",
+      created_at: new Date().toISOString(),
+    });
+    getContractMock.mockImplementation((id: string) => {
+      if (id === "c_source1") return sourceContractRow("c_source1", ["c1"]);
+      if (id === "c_source2") return sourceContractRow("c_source2", ["c2"]);
+      return undefined;
+    });
+    getContractByCardIdMock.mockReturnValue(undefined);
+    // r1's dispatch succeeds (its durable card appears), r2's dispatch fails.
+    let spawnCount = 0;
+    spawnChildMock.mockImplementation((_parentId: number, req: { goal: string }) => {
+      if (req.goal.includes("r2")) throw new Error("transient dispatch failure");
+      spawnCount++;
+      return 3;
+    });
+    kanbanGetChildrenMock.mockImplementation(() => {
+      const children: Array<ReturnType<typeof makeCard>> = [];
+      if (spawnCount >= 1) {
+        children.push({ ...makeCard({ id: 2, status: "queued", type: "W", goal: "Repair: rework [repair-item:r1]" }), parent_id: 1 });
+      }
+      return children;
+    });
+
+    mod.requestReconcile(1);
+    await flush();
+
+    // r1 was dispatched, r2 failed: partial dispatch must NOT advance state.
+    expect(spawnCount).toBe(1);
+    expect(reviewStoreMock.stateTransition).not.toHaveBeenCalledWith(1, ["repair_planned"], "repairing", undefined, expect.anything());
+  });
+
+  it("#1686: repairing with zero current-decision repair children recovers to repair_planned instead of opening another review round", async () => {
+    const claims: Array<{ projectCardId: number; goal: string }> = [];
+    await fakeCoordinator(claims);
+    setupExecutingProject();
+    reviewStoreMock.getSupervision.mockReturnValue(supervision({ state: "repairing" }));
+    reviewStoreMock.getLatestDecisionForProject.mockReturnValue({
+      id: "rd_zero_1",
+      review_case_id: "rc_1",
+      decision_json: JSON.stringify({
+        action: "repair",
+        repair: {
+          items: [
+            { id: "r1", source_contract_id: "c_source1", affected_criterion_ids: ["c1"], strategy: "rework", required_evidence: "synthesis", capabilities: [], budget: {} },
+          ],
+        },
+      }),
+      decision_digest: "d",
+      created_at: new Date().toISOString(),
+    });
+    getContractMock.mockImplementation((id: string) => (id === "c_source1" ? sourceContractRow("c_source1", ["c1"]) : undefined));
+    getContractByCardIdMock.mockReturnValue(undefined);
+    // Only unrelated children exist — an original lane Worker and a repair
+    // Worker from an older round without the current lineage.
+    kanbanGetChildrenMock.mockReturnValue([
+      { ...makeCard({ id: 10, status: "done", type: "W", goal: "Lane 1" }), parent_id: 1 },
+      { ...makeCard({ id: 11, status: "done", type: "W", goal: "Repair: rework [repair-item:r-old]" }), parent_id: 1 },
+    ]);
+    reviewStoreMock.stateTransition.mockImplementation((_pid: number, fromStates: string[], nextState: string) => {
+      if (fromStates.includes("repairing") && nextState === "repair_planned") return true;
+      return false;
+    });
+
+    mod.requestReconcile(1);
+    await flush();
+
+    // The absent repair child routes the project back to repair planning —
+    // never a new review generation.
+    expect(reviewStoreMock.stateTransition).toHaveBeenCalledWith(1, ["repairing"], "repair_planned", undefined, { authority: { projectCardId: 1, projectGeneration: 1, scheduledRunId: "run-1" } });
+    expect(reviewStoreMock.stateTransition).not.toHaveBeenCalledWith(1, ["repairing"], "executing", { repair_round: 1 }, expect.anything());
+  });
+
+  it("#1686: unrelated children with the item marker but no source lineage do not satisfy a repair item", async () => {
+    const claims: Array<{ projectCardId: number; goal: string }> = [];
+    await fakeCoordinator(claims);
+    setupExecutingProject();
+    reviewStoreMock.getSupervision.mockReturnValue(supervision({ state: "repair_planned" }));
+    reviewStoreMock.getLatestDecisionForProject.mockReturnValue({
+      id: "rd_unrelated_1",
+      review_case_id: "rc_1",
+      decision_json: JSON.stringify({
+        action: "repair",
+        repair: {
+          items: [
+            { id: "r1", source_contract_id: "c_source1", affected_criterion_ids: ["c1"], strategy: "rework", required_evidence: "synthesis", capabilities: [], budget: {} },
+          ],
+        },
+      }),
+      decision_digest: "d",
+      created_at: new Date().toISOString(),
+    });
+    getContractMock.mockImplementation((id: string) => (id === "c_source1" ? sourceContractRow("c_source1", ["c1"]) : undefined));
+    // The child carries the exact item marker but no revision lineage — it is
+    // a pre-#1686 worker and cannot satisfy the item.
+    getContractByCardIdMock.mockReturnValue({
+      id: "c_orphan",
+      contract_json: JSON.stringify({
+        schema_version: 1,
+        id: "c_orphan",
+        digest: "d_orphan",
+        goal: "Repair: rework [repair-item:r1]",
+        criteria: [{ id: "w1", description: "fetch" }],
+        expected_artifacts: [],
+        verification_commands: [],
+        required_capabilities: [],
+        supports_root_criteria: ["c1"],
+        limits: {},
+        provenance: { root_card_id: 1, card_id: 5, authored_by: "orc", created_at: new Date().toISOString() },
+      }),
+    });
+    kanbanGetChildrenMock.mockReturnValue([
+      { ...makeCard({ id: 5, status: "queued", type: "W", goal: "Repair: rework [repair-item:r1]" }), parent_id: 1 },
+    ]);
+
+    mod.requestReconcile(1);
+    await flush();
+
+    // The orphan is NOT reused — a new evidence-preserving Worker is created.
+    expect(spawnChildMock).toHaveBeenCalledTimes(1);
+    expect(spawnChildMock.mock.calls[0]?.[1]?.contract?.revision_meta?.parent_contract_id).toBe("c_source1");
+  });
+
+  it("#1686: a legacy repair decision without a usable source contract blocks once with repair_source_contract_invalid", async () => {
+    const claims: Array<{ projectCardId: number; goal: string }> = [];
+    await fakeCoordinator(claims);
+    setupExecutingProject();
+    // The transition mutates durable state so the card:failed wake observes a
+    // terminal project — otherwise the block would re-fire on every pass.
+    let projectState: "repair_planned" | "blocked" = "repair_planned";
+    reviewStoreMock.getSupervision.mockImplementation(() => supervision({ state: projectState }));
+    reviewStoreMock.stateTransition.mockImplementation((_pid: number, fromStates: string[], nextState: string) => {
+      if (!fromStates.includes(projectState)) return false;
+      projectState = nextState as "repair_planned" | "blocked";
+      return true;
+    });
+    reviewStoreMock.getLatestDecisionForProject.mockReturnValue({
+      id: "rd_legacy_1",
+      review_case_id: "rc_1",
+      decision_json: JSON.stringify({
+        action: "repair",
+        repair: {
+          items: [
+            { id: "r1", affected_criterion_ids: ["c1"], strategy: "rework", required_evidence: "synthesis", capabilities: [], budget: {} },
+          ],
+        },
+      }),
+      decision_digest: "d",
+      created_at: new Date().toISOString(),
+    });
+    getContractMock.mockReturnValue(undefined);
+    getContractByCardIdMock.mockReturnValue(undefined);
+    kanbanGetChildrenMock.mockReturnValue([]);
+
+    mod.requestReconcile(1);
+    await flush();
+
+    // One honest structural blocked outcome — no empty repair, no review loop.
+    expect(reviewStoreMock.stateTransition).toHaveBeenCalledWith(
+      1,
+      expect.arrayContaining(["repair_planned"]),
+      "blocked",
+      expect.objectContaining({ blocked_reason: expect.stringContaining("repair_source_contract_invalid") }),
+      expect.anything(),
+    );
+    expect(spawnChildMock).not.toHaveBeenCalled();
+    expect(kanbanFailMock).toHaveBeenCalled();
+  });
+
+  it("#1686: repairing transitions to a new review round exactly once when every current repair child is terminal", async () => {
+    const claims: Array<{ projectCardId: number; goal: string }> = [];
+    await fakeCoordinator(claims);
+    setupExecutingProject();
+    let repairRound = 0;
+    reviewStoreMock.getSupervision.mockImplementation(() => supervision({ state: "repairing", repair_round: repairRound }));
+    reviewStoreMock.getLatestDecisionForProject.mockReturnValue({
+      id: "rd_all_terminal_1",
+      review_case_id: "rc_1",
+      decision_json: JSON.stringify({
+        action: "repair",
+        repair: {
+          items: [
+            { id: "r1", source_contract_id: "c_source1", affected_criterion_ids: ["c1"], strategy: "rework", required_evidence: "synthesis", capabilities: [], budget: {} },
+            { id: "r2", source_contract_id: "c_source2", affected_criterion_ids: ["c2"], strategy: "rewrite", required_evidence: "synthesis", capabilities: [], budget: {} },
+          ],
+        },
+      }),
+      decision_digest: "d",
+      created_at: new Date().toISOString(),
+    });
+    getContractMock.mockImplementation((id: string) => {
+      if (id === "c_source1") return sourceContractRow("c_source1", ["c1"]);
+      if (id === "c_source2") return sourceContractRow("c_source2", ["c2"]);
+      return undefined;
+    });
+    getContractByCardIdMock.mockImplementation((cardId: number) => {
+      if (cardId === 2) return repairWorkerRow(2, "Repair: rework [repair-item:r1]", "c_source1", ["c1"]);
+      if (cardId === 3) return repairWorkerRow(3, "Repair: rewrite [repair-item:r2]", "c_source2", ["c2"]);
+      return undefined;
+    });
+    // Both current repair children are terminal.
+    kanbanGetChildrenMock.mockReturnValue([
+      { ...makeCard({ id: 2, status: "done", type: "W", goal: "Repair: rework [repair-item:r1]" }), parent_id: 1 },
+      { ...makeCard({ id: 3, status: "done", type: "W", goal: "Repair: rewrite [repair-item:r2]" }), parent_id: 1 },
+    ]);
+    reviewStoreMock.stateTransition.mockImplementation((_pid: number, fromStates: string[], nextState: string) => {
+      if (fromStates.includes("repairing") && nextState === "executing") {
+        repairRound = 1;
+        return true;
+      }
+      return false;
+    });
+
+    mod.requestReconcile(1);
+    await flush();
+
+    expect(reviewStoreMock.stateTransition).toHaveBeenCalledWith(
+      1,
+      ["repairing"],
+      "executing",
+      { repair_round: 1 },
+      { authority: { projectCardId: 1, projectGeneration: 1, scheduledRunId: "run-1" } },
+    );
+    expect(spawnChildMock).not.toHaveBeenCalled();
   });
 });
 

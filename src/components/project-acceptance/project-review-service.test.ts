@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { vi } from "vitest";
 import type { ReviewCaseSnapshot } from "./project-review-case.js";
 import type { ProjectReviewDecisionV1 } from "./project-review-validator.js";
+import type { WorkerAcceptanceContractV1 } from "../worker-contract.js";
 
 // #1618: acceptance-outbox drain tests drive a fake broker. Hoisted so the
 // module factory can reference it; tests that never call the drain are
@@ -36,12 +37,47 @@ describe("ProjectReviewService — full outcome matrix", () => {
       digest: `digest_${cardId}`,
       project_card_id: cardId,
       goal: "Build the feature",
-      criteria: [{ id: "c1", description: "Works", required: true, evidence_expectation: "synthesis" }],
+      criteria: [{ id: "c1", description: "Works", required: true, execution_owner: "delegated", evidence_expectation: "synthesis" }],
       required_outputs: [{ id: "o1", description: "Output", kind: "logical", required: true }],
       constraints: [],
       limits: { hard_deadline_at: undefined, max_tokens: 100000, max_cost: undefined, max_review_rounds: 5, max_repair_rounds: 3 },
       provenance: { requested_by: "user", authored_by: "orc", created_at: "2026-07-12T00:00:00.000Z" },
     };
+  }
+
+  /** #1686: seed the durable source Worker contract a repair item references. */
+  let _seedSeq = 0;
+  async function seedSourceContract(
+    contractId: string,
+    rootCardId: number,
+    supportsRootCriteria: string[],
+    overrides?: { provenanceRoot?: number; corrupted?: boolean; missingArtifacts?: boolean },
+  ): Promise<void> {
+    const { WorkerSupervisionStore } = await import("../worker-supervision-store.js");
+    const workerStore = new WorkerSupervisionStore(store.db);
+    const childCardId = 2000 + (++_seedSeq);
+    const base: WorkerAcceptanceContractV1 = {
+      schema_version: 1,
+      id: contractId,
+      digest: `digest_${contractId}_${childCardId}`,
+      goal: `lane ${contractId}`,
+      criteria: [{ id: "w1", description: "fetch the lane" }],
+      expected_artifacts: [{ id: "a1", kind: "file", ref: "lane1-x-handoff.md", required: true, criterion_ids: ["w1"] }],
+      verification_commands: [],
+      required_capabilities: [],
+      supports_root_criteria: supportsRootCriteria,
+      limits: {},
+      provenance: { root_card_id: overrides?.provenanceRoot ?? rootCardId, card_id: 0, authored_by: "orc", created_at: new Date().toISOString() },
+    };
+    if (overrides?.missingArtifacts) {
+      base.expected_artifacts = [];
+    }
+    if (overrides?.corrupted) {
+      workerStore.db.prepare(`INSERT INTO worker_contracts (id, card_id, revision, root_contract_id, parent_contract_id, source_attempt_id, schema_version, contract_json, contract_digest, created_at) VALUES (?, ?, 1, ?, NULL, NULL, 1, ?, 'dd', datetime('now'))`)
+        .run(contractId, childCardId, contractId, "not json {{{");
+      return;
+    }
+    workerStore.insertContract(base, childCardId);
   }
 
   async function setupCase(pid?: number): Promise<{ cardId: number; caseId: string; store: ProjectReviewStore }> {
@@ -68,7 +104,7 @@ describe("ProjectReviewService — full outcome matrix", () => {
         required_outputs: contract.required_outputs as ReviewCaseSnapshot["root_contract"]["required_outputs"],
         limits: contract.limits,
       },
-      criterion_inputs: [{ criterion_id: "c1", description: "Works", evidence_expectation: "synthesis", mapped_child_contract_ids: ["pc_child_c1"], successful_mapped_child_contract_ids: ["pc_child_c1"], unsuccessful_mapped_child_contract_ids: [], observed_evidence_ids: ["e1"], worker_claim_ids: [], failed_or_inconclusive_check_ids: [], artifact_observation_ids: [], retry_lineage_ids: [], coverage_hint: "supported" }],
+      criterion_inputs: [{ criterion_id: "c1", description: "Works", evidence_expectation: "synthesis", mapped_child_contract_ids: [`pc_child_${cardId}`], successful_mapped_child_contract_ids: [`pc_child_${cardId}`], unsuccessful_mapped_child_contract_ids: [], observed_evidence_ids: ["e1"], worker_claim_ids: [], failed_or_inconclusive_check_ids: [], artifact_observation_ids: [], retry_lineage_ids: [], coverage_hint: "supported" }],
       contradiction_candidates: [],
       uncovered_criteria: [],
       child_summaries: [],
@@ -137,10 +173,11 @@ describe("ProjectReviewService — full outcome matrix", () => {
 
   it("routes to repair_planned for valid repair decision", async () => {
     const { cardId, caseId } = await setupCase();
+    await seedSourceContract(`pc_child_${cardId}`, cardId, ["c1"]);
     const decision = makeValidDecision(cardId, caseId, {
       action: "repair",
       repair: {
-        items: [{ affected_criterion_ids: ["c1"], required_evidence: ["observed"], strategy: "rework", do_not_repeat: [], budget: { max_tokens: 5000 }, required_capabilities: [] }],
+        items: [{ id: "r1", source_contract_id: `pc_child_${cardId}`, affected_criterion_ids: ["c1"], required_evidence: "observed", strategy: "rework", do_not_repeat: [], capabilities: [], budget: { max_tokens: 5000 } }],
         rationale: "Need more evidence",
       },
     });
@@ -150,6 +187,118 @@ describe("ProjectReviewService — full outcome matrix", () => {
 
     const sup = store.getSupervision(cardId);
     expect(sup?.state).toBe("repair_planned");
+  });
+
+  // ── #1686: durable repair source-contract validation ──────────────────────
+
+  it("rejects a repair whose source contract is not in the worker supervision store", async () => {
+    const { cardId, caseId } = await setupCase();
+    const decision = makeValidDecision(cardId, caseId, {
+      action: "repair",
+      repair: {
+        items: [{ id: "r1", source_contract_id: `pc_child_${cardId}`, affected_criterion_ids: ["c1"], required_evidence: "observed", strategy: "rework", do_not_repeat: [], capabilities: [], budget: {} }],
+        rationale: "Need more evidence",
+      },
+    });
+    const result = service.processDecision(decision);
+    expect(result.kind).toBe("invalid");
+    if (result.kind === "invalid") {
+      expect(result.issues.some(i => i.message.includes("not found in the worker supervision store"))).toBe(true);
+    }
+    // No repair state, no decision, no budget mutation.
+    expect(store.getSupervision(cardId)?.state).toBe("review_ready");
+    expect(store.hasDecisionForCase(caseId)).toBe(false);
+  });
+
+  it("rejects a repair whose source contract is corrupt or fails worker validation", async () => {
+    const { cardId, caseId } = await setupCase();
+    await seedSourceContract(`pc_child_${cardId}`, cardId, ["c1"], { corrupted: true });
+    const decision = makeValidDecision(cardId, caseId, {
+      action: "repair",
+      repair: {
+        items: [{ id: "r1", source_contract_id: `pc_child_${cardId}`, affected_criterion_ids: ["c1"], required_evidence: "observed", strategy: "rework", do_not_repeat: [], capabilities: [], budget: {} }],
+        rationale: "Need more evidence",
+      },
+    });
+    const result = service.processDecision(decision);
+    expect(result.kind).toBe("invalid");
+    if (result.kind === "invalid") {
+      expect(result.issues.some(i => i.message.includes("unparseable"))).toBe(true);
+    }
+    expect(store.getSupervision(cardId)?.state).toBe("review_ready");
+  });
+
+  it("rejects a source contract with no evidence path (fails worker validation)", async () => {
+    const { cardId, caseId } = await setupCase();
+    await seedSourceContract(`pc_child_${cardId}`, cardId, ["c1"], { missingArtifacts: true });
+    const decision = makeValidDecision(cardId, caseId, {
+      action: "repair",
+      repair: {
+        items: [{ id: "r1", source_contract_id: `pc_child_${cardId}`, affected_criterion_ids: ["c1"], required_evidence: "observed", strategy: "rework", do_not_repeat: [], capabilities: [], budget: {} }],
+        rationale: "Need more evidence",
+      },
+    });
+    const result = service.processDecision(decision);
+    expect(result.kind).toBe("invalid");
+    if (result.kind === "invalid") {
+      expect(result.issues.some(i => i.message.includes("failed worker-contract validation"))).toBe(true);
+    }
+    expect(store.getSupervision(cardId)?.state).toBe("review_ready");
+  });
+
+  it("rejects a source contract whose provenance names a different root project", async () => {
+    const { cardId, caseId } = await setupCase();
+    await seedSourceContract(`pc_child_${cardId}`, cardId, ["c1"], { provenanceRoot: cardId + 1000 });
+    const decision = makeValidDecision(cardId, caseId, {
+      action: "repair",
+      repair: {
+        items: [{ id: "r1", source_contract_id: `pc_child_${cardId}`, affected_criterion_ids: ["c1"], required_evidence: "observed", strategy: "rework", do_not_repeat: [], capabilities: [], budget: {} }],
+        rationale: "Need more evidence",
+      },
+    });
+    const result = service.processDecision(decision);
+    expect(result.kind).toBe("invalid");
+    if (result.kind === "invalid") {
+      expect(result.issues.some(i => i.message.includes("belongs to project"))).toBe(true);
+    }
+    expect(store.getSupervision(cardId)?.state).toBe("review_ready");
+  });
+
+  it("rejects a repair whose source contract does not cover the affected criteria", async () => {
+    const { cardId, caseId } = await setupCase();
+    await seedSourceContract(`pc_child_${cardId}`, cardId, ["c1"]);
+    const decision = makeValidDecision(cardId, caseId, {
+      action: "repair",
+      repair: {
+        items: [{ id: "r1", source_contract_id: `pc_child_${cardId}`, affected_criterion_ids: ["c1", "ghost"], required_evidence: "observed", strategy: "rework", do_not_repeat: [], capabilities: [], budget: {} }],
+        rationale: "Need more evidence",
+      },
+    });
+    const result = service.processDecision(decision);
+    expect(result.kind).toBe("invalid");
+    if (result.kind === "invalid") {
+      expect(result.issues.some(i => i.message.includes("does not cover affected criterion"))).toBe(true);
+    }
+    expect(store.getSupervision(cardId)?.state).toBe("review_ready");
+    expect(store.hasDecisionForCase(caseId)).toBe(false);
+  });
+
+  it("a legacy repair item without source_contract_id is rejected before any mutation", async () => {
+    const { cardId, caseId } = await setupCase();
+    const decision = makeValidDecision(cardId, caseId, {
+      action: "repair",
+      repair: {
+        items: [{ id: "r1", affected_criterion_ids: ["c1"], required_evidence: "observed", strategy: "rework", do_not_repeat: [], capabilities: [], budget: {} }],
+        rationale: "Legacy",
+      },
+    });
+    const result = service.processDecision(decision);
+    expect(result.kind).toBe("invalid");
+    if (result.kind === "invalid") {
+      expect(result.issues.some(i => i.path.includes("source_contract_id"))).toBe(true);
+    }
+    expect(store.getSupervision(cardId)?.state).toBe("review_ready");
+    expect(store.hasDecisionForCase(caseId)).toBe(false);
   });
 
   // ── Blocked ─────────────────────────────────────────────────────────────────
@@ -398,7 +547,7 @@ describe("ProjectReviewService — #1620 severity, correction budget, truthful e
       digest: `digest_${cardId}`,
       project_card_id: cardId,
       goal: "Build the feature",
-      criteria: [{ id: "c1", description: "Works", required: true, evidence_expectation: "synthesis" }],
+      criteria: [{ id: "c1", description: "Works", required: true, execution_owner: "delegated", evidence_expectation: "synthesis" }],
       required_outputs: [{ id: "o1", description: "Output", kind: "logical", required: true }],
       constraints: [],
       limits: { hard_deadline_at: undefined, max_tokens: 100000, max_cost: undefined, max_review_rounds: 5, max_repair_rounds: 3 },
@@ -423,7 +572,7 @@ describe("ProjectReviewService — #1620 severity, correction budget, truthful e
         required_outputs: contract.required_outputs as ReviewCaseSnapshot["root_contract"]["required_outputs"],
         limits: contract.limits,
       },
-      criterion_inputs: [{ criterion_id: "c1", description: "Works", evidence_expectation: "synthesis", mapped_child_contract_ids: ["pc_child_c1"], successful_mapped_child_contract_ids: ["pc_child_c1"], unsuccessful_mapped_child_contract_ids: [], observed_evidence_ids: ["e1"], worker_claim_ids: [], failed_or_inconclusive_check_ids: [], artifact_observation_ids: [], retry_lineage_ids: [], coverage_hint: "supported" }],
+      criterion_inputs: [{ criterion_id: "c1", description: "Works", evidence_expectation: "synthesis", mapped_child_contract_ids: [`pc_child_${cardId}`], successful_mapped_child_contract_ids: [`pc_child_${cardId}`], unsuccessful_mapped_child_contract_ids: [], observed_evidence_ids: ["e1"], worker_claim_ids: [], failed_or_inconclusive_check_ids: [], artifact_observation_ids: [], retry_lineage_ids: [], coverage_hint: "supported" }],
       contradiction_candidates: [],
       uncovered_criteria: [],
       child_summaries: [],
@@ -569,12 +718,27 @@ describe("ProjectReviewService — #1620 severity, correction budget, truthful e
     expect(Number(decisions.cnt)).toBe(1);
   });
 
-  it("warnings are surfaced on successful non-accept outcomes without incrementing", () => {
+  it("warnings are surfaced on successful non-accept outcomes without incrementing", async () => {
     const decision = makeDecision(cardId, caseId, {
       action: "repair",
       outputs: [],
-      repair: { items: [{ affected_criterion_ids: ["c1"], required_evidence: "observed", strategy: "rework", do_not_repeat: [], budget: { max_tokens: 5000 } }], rationale: "needs evidence" },
+      repair: { items: [{ id: "r1", source_contract_id: `pc_child_${cardId}`, affected_criterion_ids: ["c1"], required_evidence: "observed", strategy: "rework", do_not_repeat: [], capabilities: [], budget: { max_tokens: 5000 } }], rationale: "needs evidence" },
     });
+    const { WorkerSupervisionStore } = await import("../worker-supervision-store.js");
+    const workerStore = new WorkerSupervisionStore(store.db);
+    workerStore.insertContract({
+      schema_version: 1,
+      id: `pc_child_${cardId}`,
+      digest: `digest_warnings_${cardId}`,
+      goal: "lane 1",
+      criteria: [{ id: "w1", description: "fetch the lane" }],
+      expected_artifacts: [{ id: "a1", kind: "file", ref: "lane1-x-handoff.md", required: true, criterion_ids: ["w1"] }],
+      verification_commands: [],
+      required_capabilities: [],
+      supports_root_criteria: ["c1"],
+      limits: {},
+      provenance: { root_card_id: cardId, card_id: 0, authored_by: "orc", created_at: new Date().toISOString() },
+    }, 2);
     const result = service.processDecision(decision);
     expect(result.kind).toBe("repair");
     if (result.kind === "repair") expect(result.warnings?.length).toBe(1);

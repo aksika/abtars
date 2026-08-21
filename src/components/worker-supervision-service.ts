@@ -90,6 +90,10 @@ export class WorkerSupervisionService {
       contractId?: string;
       attemptId?: string;
       workspaceAlias?: string;
+      /** #1686: immutable revision lineage for derived children (repair/retry).
+       * Carried into the contract through normalization so the durable contract
+       * keeps its parent-contract and retry-context lineage. */
+      revisionMeta?: import("./worker-contract.js").WorkerContractRevisionV1;
       /** #1644: immutable project authority. Never supplied by tool arguments
        *  beyond the bound Orc invocation context; when absent it is derived
        *  from the durable root state at creation (repair path). */
@@ -150,6 +154,9 @@ export class WorkerSupervisionService {
     }
     if (opts?.workspaceAlias) {
       raw["workspace_alias"] = opts.workspaceAlias;
+    }
+    if (opts?.revisionMeta) {
+      raw["revision_meta"] = opts.revisionMeta;
     }
     if (opts?.limits && Object.keys(opts.limits).length > 0) {
       raw["limits"] = opts.limits;

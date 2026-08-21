@@ -29,16 +29,16 @@ import { readProjectCriterionCoverage, coverageSignature } from "./project-accep
 import { delegatedCriterionIds } from "./project-acceptance/project-contract.js";
 import { OrcProjectRunStore } from "./orc-project/orc-project-run-store.js";
 import { hasLiveContributionForProject } from "./peer-help/contribution-store.js";
-import { REVIEW_REQUEST_ABANDONED } from "./project-acceptance/project-review-contract.js";
+import { REVIEW_REQUEST_ABANDONED, REPAIR_SOURCE_CONTRACT_INVALID } from "./project-acceptance/project-review-contract.js";
+import { deriveRepairContract } from "./retry/retry-directive.js";
 import { readEntries } from "./tasks/task-store.js";
 import { readState } from "./tasks/task-state-store.js";
 import { settleRunOnce } from "./tasks/task-run-settler.js";
 import { makeTaskFailure } from "./tasks/task-failure.js";
-import type { TaskFailureDiagnosticV1 } from "./tasks/task-failure.js";
 import type { PiRunService } from "./pi-executor/pi-run-service.js";
 import type { AttemptLifecycle, AttemptRow } from "./worker-supervision-store.js";
 import type { WorkerAcceptanceContractV1 } from "./worker-contract.js";
-import { acceptancePassed } from "./worker-contract.js";
+import { acceptancePassed, validateContract } from "./worker-contract.js";
 import { RetryService } from "./retry/retry-service.js";
 import { LocalExecutorCatalog, providerForAdapter } from "./retry/local-executor-catalog.js";
 import type { OrcOwnershipReleasedV1 } from "./orc-project/orc-project-contracts.js";
@@ -57,7 +57,7 @@ export interface ReconcilerDeps {
   readonly createPiAdapter: (service: PiRunService) => SwarmExecutorAdapter;
   readonly getQuarantineStore: () => ReconcileQuarantineStore;
   readonly projectRunProgress: (cardId: number) => void;
-  readonly failureCascade?: (entryId: string, diagnostic: TaskFailureDiagnosticV1) => void;
+  readonly failureCascade?: (event: import("./sha/sha-types.js").ScheduledFailureEvent) => void;
 }
 
 export type RecoveryAttemptResult =
@@ -652,9 +652,29 @@ function inspectProjectOwnership(projectId: number, supervision: ProjectSupervis
     if (pending.length > 0 || answered.length > 0) return "input";
   }
   if (supervision.state === "repairing") {
-    const anyLive = children.some(c => c.status === "queued" || c.status === "running");
-    const allTerminal = children.length > 0 && children.every(c => KANBAN_TERMINAL_STATUSES.includes(c.status));
-    if (anyLive || allTerminal) return "repair";
+    // #1686: only the current decision's repair children determine whether the
+    // round is waiting or terminal. Original lane children and repair children
+    // from older rounds never satisfy readiness, and zero matching repair
+    // children can never open another review round.
+    const decision = reviewStore.getLatestDecisionForProject(projectId);
+    if (decision) {
+      try {
+        const parsed = JSON.parse(decision.decision_json) as { repair?: { items?: RepairItem[] } };
+        const items = parsed.repair?.items ?? [];
+        if (items.length > 0) {
+const matches = currentRepairChildrenForDecision(projectId, children, items, workerStore);
+          if (matches.length > 0) {
+            const anyLive = matches.some(c => c.status === "queued" || c.status === "running");
+            const allTerminal = matches.every(c => KANBAN_TERMINAL_STATUSES.includes(c.status));
+            if (anyLive || allTerminal) return "repair";
+            return "worker_resume";
+          }
+          // Expected repair children are absent — the repair owner owns the
+          // recovery to repair_planned; never the no-owner continuation.
+          return "repair";
+        }
+      } catch { /* fall through — no durable repair items */ }
+    }
   }
 
   // R2: the Reconciler's review case creation owns an executing project whose
@@ -856,10 +876,12 @@ function handleInputState(projectId: number, supervision: ProjectSupervisionRow,
 
 type RepairItem = {
   id: string;
+  source_contract_id: string;
   affected_criterion_ids: string[];
   strategy: string;
   required_evidence: string;
   capabilities: string[];
+  do_not_repeat: string[];
   budget: { max_attempts?: number; max_tokens?: number };
 };
 
@@ -870,31 +892,121 @@ function repairWorkerGoal(item: RepairItem): string {
   return `Repair: ${item.strategy.slice(0, 200)} [repair-item:${item.id}]`;
 }
 
-function sameStringSet(left: readonly string[] | undefined, right: readonly string[]): boolean {
-  if (!left || left.length !== right.length) return false;
-  const expected = new Set(right);
-  return left.every(value => expected.has(value));
+/** Read the durable contract of a child card, tolerating store/parse gaps. */
+function readChildContract(
+  cardId: number,
+  workerStore: WorkerSupervisionStore | WorkerSupervisionService,
+): WorkerAcceptanceContractV1 | undefined {
+  try {
+    if (workerStore instanceof WorkerSupervisionService) {
+      return workerStore.getContractForCard(cardId);
+    }
+    const row = workerStore.getContractByCardId(cardId);
+    if (!row) return undefined;
+    const parsed = JSON.parse(row.contract_json) as unknown;
+    if (typeof parsed !== "object" || parsed === null) return undefined;
+    return parsed as WorkerAcceptanceContractV1;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * #1686: a repair item is owned only by a child whose contract lineage points
+ * to the item's source contract and whose durable goal carries the item
+ * marker. Root provenance must match the project. Children without the
+ * lineage (legacy pre-#1686 workers, original lane children, or repair
+ * children from older rounds) never satisfy an item.
+ */
+function isRepairWorkerForItem(
+  contract: WorkerAcceptanceContractV1 | undefined,
+  projectId: number,
+  item: RepairItem,
+): boolean {
+  if (!contract) return false;
+  if (contract.provenance.root_card_id !== projectId) return false;
+  if (contract.revision_meta?.parent_contract_id !== item.source_contract_id) return false;
+  return contract.goal === repairWorkerGoal(item);
 }
 
 function hasRepairWorkerForItem(
   projectId: number,
   children: readonly KanbanCard[],
   item: RepairItem,
-  supervisionService: WorkerSupervisionService,
+  workerStore: WorkerSupervisionStore | WorkerSupervisionService,
 ): boolean {
-  const goal = repairWorkerGoal(item);
-  const legacyGoal = `Repair: ${item.strategy.slice(0, 200)}`;
-  for (const child of children) {
-    let contract: WorkerAcceptanceContractV1 | undefined;
-    try { contract = supervisionService.getContractForCard(child.id); } catch { contract = undefined; }
-    if (!contract || contract.provenance.root_card_id !== projectId) continue;
-    if (contract.goal === goal) return true;
-    // Existing workers created before the marker was added remain durable
-    // owners. Their legacy goal is accepted only with the same root criteria,
-    // so an unrelated Worker cannot satisfy a repair item by text alone.
-    if (contract.goal === legacyGoal && sameStringSet(contract.supports_root_criteria, item.affected_criterion_ids)) return true;
+  return children.some(child => isRepairWorkerForItem(readChildContract(child.id, workerStore), projectId, item));
+}
+
+/** Current decision's repair children — the only children that count for readiness. */
+function currentRepairChildrenForDecision(
+  projectId: number,
+  children: readonly KanbanCard[],
+  items: readonly RepairItem[],
+  workerStore: WorkerSupervisionStore | WorkerSupervisionService,
+): KanbanCard[] {
+  return children.filter(child => {
+    const contract = readChildContract(child.id, workerStore);
+    return items.some(item => isRepairWorkerForItem(contract, projectId, item));
+  });
+}
+
+/**
+ * #1686: resolve and validate the durable source contract of a repair item
+ * under the project. Returns an actionable error message, or null when the
+ * source contract is usable. The review service already validated references
+ * at decision time; this is the reconciler's fail-closed re-check for legacy
+ * decisions persisted before #1686 (or corrupt rows).
+ */
+function repairSourceContractError(
+  item: RepairItem,
+  projectId: number,
+  workerStore: WorkerSupervisionStore,
+): string | null {
+  const sid = item.source_contract_id;
+  if (!sid || sid.trim().length === 0) {
+    return `repair item ${item.id} has no source_contract_id — legacy repair decisions cannot authorize a Worker`;
   }
-  return false;
+  const row = workerStore.getContract(sid);
+  if (!row) {
+    return `repair item ${item.id} references unknown source contract "${sid}"`;
+  }
+  let contract: WorkerAcceptanceContractV1;
+  try {
+    const parsed = JSON.parse(row.contract_json) as unknown;
+    const validated = validateContract(parsed);
+    if (!validated.ok) {
+      return `source contract "${sid}" failed worker-contract validation: ${validated.errors.map(e => e.message).join("; ")}`;
+    }
+    contract = validated.contract;
+  } catch {
+    return `source contract "${sid}" is unparseable`;
+  }
+  if (contract.provenance.root_card_id !== projectId) {
+    return `source contract "${sid}" belongs to project ${contract.provenance.root_card_id}, not ${projectId}`;
+  }
+  const supported = new Set(contract.supports_root_criteria ?? []);
+  const missing = item.affected_criterion_ids.filter(acid => !supported.has(acid));
+  if (missing.length > 0) {
+    return `source contract "${sid}" does not cover affected criterion "${missing.join(",")}"`;
+  }
+  return null;
+}
+
+/**
+ * #1686: settle one honest structural blocked outcome for a repair decision
+ * that cannot authorize any Worker. The project is terminalized with the
+ * stable repair_source_contract_invalid class — never an empty repair or
+ * review generation loop.
+ */
+function blockRepairSourceContractInvalid(reviewStore: ProjectReviewStore, projectId: number, reason: string): void {
+  const supervision = reviewStore.getSupervision(projectId);
+  const authority = supervision ? projectMutationAuthority(projectId, supervision.generation) : undefined;
+  const blocked = blockProjectWithInvalidation(reviewStore, projectId, `${REPAIR_SOURCE_CONTRACT_INVALID}: ${reason}`, undefined, { authority });
+  if (blocked) {
+    try { nerve.fire("card:failed", projectId); } catch (err) { logAndSwallow(TAG, "fire card:failed", err); }
+  }
+  logWarn(TAG, `Project ${projectId}: repair source contract invalid — ${REPAIR_SOURCE_CONTRACT_INVALID} (${reason})`);
 }
 
 function handleRepairState(generation: ReconcilerGeneration, projectId: number, supervision: ProjectSupervisionRow, reviewStore: ProjectReviewStore): BranchResult {
@@ -905,64 +1017,137 @@ function handleRepairState(generation: ReconcilerGeneration, projectId: number, 
       logWarn(TAG, `Project ${projectId}: repair_planned but no decision found — falling through to the no-owner decision`);
       return "none";
     }
-    const parsed = JSON.parse(decision.decision_json) as { repair?: { items: RepairItem[] } };
+    let parsed: { repair?: { items: RepairItem[] } };
+    try {
+      parsed = JSON.parse(decision.decision_json) as { repair?: { items: RepairItem[] } };
+    } catch {
+      logWarn(TAG, `Project ${projectId}: repair_planned but decision is unparseable — falling through to the no-owner decision`);
+      return "none";
+    }
     const items = parsed.repair?.items ?? [];
     if (items.length === 0) {
       logWarn(TAG, `Project ${projectId}: repair_planned but no repair items — falling through to the no-owner decision`);
       return "none";
     }
-    const contractRow2 = reviewStore.getContractByProjectCardId(projectId);
-    const rootContract = contractRow2 ? JSON.parse(contractRow2.contract_json) as { criteria: Array<{ id: string; description: string }> } : null;
+
+    const workerStore = new WorkerSupervisionStore();
+    // #1686: fail closed once on a decision that cannot authorize any repair
+    // Worker — a legacy item without a usable source contract must never loop
+    // through empty repair generations.
+    for (const item of items) {
+      const sourceError = repairSourceContractError(item, projectId, workerStore);
+      if (sourceError) {
+        blockRepairSourceContractInvalid(reviewStore, projectId, sourceError);
+        return "transitioned";
+      }
+    }
+
+    const rootContractRow = reviewStore.getContractByProjectCardId(projectId);
+    let rootContract: { limits?: { max_tokens?: number; max_duration_ms?: number; max_cost?: number } } | null = null;
+    if (rootContractRow) {
+      try {
+        rootContract = JSON.parse(rootContractRow.contract_json) as { limits?: { max_tokens?: number; max_duration_ms?: number; max_cost?: number } };
+      } catch { /* keep null — the derivation boundary still validates */ }
+    }
     const rootCardId = resolveRootId(projectId) ?? projectId;
     const children = kanbanGetChildren(projectId);
-    const supervisionService = new WorkerSupervisionService();
+    let created = 0;
     for (const item of items) {
-      const goal = repairWorkerGoal(item);
-      if (hasRepairWorkerForItem(projectId, children, item, supervisionService)) {
+      if (hasRepairWorkerForItem(projectId, children, item, workerStore)) {
         logInfo(TAG, `Project ${projectId}: repair worker for item ${item.id} already exists — reusing durable Worker`);
         continue;
       }
-      logInfo(TAG, `Project ${projectId}: creating repair worker for item ${item.id} (criteria: ${item.affected_criterion_ids.join(",")})`);
-      const criteria = rootContract?.criteria
-        .filter(c => item.affected_criterion_ids.includes(c.id))
-        .map(c => ({ id: c.id, description: c.description })) ?? [];
-      const contract: WorkerAcceptanceContractV1 = {
-        schema_version: 1,
-        id: `repair_${projectId}_${item.id}_${Date.now()}`,
-        digest: "",
-        goal,
-        criteria: criteria.length > 0 ? criteria : [{ id: "repair", description: goal }],
-        expected_artifacts: [],
-        verification_commands: [],
-        required_capabilities: item.capabilities ?? [],
-        supports_root_criteria: [...item.affected_criterion_ids],
-        limits: { max_tokens: item.budget?.max_tokens },
-        provenance: { root_card_id: rootCardId, card_id: 0, authored_by: "orc", created_at: new Date().toISOString() },
-      };
+      logInfo(TAG, `Project ${projectId}: creating repair worker for item ${item.id} (source: ${item.source_contract_id}, criteria: ${item.affected_criterion_ids.join(",")})`);
+      const sourceRow = workerStore.getContract(item.source_contract_id);
+      if (!sourceRow) {
+        // Unreachable after the source check above; guard anyway so a partial
+        // dispatch never advances state with a missing source.
+        logWarn(TAG, `Project ${projectId}: source contract for item ${item.id} disappeared — leaving repair_planned`);
+        return "owned";
+      }
+      let sourceContract: WorkerAcceptanceContractV1;
       try {
-        spin.spawnChild(projectId, { goal, source: "agent", contract, settlementOwner: "spin" });
+        const validated = validateContract(JSON.parse(sourceRow.contract_json) as unknown);
+        if (!validated.ok) {
+          logWarn(TAG, `Project ${projectId}: source contract for item ${item.id} is no longer valid — leaving repair_planned`);
+          return "owned";
+        }
+        sourceContract = validated.contract;
+      } catch {
+        logWarn(TAG, `Project ${projectId}: source contract for item ${item.id} is no longer parseable — leaving repair_planned`);
+        return "owned";
+      }
+      const latestAttempt = workerStore.getAttemptsForCard(sourceRow.card_id).slice(-1)[0];
+      const contract = deriveRepairContract({
+        sourceContract,
+        sourceAttemptId: latestAttempt?.id,
+        item,
+        rootCardId,
+        pendingCardId: 0,
+        now: new Date().toISOString(),
+        enclosingLimits: rootContract?.limits,
+      });
+      try {
+        spin.spawnChild(projectId, { goal: contract.goal, source: "agent", contract, settlementOwner: "spin", authority });
+        created++;
       } catch (err) {
         logWarn(TAG, `Project ${projectId}: failed to dispatch repair worker for item ${item.id} — ${err instanceof Error ? err.message : String(err)}`);
       }
+    }
+
+    // #1686: transition to repairing only after EVERY item has a matching
+    // durable child. A failed dispatch leaves the project in repair_planned
+    // for the bounded reconciliation/recovery policy; the next wake reuses
+    // the already-created children and creates only the missing ones.
+    const reread = kanbanGetChildren(projectId);
+    const allCovered = items.every(item => hasRepairWorkerForItem(projectId, reread, item, workerStore));
+    if (!allCovered) {
+      logWarn(TAG, `Project ${projectId}: not all repair items have durable Workers (created ${created}) — remaining repair_planned for retry`);
+      return "owned";
     }
     return reviewStore.stateTransition(projectId, ["repair_planned"], "repairing", undefined, { authority })
       ? "transitioned"
       : "none";
   }
   if (supervision.state === "repairing") {
+    const decision = reviewStore.getLatestDecisionForProject(projectId);
+    if (!decision) {
+      logWarn(TAG, `Project ${projectId}: repairing but no decision found — falling through to the no-owner decision`);
+      return "none";
+    }
+    let items: RepairItem[];
+    try {
+      const parsed = JSON.parse(decision.decision_json) as { repair?: { items: RepairItem[] } };
+      items = parsed.repair?.items ?? [];
+    } catch {
+      items = [];
+    }
+    if (items.length === 0) {
+      logWarn(TAG, `Project ${projectId}: repairing but no current repair items — falling through to the no-owner decision`);
+      return "none";
+    }
     const children = kanbanGetChildren(projectId);
-    const allTerminal = children.length > 0 && children.every(c => KANBAN_TERMINAL_STATUSES.includes(c.status));
+    const workerStore = new WorkerSupervisionStore();
+    const matches = currentRepairChildrenForDecision(projectId, children, items, workerStore);
+
+    // #1686: an expected repair child is absent — return to repair planning
+    // so the next wake re-creates only the missing children. Never open a new
+    // review round while the current repair is incomplete.
+    const expected = items.length;
+    if (matches.length < expected) {
+      logWarn(TAG, `Project ${projectId}: repairing with ${matches.length}/${expected} current repair children — recovering to repair_planned`);
+      return reviewStore.stateTransition(projectId, ["repairing"], "repair_planned", undefined, { authority })
+        ? "transitioned"
+        : "none";
+    }
+    const allTerminal = matches.every(c => KANBAN_TERMINAL_STATUSES.includes(c.status));
     if (allTerminal) {
-      logInfo(TAG, `Project ${projectId}: all repair children terminal — creating new review round`);
+      logInfo(TAG, `Project ${projectId}: all current repair children terminal — creating new review round`);
       return reviewStore.stateTransition(projectId, ["repairing"], "executing", { repair_round: supervision.repair_round + 1 }, { authority })
         ? "transitioned"
         : "none";
     }
-    if (children.length === 0) {
-      logWarn(TAG, `Project ${projectId}: repairing with no children — falling through to the no-owner decision`);
-      return "none";
-    }
-    // recoverable child rows — Reconciler/Worker dispatcher owns
+    // Recoverable child rows — Reconciler/Worker dispatcher owns
     requestWorkerDispatchFor(generation);
     return "owned";
   }

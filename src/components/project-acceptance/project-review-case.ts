@@ -511,6 +511,15 @@ export interface ProjectReviewBriefV1 {
   outputs: Array<{ output_id: string; description: string; kind: string; required: boolean }>;
   contradictions: ContradictionCandidate[];
   children: ProjectReviewChildBriefV1[];
+  /** #1686: legal repair source contracts — mapped child contracts of this
+   * case with the root criteria they cover. A repair item must reference one
+   * of these and may only affect criteria the source covers. */
+  repair_sources: Array<{
+    contract_id: string;
+    card_id: number;
+    outcome: string;
+    supports_root_criteria: string[];
+  }>;
   /** #1433/#1493: peer claims are claims, never requester-observed evidence. */
   peer_claims: ReviewCaseSnapshot["peer_contributions"];
   uncovered_criteria: string[];
@@ -608,6 +617,24 @@ export function projectReviewBrief(
       executor_kind: truncateProse(child.executor_kind, 64) as ExecutorKind | "unknown",
     }));
 
+    // #1686: derive the legal repair source set from the immutable case —
+    // a contract is a repair source only where a criterion maps it, and the
+    // mapped set is the contract's supported root criteria.
+    const criteriaByContract = new Map<string, Set<string>>();
+    for (const ci of snapshot.criterion_inputs) {
+      for (const cid of ci.mapped_child_contract_ids) {
+        const supported = criteriaByContract.get(cid) ?? new Set<string>();
+        supported.add(ci.criterion_id);
+        criteriaByContract.set(cid, supported);
+      }
+    }
+    const repairSources: ProjectReviewBriefV1["repair_sources"] = snapshot.child_summaries.map(child => ({
+      contract_id: child.contract_id,
+      card_id: child.card_id,
+      outcome: truncateProse(child.outcome, 64),
+      supports_root_criteria: [...(criteriaByContract.get(child.contract_id) ?? [])],
+    }));
+
     const contradictions: ContradictionCandidate[] = snapshot.contradiction_candidates.map(candidate => ({
       id: candidate.id,
       affected_criterion_ids: [...candidate.affected_criterion_ids],
@@ -656,6 +683,7 @@ export function projectReviewBrief(
         outputs,
         contradictions,
         children,
+        repair_sources: repairSources,
         peer_claims: peerClaims,
         uncovered_criteria: [...snapshot.uncovered_criteria],
         budgets: snapshot.budgets,

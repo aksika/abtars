@@ -507,6 +507,101 @@ describe("ProjectReviewValidator", () => {
     });
   });
 
+  describe("#1686 repair source-contract validation", () => {
+    function repairDecision(pid: number, caseId: string, items: unknown[]): ProjectReviewDecisionV1 {
+      return makeValidDecision(pid, {
+        action: "repair",
+        repair: { items: items as never, rationale: "Fix it" },
+      }, caseId);
+    }
+
+    it("accepts a repair item referencing a mapped source contract covering its affected criteria", () => {
+      const { caseId, pid, snapshot } = setupCase();
+      const decision = repairDecision(pid, caseId, [
+        { id: "r1", source_contract_id: "pc_child_c1", affected_criterion_ids: ["c1"], required_evidence: "observed", strategy: "rework", do_not_repeat: [], capabilities: [], budget: {} },
+      ]);
+      const errors = validator.validateDecision(decision, snapshot);
+      expect(errors).toHaveLength(0);
+    });
+
+    it("rejects an empty or missing source_contract_id", () => {
+      const { caseId, pid, snapshot } = setupCase();
+      const decision = repairDecision(pid, caseId, [
+        { id: "r1", source_contract_id: "", affected_criterion_ids: ["c1"], required_evidence: "observed", strategy: "rework", do_not_repeat: [], capabilities: [], budget: {} },
+      ]);
+      const errors = validator.validateDecision(decision, snapshot);
+      expect(errors.some(e => e.path.includes("source_contract_id") && e.tag === "missing_field")).toBe(true);
+    });
+
+    it("rejects a hallucinated source contract not mapped by any criterion", () => {
+      const { caseId, pid, snapshot } = setupCase();
+      const decision = repairDecision(pid, caseId, [
+        { id: "r1", source_contract_id: "c_fabricated", affected_criterion_ids: ["c1"], required_evidence: "observed", strategy: "rework", do_not_repeat: [], capabilities: [], budget: {} },
+      ]);
+      const errors = validator.validateDecision(decision, snapshot);
+      expect(errors.some(e => e.path.includes("source_contract_id") && e.message.includes("unknown source contract"))).toBe(true);
+    });
+
+    it("rejects a source contract that does not cover the affected criterion", () => {
+      const { caseId, pid, snapshot } = setupCase();
+      const decision = repairDecision(pid, caseId, [
+        { id: "r1", source_contract_id: "pc_child_c1", affected_criterion_ids: ["c2"], required_evidence: "observed", strategy: "rework", do_not_repeat: [], capabilities: [], budget: {} },
+      ]);
+      const errors = validator.validateDecision(decision, snapshot);
+      expect(errors.some(e => e.message.includes("does not cover affected criterion"))).toBe(true);
+    });
+
+    it("rejects Orc-owned or unknown affected criteria", () => {
+      const { caseId, pid, snapshot } = setupCase();
+      // Orc-owned criterion "o-crit" is not in the snapshot, but the root
+      // contract in this fixture only has c1/c2 delegated — an unknown id.
+      const decision = repairDecision(pid, caseId, [
+        { id: "r1", source_contract_id: "pc_child_c1", affected_criterion_ids: ["ghost"], required_evidence: "observed", strategy: "rework", do_not_repeat: [], capabilities: [], budget: {} },
+      ]);
+      const errors = validator.validateDecision(decision, snapshot);
+      expect(errors.some(e => e.message.includes("not a delegated root criterion"))).toBe(true);
+    });
+
+    it("rejects duplicate affected criteria within one item", () => {
+      const { caseId, pid, snapshot } = setupCase();
+      const decision = repairDecision(pid, caseId, [
+        { id: "r1", source_contract_id: "pc_child_c1", affected_criterion_ids: ["c1", "c1"], required_evidence: "observed", strategy: "rework", do_not_repeat: [], capabilities: [], budget: {} },
+      ]);
+      const errors = validator.validateDecision(decision, snapshot);
+      expect(errors.some(e => e.message.includes("duplicate affected criterion"))).toBe(true);
+    });
+
+    it("rejects conflicting items referencing the same source contract", () => {
+      const { caseId, pid, snapshot } = setupCase();
+      const decision = repairDecision(pid, caseId, [
+        { id: "r1", source_contract_id: "pc_child_c1", affected_criterion_ids: ["c1"], required_evidence: "observed", strategy: "rework", do_not_repeat: [], capabilities: [], budget: {} },
+        { id: "r2", source_contract_id: "pc_child_c1", affected_criterion_ids: ["c1"], required_evidence: "observed", strategy: "rewrite", do_not_repeat: [], capabilities: [], budget: {} },
+      ]);
+      const errors = validator.validateDecision(decision, snapshot);
+      expect(errors.some(e => e.message.includes("already claimed by repair item"))).toBe(true);
+    });
+
+    it("allows two disjoint items on the same source contract", () => {
+      const { caseId, pid, snapshot } = setupCase();
+      const decision = repairDecision(pid, caseId, [
+        { id: "r1", source_contract_id: "pc_child_c1", affected_criterion_ids: ["c1"], required_evidence: "observed", strategy: "rework", do_not_repeat: [], capabilities: [], budget: {} },
+        { id: "r2", source_contract_id: "pc_child_c2", affected_criterion_ids: ["c2"], required_evidence: "observed", strategy: "rewrite", do_not_repeat: [], capabilities: [], budget: {} },
+      ]);
+      const errors = validator.validateDecision(decision, snapshot);
+      expect(errors).toHaveLength(0);
+    });
+
+    it("rejects a duplicate repair item id", () => {
+      const { caseId, pid, snapshot } = setupCase();
+      const decision = repairDecision(pid, caseId, [
+        { id: "r1", source_contract_id: "pc_child_c1", affected_criterion_ids: ["c1"], required_evidence: "observed", strategy: "rework", do_not_repeat: [], capabilities: [], budget: {} },
+        { id: "r1", source_contract_id: "pc_child_c2", affected_criterion_ids: ["c2"], required_evidence: "observed", strategy: "rewrite", do_not_repeat: [], capabilities: [], budget: {} },
+      ]);
+      const errors = validator.validateDecision(decision, snapshot);
+      expect(errors.some(e => e.message.includes("duplicate repair item id"))).toBe(true);
+    });
+  });
+
   describe("blocked validation", () => {
     it("rejects blocked without blocker info", () => {
       const { caseId, pid, snapshot } = setupCase();

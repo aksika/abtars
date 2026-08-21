@@ -2,7 +2,10 @@ import { ProjectReviewStore } from "./project-review-store.js";
 import type { ProjectMutationAuthority } from "./project-review-store.js";
 import { ProjectReviewValidator, type ProjectReviewDecisionV1 } from "./project-review-validator.js";
 import type { ValidationIssue } from "./project-review-contract.js";
+import { validationError } from "./project-review-contract.js";
 import type { ReviewCaseSnapshot } from "./project-review-case.js";
+import { WorkerSupervisionStore } from "../worker-supervision-store.js";
+import { validateContract } from "../worker-contract.js";
 import { nerve } from "../nerve.js";
 import { randomUUID } from "node:crypto";
 import { logAndSwallow } from "../log-and-swallow.js";
@@ -116,6 +119,122 @@ export class ProjectReviewService {
   }
 
   /**
+   * #1686: authoritative durable stage of repair-source validation. The
+   * review validator checks the immutable case (mapped contract ids); this
+   * re-reads every referenced source contract from the worker supervision
+   * store under current authority and verifies it belongs to this root
+   * project, parses and passes the shared worker-contract validator, and
+   * covers every affected root criterion. Any failure rejects the decision
+   * before a repair is persisted, budget reserved, or state advanced.
+   */
+  private resolveRepairSourceContracts(
+    decision: ProjectReviewDecisionV1,
+    caseSnapshot: ReviewCaseSnapshot,
+  ): ValidationIssue[] {
+    if (decision.action !== "repair" || !decision.repair || decision.repair.items.length === 0) {
+      return [];
+    }
+    const workerStore = new WorkerSupervisionStore(this.store.db);
+    const issues: ValidationIssue[] = [];
+    const sourceIssues = new Map<string, ValidationIssue>();
+    const affectedBySource = new Map<string, Set<string>>();
+    for (const item of decision.repair.items) {
+      const sid = item.source_contract_id;
+      if (!sid || sid.trim().length === 0) continue; // reported by the validator
+      const affected = affectedBySource.get(sid) ?? new Set<string>();
+      for (const acid of item.affected_criterion_ids) affected.add(acid);
+      affectedBySource.set(sid, affected);
+      if (!sourceIssues.has(sid)) {
+        const issue = this.validateDurableSourceContract(sid, decision, caseSnapshot, workerStore);
+        if (issue) sourceIssues.set(sid, issue);
+      }
+    }
+    for (const [sid, affected] of affectedBySource) {
+      const issue = sourceIssues.get(sid);
+      if (issue) continue;
+      // Coverage is checked per source contract over ALL items referencing it.
+      const contract = this.readValidatedSourceContract(sid, decision.project_card_id, workerStore);
+      if (!contract) continue;
+      const supported = new Set(contract.supports_root_criteria ?? []);
+      for (const acid of affected) {
+        if (!supported.has(acid)) {
+          sourceIssues.set(sid, validationError(
+            "bad_reference",
+            `$.repair.items.source_contract_id`,
+            `source contract "${sid}" does not cover affected criterion "${acid}" — its supports_root_criteria is [${[...supported].join(", ")}]`,
+          ));
+          break;
+        }
+      }
+    }
+    for (const issue of sourceIssues.values()) {
+      issues.push(issue);
+    }
+    return issues;
+  }
+
+  private readValidatedSourceContract(
+    sourceContractId: string,
+    projectCardId: number,
+    workerStore: WorkerSupervisionStore,
+  ): import("../worker-contract.js").WorkerAcceptanceContractV1 | null {
+    const row = workerStore.getContract(sourceContractId);
+    if (!row) return null;
+    try {
+      const parsed = JSON.parse(row.contract_json) as unknown;
+      const validated = validateContract(parsed);
+      if (!validated.ok) return null;
+      if (validated.contract.provenance.root_card_id !== projectCardId) return null;
+      return validated.contract;
+    } catch {
+      return null;
+    }
+  }
+
+  private validateDurableSourceContract(
+    sid: string,
+    decision: ProjectReviewDecisionV1,
+    _caseSnapshot: ReviewCaseSnapshot,
+    workerStore: WorkerSupervisionStore,
+  ): ValidationIssue | null {
+    const row = workerStore.getContract(sid);
+    if (!row) {
+      return validationError(
+        "bad_reference",
+        `$.repair.items.source_contract_id`,
+        `source contract "${sid}" not found in the worker supervision store — the referenced contract must be a durable Worker contract of this project`,
+      );
+    }
+    let contract: import("../worker-contract.js").WorkerAcceptanceContractV1 | undefined;
+    try {
+      const parsed = JSON.parse(row.contract_json) as unknown;
+      const validated = validateContract(parsed);
+      if (!validated.ok) {
+        return validationError(
+          "invalid_contract",
+          `$.repair.items.source_contract_id`,
+          `source contract "${sid}" failed worker-contract validation: ${validated.errors.map(e => e.message).join("; ")}`,
+        );
+      }
+      contract = validated.contract;
+    } catch {
+      return validationError(
+        "invalid_contract",
+        `$.repair.items.source_contract_id`,
+        `source contract "${sid}" is unparseable — corrupt contracts cannot authorize a repair`,
+      );
+    }
+    if (contract.provenance.root_card_id !== decision.project_card_id) {
+      return validationError(
+        "bad_reference",
+        `$.repair.items.source_contract_id`,
+        `source contract "${sid}" belongs to project ${contract.provenance.root_card_id}, not ${decision.project_card_id} — cross-project repair references are rejected`,
+      );
+    }
+    return null;
+  }
+
+  /**
    * Process a review decision submitted by Orc.
    * Validates, persists, and transitions project state.
    * #1620: validation issues are partitioned by severity — errors reject and
@@ -145,10 +264,13 @@ export class ProjectReviewService {
       return { kind: "invalid", errors: ["review case snapshot is structurally invalid"], issues: [], invalidProposalCount: 0, remainingAttempts: MAX_INVALID_PROPOSALS };
     }
 
-    // Validate the decision
+    // Validate the decision — the semantic review-case stage plus the
+    // #1686 authoritative durable stage that re-reads repair source contracts.
     const issues = this.validator.validateDecision(decision, caseSnapshot);
-    const errors = issues.filter(i => i.severity === "error");
-    const warnings = issues.filter(i => i.severity === "warn");
+    const sourceIssues = this.resolveRepairSourceContracts(decision, caseSnapshot);
+    const allIssues = [...issues, ...sourceIssues];
+    const errors = allIssues.filter(i => i.severity === "error");
+    const warnings = allIssues.filter(i => i.severity === "warn");
 
     if (errors.length > 0) {
       // A foreign project/generation is a stale or misbound invocation, not a

@@ -76,6 +76,10 @@ export interface RetryContext {
   readonly prior_evidence_ids: readonly string[];
   readonly failed_criterion_ids: readonly string[];
   readonly unresolved_risks: readonly string[];
+  /** #1686: the repair item's required-evidence prose carried into the derived
+   * contract lineage. Explanatory only — it never substitutes for an artifact
+   * or verification command (worker evidence validation stays fail-closed). */
+  readonly required_evidence?: string;
 }
 
 export interface WorkerContractRevisionV1 {
@@ -703,6 +707,12 @@ export function normalizeContract(raw: unknown): NormalizeResult {
 
   const capabilitiesRaw = Array.isArray(obj["required_capabilities"]) ? (obj["required_capabilities"] as string[]) : [];
   const supportsRootCriteriaRaw = Array.isArray(obj["supports_root_criteria"]) ? (obj["supports_root_criteria"] as string[]) : undefined;
+  // #1686: revision lineage is part of the contract vocabulary — preserve it
+  // through normalization when present so repair/retry children keep their
+  // parent-contract and retry-context lineage instead of silently dropping it.
+  const revisionMetaRaw = (typeof obj["revision_meta"] === "object" && obj["revision_meta"] !== null)
+    ? (obj["revision_meta"] as Record<string, unknown>)
+    : undefined;
   // Keep an explicitly supplied non-string value in the normalized object so
   // validation rejects it instead of silently dropping the typed routing
   // marker and accidentally turning a malformed coding contract into Spin.
@@ -735,6 +745,9 @@ export function normalizeContract(raw: unknown): NormalizeResult {
   };
   if (supportsRootCriteriaRaw !== undefined && supportsRootCriteriaRaw.length > 0) {
     built["supports_root_criteria"] = supportsRootCriteriaRaw;
+  }
+  if (revisionMetaRaw !== undefined) {
+    built["revision_meta"] = revisionMetaRaw;
   }
   // An explicitly present alias — even whitespace-only — must reach the
   // validator so "non-empty when present" is enforced, not silently dropped.

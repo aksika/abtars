@@ -1831,6 +1831,9 @@ export class Spin {
         supportsRootCriteria: request.contract.supports_root_criteria ? [...request.contract.supports_root_criteria] : undefined,
         limits: { ...request.contract.limits },
         workspaceAlias: request.contract.workspace_alias,
+        // #1686: derived children keep their immutable revision lineage
+        // (repair parent-contract reference and retry context).
+        revisionMeta: request.contract.revision_meta,
         // #1644: the bound Orc invocation context is the only spawn authority
         // for tool-driven work; tool arguments cannot choose or override it.
         authority: request.authority,

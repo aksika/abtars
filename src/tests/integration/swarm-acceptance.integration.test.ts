@@ -11,7 +11,41 @@ async function getDbCtor(): Promise<any> {
   return _DbCtor;
 }
 vi.mock("../../components/spin.js", () => ({
-  spin: { dispatch: dispatchMock },
+  spin: {
+    dispatch: dispatchMock,
+    // #1686: the repair path spawns through spin.spawnChild. The harness
+    // mirrors the real boundary: a durable child card + worker contract row
+    // (revision lineage included) so the reconciler's re-read finds it.
+    spawnChild: (parentCardId: number, request: any) => {
+      const childId = nextCardId++;
+      const now = new Date().toISOString().replace(/Z$/, "");
+      const contract = request.contract as import("../../components/worker-contract.js").WorkerAcceptanceContractV1;
+      const card: any = {
+        id: childId, title: request.goal.slice(0, 80), source: request.source ?? "agent",
+        status: "queued", type: "W", parent_id: parentCardId,
+        goal: request.goal, notes: JSON.stringify({ supervised: true }),
+        created_at: now, priority: "MEDIUM",
+        result_summary: null, delivery_attempts: 0, max_tokens: null, tokens_used: null,
+      };
+      cards.set(childId, card);
+      _overrideDb?.prepare(`INSERT INTO kanban_board (id, title, source, status, type, parent_id, goal, created_at, updated_at) VALUES (?, ?, ?, 'queued', 'W', ?, ?, ?, ?)`)
+        .run(childId, request.goal.slice(0, 80), request.source ?? "agent", parentCardId, request.goal, now, now);
+      const revMeta = contract.revision_meta;
+      _overrideDb?.prepare(`INSERT INTO worker_contracts (id, card_id, revision, root_contract_id, parent_contract_id, source_attempt_id, schema_version, contract_json, contract_digest, created_at) VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?, ?)`)
+        .run(
+          contract.id,
+          childId,
+          revMeta?.revision ?? 1,
+          revMeta?.root_contract_id ?? contract.id,
+          revMeta?.parent_contract_id ?? null,
+          revMeta?.source_attempt_id ?? null,
+          JSON.stringify(contract),
+          contract.digest,
+          now,
+        );
+      return childId;
+    },
+  },
 }));
 
 const cards = new Map<number, any>();
@@ -942,6 +976,263 @@ describe("Swarm acceptance — production contract shape (#1605)", () => {
     const decisionRow = reviewStore.getDecision(updated.accepted_decision_id);
     const parsed = JSON.parse((decisionRow as any).decision_json) as any;
     expect(parsed.synthesis).toBe("Daily briefing delivered with all required lanes.");
+  });
+
+  // ── #1686: evidence-preserving repair + optional-gap settlement ─────────────
+
+  async function buildVerdicts(snapshot: any) {
+    return snapshot.criterion_inputs.map((ci: any) => {
+      if (ci.coverage_hint === "failed" || ci.coverage_hint === "gap") {
+        return { criterion_id: ci.criterion_id, verdict: "unsatisfied", evidence_ids: [], rationale: `${ci.criterion_id} lane failed; briefing remains useful` };
+      }
+      if (ci.execution_owner === "orc") {
+        return { criterion_id: ci.criterion_id, verdict: "satisfied", evidence_ids: [], rationale: `Orc-owned: ${ci.criterion_id} evaluated in review` };
+      }
+      return { criterion_id: ci.criterion_id, verdict: "satisfied", evidence_ids: ci.observed_evidence_ids.length > 0 ? [ci.observed_evidence_ids[0]!] : [], rationale: "lane passed" };
+    });
+  }
+
+  async function settleRepairWorker(store: import("../../components/worker-supervision-store.js").WorkerSupervisionStore, projectId: number, outcome: "completed" | "failed"): Promise<number> {
+    const repairChild = Array.from(cards.values()).find((c: any) =>
+      c.parent_id === projectId && c.type === "W" && typeof c.goal === "string" && c.goal.includes("[repair-item:"),
+    );
+    expect(repairChild).toBeDefined();
+    const contract = store.getContractByCardId(repairChild!.id)!;
+    const parsed = JSON.parse(contract.contract_json) as any;
+    // The repair contract preserves the source evidence path and lineage.
+    expect(parsed.expected_artifacts).toHaveLength(1);
+    expect(parsed.verification_commands).toHaveLength(1);
+    expect(parsed.revision_meta?.parent_contract_id).toBeTruthy();
+    expect(parsed.revision_meta?.retry_context?.mode).toBe("repair");
+    // The attempt must carry the CURRENT supervision generation — the repair
+    // settlement advanced the generation, so an attempt at generation 1 could
+    // never be authorized to complete (#1644).
+    const generation = new ProjectReviewStore().getSupervision(projectId)?.generation ?? 1;
+    const attemptId = `a_${repairChild!.id}_1`;
+    store.insertAttempt({
+      id: attemptId, card_id: repairChild!.id, contract_id: parsed.id, ordinal: 1,
+      executor_kind: "agent", executor_id: "spin-local", status: "pending",
+      started_at: new Date().toISOString(), root_project_card_id: projectId,
+      root_project_generation: generation, scheduled_run_id: null,
+    });
+    store.lifecycleTransition(attemptId, ["pending"], "running", { settled_at: null });
+    if (outcome === "completed") {
+      const env = makeEnvelope(repairChild!.id, parsed.id, "lane3-web");
+      // #1686: the envelope must name the DERIVED contract's real digest and
+      // its OWN criteria ids (copied from the source) — acceptance is
+      // exact-contract (id + digest + criterion set).
+      env.attempt.contract_digest = parsed.digest;
+      env.criteria = parsed.criteria.map((c: any) => ({ criterion_id: c.id, status: "passed", evidence_ids: [`chk_${repairChild!.id}`] }));
+      store.completeAttempt(attemptId);
+      store.insertResult(attemptId, env);
+      const card = cards.get(repairChild!.id);
+      if (card) card.status = "done";
+    } else {
+      store.failAttempt(attemptId);
+      const card = cards.get(repairChild!.id);
+      if (card) card.status = "failed";
+    }
+    return repairChild!.id;
+  }
+
+  it("#1686: a source-referenced repair of the failed optional lane derives an evidence-preserving Worker and the project settles accepted with the Known gaps disclosure", async () => {
+    const { projectId, laneIds, failedLaneId } = await createProductionShapeProject();
+    const store = new WorkerSupervisionStore();
+    await completeLane(store, laneIds[0]!, projectId, "lane1-feeds");
+    await completeLane(store, laneIds[1]!, projectId, "lane2-newsletters");
+    await failLane(store, failedLaneId, projectId, "lane3-web");
+
+    mod.requestReconcile(projectId);
+    await flush();
+    await new Promise(r => setTimeout(r, 10));
+    await flush();
+
+    const reviewStore = new ProjectReviewStore();
+    const openCase = reviewStore.getLatestOpenCase(projectId);
+    expect(openCase).toBeDefined();
+    const supervision = reviewStore.getSupervision(projectId) as any;
+    const snap = JSON.parse((openCase as any).case_json) as any;
+
+    // Repair item references the failed lane's durable Worker contract.
+    const sourceContractId = `cc_${failedLaneId}`;
+    const decision: import("../../components/project-acceptance/project-review-validator.js").ProjectReviewDecisionV1 = {
+      schema_version: 1, id: `d_${projectId}`, project_card_id: projectId,
+      review_case_id: (openCase as any).id, project_generation: supervision.generation,
+      action: "repair",
+      criteria: await buildVerdicts(snap),
+      outputs: [{ output_id: "out", disposition: "present", evidence_ids: [] }],
+      contradictions: [],
+      residual_risks: [],
+      authored_at: new Date().toISOString(),
+      synthesis: "Repair the failed web lane.",
+      repair: {
+        items: [{
+          id: "r1",
+          source_contract_id: sourceContractId,
+          affected_criterion_ids: ["lane3-web"],
+          required_evidence: "dated handoff from the web lane",
+          strategy: "re-run the web lane once",
+          do_not_repeat: [],
+          capabilities: [],
+          budget: { max_tokens: 5000 },
+        }],
+        rationale: "the failed optional lane needs a verifiable handoff",
+      },
+    };
+
+    const svc = new ProjectReviewService();
+    const result = svc.processDecision(decision);
+    expect(result.kind).toBe("repair");
+    expect(reviewStore.getSupervision(projectId)?.state).toBe("repair_planned");
+
+    // The reconciler derives the repair Worker from the source contract and
+    // advances to repairing only after the durable child exists.
+    mod.requestReconcile(projectId);
+    await flush();
+    await new Promise(r => setTimeout(r, 10));
+    await flush();
+    expect(reviewStore.getSupervision(projectId)?.state).toBe("repairing");
+
+    // The repair lane TERMINATES failed again — the optional source remains
+    // unavailable, so the round-2 review accepts with the disclosed gap.
+    await settleRepairWorker(store, projectId, "failed");
+    mod.requestReconcile(projectId);
+    await flush();
+    await new Promise(r => setTimeout(r, 10));
+    await flush();
+
+    // All current repair children terminal → one new review round.
+    expect(reviewStore.getSupervision(projectId)?.state).toBe("review_requested");
+    expect(reviewStore.getSupervision(projectId)?.repair_round).toBe(1);
+
+    // Round 2: accept with the still-unsatisfied optional lane disclosed.
+    const case2 = reviewStore.getLatestOpenCase(projectId);
+    const snap2 = JSON.parse((case2 as any).case_json) as any;
+    const acceptDecision: import("../../components/project-acceptance/project-review-validator.js").ProjectReviewDecisionV1 = {
+      schema_version: 1, id: `d2_${projectId}`, project_card_id: projectId,
+      review_case_id: (case2 as any).id, project_generation: (reviewStore.getSupervision(projectId) as any).generation,
+      action: "accept",
+      criteria: await buildVerdicts(snap2),
+      outputs: [{ output_id: "out", disposition: "present", evidence_ids: [] }],
+      contradictions: [],
+      residual_risks: [],
+      authored_at: new Date().toISOString(),
+      synthesis: "Daily briefing delivered with all required lanes.",
+    };
+    const result2 = svc.processDecision(acceptDecision);
+    expect(result2.kind).toBe("accepted");
+
+    const kanbanRow = reviewStore.db.prepare("SELECT status, result_summary FROM kanban_board WHERE id = ?").get(projectId) as any;
+    expect(kanbanRow.status).toBe("done");
+    expect(kanbanRow.result_summary).toContain("Known gaps:");
+    expect(kanbanRow.result_summary).toContain("lane3-web: unsatisfied");
+
+    // #1686: no SHA module/table was touched — the journey settled through the
+    // ordinary scheduled-task path only.
+    const shaTables = reviewStore.db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name LIKE '%sha%'").all() as Array<{ name: string }>;
+    expect(shaTables).toEqual([]);
+  });
+
+  it("#1686: a source-referenced repair of a FAILED REQUIRED lane derives an evidence-preserving Worker and cannot be waived", async () => {
+    const { projectId, laneIds } = await createProductionShapeProject();
+    const store = new WorkerSupervisionStore();
+    // Fail the REQUIRED first lane (lane1-feeds) instead of the optional one.
+    await failLane(store, laneIds[0]!, projectId, "lane1-feeds");
+    await completeLane(store, laneIds[1]!, projectId, "lane2-newsletters");
+    await completeLane(store, laneIds[2]!, projectId, "lane3-web");
+
+    mod.requestReconcile(projectId);
+    await flush();
+    await new Promise(r => setTimeout(r, 10));
+    await flush();
+
+    const reviewStore = new ProjectReviewStore();
+    const openCase = reviewStore.getLatestOpenCase(projectId);
+    expect(openCase).toBeDefined();
+    const supervision = reviewStore.getSupervision(projectId) as any;
+    const snap = JSON.parse((openCase as any).case_json) as any;
+
+    // Accepting a required unsatisfied lane is REJECTED — it can never be
+    // waived like an optional gap.
+    const waiveDecision: import("../../components/project-acceptance/project-review-validator.js").ProjectReviewDecisionV1 = {
+      schema_version: 1, id: `dw_${projectId}`, project_card_id: projectId,
+      review_case_id: (openCase as any).id, project_generation: supervision.generation,
+      action: "accept",
+      criteria: await buildVerdicts(snap),
+      outputs: [{ output_id: "out", disposition: "present", evidence_ids: [] }],
+      contradictions: [],
+      residual_risks: [],
+      authored_at: new Date().toISOString(),
+      synthesis: "waive the required lane",
+    };
+    const svc = new ProjectReviewService();
+    const waive = svc.processDecision(waiveDecision);
+    expect(waive.kind).toBe("invalid");
+    // The invalid proposal leaves the open review turn untouched.
+    expect(reviewStore.getSupervision(projectId)?.state).toBe("review_requested");
+
+    // A source-referenced repair of the required lane is accepted and the
+    // reconciler derives the evidence-preserving Worker.
+    const repairDecision: import("../../components/project-acceptance/project-review-validator.js").ProjectReviewDecisionV1 = {
+      schema_version: 1, id: `dr_${projectId}`, project_card_id: projectId,
+      review_case_id: (openCase as any).id, project_generation: supervision.generation,
+      action: "repair",
+      criteria: await buildVerdicts(snap),
+      outputs: [{ output_id: "out", disposition: "present", evidence_ids: [] }],
+      contradictions: [],
+      residual_risks: [],
+      authored_at: new Date().toISOString(),
+      synthesis: "Repair the failed required lane.",
+      repair: {
+        items: [{
+          id: "r1",
+          source_contract_id: `cc_${laneIds[0]}`,
+          affected_criterion_ids: ["lane1-feeds"],
+          required_evidence: "dated handoff from the feeds lane",
+          strategy: "re-run the feeds lane once",
+          do_not_repeat: [],
+          capabilities: [],
+          budget: { max_tokens: 5000 },
+        }],
+        rationale: "the required lane needs a verifiable handoff",
+      },
+    };
+    const repairResult = svc.processDecision(repairDecision);
+    expect(repairResult.kind).toBe("repair");
+    expect(reviewStore.getSupervision(projectId)?.state).toBe("repair_planned");
+
+    mod.requestReconcile(projectId);
+    await flush();
+    await new Promise(r => setTimeout(r, 10));
+    await flush();
+    expect(reviewStore.getSupervision(projectId)?.state).toBe("repairing");
+
+    await settleRepairWorker(store, projectId, "completed");
+    // Let the earlier dispatch pump drain before the wake re-reads the child.
+    await new Promise(r => setTimeout(r, 60));
+    mod.requestReconcile(projectId);
+    await flush();
+    await new Promise(r => setTimeout(r, 10));
+    await flush();
+    expect(reviewStore.getSupervision(projectId)?.state).toBe("review_requested");
+
+    // Round 2: the required lane is now satisfied; acceptance succeeds.
+    const case2 = reviewStore.getLatestOpenCase(projectId);
+    const snap2 = JSON.parse((case2 as any).case_json) as any;
+    const acceptDecision: import("../../components/project-acceptance/project-review-validator.js").ProjectReviewDecisionV1 = {
+      schema_version: 1, id: `da_${projectId}`, project_card_id: projectId,
+      review_case_id: (case2 as any).id, project_generation: (reviewStore.getSupervision(projectId) as any).generation,
+      action: "accept",
+      criteria: await buildVerdicts(snap2),
+      outputs: [{ output_id: "out", disposition: "present", evidence_ids: [] }],
+      contradictions: [],
+      residual_risks: [],
+      authored_at: new Date().toISOString(),
+      synthesis: "Daily briefing delivered with all required lanes.",
+    };
+    const accepted = svc.processDecision(acceptDecision);
+    expect(accepted.kind).toBe("accepted");
+    expect(reviewStore.getSupervision(projectId)?.state).toBe("accepted");
   });
 });
 
