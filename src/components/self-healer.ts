@@ -38,9 +38,14 @@ export function createSelfHealerTask(onSignal: LogSourceCallback): HeartbeatTask
 
         const lines = content.split("\n");
         let evaluatedCount = 0;
+        let lineStart = logCursor?.offset !== undefined
+          ? logCursor.offset - content.length
+          : 0;
+        const baseOffset = logCursor?.offset !== undefined ? logCursor.offset - content.length : 0;
 
         for (let i = 0; i < lines.length; i++) {
           const line = lines[i]!;
+          lineStart = i === 0 ? baseOffset : lineStart + lines[i - 1]!.length + 1;
           if (line.length < 24 || !line.includes(" ERROR ")) continue;
           if (line.includes("TEST ")) continue;
 
@@ -55,7 +60,7 @@ export function createSelfHealerTask(onSignal: LogSourceCallback): HeartbeatTask
             tag: match[1]!,
             logPath: logFile,
             inode: logCursor?.inode ?? -1,
-            lineOffset: (logCursor?.offset ?? 0) - raw.length - 1,
+            lineOffset: lineStart,
             normalizedMessage: raw.slice(0, 512),
             occurredAt: Date.now(),
             evidence: raw.slice(0, 2048),
