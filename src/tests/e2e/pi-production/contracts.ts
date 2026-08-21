@@ -100,7 +100,8 @@ export type ProviderAction =
   | { kind: "text"; chunks: string[] }
   | { kind: "toolCall"; name: string; arguments: unknown }
   | { kind: "httpError"; status: number; code: string }
-  | { kind: "hold"; release: Promise<void> };
+  | { kind: "hold"; release: Promise<void> }
+  | { kind: "acquisitionHold"; release: Promise<void> };
 
 export interface ScriptedRequest {
   candidate: string;

@@ -566,6 +566,10 @@ async function main(): Promise<void> {
       return { observed: `mock Pi host failed to start: ${err instanceof Error ? err.message : String(err)}`, evidence: [] };
     }
     if (!subscribed) return { observed: `agent not subscribed after start`, evidence: [] };
+    // Capture the listener BEFORE cancel: settlement unsubscribes the host,
+    // which would otherwise empty `subs` and silently skip the late-event check.
+    const listener = subs[0];
+    if (!listener) return { observed: `agent listener missing after start`, evidence: [] };
 
     // Cancel — must claim terminal immediately even though waitForIdle hangs
     host.cancel();
@@ -580,8 +584,6 @@ async function main(): Promise<void> {
     // handleAgentEnd is no-op when settled, state unchanged
     const stateBefore = host.state;
     const lateAgentEnd: AgentEvent = { type: "agent_end", messages: [] };
-    const listener = subs[0];
-    if (!listener) return { observed: `agent listener missing after start`, evidence: [] };
     await listener(lateAgentEnd, new AbortController().signal);
     if (host.state !== stateBefore) return { observed: `late agent_end changed state from ${stateBefore} to ${host.state}`, evidence: [] };
 
@@ -602,6 +604,43 @@ async function main(): Promise<void> {
     sv.remove(`sig-${executionId}`);
     return { observed: `terminal: clean, cleanup: ${cleanup}, signalCancel: non-blocking (${elapsed}ms), late agent_end rejected`, evidence: [`executionId=${executionId}`] };
   }, ["M15"]);
+
+  await checkpoint("M30A", "Acquisition hang: never-resolving attempt factory is bounded", "timeout", "provider_attempt_timeout phase=acquiring within the inactivity bound", async () => {
+    // #1506 reopened: the escaped acquisition edge — the attempt factory never
+    // resolves and no iterator exists for any stream watchdog to observe. The
+    // whole-attempt liveness runner must bound the acquisition itself.
+    const SF = await import("../src/components/transport/pi-stream-fn.js");
+    const FP = await import("../src/components/transport/fallback-policy.js");
+    const MHR = await import("../src/components/transport/model-health-registry.js");
+    const candidate = {
+      model: "fixture-stuck",
+      provider: "fixture",
+      endpoint: "https://fixture.invalid/v1",
+      maxContext: 128000,
+      apiKey: "fixture-key",
+      source: "primary",
+    };
+    const registry = new MHR.ModelHealthRegistry();
+    const policy = new FP.FallbackPolicy([candidate], registry);
+    const attemptFactory = async () => new Promise<never>(() => {});
+    const executionId = `m30a-${Date.now()}`;
+    const streamFn = SF.createPiStreamFn({
+      policy,
+      executionId,
+      createPiAiAttempt: attemptFactory,
+      providerInactivityTimeoutMs: 100,
+    });
+    const started = Date.now();
+    const events: any[] = [];
+    for await (const ev of streamFn({ id: "test" }, { messages: [] }, {})) events.push(ev);
+    const elapsed = Date.now() - started;
+    const terminal = events.at(-1);
+    if (terminal?.type !== "error") return `expected terminal error event, got ${terminal?.type ?? "none"}`;
+    if (elapsed > 5_000) return `acquisition hang not bounded: ${elapsed}ms`;
+    if (!policy.excludedKeys.has("fixture-stuck@https://fixture.invalid/v1")) return "candidate not poisoned after acquisition timeout";
+    if (policy.excludedKeys.size !== 1) return `candidate poisoned more than once: ${policy.excludedKeys.size}`;
+    return { observed: `bounded at ${elapsed}ms; terminal stopReason=${(terminal.error as { stopReason?: string } | undefined)?.stopReason}; candidate poisoned exactly once`, evidence: [`elapsedMs=${elapsed}`, `executionId=${executionId}`], correlation: { executionId } };
+  });
 
   await checkpoint("M31", "History written for cancellation", "settlement", "cancelled outcome in history", async () => {
     const runId = `cancel-hist-${Date.now()}`;

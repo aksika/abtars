@@ -9,7 +9,6 @@ import type {
   Usage,
 } from "@earendil-works/pi-ai";
 import { logDebug } from "../logger.js";
-import { logAndSwallow } from "../log-and-swallow.js";
 import type { FallbackPolicy } from "./fallback-policy.js";
 import type { ModelCandidate } from "./model-candidates.js";
 import { candidateKey } from "./model-candidates.js";
@@ -20,16 +19,13 @@ import type { ExecutionTelemetryScope, ProviderCallTerminal } from "../execution
 import type { StreamFn } from "./pi-core-types.js";
 import { buildPiModel, pickPiApi, createPiAiAssistantStream } from "./pi-ai-adapter.js";
 import { randomUUID } from "node:crypto";
+import { ProviderAttemptRunner } from "./provider-attempt-runner.js";
+import type { ProviderAttemptExit, ProviderAttemptFactory } from "./provider-attempt-runner.js";
 
 const TAG = "pi-stream-fn";
 
-export type ProviderAttemptFactory = (
-  candidate: ModelCandidate,
-  model: Model<Api>,
-  context: Context,
-  options: SimpleStreamOptions,
-  signal: AbortSignal,
-) => Promise<AssistantMessageEventStream>;
+// Re-exported for callers that imported the attempt factory type from here.
+export type { ProviderAttemptFactory } from "./provider-attempt-runner.js";
 
 export interface AbtarsPiStreamFnOptions {
   policy: FallbackPolicy;
@@ -132,10 +128,9 @@ function isOpenAiCompatible(api: Api): boolean {
   return api === "openai-completions" || api === "openai-responses";
 }
 
-function buildAttemptOptions(fnOptions: SimpleStreamOptions, providerRequestId: string, signal: AbortSignal): SimpleStreamOptions {
+function buildAttemptOptions(fnOptions: SimpleStreamOptions, providerRequestId: string): SimpleStreamOptions {
   return {
     ...fnOptions,
-    signal,
     headers: {
       ...fnOptions.headers,
       "x-client-request-id": providerRequestId,
@@ -209,59 +204,6 @@ function wrapEventStream(source: AsyncGenerator<AssistantMessageEvent>, fallback
   } as unknown as AssistantMessageEventStream;
 }
 
-/** #1506: Wrap an async generator with an inactivity timeout.
- *  If no event is yielded within `timeoutMs`, abort the candidate-local
- *  controller and yield a provider_stream_timeout error. */
-async function* withInactivityTimeout(
-  source: AsyncIterable<AssistantMessageEvent>,
-  timeoutMs: number,
-  signal: AbortSignal,
-  onTimeout: () => void,
-): AsyncGenerator<AssistantMessageEvent> {
-  const iterator = source[Symbol.asyncIterator]();
-  let timer: ReturnType<typeof setTimeout> | null = null;
-  let abortListener: (() => void) | null = null;
-  try {
-    while (true) {
-      const next = iterator.next().then((result) => ({ kind: "event" as const, result }));
-      const timeout = new Promise<{ kind: "timeout" }>((resolve) => {
-        timer = setTimeout(() => { timer = null; resolve({ kind: "timeout" }); }, timeoutMs);
-      });
-      const aborted = new Promise<{ kind: "aborted" }>((resolve) => {
-        if (signal.aborted) {
-          resolve({ kind: "aborted" });
-          return;
-        }
-        abortListener = () => resolve({ kind: "aborted" });
-        signal.addEventListener("abort", abortListener, { once: true });
-      });
-      const outcome = await Promise.race([next, timeout, aborted]);
-      if (timer) clearTimeout(timer);
-      timer = null;
-      if (abortListener) {
-        signal.removeEventListener("abort", abortListener);
-        abortListener = null;
-      }
-      if (outcome.kind !== "event") {
-        onTimeout();
-        return;
-      }
-      if (outcome.result.done) return;
-      yield outcome.result.value;
-    }
-  } finally {
-    if (timer) clearTimeout(timer);
-    if (abortListener) signal.removeEventListener("abort", abortListener);
-    // The provider may ignore abort. Never await its return() here: logical
-    // stream timeout must not be coupled to unbounded provider cleanup.
-    try {
-      void Promise.resolve(iterator.return?.()).catch(err => logAndSwallow(TAG, "provider stream return during teardown", err));
-    } catch (err) {
-      logAndSwallow(TAG, "invoke provider stream return during teardown", err);
-    }
-  }
-}
-
 export function createPiStreamFn(options: AbtarsPiStreamFnOptions): StreamFn {
   return (model: Model<Api>, context: Context, fnOptions: SimpleStreamOptions = {}): AssistantMessageEventStream => {
     const signal = fnOptions.signal ?? new AbortController().signal;
@@ -301,14 +243,9 @@ export function createPiStreamFn(options: AbtarsPiStreamFnOptions): StreamFn {
 
         while (true) {
           const providerRequestId = (options.providerRequestIdFactory ?? randomUUID)();
-          const attemptController = new AbortController();
-          const abortFromOuter = (): void => attemptController.abort();
-          if (signal.aborted) attemptController.abort();
-          else signal.addEventListener("abort", abortFromOuter, { once: true });
-          const attemptSignal = attemptController.signal;
           const attemptOptions = isOpenAiCompatible(piModel.api)
-            ? buildAttemptOptions(fnOptions, providerRequestId, attemptSignal)
-            : { ...fnOptions, signal: attemptSignal };
+            ? buildAttemptOptions(fnOptions, providerRequestId)
+            : { ...fnOptions };
 
           logDebug(TAG, `provider attempt execution=${options.executionId} request=${providerRequestId} candidate=${candidateKey(candidate.model, candidate.endpoint)}`);
 
@@ -363,28 +300,33 @@ export function createPiStreamFn(options: AbtarsPiStreamFnOptions): StreamFn {
           }
 
           let shouldRetry = false;
+          // #1506: the whole provider attempt (acquisition AND streaming) is
+          // owned by one liveness runner whose inactivity/abort/deadline scope
+          // is armed before the first external await. Acquisition can no longer
+          // hang without an iterator for the watchdog to observe.
+          const runner = new ProviderAttemptRunner({
+            executionId: options.executionId,
+            requestId: providerRequestId,
+            candidate,
+            model: piModel,
+            context,
+            options: attemptOptions,
+            attemptFactory,
+            signal,
+            deadlineAt: options.deadlineAt,
+            inactivityTimeoutMs: options.providerInactivityTimeoutMs ?? 180_000,
+          });
+
+          const buffered: AssistantMessageEvent[] = [];
+          let terminal: AssistantMessage | undefined;
+          let exit: ProviderAttemptExit | null = null;
           try {
-            const inner = await attemptFactory(candidate, piModel, context, attemptOptions, attemptSignal);
-            // #1506: Inactivity timeout per candidate
-            let inactivityTimedOut = false;
-            const remainingMs = options.deadlineAt === undefined
-              ? Number.POSITIVE_INFINITY
-              : Math.max(0, options.deadlineAt - Date.now());
-            const inactivityMs = Math.min(options.providerInactivityTimeoutMs ?? 180_000, remainingMs);
-            const inactivityWrapped = inactivityMs > 0
-              ? withInactivityTimeout(inner, inactivityMs, attemptSignal, () => {
-                inactivityTimedOut = true;
-                attemptController.abort();
-              })
-              : inner;
-            const buffered: AssistantMessageEvent[] = [];
-            let terminal: AssistantMessage | undefined;
-            let inactivityAborted = false;
-            for await (const event of inactivityWrapped) {
-              if (inactivityTimedOut) {
-                inactivityAborted = true;
+            for await (const item of runner.run()) {
+              if (item.kind !== "event") {
+                exit = item;
                 break;
               }
+              const event = item.event;
               terminal = terminalResult(event) ?? terminal;
               if (!attemptCommitted && isSemanticEvent(event)) {
                 attemptCommitted = true;
@@ -424,36 +366,6 @@ export function createPiStreamFn(options: AbtarsPiStreamFnOptions): StreamFn {
                 return;
               }
             }
-            if (inactivityTimedOut) inactivityAborted = true;
-            if (inactivityAborted) {
-              if (attemptCommitted) {
-                // A provider inactivity stall remains a genuine candidate
-                // failure even after semantic output. We cannot fall back
-                // after committing partial output, but the candidate must be
-                // excluded for later calls. Operator/deadline cancellation
-                // has signal.aborted=true and must not poison health.
-                if (!signal.aborted) poisonCandidate();
-                finishAttempt("aborted", terminal);
-                yield terminalError(model, "aborted", `provider_stream_timeout after ${inactivityMs}ms inactivity (semantic output was emitted)`);
-                return;
-              }
-              // #1534: exclude only genuine inactivity stalls (the signal
-              // was NOT aborted) so the fallback chain skips them; an
-              // operator/execution abort must never poison the candidate.
-              if (!signal.aborted) poisonCandidate();
-              finishAttempt("aborted", terminal);
-              break;
-            }
-            if (shouldRetry) continue;
-            if (attemptCommitted) {
-              finishAttempt(signal.aborted ? "aborted" : "failure", terminal);
-              yield terminalError(model, signal.aborted ? "aborted" : "error", "Provider stream ended without a terminal event");
-              return;
-            }
-            if (!telemetryEnded) {
-              finishAttempt(signal.aborted ? "aborted" : "failure", terminal);
-              break;
-            }
           } catch (err) {
             if (!retried && isIdempotencyConflict(err)) {
               endTelemetry(handle, { result: "failure", endedAt: Date.now() });
@@ -474,8 +386,71 @@ export function createPiStreamFn(options: AbtarsPiStreamFnOptions): StreamFn {
             }
             break;
           }
-          finally {
-            signal.removeEventListener("abort", abortFromOuter);
+
+          if (exit) {
+            if (exit.kind === "timeout") {
+              logDebug(TAG, `provider_attempt_timeout execution=${options.executionId} request=${providerRequestId} phase=${exit.phase} elapsed_ms=${exit.elapsedMs}`);
+              if (attemptCommitted) {
+                // #1506: a streaming inactivity stall after semantic output
+                // is a genuine candidate failure, but fallback is forbidden
+                // once output was emitted. Operator/deadline cancellation has
+                // signal.aborted=true and must not poison health.
+                if (!signal.aborted) poisonCandidate();
+                finishAttempt("aborted", terminal);
+                yield terminalError(model, "aborted", `provider_stream_timeout after ${exit.elapsedMs}ms inactivity (semantic output was emitted)`);
+                return;
+              }
+              // #1534: exclude only genuine inactivity stalls (the signal was
+              // NOT aborted) so the fallback chain skips them; an
+              // operator/execution abort must never poison the candidate.
+              if (!signal.aborted) poisonCandidate();
+              finishAttempt("aborted", terminal);
+              break;
+            }
+            if (exit.kind === "aborted") {
+              finishAttempt("aborted", terminal);
+              yield terminalError(model, "aborted", "Execution cancelled");
+              return;
+            }
+            if (exit.kind === "failed") {
+              const err = exit.error;
+              if (!retried && isIdempotencyConflict(err)) {
+                endTelemetry(handle, { result: "failure", endedAt: Date.now() });
+                telemetryEnded = true;
+                retried = true;
+                continue;
+              }
+              const classified = classifyAttemptError(err);
+              finishAttempt(signal.aborted ? "aborted" : "failure", undefined, classified.kind, classified.retryAfterMs);
+              if (attemptCommitted) {
+                yield terminalError(model, signal.aborted ? "aborted" : "error", "Provider stream failed after output began");
+                return;
+              }
+              logDebug(TAG, `Provider attempt failed before commit (${err instanceof Error ? err.name : "unknown"})`);
+              if (signal.aborted) {
+                yield terminalError(model, "aborted", "Execution cancelled");
+                return;
+              }
+              break;
+            }
+            // exit.kind === "ended": the stream completed without a terminal event.
+            if (attemptCommitted) {
+              finishAttempt(signal.aborted ? "aborted" : "failure", terminal);
+              yield terminalError(model, signal.aborted ? "aborted" : "error", "Provider stream ended without a terminal event");
+              return;
+            }
+            if (!telemetryEnded) {
+              finishAttempt(signal.aborted ? "aborted" : "failure", terminal);
+              break;
+            }
+          } else if (shouldRetry) {
+            continue;
+          } else if (attemptCommitted) {
+            finishAttempt(signal.aborted ? "aborted" : "failure", terminal);
+            yield terminalError(model, signal.aborted ? "aborted" : "error", "Provider stream ended without a terminal event");
+            return;
+          } else if (!telemetryEnded) {
+            finishAttempt(signal.aborted ? "aborted" : "failure", terminal);
           }
           break;
         }

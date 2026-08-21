@@ -284,6 +284,129 @@ describe("createPiStreamFn", () => {
     expect(events.some((event) => event.type === "done" && event.message?.content === "fallback")).toBe(true);
   });
 
+  it("times out an attempt factory that never resolves and falls back before semantic output (#1506 acquisition)", async () => {
+    const first = makeCandidate({ model: "stuck", endpoint: "https://stuck/v1" });
+    const second = makeCandidate({ model: "fallback", endpoint: "https://fallback/v1" });
+    const fallbackPolicy = new FallbackPolicy([first, second], registry);
+    let firstSignal: AbortSignal | undefined;
+    const attemptFactory = vi.fn().mockImplementation(async (candidate: ModelCandidate, _model: unknown, _ctx: unknown, _opts: unknown, signal: AbortSignal) => {
+      if (candidate.model === "stuck") {
+        firstSignal = signal;
+        return new Promise<never>(() => {}); // never resolves, ignores abort
+      }
+      return makeFakeStream([{ type: "done", reason: "stop", message: { role: "assistant", content: "fallback", stopReason: "stop", usage: { input: 1, output: 1 } } }]);
+    });
+
+    const streamFn = createPiStreamFn({
+      policy: fallbackPolicy,
+      executionId: "stuck-provider",
+      createPiAiAttempt: attemptFactory,
+      providerInactivityTimeoutMs: 20,
+    });
+    const events: any[] = [];
+    for await (const event of streamFn({ id: "test" }, { messages: [] }, {})) events.push(event);
+
+    expect(attemptFactory).toHaveBeenCalledTimes(2);
+    expect(firstSignal?.aborted).toBe(true);
+    expect(events.some((event) => event.type === "done" && event.message?.content === "fallback")).toBe(true);
+  });
+
+  it("does not publish or re-record telemetry when a timed-out factory resolves after fallback (#1506)", async () => {
+    const first = makeCandidate({ model: "stuck", endpoint: "https://stuck/v1" });
+    const second = makeCandidate({ model: "fallback", endpoint: "https://fallback/v1" });
+    const fallbackPolicy = new FallbackPolicy([first, second], registry);
+    let resolveLate: ((v: unknown) => void) | undefined;
+    const lateReturn = vi.fn(async () => ({ done: true, value: undefined }));
+    const telemetryCalls: string[] = [];
+    const mockTelemetry = {
+      executionId: "exec_1",
+      beginProviderCall: vi.fn().mockReturnValue({
+        providerCallId: "pc1",
+        ordinal: 1,
+        end: vi.fn().mockImplementation((t: { result: string }) => { telemetryCalls.push(t.result); }),
+      }),
+      snapshot: vi.fn(),
+      close: vi.fn(),
+    };
+
+    const attemptFactory = vi.fn().mockImplementation(async (candidate: ModelCandidate) => {
+      if (candidate.model === "stuck") {
+        return new Promise((resolve) => { resolveLate = resolve; });
+      }
+      return makeFakeStream([{ type: "done", reason: "stop", message: { role: "assistant", content: "fallback", stopReason: "stop", usage: { input: 1, output: 1 } } }]);
+    });
+
+    const streamFn = createPiStreamFn({
+      policy: fallbackPolicy,
+      executionId: "stuck-provider",
+      createPiAiAttempt: attemptFactory,
+      providerInactivityTimeoutMs: 20,
+      telemetry: mockTelemetry,
+    });
+    const events: any[] = [];
+    for await (const event of streamFn({ id: "test" }, { messages: [] }, {})) events.push(event);
+
+    expect(events.some((event) => event.type === "done" && event.message?.content === "fallback")).toBe(true);
+    // Exactly one terminal record per started request: stuck timeout + fallback success.
+    expect(telemetryCalls).toEqual(["aborted", "success"]);
+
+    const lateStream = {
+      [Symbol.asyncIterator]: () => ({
+        next: async () => ({ done: true, value: undefined }),
+        return: lateReturn,
+      }),
+    };
+    resolveLate?.(lateStream);
+    await vi.waitFor(() => expect(lateReturn).toHaveBeenCalled(), { timeout: 2_000, interval: 10 });
+
+    // The late stream must not publish output, change health, or add a record.
+    expect(telemetryCalls).toEqual(["aborted", "success"]);
+    expect(fallbackPolicy.excludedKeys.has("stuck@https://stuck/v1")).toBe(true);
+    expect(fallbackPolicy.excludedKeys.has("fallback@https://fallback/v1")).toBe(false);
+  });
+
+  it("consumes a timed-out factory rejection after fallback (no unhandled rejection, no duplicate telemetry) (#1506)", async () => {
+    const first = makeCandidate({ model: "stuck", endpoint: "https://stuck/v1" });
+    const second = makeCandidate({ model: "fallback", endpoint: "https://fallback/v1" });
+    const fallbackPolicy = new FallbackPolicy([first, second], registry);
+    let rejectLate: ((err: Error) => void) | undefined;
+    const telemetryCalls: string[] = [];
+    const mockTelemetry = {
+      executionId: "exec_1",
+      beginProviderCall: vi.fn().mockReturnValue({
+        providerCallId: "pc1",
+        ordinal: 1,
+        end: vi.fn().mockImplementation((t: { result: string }) => { telemetryCalls.push(t.result); }),
+      }),
+      snapshot: vi.fn(),
+      close: vi.fn(),
+    };
+
+    const attemptFactory = vi.fn().mockImplementation(async (candidate: ModelCandidate) => {
+      if (candidate.model === "stuck") {
+        return new Promise((_resolve, reject) => { rejectLate = reject; });
+      }
+      return makeFakeStream([{ type: "done", reason: "stop", message: { role: "assistant", content: "fallback", stopReason: "stop", usage: { input: 1, output: 1 } } }]);
+    });
+
+    const streamFn = createPiStreamFn({
+      policy: fallbackPolicy,
+      executionId: "stuck-provider",
+      createPiAiAttempt: attemptFactory,
+      providerInactivityTimeoutMs: 20,
+      telemetry: mockTelemetry,
+    });
+    const events: any[] = [];
+    for await (const event of streamFn({ id: "test" }, { messages: [] }, {})) events.push(event);
+
+    expect(events.some((event) => event.type === "done" && event.message?.content === "fallback")).toBe(true);
+    rejectLate?.(new Error("late provider failure"));
+    // An unhandled rejection would fail the test; telemetry stays exactly-once.
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(telemetryCalls).toEqual(["aborted", "success"]);
+    expect(attemptFactory).toHaveBeenCalledTimes(2);
+  });
+
   it("does not fall back after a stalled provider has emitted semantic output", async () => {
     const first = makeCandidate({ model: "partial", endpoint: "https://partial/v1" });
     const second = makeCandidate({ model: "should-not-run", endpoint: "https://unused/v1" });

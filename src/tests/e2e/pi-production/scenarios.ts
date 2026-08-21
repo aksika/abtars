@@ -612,6 +612,67 @@ async function cancellation(ctx: PiAcceptanceContext): Promise<void> {
   }
 }
 
+// ── Scenario 11b: Acquisition hang cancellation (full) — #1506 ──────────────
+
+/**
+ * The escaped #1506 edge: a provider whose request/stream NEVER opens (no
+ * response headers) leaves the attempt in `acquiring` with no iterator for
+ * any stream watchdog to observe. The whole-attempt liveness runner must
+ * bound the acquisition on the execution abort signal so the turn terminates
+ * and the next turn starts — the old code awaited the factory forever.
+ */
+async function acquisitionCancel(ctx: PiAcceptanceContext): Promise<void> {
+  const a1 = ctx.markers.next("ACQ1");
+  const a2 = ctx.markers.next("ACQ2");
+
+  // Script the acquisition hold on both candidates — headers never written —
+  // so the request lands on exactly the candidate the session currently uses.
+  const hold = releaseHold();
+  for (const candidate of [FIXTURE_MODEL_A, FIXTURE_MODEL_B]) {
+    ctx.provider.enqueue({ candidate, expectation: { candidate, currentTurn: a1 }, action: { kind: "acquisitionHold", release: hold.promise } });
+  }
+
+  // Fire the turn without awaiting; /stop interrupts the pending acquisition.
+  ctx.tui.sendInput(a1);
+  const held = await waitForHeldMarkerSummary(ctx.provider, a1);
+  const servedCandidate = held.candidate;
+
+  ctx.tui.sendInput("/stop");
+
+  // The never-opened provider connection must observe the abort — the bridge
+  // cancelled the acquisition even though no stream ever existed.
+  await waitFor(
+    async () => held.aborted,
+    TIMEOUTS.holdSettleMs,
+    "held acquisition request abort",
+  );
+
+  // Drain the bounded abort/error frames the cancelled turn may surface.
+  for (let i = 0; i < 4; i++) {
+    try {
+      await ctx.tui.awaitMessage(1_000);
+    } catch {
+      break;
+    }
+  }
+
+  // The next turn must reach the provider and settle normally.
+  ctx.provider.enqueue(textScript(servedCandidate, {
+    candidate: servedCandidate,
+    currentTurn: a2,
+    orderedContains: [a1],
+    exactlyOnce: [a2],
+  }, a2));
+  await sendExpectReply(ctx.tui, a2, a2, "post-cancel reply after acquisition hang");
+
+  // No orphan requests: the only requests since the held one are the turn
+  // that settled the cancel and the successful continuation.
+  const since = ctx.provider.summaries.filter((s) => s.seq > held.seq);
+  if (since.some((s) => s.action === "unscripted" || s.action === "expectation_failed")) {
+    throw new Error("orphan or unscripted provider request after acquisition cancellation");
+  }
+}
+
 // ── Scenario 12: Pi terminal cleanup (core) — #1647 ────────────────────────
 
 /**
@@ -701,6 +762,7 @@ export const PI_SCENARIOS: PiScenario[] = [
   { name: "candidate-fallback", profiles: ["full"], run: fallback },
   { name: "model-switch", profiles: ["full"], run: modelSwitch },
   { name: "cancellation-deadline", profiles: ["full"], run: cancellation },
+  { name: "acquisition-hang-cancellation", profiles: ["full"], run: acquisitionCancel },
   { name: "scheduled-orc-round-limit", profiles: ["full"], run: scheduledOrcRoundLimit },
   { name: "scheduled-orc-round-limit-restart", profiles: ["full"], run: scheduledOrcRoundLimitRestart },
   // This scenario intentionally relies on the offline/fail-closed Pi prompt.

@@ -220,10 +220,23 @@ export class ScriptedProvider {
         res.end();
         break;
       }
+    case "acquisitionHold": {
+        // #1506: simulate a provider whose request/stream NEVER opens — no
+        // response headers are ever written, so the client's acquisition
+        // promise stays pending with no iterator for any stream watchdog to
+        // observe. The executing bridge must bound the attempt itself (abort
+        // signal or inactivity deadline). The connection close on abort (or an
+        // explicit release) resolves the wait; never a fixed sleep.
+        await Promise.race([
+          script.action.release,
+          new Promise<void>((resolve) => res.once("close", resolve)),
+        ]);
+        break;
+      }
     }
 
     // Finalize abort state for held connections that died during the wait.
-    if (script.action.kind === "hold" && summary.aborted && !res.writableEnded) {
+    if ((script.action.kind === "hold" || script.action.kind === "acquisitionHold") && summary.aborted && !res.writableEnded) {
       res.destroy();
     }
   }
