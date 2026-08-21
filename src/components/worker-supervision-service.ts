@@ -86,7 +86,7 @@ export class WorkerSupervisionService {
       verificationCommands?: Array<{ id: string; argv: string[]; cwd?: string; timeout_ms: number; criterion_ids: string[] }>;
       requiredCapabilities?: string[];
       supportsRootCriteria?: string[];
-      limits?: { max_duration_ms?: number; max_tokens?: number };
+      limits?: { max_duration_ms?: number; max_tokens?: number; max_cost?: number };
       contractId?: string;
       attemptId?: string;
       workspaceAlias?: string;

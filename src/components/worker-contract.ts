@@ -606,6 +606,9 @@ export function validateContract(raw: unknown): ValidationResult {
       if (limits["max_tokens"] !== undefined && (typeof limits["max_tokens"] !== "number" || !Number.isInteger(limits["max_tokens"] as number) || (limits["max_tokens"] as number) <= 0)) {
         errors.push(error("type_error", "$.limits.max_tokens", "must be a positive integer"));
       }
+      if (limits["max_cost"] !== undefined && (typeof limits["max_cost"] !== "number" || !Number.isFinite(limits["max_cost"] as number) || (limits["max_cost"] as number) <= 0)) {
+        errors.push(error("type_error", "$.limits.max_cost", "must be a positive number"));
+      }
     }
   }
 
@@ -732,7 +735,11 @@ export function normalizeContract(raw: unknown): NormalizeResult {
     verification_commands,
     required_capabilities: capabilitiesRaw,
     limits: Object.keys(limitsRaw).length > 0
-      ? { max_duration_ms: limitsRaw["max_duration_ms"] as number | undefined, max_tokens: limitsRaw["max_tokens"] as number | undefined }
+      ? {
+          max_duration_ms: limitsRaw["max_duration_ms"] as number | undefined,
+          max_tokens: limitsRaw["max_tokens"] as number | undefined,
+          max_cost: limitsRaw["max_cost"] as number | undefined,
+        }
       : {},
     provenance: provenanceRaw
       ? {

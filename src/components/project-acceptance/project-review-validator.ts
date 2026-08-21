@@ -369,55 +369,54 @@ export class ProjectReviewValidator {
         .map(c => c.id),
     );
     const seenItems = new Set<string>();
-    const affectedByItem = new Map<string, Set<string>>();
-    for (const item of _decision.repair.items) {
+    for (const [itemIndex, item] of _decision.repair.items.entries()) {
+      const itemPath = `$.repair.items[${itemIndex}]`;
       if (seenItems.has(item.id)) {
-        errors.push(error("duplicate_id", `$.repair.items[${item.id}]`, `duplicate repair item id "${item.id}"`));
+        errors.push(error("duplicate_id", `${itemPath}.id`, `duplicate repair item id "${item.id}"`));
       }
       seenItems.add(item.id);
       if (!item.source_contract_id || item.source_contract_id.trim().length === 0) {
-        errors.push(error("missing_field", `$.repair.items[${item.id}].source_contract_id`, "source_contract_id is required — reference the mapped Worker contract whose evidence this repair must preserve"));
+        errors.push(error("missing_field", `${itemPath}.source_contract_id`, "source_contract_id is required — reference the mapped Worker contract whose evidence this repair must preserve"));
       } else if (!legalSourceIds.has(item.source_contract_id)) {
-        errors.push(error("bad_reference", `$.repair.items[${item.id}].source_contract_id`, `unknown source contract "${item.source_contract_id}" — it must be a mapped child contract of this review case`));
+        errors.push(error("bad_reference", `${itemPath}.source_contract_id`, `unknown source contract "${item.source_contract_id}" — it must be a mapped child contract of this review case`));
       }
       if (item.affected_criterion_ids.length === 0) {
-        errors.push(error("missing_field", `$.repair.items[${item.id}].affected_criterion_ids`, "at least one affected criterion is required"));
+        errors.push(error("missing_field", `${itemPath}.affected_criterion_ids`, "at least one affected criterion is required"));
       }
       if (!item.strategy || item.strategy.length === 0) {
-        errors.push(error("missing_field", `$.repair.items[${item.id}].strategy`, "strategy is required"));
+        errors.push(error("missing_field", `${itemPath}.strategy`, "strategy is required"));
       }
       if (!item.required_evidence || item.required_evidence.length === 0) {
-        errors.push(error("missing_field", `$.repair.items[${item.id}].required_evidence`, "required evidence is required"));
+        errors.push(error("missing_field", `${itemPath}.required_evidence`, "required evidence is required"));
       }
       const affected = new Set<string>();
       for (const acid of item.affected_criterion_ids) {
         if (affected.has(acid)) {
-          errors.push(error("duplicate_id", `$.repair.items[${item.id}].affected_criterion_ids`, `duplicate affected criterion "${acid}"`));
+          errors.push(error("duplicate_id", `${itemPath}.affected_criterion_ids`, `duplicate affected criterion "${acid}"`));
           continue;
         }
         affected.add(acid);
         if (!delegatedRootIds.has(acid)) {
-          errors.push(error("bad_reference", `$.repair.items[${item.id}].affected_criterion_ids`, `affected criterion "${acid}" is not a delegated root criterion — Orc-owned or unknown criteria cannot be repaired`));
+          errors.push(error("bad_reference", `${itemPath}.affected_criterion_ids`, `affected criterion "${acid}" is not a delegated root criterion — Orc-owned or unknown criteria cannot be repaired`));
           continue;
         }
         if (item.source_contract_id && !(contractsByCriterion.get(acid)?.has(item.source_contract_id))) {
-          errors.push(error("bad_reference", `$.repair.items[${item.id}].source_contract_id`, `source contract "${item.source_contract_id}" does not cover affected criterion "${acid}" — one repair item may only affect root criteria that its source contract maps`));
+          errors.push(error("bad_reference", `${itemPath}.source_contract_id`, `source contract "${item.source_contract_id}" does not cover affected criterion "${acid}" — one repair item may only affect root criteria that its source contract maps`));
         }
       }
-      affectedByItem.set(item.id, affected);
     }
 
     // #1686: the same source contract must not be referenced by conflicting
     // repair items — overlapping affected criteria across items make the
     // repair ownership ambiguous.
     const criteriaBySource = new Map<string, Map<string, string>>();
-    for (const item of _decision.repair.items) {
+    for (const [itemIndex, item] of _decision.repair.items.entries()) {
       if (!item.source_contract_id) continue;
       const byItem = criteriaBySource.get(item.source_contract_id) ?? new Map<string, string>();
       for (const acid of item.affected_criterion_ids) {
         const priorItem = byItem.get(acid);
         if (priorItem !== undefined && priorItem !== item.id) {
-          errors.push(error("bad_reference", `$.repair.items[${item.id}].affected_criterion_ids`, `affected criterion "${acid}" is already claimed by repair item "${priorItem}" on the same source contract "${item.source_contract_id}" — split conflicting repairs into separate source contracts`));
+          errors.push(error("bad_reference", `$.repair.items[${itemIndex}].affected_criterion_ids`, `affected criterion "${acid}" is already claimed by repair item "${priorItem}" on the same source contract "${item.source_contract_id}" — split conflicting repairs into separate source contracts`));
         }
         byItem.set(acid, item.id);
       }

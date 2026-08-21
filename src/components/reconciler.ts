@@ -662,7 +662,7 @@ function inspectProjectOwnership(projectId: number, supervision: ProjectSupervis
         const parsed = JSON.parse(decision.decision_json) as { repair?: { items?: RepairItem[] } };
         const items = parsed.repair?.items ?? [];
         if (items.length > 0) {
-const matches = currentRepairChildrenForDecision(projectId, children, items, workerStore);
+          const matches = currentRepairChildrenForDecision(projectId, children, items, workerStore);
           if (matches.length > 0) {
             const anyLive = matches.some(c => c.status === "queued" || c.status === "running");
             const allTerminal = matches.every(c => KANBAN_TERMINAL_STATUSES.includes(c.status));
@@ -898,14 +898,16 @@ function readChildContract(
   workerStore: WorkerSupervisionStore | WorkerSupervisionService,
 ): WorkerAcceptanceContractV1 | undefined {
   try {
+    let parsed: unknown;
     if (workerStore instanceof WorkerSupervisionService) {
-      return workerStore.getContractForCard(cardId);
+      parsed = workerStore.getContractForCard(cardId);
+    } else {
+      const row = workerStore.getContractByCardId(cardId);
+      if (!row) return undefined;
+      parsed = JSON.parse(row.contract_json) as unknown;
     }
-    const row = workerStore.getContractByCardId(cardId);
-    if (!row) return undefined;
-    const parsed = JSON.parse(row.contract_json) as unknown;
-    if (typeof parsed !== "object" || parsed === null) return undefined;
-    return parsed as WorkerAcceptanceContractV1;
+    const validated = validateContract(parsed);
+    return validated.ok ? validated.contract : undefined;
   } catch {
     return undefined;
   }

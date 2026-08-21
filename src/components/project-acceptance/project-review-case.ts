@@ -628,12 +628,14 @@ export function projectReviewBrief(
         criteriaByContract.set(cid, supported);
       }
     }
-    const repairSources: ProjectReviewBriefV1["repair_sources"] = snapshot.child_summaries.map(child => ({
-      contract_id: child.contract_id,
-      card_id: child.card_id,
-      outcome: truncateProse(child.outcome, 64),
-      supports_root_criteria: [...(criteriaByContract.get(child.contract_id) ?? [])],
-    }));
+    const repairSources: ProjectReviewBriefV1["repair_sources"] = snapshot.child_summaries
+      .filter(child => criteriaByContract.has(child.contract_id))
+      .map(child => ({
+        contract_id: child.contract_id,
+        card_id: child.card_id,
+        outcome: truncateProse(child.outcome, 64),
+        supports_root_criteria: [...(criteriaByContract.get(child.contract_id) ?? [])],
+      }));
 
     const contradictions: ContradictionCandidate[] = snapshot.contradiction_candidates.map(candidate => ({
       id: candidate.id,

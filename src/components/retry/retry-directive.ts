@@ -217,6 +217,12 @@ export interface DeriveRepairContractInput {
   enclosingLimits?: { max_tokens?: number; max_duration_ms?: number; max_cost?: number };
 }
 
+/** Keep every derived bound inside all applicable source, item, and project limits. */
+function boundedLimit(...values: Array<number | undefined>): number | undefined {
+  const defined = values.filter((value): value is number => value !== undefined);
+  return defined.length > 0 ? Math.min(...defined) : undefined;
+}
+
 export function deriveRepairContract(input: DeriveRepairContractInput): WorkerAcceptanceContractV1 {
   const { sourceContract, sourceAttemptId, item, rootCardId, pendingCardId, now, enclosingLimits } = input;
   const goal = `Repair: ${item.strategy.slice(0, 200)} [repair-item:${item.id}]`;
@@ -227,20 +233,15 @@ export function deriveRepairContract(input: DeriveRepairContractInput): WorkerAc
 
   // Budgets copy source bounds; item max_tokens applies only within the
   // source and enclosing bounds and can never expand an enclosing budget.
-  let maxTokens = sourceContract.limits?.max_tokens;
-  if (item.budget?.max_tokens !== undefined) {
-    maxTokens = item.budget.max_tokens;
-    if (sourceContract.limits?.max_tokens !== undefined) {
-      maxTokens = Math.min(maxTokens, sourceContract.limits.max_tokens);
-    }
-    if (enclosingLimits?.max_tokens !== undefined) {
-      maxTokens = Math.min(maxTokens, enclosingLimits.max_tokens);
-    }
-  }
+  const maxTokens = boundedLimit(
+    sourceContract.limits?.max_tokens,
+    item.budget?.max_tokens,
+    enclosingLimits?.max_tokens,
+  );
   const limits: WorkerAcceptanceContractV1["limits"] = {
-    max_duration_ms: sourceContract.limits?.max_duration_ms ?? enclosingLimits?.max_duration_ms,
+    max_duration_ms: boundedLimit(sourceContract.limits?.max_duration_ms, enclosingLimits?.max_duration_ms),
     max_tokens: maxTokens,
-    max_cost: sourceContract.limits?.max_cost ?? enclosingLimits?.max_cost,
+    max_cost: boundedLimit(sourceContract.limits?.max_cost, enclosingLimits?.max_cost),
   };
   for (const k of ["max_duration_ms", "max_tokens", "max_cost"] as const) {
     if (limits[k] === undefined) delete limits[k];

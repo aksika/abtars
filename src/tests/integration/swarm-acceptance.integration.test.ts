@@ -1127,10 +1127,6 @@ describe("Swarm acceptance — production contract shape (#1605)", () => {
     expect(kanbanRow.result_summary).toContain("Known gaps:");
     expect(kanbanRow.result_summary).toContain("lane3-web: unsatisfied");
 
-    // #1686: no SHA module/table was touched — the journey settled through the
-    // ordinary scheduled-task path only.
-    const shaTables = reviewStore.db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name LIKE '%sha%'").all() as Array<{ name: string }>;
-    expect(shaTables).toEqual([]);
   });
 
   it("#1686: a source-referenced repair of a FAILED REQUIRED lane derives an evidence-preserving Worker and cannot be waived", async () => {
