@@ -71,6 +71,7 @@ describe("Contract: ACP session update handling", () => {
     transport.toolMeta = null;
     transport.sm = { state: "idle", toolStarted: vi.fn(), toolCompleted: vi.fn() };
     transport.outputObservers = new Map();
+    transport.orcTurnControls = new Map();
     return transport;
   }
 

@@ -247,6 +247,11 @@ describe("Peer round trip — production-shaped two-node (#1618)", () => {
       emit: false,
     }, receiver.taskDb);
     expect(dispatch.kind).toBe("applied");
+    // #1680: while the peer executes, the requester's durable contribution
+    // predicate owns the root (contribution_wait) — no Orc continuation may
+    // claim it.
+    const { hasLiveContributionForProject } = await import("../../components/peer-help/contribution-store.js");
+    expect(hasLiveContributionForProject(requester.taskDb as never, delegated.projectCardId)).toBe(true);
     const decisionId = `rd_settle_${receiverCard.id}_t1`;
     reviewStore.settleAcceptance(
       receiverCard.id, `case_${receiverCard.id}`, { action: "accept", synthesis: "peer finished" },
@@ -272,6 +277,10 @@ describe("Peer round trip — production-shaped two-node (#1618)", () => {
     expect(notes.outcome).toBe("completed");
     expect(notes.receiver_peer).toBe("molty");
     expect(mockRequestReconcile).toHaveBeenCalledWith(delegated.projectCardId);
+    // #1680: the terminal event released the contribution-wait predicate; the
+    // next owner inspection sees the settled proxy and advances to review —
+    // never a post-contract Orc continuation claim.
+    expect(hasLiveContributionForProject(requester.taskDb as never, delegated.projectCardId)).toBe(false);
   });
 
   it("delivers a FAILED terminal event when the receiver blocks, never false success", async () => {
