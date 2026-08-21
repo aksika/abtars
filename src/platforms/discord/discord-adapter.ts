@@ -26,6 +26,8 @@ import type { ConversationBuffer } from "../../components/conversation-buffer.js
 
 const TAG = "discord";
 
+const DISCORD_ATTACHMENT_REQUEST_TIMEOUT_MS = 60_000;
+
 export interface DiscordAdapterConfig {
   botToken: string;
   appId: string;
@@ -280,7 +282,9 @@ export class DiscordAdapter implements PlatformAdapter {
       try {
         const { saveInboundMedia } = await import("../../components/media-utils.js");
         const att = message.attachments[0]!; // handle first attachment
-        const res = await fetch(att.url);
+        const res = await fetch(att.url, {
+          signal: AbortSignal.timeout(DISCORD_ATTACHMENT_REQUEST_TIMEOUT_MS),
+        });
         if (res.ok) {
           const buf = Buffer.from(await res.arrayBuffer());
           const extHint = att.filename ? "." + (att.filename.split(".").pop() ?? "") : undefined;

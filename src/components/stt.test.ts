@@ -13,13 +13,16 @@ import type { SttConfig } from "./stt.js";
 
 describe("transcribeAudio — Property 1: STT request shape invariant", () => {
   let capturedFormData: FormData | null = null;
+  let capturedSignal: AbortSignal | undefined;
   const originalFetch = globalThis.fetch;
 
   beforeEach(() => {
     capturedFormData = null;
+    capturedSignal = undefined;
     // Mock global fetch to capture the FormData body and return a successful response
     globalThis.fetch = vi.fn(async (_url: string | URL | Request, init?: RequestInit) => {
       capturedFormData = init?.body as FormData;
+      capturedSignal = init?.signal;
       return new Response(JSON.stringify({ text: "test" }), {
         status: 200,
         headers: { "Content-Type": "application/json" },
@@ -61,6 +64,14 @@ describe("transcribeAudio — Property 1: STT request shape invariant", () => {
       ),
       { numRuns: 100 },
     );
+  });
+
+  it("passes a live AbortSignal to the transcription request (#1667)", async () => {
+    const config: SttConfig = { provider: "groq", apiKey: "test-key-signal" };
+    await transcribeAudio(Buffer.from([0x4f, 0x67, 0x67, 0x53]), "voice.ogg", config);
+
+    expect(capturedSignal).toBeInstanceOf(AbortSignal);
+    expect(capturedSignal?.aborted).toBe(false);
   });
 });
 

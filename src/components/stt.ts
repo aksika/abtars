@@ -13,6 +13,7 @@ export interface SttConfig {
 
 const GROQ_ENDPOINT = "https://api.groq.com/openai/v1/audio/transcriptions";
 const DEFAULT_MODEL = "whisper-large-v3";
+const STT_REQUEST_TIMEOUT_MS = 60_000;
 export const LANGUAGE_HINT_PROMPT = process.env["STT_LANGUAGE_HINT"] || "";
 
 /**
@@ -42,6 +43,7 @@ export async function transcribeAudio(
       Authorization: `Bearer ${config.apiKey}`,
     },
     body: formData,
+    signal: AbortSignal.timeout(STT_REQUEST_TIMEOUT_MS),
   });
 
   if (!response.ok) {

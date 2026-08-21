@@ -9,6 +9,8 @@ import { readFileSync, existsSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 
+const AGENT_API_REQUEST_TIMEOUT_MS = 10_000;
+
 function readPort(): number {
   try {
     const portFile = join(homedir(), ".abtars", "state", "agent-api.port");
@@ -111,6 +113,7 @@ export async function kanban(args: string[]): Promise<number> {
       method: "POST",
       headers: { "Content-Type": "application/json", "Content-Length": String(Buffer.byteLength(body)) },
       body,
+      signal: AbortSignal.timeout(AGENT_API_REQUEST_TIMEOUT_MS),
     });
     const result = await response.json() as { ok: boolean; card_id?: number; status?: string; error?: string };
     if (result.ok) {

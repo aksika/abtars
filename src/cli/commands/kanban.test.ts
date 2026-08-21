@@ -80,28 +80,42 @@ describe("kanban CLI against the HTTPS Agent API (#1621)", () => {
       return true;
     }) as typeof process.stdout.write);
 
-    const code = await kanban([
-      "create",
-      "--title", "Test card",
-      "--goal", "Verify the HTTPS boundary",
-      "--type", "B",
-      "--priority", "HIGH",
-      "--delivery-mode", "notify",
-    ]);
+    const originalFetch = globalThis.fetch;
+    const capturedSignals: Array<AbortSignal | undefined> = [];
+    globalThis.fetch = ((input: RequestInfo | URL, init?: RequestInit) => {
+      capturedSignals.push(init?.signal);
+      return originalFetch(input, init);
+    }) as typeof fetch;
 
-    expect(code).toBe(0);
-    expect(output.join("")).toContain("+ Card #42 created (queued)");
-    expect(requests).toHaveLength(1);
-    expect(requests[0]!.method).toBe("POST");
-    expect(requests[0]!.url).toBe("/v1/kanban");
-    expect(requests[0]!.body).toMatchObject({
-      type: "B",
-      title: "Test card",
-      goal: "Verify the HTTPS boundary",
-      source: "cli",
-      priority: "HIGH",
-      delivery_mode: "notify",
-    });
-    expect(process.env["NODE_TLS_REJECT_UNAUTHORIZED"]).toBe(originalReject);
+    try {
+      const code = await kanban([
+        "create",
+        "--title", "Test card",
+        "--goal", "Verify the HTTPS boundary",
+        "--type", "B",
+        "--priority", "HIGH",
+        "--delivery-mode", "notify",
+      ]);
+
+      expect(code).toBe(0);
+      expect(output.join("")).toContain("+ Card #42 created (queued)");
+      expect(requests).toHaveLength(1);
+      expect(requests[0]!.method).toBe("POST");
+      expect(requests[0]!.url).toBe("/v1/kanban");
+      expect(requests[0]!.body).toMatchObject({
+        type: "B",
+        title: "Test card",
+        goal: "Verify the HTTPS boundary",
+        source: "cli",
+        priority: "HIGH",
+        delivery_mode: "notify",
+      });
+      expect(capturedSignals).toHaveLength(1);
+      expect(capturedSignals[0]).toBeInstanceOf(AbortSignal);
+      expect(capturedSignals[0]?.aborted).toBe(false);
+      expect(process.env["NODE_TLS_REJECT_UNAUTHORIZED"]).toBe(originalReject);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
   });
 });

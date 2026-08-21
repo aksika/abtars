@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { createDisabledRuntime } from "../../components/memory-runtime.js";
 import { DiscordAdapter, type DiscordAdapterConfig, type DiscordAdapterDeps } from "./discord-adapter.js";
 import type { PipelineDeps } from "../../components/message-pipeline.js";
@@ -18,6 +18,7 @@ vi.mock("./discord-api.js", () => ({
       onReaction: vi.fn((handler: Function) => { capturedReactionHandler = handler; }),
       onInteraction: vi.fn(),
       registerCommands: vi.fn().mockResolvedValue(undefined),
+      sendTyping: vi.fn().mockResolvedValue(undefined),
       botUserId: null,
     };
     capturedDiscordApi = api;
@@ -42,6 +43,21 @@ vi.mock("./discord-poller.js", () => ({
     };
   }),
 }));
+
+vi.mock("../../components/media-utils.js", () => ({
+  saveInboundMedia: vi.fn().mockResolvedValue({
+    path: "/tmp/inbound/photo.jpg",
+    mime: "image/jpeg",
+    ext: ".jpg",
+    size: 4,
+    isImage: true,
+  }),
+}));
+
+vi.mock("../../components/message-pipeline.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../../components/message-pipeline.js")>();
+  return { ...actual, handleInboundMessage: vi.fn().mockResolvedValue(undefined) };
+});
 
 const DiscordPollerMock: any = {};
 
@@ -194,6 +210,56 @@ describe("DiscordAdapter", () => {
 
       await capturedReactionHandler!(fakeReaction("❤️", "ch1", "555"), fakeUser("42"));
       expect(mockMemory.recordFeedback).not.toHaveBeenCalled();
+    });
+  });
+
+  describe("attachment download (#1667)", () => {
+    let transport: IKiroTransport;
+    let deps: DiscordAdapterDeps;
+    const originalFetch = globalThis.fetch;
+
+    beforeEach(async () => {
+      vi.clearAllMocks();
+      transport = mockTransport();
+      deps = makeDeps(transport);
+      adapter = new DiscordAdapter(makeConfig(), deps);
+      await adapter.start();
+    });
+
+    afterEach(() => {
+      globalThis.fetch = originalFetch;
+    });
+
+    it("requests the first attachment with a live AbortSignal", async () => {
+      globalThis.fetch = vi.fn(async (_input: string | URL | Request, _init?: RequestInit) =>
+        new Response(new Uint8Array([0xff, 0xd8, 0xff, 0xd9]), { status: 200 }),
+      ) as unknown as typeof fetch;
+
+      await DiscordPollerMock._handler({
+        id: "111",
+        channelId: "ch1",
+        parentChannelId: null,
+        channelName: "DM",
+        isDM: true,
+        authorId: "42",
+        authorUsername: "Tester",
+        authorIsBot: false,
+        content: "",
+        timestamp: Date.now(),
+        mentionsBotId: false,
+        mentionsBotRole: false,
+        mentionsEveryone: false,
+        hasUserMentions: false,
+        replyReferenceMessageId: null,
+        attachments: [{ url: "https://cdn.example/att.jpg", filename: "photo.jpg", contentType: "image/jpeg", size: 100 }],
+      });
+
+      const fetchMock = globalThis.fetch as ReturnType<typeof vi.fn>;
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      const [url, init] = fetchMock.mock.calls[0]!;
+      expect(String(url)).toBe("https://cdn.example/att.jpg");
+      expect(init?.signal).toBeInstanceOf(AbortSignal);
+      expect(init?.signal?.aborted).toBe(false);
     });
   });
 });

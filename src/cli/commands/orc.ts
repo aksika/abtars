@@ -7,6 +7,8 @@ import { printBanner } from './banner.js';
 const PORT = parseInt(process.env["AGENT_API_PORT"] || "7100", 10);
 const BASE = `https://127.0.0.1:${PORT}/v1/orc`;
 
+const AGENT_API_REQUEST_TIMEOUT_MS = 10_000;
+
 // Skip TLS verification for localhost self-signed cert
 process.env["NODE_TLS_REJECT_UNAUTHORIZED"] = "0";
 
@@ -15,6 +17,7 @@ async function call(method: string, path: string, body?: Record<string, unknown>
     method,
     headers: body ? { "Content-Type": "application/json" } : {},
     body: body ? JSON.stringify(body) : undefined,
+    signal: AbortSignal.timeout(AGENT_API_REQUEST_TIMEOUT_MS),
   });
   return res.text();
 }
