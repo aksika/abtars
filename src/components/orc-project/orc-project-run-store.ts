@@ -9,6 +9,7 @@ import type {
   OrcRunFailureCode,
 } from "./orc-project-contracts.js";
 import { deriveIntentKey } from "./orc-project-contracts.js";
+import { intentPolicyFor, readOrcProjectSnapshot } from "./orc-intent-policy.js";
 
 /**
  * #1679: the read-side owner fence, defined once. Every method composes these
@@ -204,6 +205,14 @@ export class OrcProjectRunStore {
           return { kind: "idempotent" as const, context: ctx };
         }
         return { kind: "busy" as const, activeRunId: existing.id };
+      }
+
+      // #1680: actionability is evaluated on the same connection and inside
+      // the claim transaction. The public schedule boundaries cannot create
+      // an authoring run after a contract or an execution run before the
+      // contract/no-higher-owner postcondition is true.
+      if (!intentPolicyFor(input.intentKind).isActionable(readOrcProjectSnapshot(this.db, input.projectCardId))) {
+        return { kind: "not_actionable" as const, reason: "intent_not_actionable" as const };
       }
 
       const counter = this.db.prepare(`

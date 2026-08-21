@@ -53,7 +53,7 @@ function ensureSupervisionTable(store: import("./orc-project-run-store.js").OrcP
   `);
 }
 
-function seedProject(store: import("./orc-project-run-store.js").OrcProjectRunStore, cardId: number, state = "executing"): void {
+function seedProject(store: import("./orc-project-run-store.js").OrcProjectRunStore, cardId: number, state = "awaiting_contract"): void {
   store.db.prepare(`
     INSERT OR IGNORE INTO project_supervision (project_card_id, contract_id, state, generation, updated_at)
     VALUES (?, '', ?, 1, ?)
