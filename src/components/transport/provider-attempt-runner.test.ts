@@ -241,6 +241,18 @@ describe("ProviderAttemptRunner", () => {
     }
   });
 
+  it("normalizes a synchronous factory throw as a failed acquisition", async () => {
+    const factory = vi.fn(() => { throw new Error("provider setup threw"); }) as unknown as ProviderAttemptFactory;
+    const { runner } = makeRunner({ attemptFactory: factory });
+    const exits = await collect(runner);
+
+    expect(exits[0]?.kind).toBe("failed");
+    if (exits[0]?.kind === "failed") {
+      expect(exits[0].phase).toBe("acquiring");
+      expect((exits[0].error as Error).message).toBe("provider setup threw");
+    }
+  });
+
   it("reports an iterator next() rejection as failed (phase streaming)", async () => {
     const stream = {
       [Symbol.asyncIterator]: () => ({
@@ -256,6 +268,26 @@ describe("ProviderAttemptRunner", () => {
       expect(exits[0].phase).toBe("streaming");
       expect((exits[0].error as Error).message).toBe("stream died");
     }
+  });
+
+  it("normalizes a synchronous iterator throw as a failed stream", async () => {
+    const returnSpy = vi.fn(async () => ({ done: true, value: undefined }));
+    const stream = {
+      [Symbol.asyncIterator]: () => ({
+        next: () => { throw new Error("stream setup threw"); },
+        return: returnSpy,
+      }),
+    };
+    const factory = vi.fn(async () => stream) as unknown as ProviderAttemptFactory;
+    const { runner } = makeRunner({ attemptFactory: factory });
+    const exits = await collect(runner);
+
+    expect(exits[0]?.kind).toBe("failed");
+    if (exits[0]?.kind === "failed") {
+      expect(exits[0].phase).toBe("streaming");
+      expect((exits[0].error as Error).message).toBe("stream setup threw");
+    }
+    await vi.waitFor(() => expect(returnSpy).toHaveBeenCalled());
   });
 
   it("yields ended when the stream completes without a terminal event", async () => {

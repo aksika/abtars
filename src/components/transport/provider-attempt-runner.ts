@@ -188,13 +188,13 @@ export class ProviderAttemptRunner {
       const acquireGuard = this.armGuard();
       // The factory promise is observed (never an unhandled rejection) and its
       // terminal value races the guard that was armed before invocation.
-      const acquiredPromise: Promise<AcquireOutcome> = this.opts.attemptFactory(
+      const acquiredPromise: Promise<AcquireOutcome> = Promise.resolve().then(() => this.opts.attemptFactory(
         this.opts.candidate,
         this.opts.model,
         this.opts.context,
         { ...this.opts.options, signal: this.attemptSignal },
         this.attemptSignal,
-      ).then(
+      )).then(
         (stream) => ({ kind: "acquired" as const, stream }),
         (error) => ({ kind: "failed" as const, error }),
       );
@@ -243,7 +243,7 @@ export class ProviderAttemptRunner {
         while (true) {
           // Guard armed BEFORE the next provider read begins.
           const nextGuard = this.armGuard();
-          const nextPromise = iterator.next();
+          const nextPromise = Promise.resolve().then(() => iterator.next());
           // The next() outcome is observed so a late rejection is consumed even
           // if the guard wins the race.
           const nextSettled: Promise<

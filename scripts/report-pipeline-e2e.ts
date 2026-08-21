@@ -12,6 +12,7 @@ import type {
   PiAgentOptions,
   StreamFn,
 } from "../src/components/transport/pi-core-types.js";
+import type { ModelCandidate } from "../src/components/transport/model-candidates.js";
 
 const RUN_ID = `e2e-${Date.now()}-${randomUUID().slice(0, 8)}`;
 const OUT_DIR = join(process.cwd(), "test-results", "report-pipeline-e2e", RUN_ID);
@@ -612,7 +613,7 @@ async function main(): Promise<void> {
     const SF = await import("../src/components/transport/pi-stream-fn.js");
     const FP = await import("../src/components/transport/fallback-policy.js");
     const MHR = await import("../src/components/transport/model-health-registry.js");
-    const candidate = {
+    const candidate: ModelCandidate = {
       model: "fixture-stuck",
       provider: "fixture",
       endpoint: "https://fixture.invalid/v1",
@@ -632,7 +633,8 @@ async function main(): Promise<void> {
     });
     const started = Date.now();
     const events: any[] = [];
-    for await (const ev of streamFn({ id: "test" }, { messages: [] }, {})) events.push(ev);
+    const stream = await streamFn(acceptanceModel, { messages: [] }, {});
+    for await (const ev of stream) events.push(ev);
     const elapsed = Date.now() - started;
     const terminal = events.at(-1);
     if (terminal?.type !== "error") return `expected terminal error event, got ${terminal?.type ?? "none"}`;
