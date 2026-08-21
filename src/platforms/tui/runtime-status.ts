@@ -25,7 +25,9 @@ function withCacheHit(usage?: RuntimeUsageSnapshot): TuiUsageSnapshot | undefine
   if (!usage) return undefined;
   const result: TuiUsageSnapshot = { ...usage };
   if (usage.input > 0 && usage.cacheRead !== undefined) {
-    result.cacheHitPercent = (usage.cacheRead / usage.input) * 100;
+    // #1687: some providers report prompt_tokens not cache-inclusive, so
+    // cacheRead can exceed reported input; a hit ratio can never exceed 100.
+    result.cacheHitPercent = Math.min(100, (usage.cacheRead / usage.input) * 100);
   }
   return result;
 }

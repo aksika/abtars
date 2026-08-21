@@ -59,6 +59,13 @@ describe("buildTuiRuntimeStatus (#1612)", () => {
     expect(status.sessionUsage?.cacheHitPercent).toBeCloseTo(40);
   });
 
+  it("clamps the cache-hit percentage to 100 when cacheRead exceeds input (#1687)", () => {
+    const status = buildTuiRuntimeStatus(session({
+      sessionUsage: { input: 100, output: 10, cacheRead: 5478, cacheWrite: 0 },
+    }), 1);
+    expect(status.sessionUsage?.cacheHitPercent).toBe(100);
+  });
+
   it("keeps the transport's last-turn usage when the session has none", () => {
     const status = buildTuiRuntimeStatus(session({
       transport: { getRuntimeStatus: () => ({ lastTurnUsage: { input: 50, output: 10, cacheRead: 0, cacheWrite: 0 } }) },
