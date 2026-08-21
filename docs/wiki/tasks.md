@@ -32,8 +32,17 @@ The bridge heartbeat checks every 5 minutes for due tasks. When one fires:
 | `/tasks` | List all tasks with today's status |
 | `/tasks trigger <id>` | Run a task immediately |
 | `/tasks log <id>` | Show last 5 runs |
+| `/task validate` | Dry-run check of the task registry (read-only) |
 
 Or just ask: "show my scheduled tasks", "cancel the morning reminder", "pause the backup task".
+
+`/task validate` runs the same read-only validation as `abtars-task validate` in
+chat: it checks the live task registry for invalid entries, duplicate IDs,
+missing task files, missing required report files, and orphaned task package
+directories, and reports `OK` or `FAILED` with the findings. It is a dry run —
+it never schedules, runs, pauses, or changes any task, and it is not an
+execution simulation. The chat form always checks the live registry and takes
+no path argument; use `abtars-task validate [path]` to check a staged file.
 
 ## Example: "Every Friday at 5pm, summarize my week"
 

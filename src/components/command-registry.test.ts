@@ -197,6 +197,35 @@ describe("command-registry help projection", () => {
       expect(surfaced, `${def.match} ${def.visibility} surfaced without explicit help`).toBe(def.help !== undefined);
     }
   });
+
+  it("help surfaces /task validate as a dry-run check", () => {
+    for (const platform of ["telegram", "discord"]) {
+      expect(getHelpEntries(platform)).toContain("/task validate — Dry-run validation of the live task registry");
+    }
+  });
+
+  it("/task validate is a help-only route and /tasks validate is its internal alias", () => {
+    const taskValidate = COMMAND_DEFINITIONS.find(d => d.match === "/task validate");
+    const tasksValidate = COMMAND_DEFINITIONS.find(d => d.match === "/tasks validate");
+    expect(taskValidate).toBeDefined();
+    expect(taskValidate?.handler.name).toBe("handleTasksValidate");
+    expect(taskValidate?.kind).toBe("prefix");
+    expect(taskValidate?.visibility).toBe("help-only");
+    expect(taskValidate?.access).toBe("all");
+    expect(tasksValidate).toBeDefined();
+    expect(tasksValidate?.handler).toBe(taskValidate?.handler);
+    expect(tasksValidate?.visibility).toBe("internal");
+    expect(tasksValidate?.access).toBe("all");
+  });
+
+  it("validate routes do not add a platform menu root", () => {
+    for (const platform of ["telegram", "discord"]) {
+      const menu = getPlatformCommands(platform);
+      expect(menu.find(c => c.name === "validate")).toBeUndefined();
+      expect(menu.filter(c => c.name === "tasks")).toHaveLength(1);
+      expect(menu.find(c => c.name === "task")).toBeUndefined();
+    }
+  });
 });
 
 /** Guard against reintroducing a second metadata list or a projection bypass. */

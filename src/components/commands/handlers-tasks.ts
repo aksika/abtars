@@ -2,6 +2,7 @@ import { execAsync } from "./exec-async.js";
 import { logError } from "../logger.js";
 import { logAndSwallow } from "../log-and-swallow.js";
 import { formatTaskLabel } from "../tasks/task-types.js";
+import type { TaskValidationFinding, TaskValidationResult } from "../tasks/task-validator.js";
 import type { CommandContext } from "./types.js";
 
 const TAG = "cmd_tasks";
@@ -210,6 +211,60 @@ export async function handleTaskPause(text: string, ctx: CommandContext): Promis
     await ctx.reply(`Failed: ${err instanceof Error ? err.message : String(err)}`);
   }
   return true;
+}
+
+/**
+ * #1685: dry-run validation of the live task registry. Imports the shipped
+ * read-only validateTaskFile() engine in-process — never spawns the CLI and
+ * never enqueues work. The reply is deterministic plain text with bounded
+ * findings.
+ */
+export async function handleTasksValidate(text: string, ctx: CommandContext): Promise<boolean> {
+  const rest = text.replace(/^\/(tasks?|cron) validate\s*/i, "").trim();
+  if (rest) {
+    await ctx.reply("Usage: /task validate");
+    return true;
+  }
+  try {
+    const { validateTaskFile } = await import("../tasks/task-validator.js");
+    const result = validateTaskFile();
+    await ctx.reply(renderTaskValidation(result));
+  } catch (err) {
+    logAndSwallow(TAG, "validate task registry", err, "error");
+    await ctx.reply(`Task validation failed: ${err instanceof Error ? err.message : String(err)}`);
+  }
+  return true;
+}
+
+const MAX_VALIDATION_FINDINGS = 40;
+const MAX_VALIDATION_CHARS = 3800;
+
+function renderTaskValidation(result: TaskValidationResult): string {
+  const header = [
+    `Task validation: ${result.ok ? "OK" : "FAILED"}`,
+    `Path: ${result.path}`,
+    `Entries: ${result.summary.entryCount}`,
+    `Valid entries: ${result.summary.validEntryCount}`,
+    `Findings: ${result.summary.findingCount}`,
+  ].join("\n");
+  if (result.ok) return header;
+  const lines: string[] = [];
+  for (const finding of result.findings) {
+    if (lines.length >= MAX_VALIDATION_FINDINGS) break;
+    const line = validationFindingLine(finding);
+    const total = header.length + lines.join("\n").length + line.length + 1;
+    if (total > MAX_VALIDATION_CHARS) break;
+    lines.push(line);
+  }
+  const omitted = result.summary.findingCount - lines.length;
+  if (omitted > 0) lines.push(`${omitted} more findings omitted`);
+  return [header, ...lines].join("\n");
+}
+
+function validationFindingLine(f: TaskValidationFinding): string {
+  const id = f.entryId ?? (f.entryIndex !== undefined ? `index ${f.entryIndex}` : "");
+  const path = f.configuredPath ?? f.path ?? "";
+  return [f.code, id, path, f.message].filter(Boolean).join(" | ");
 }
 
 /**

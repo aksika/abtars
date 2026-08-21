@@ -19,7 +19,7 @@ import {
   handleNewReset, handleCompact,
   handleStatus, handleDoctor, handleStop, handleWait, handleRestart,
   handleFull, handleShort, handleHealing, handleFacts,
-  handleTasksList, handleTasksTrigger, handleTasksLog, handleTaskPause, handleKanban,
+  handleTasksList, handleTasksTrigger, handleTasksLog, handleTaskPause, handleTasksValidate, handleKanban,
   handleChannel, handleTodo, handleProjectUnquarantine,
   handleEmergencyAlias, handleModels, handleHeartbeat, handleEffort, handleThinking, handleContinue, handleRoute,
   handleMemory, handleNlm,
@@ -251,6 +251,15 @@ export const COMMAND_DEFINITIONS: readonly CommandDefinition[] = [
   {
     name: "tasks", match: "/tasks resume ", description: "Resume a task",
     handler: handleTaskPause, kind: "prefix", visibility: "internal", access: "all",
+  },
+  {
+    name: "task", match: "/task validate", description: "Dry-run validation of the live task registry",
+    handler: handleTasksValidate, kind: "prefix", visibility: "help-only", access: "all",
+    help: ["/task validate — Dry-run validation of the live task registry"],
+  },
+  {
+    name: "tasks", match: "/tasks validate", description: "Dry-run validation of the live task registry",
+    handler: handleTasksValidate, kind: "prefix", visibility: "internal", access: "all",
   },
   {
     name: "task", match: "/task", description: "Scheduled tasks (alias for /tasks)",

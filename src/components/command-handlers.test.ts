@@ -1,4 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { handleCommand, type CommandContext } from "./commands/index.js";
 import { Spin } from "./spin.js";
 const SessionManager = Spin;
@@ -195,6 +198,99 @@ describe("command-handlers", () => {
     (ctx.reply as ReturnType<typeof vi.fn>).mockClear();
     expect(await handleCommand("/status", ctx)).toBe(true);
     expect(ctx.reply).toHaveBeenCalled();
+  });
+
+});
+
+describe("command-handlers /task validate", () => {
+  const origHome = process.env.HOME;
+  const origAbtarsHome = process.env.ABTARS_HOME;
+  let home: string;
+  let taskRoot: string;
+
+  beforeEach(() => {
+    setUserRegistryOverride({
+      users: [{ userId: "test", role: "master", maxClass: 3, tools: ["all"], platforms: { telegram: 123 } }],
+      byPlatformId: new Map([["telegram:123", { userId: "test", role: "master", maxClass: 3, tools: ["all"], platforms: { telegram: 123 } }]]),
+      byUserId: new Map([["test", { userId: "test", role: "master", maxClass: 3, tools: ["all"], platforms: { telegram: 123 } }]]),
+    } as any);
+    home = mkdtempSync(join(tmpdir(), "cmd-tasks-valid-"));
+    taskRoot = join(home, ".abtars", "tasks");
+    process.env.HOME = home;
+    process.env.ABTARS_HOME = join(home, ".abtars");
+    mkdirSync(taskRoot, { recursive: true });
+  });
+
+  afterEach(() => {
+    setUserRegistryOverride(null);
+    process.env.HOME = origHome;
+    if (origAbtarsHome === undefined) delete process.env.ABTARS_HOME;
+    else process.env.ABTARS_HOME = origAbtarsHome;
+    try { rmSync(home, { recursive: true, force: true }); } catch { /* */ }
+  });
+
+  it("/task validate returns an OK summary for a clean registry", async () => {
+    writeFileSync(join(taskRoot, "tasks.json"), "[]", "utf-8");
+    const ctx = makeCtx();
+    const handled = await handleCommand("/task validate", ctx);
+    expect(handled).toBe(true);
+    const reply = (ctx.reply as ReturnType<typeof vi.fn>).mock.calls[0]![0] as string;
+    expect(reply).toContain("Task validation: OK");
+    expect(reply).toContain(`Path: ${join(taskRoot, "tasks.json")}`);
+    expect(reply).toContain("Entries: 0");
+    expect(reply).toContain("Valid entries: 0");
+    expect(reply).toContain("Findings: 0");
+  });
+
+  it("/task validate reports FAILED with finding details for an invalid registry", async () => {
+    writeFileSync(join(taskRoot, "tasks.json"), JSON.stringify([{ id: "bad-one" }]), "utf-8");
+    const ctx = makeCtx();
+    const handled = await handleCommand("/task validate", ctx);
+    expect(handled).toBe(true);
+    const reply = (ctx.reply as ReturnType<typeof vi.fn>).mock.calls[0]![0] as string;
+    expect(reply).toContain("Task validation: FAILED");
+    expect(reply).toContain("Entries: 1");
+    expect(reply).toContain("Findings: 1");
+    expect(reply).toContain("entry_invalid");
+    expect(reply).toContain("bad-one");
+  });
+
+  it("/task validate bounds the response and reports omitted findings", async () => {
+    const entries = Array.from({ length: 60 }, (_, i) => ({ id: `bad-${i}`, kind: "agent" }));
+    writeFileSync(join(taskRoot, "tasks.json"), JSON.stringify(entries), "utf-8");
+    const ctx = makeCtx();
+    await handleCommand("/task validate", ctx);
+    const reply = (ctx.reply as ReturnType<typeof vi.fn>).mock.calls[0]![0] as string;
+    expect(reply).toContain("Findings: 60");
+    expect(reply).toContain("20 more findings omitted");
+    expect(reply.length).toBeLessThan(4000);
+  });
+
+  it("/task validate with arguments returns usage without running validation", async () => {
+    const ctx = makeCtx();
+    const handled = await handleCommand("/task validate tasks.json", ctx);
+    expect(handled).toBe(true);
+    expect(ctx.reply).toHaveBeenCalledWith("Usage: /task validate");
+  });
+
+  it("/tasks validate routes to the same dry-run handler", async () => {
+    writeFileSync(join(taskRoot, "tasks.json"), "[]", "utf-8");
+    const ctx = makeCtx();
+    await handleCommand("/tasks validate", ctx);
+    const reply = (ctx.reply as ReturnType<typeof vi.fn>).mock.calls[0]![0] as string;
+    expect(reply).toContain("Task validation: OK");
+  });
+
+  it("/task validate never enqueues work or spawns the validator CLI", async () => {
+    writeFileSync(join(taskRoot, "tasks.json"), "[]", "utf-8");
+    const enqueueCron = vi.fn();
+    const ctx = makeCtx({ enqueueCron });
+    const { execFile } = await import("node:child_process") as { execFile: ReturnType<typeof vi.fn> };
+    execFile.mockClear();
+    await handleCommand("/task validate", ctx);
+    expect(enqueueCron).not.toHaveBeenCalled();
+    const abtarsTaskCalls = execFile.mock.calls.filter((c: unknown[]) => c[0] === "abtars-task");
+    expect(abtarsTaskCalls).toHaveLength(0);
   });
 
 });
