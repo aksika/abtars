@@ -299,4 +299,59 @@ describe("#1680 escaped turn boundary (real Spin/coordinator/stores/tools)", () 
     // once consumed, the accepted contribution wins the wake.
     expect(policyMod.readOrcProjectSnapshot(runStore.db, rootId).contributionActive).toBe(true);
   });
+
+  it("a normal local no-owner project claims exactly one project_execution run, never another contract_authoring run (#1680)", async () => {
+    // Local executing root with a contract and no Worker/contribution/review
+    // owner: the reconciler's no-owner path must claim the truthful
+    // project_execution intent — never a second contract_authoring claim.
+    const rootId = kanban.kanbanEnqueue("Local Project", "agent", undefined, {
+      type: "O",
+      goal: "local supervised work",
+    });
+    kanban.kanbanRunning(rootId);
+    const store = new reviewStoreMod.ProjectReviewStore();
+    const contractId = `ct_exec_${rootId}`;
+    store.insertContract({
+      schema_version: 2,
+      id: contractId,
+      digest: `d_${contractId}`,
+      project_card_id: rootId,
+      goal: "local supervised work",
+      criteria: [{ id: "c1", description: "goal met", required: true, execution_owner: "orc", evidence_expectation: "synthesis" }],
+      required_outputs: [],
+      constraints: [],
+      limits: { max_review_rounds: 10, max_repair_rounds: 5 },
+      provenance: { requested_by: "agent", authored_by: "fixture", created_at: new Date().toISOString() },
+    } as never);
+    store.initializeSupervision(rootId, contractId, "executing");
+
+    const runStore = new runStoreMod.OrcProjectRunStore();
+    // The no-owner wake path (claimOrcContinuation) routes to
+    // scheduleProjectExecution — the same decision the reconciler makes.
+    const claim = new coordinatorMod.OrcProjectCoordinator({
+      ownerPeer: "kp",
+      ownerInstanceId: "inst-test",
+      startPort: async () => {},
+    }).scheduleProjectExecution(rootId, "resume from durable state");
+
+    expect(claim.kind).toBe("claimed");
+    if (claim.kind !== "claimed") return;
+    expect(claim.context.intentKind).toBe("project_execution");
+    expect(claim.context.intentKey).toBe(`execute:${rootId}:1`);
+    const row = runStore.getRun(claim.context.runId);
+    expect(row?.intent_kind).toBe("project_execution");
+
+    // A second no-owner wake is idempotent against the same run — no second
+    // claim, and never a contract_authoring claim (that intent is only
+    // actionable before a contract exists).
+    const again = new coordinatorMod.OrcProjectCoordinator({
+      ownerPeer: "kp",
+      ownerInstanceId: "inst-test",
+      startPort: async () => {},
+    }).scheduleProjectExecution(rootId, "resume from durable state");
+    expect(again.kind).toBe("idempotent");
+    expect(again.context.runId).toBe(claim.context.runId);
+    expect(runStore.getRunsForProject(rootId).filter(r => r.intent_kind === "contract_authoring")).toHaveLength(0);
+    expect(runStore.getRunsForProject(rootId).filter(r => r.intent_kind === "project_execution")).toHaveLength(1);
+  });
 });
