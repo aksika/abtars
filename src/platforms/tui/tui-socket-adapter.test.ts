@@ -36,6 +36,7 @@ import type { QueuedSessionInstruction } from "../../components/spin-types.js";
 import { classifyContent } from "../../components/clean-response.js";
 import type { InboundMessage } from "../../types/platform.js";
 import { expireInstructions, drainInstructionBatch } from "../../components/session-instruction-queue.js";
+import { setCodingRouteService } from "../../components/pipeline/coding-route.js";
 import { OrcActivityFeed } from "../../components/orc-activity-feed.js";
 import { SessionOutputFeed } from "../../components/session-output-feed.js";
 
@@ -2170,6 +2171,32 @@ describe("TuiSocketAdapter — native coding handoff", () => {
       t: "coding-handoff-rejected",
     });
     conn.destroy();
+  });
+
+  it("#1690 accepts a coding-handoff when the service registers after adapter construction", async () => {
+    // Production shape: the platforms boot phase builds the adapter BEFORE
+    // boot-pi runs, so the constructor snapshot is null. The handoff must
+    // resolve the service through the coding-route registry instead.
+    adapter.stop();
+    sockPath = tmpSocketPath();
+    adapter = new TuiSocketAdapter({
+      spin: makeMockSpin().spin,
+      onMessage: makeRecoveryHandler(),
+      socketPath: sockPath,
+    });
+    setCodingRouteService(coding as never);
+    try {
+      await adapter.start();
+      const { conn, frames } = await openConn();
+      conn.write(encodeFrame({ t: "coding-handoff", text: "/coding" }));
+      await waitFor(() => frames.some((f) => f.t === "coding-handoff-accepted"), 2000);
+      expect(coding.beginNativeHandoff).toHaveBeenCalled();
+      const accepted = frames.find((f) => f.t === "coding-handoff-accepted");
+      expect(accepted).toMatchObject({ t: "coding-handoff-accepted", handoff: H1 });
+      conn.destroy();
+    } finally {
+      setCodingRouteService(null);
+    }
   });
 
   it("forwards coding-handoff-started pid and coding-handoff-exit to the service", async () => {

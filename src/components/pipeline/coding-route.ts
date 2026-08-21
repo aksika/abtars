@@ -25,6 +25,11 @@ export function setCodingRouteService(svc: PiCodingSessionService | null): void 
   service = svc;
 }
 
+/** #1690: lazy accessor — the service is registered by boot-pi after the TUI adapter is constructed. */
+export function getCodingRouteService(): PiCodingSessionService | null {
+  return service;
+}
+
 const CODING_CONTROLS = new Set(["/stop", "/ctrlc", "/steer", "/compact"]);
 
 export const codingRouteMiddleware: Middleware = async (ctx, next) => {

@@ -190,7 +190,9 @@ export async function phasePlatformsConnect(ctx: BootCtx): Promise<PhaseResult> 
         onMessage: (msg) => recovery.handle(msg, adapter),
         orcActivityFeed: ctx.orcActivityFeed,
         sessionOutputFeed: ctx.sessionOutputFeed,
-        // #1635 Phase 2 — native TUI handoff (undefined when Pi coding is off)
+        // #1635 Phase 2 — native TUI handoff. #1690: this is always null here
+        // (boot-pi runs after the platforms phase); the adapter resolves the
+        // live service from the coding-route registry at handoff time.
         codingService: ctx.codingSessionService ?? null,
       });
       platformAdapters.set("tui", adapter);

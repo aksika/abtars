@@ -71,6 +71,7 @@ import {
   MAX_TUI_FRAME_BYTES,
 } from "./tui-protocol.js";
 import { TuiFrameWriter, type TuiFrameWriterResult } from "./tui-frame-writer.js";
+import { getCodingRouteService } from "../../components/pipeline/coding-route.js";
 
 const TAG = "tui";
 
@@ -136,7 +137,9 @@ export interface TuiAdapterDeps {
   sessionOutputFeed?: SessionOutputFeed;
   onMessage: (msg: InboundMessage) => void;
   socketPath?: string;
-  /** #1635 Phase 2 — interactive Pi coding sessions (native TUI handoff). */
+  /** #1635 Phase 2 — interactive Pi coding sessions (native TUI handoff).
+   *  #1690: production always passes null (boot-pi runs after this adapter);
+   *  the adapter falls back to the coding-route registry at handoff time. */
   codingService?: import("../../components/pi-executor/pi-coding-session-service.js").PiCodingSessionService | null;
 }
 
@@ -553,7 +556,7 @@ export class TuiSocketAdapter implements PlatformAdapter {
     // Close handler: abort any native handoff owned by this connection, then
     // detach only if this generation is still current.
     conn.on("close", () => {
-      const coding = this.deps.codingService;
+      const coding = this._codingService();
       if (coding) {
         try { coding.abortNativeHandoff(`tui:${connGen}`); } catch { /* best effort */ }
       }
@@ -1082,6 +1085,13 @@ export class TuiSocketAdapter implements PlatformAdapter {
     }
   }
 
+  /** #1690: resolve the coding service lazily. The constructor snapshot is
+   *  always null on a live bridge (boot-pi runs after the platforms phase);
+   *  the module registry is the authoritative source once boot-pi finishes. */
+  private _codingService() {
+    return this.deps.codingService ?? getCodingRouteService();
+  }
+
   // ── #1635 Phase 2 — native TUI handoff ──────────────────────────────────
 
   /**
@@ -1092,7 +1102,7 @@ export class TuiSocketAdapter implements PlatformAdapter {
    */
   private async _handleCodingHandoff(text: string): Promise<void> {
     const capturedConnGen = this._connGen;
-    const coding = this.deps.codingService;
+    const coding = this._codingService();
     if (!coding) {
       this._pushHandoffDirect({ t: "coding-handoff-rejected", message: "Interactive Pi coding is not available on this bridge" }, capturedConnGen);
       return;
@@ -1119,7 +1129,7 @@ export class TuiSocketAdapter implements PlatformAdapter {
   /** Record the client's spawned Pi pid as the exclusive-writer fence. */
   private async _handleCodingHandoffStarted(sessionId: string, pid: number): Promise<void> {
     const capturedConnGen = this._connGen;
-    const coding = this.deps.codingService;
+    const coding = this._codingService();
     if (!coding) return;
     let accepted = false;
     try {
@@ -1133,7 +1143,7 @@ export class TuiSocketAdapter implements PlatformAdapter {
   /** Pi exited — reconcile and release the generation-owned resources. */
   private async _handleCodingHandoffExit(sessionId: string, code: number | null): Promise<void> {
     const capturedConnGen = this._connGen;
-    const coding = this.deps.codingService;
+    const coding = this._codingService();
     if (!coding) return;
     let message: string;
     let ok = false;
