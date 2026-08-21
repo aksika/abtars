@@ -446,7 +446,7 @@ function mergeEnvContent(existing: string, answers: WizardAnswers): string {
     'DEFAULT_PROVIDER', 'DEFAULT_MODEL',
     'HEARTBEAT_INTERVAL_SEC', 'TRUST_MODE',
     'TELEGRAM_ENABLED', 'DISCORD_ENABLED',
-    'LOG_LEVEL', 'ACTIVE_MEMORY', 'ENABLE_AGENT_API', 'SELFHEAL_ENABLED',
+    'LOG_LEVEL', 'ACTIVE_MEMORY', 'ENABLE_AGENT_API', 'SELFHEAL_MODE',
   ]);
   const keptLines: string[] = [];
   for (const line of existing.split('\n')) {
@@ -474,7 +474,7 @@ function mergeEnvContent(existing: string, answers: WizardAnswers): string {
   newBlock.push(`LOG_LEVEL=debug`);
   newBlock.push(`ACTIVE_MEMORY=true`);
   newBlock.push(`ENABLE_AGENT_API=false`);
-  newBlock.push(`SELFHEAL_ENABLED=true`);
+  newBlock.push(`SELFHEAL_MODE=off`);
 
   return [...keptLines, ...newBlock, ''].join('\n');
 }

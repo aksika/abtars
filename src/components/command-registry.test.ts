@@ -135,7 +135,7 @@ describe("command-registry help projection", () => {
     const lines = getHelpEntries("telegram");
     expect(lines).toContain("/full — Raw output, TTS disabled");
     expect(lines).toContain("/short — Clean responses (default)");
-    expect(lines).toContain("/healing — Toggle self-healer on/off");
+    expect(lines).toContain("/healing — Self-healing mode, policy and active incidents (read-only)");
     expect(lines).toContain("/help — Show this help");
     expect(lines).toContain("/task run <id> — Manually fire a task");
     expect(lines).toContain("/pi run --workspace <alias> <goal> — Start a Pi coding run");

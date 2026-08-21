@@ -21,16 +21,20 @@ export interface PiCoreToolContext {
   onToolFailure?: (diagnostic: ToolFailureDiagnosticV1) => void;
   /** Wrap a JSON schema object as a Pi-compatible TypeScript schema (Type.Unsafe). */
   createUnsafeSchema?: (schema: Record<string, unknown>) => Record<string, unknown>;
-  /** #1502 Task 10: task-local execution scope. */
+/** #1502 Task 10: task-local execution scope. */
   executionScope?: ToolExecutionScope;
   /** #1480: Orc invocation context for durable project ownership fencing. */
-  orcContext?: import("../orc-project/orc-project-contracts.js").OrcInvocationContextV1;
+  orcContext?: import("../orc-project/orc-project-contracts.js").OrcInvocationContextV2;
   /** #1552: trusted session type supplied by Spin; absent types fail closed. */
   sessionType?: import("../spin-types.js").SessionType;
-  /** #1552: late-bound memory-tool dependencies (runtime + quota holder). */
+  /** #1552: late-bound memory-tool dependencies (runtime + quota). */
   memoryToolDeps?: import("../memory-store-quota.js").MemoryToolDependenciesHolder;
   /** #1629: trusted tool authorization mode (from Spin via the transport). */
   authorizationMode?: import("../action-gate.js").ToolAuthorizationMode;
+  /** #1680: host-owned one-shot turn control — intent satisfaction stops the
+   *  active turn at the durable transition instead of waiting for another
+   *  provider round. */
+  orcTurnControl?: import("../orc-project/orc-project-contracts.js").OrcTurnControl;
 }
 
 function adaptParameters(params: Record<string, unknown>): Record<string, unknown> {
@@ -129,7 +133,17 @@ function definitionToAgentTool(def: ToolDefinition, context: PiCoreToolContext):
           sessionType: context.sessionType,
           memoryToolDeps: context.memoryToolDeps,
           authorizationMode: context.authorizationMode,
+          orcTurnControl: context.orcTurnControl,
         });
+
+        // #1680: when the durable intent postcondition won, the turn ends here —
+        // the safety controller stops further provider rounds so the model
+        // cannot keep calling tools after its intent was consumed. The run CAS
+        // and Spin's execution generation reject any late event regardless.
+        const terminal = context.orcTurnControl?.completed;
+        if (terminal?.kind === "intent_satisfied") {
+          context.safety.requestStop(`intent satisfied: ${terminal.code}`);
+        }
 
         const diag = parseToolResultToDiagnostic(result, context.executionId, def.name);
         if (diag) {

@@ -727,7 +727,7 @@ function claimOrcContinuation(generation: ReconcilerGeneration, projectId: numbe
     ? project.goal
     : `[CONTINUATION] Supervised project #${projectId}, run ${project.source_id ?? "unknown"}: inspect the existing project contract and durable project rows and resume the supervised lifecycle from its current durable state (spawn pending Workers, complete the review, or settle). Do not re-author the contract.`;
 
-  const result = coordinator.scheduleScheduledProject(projectId, goal);
+  const result = coordinator.scheduleProjectExecution(projectId, goal);
   switch (result.kind) {
     case "claimed":
     case "idempotent":
@@ -748,7 +748,7 @@ function claimOrcContinuation(generation: ReconcilerGeneration, projectId: numbe
           logInfo(TAG, `Project ${projectId}: continuation conflict — re-derive found owner ${rederived}`);
           return "owned";
         }
-        const retry = coordinator.scheduleScheduledProject(projectId, goal);
+        const retry = coordinator.scheduleProjectExecution(projectId, goal);
         if (retry.kind === "claimed" || retry.kind === "idempotent" || retry.kind === "busy") return "owned";
       }
       settleProjectLastResortFor(generation, projectId);
@@ -1343,7 +1343,7 @@ function dispatchCoverageRound(generation: ReconcilerGeneration, projectId: numb
   const card = kanbanGetCard(projectId);
   if (card && isSupervisedRootIdentity(card)) {
     const coordinator = generation.deps.coordinator;
-    const claim = coordinator.scheduleScheduledProject(projectId, goal);
+    const claim = coordinator.scheduleProjectExecution(projectId, goal);
     if (claim.kind === "claimed" || claim.kind === "idempotent" || claim.kind === "busy") {
       logInfo(TAG, `Project ${projectId}: coverage round dispatched to scheduled Orc (${uncovered.join(", ")})`);
     } else {
@@ -2285,18 +2285,23 @@ export async function startReconciler(deps: ReconcilerDeps): Promise<ReconcilerH
     });
 
     // 4. Coordinator ownership-release subscription (returns its disposer).
+    // #1680: the ownership-released wake distinguishes the durable Orc intents
+    // that need the root + parent wake from the rest. Contract authoring and
+    // project execution both release after their durable transition; the
+    // parent wake is required so a contribution-waiting root's parent hears
+    // the terminal ledger/proxy settlement.
     const onOwnershipReleased = (event: OrcOwnershipReleasedV1): void => {
       if (generation.phase === "starting") {
         generation.pendingProjectWakes.add(event.projectCardId);
         wakeScheduledOrcProjects(generation);
         return;
       }
-      if (event.intentKind !== "contract_authoring") {
-        requestReconcile(event.projectCardId);
+      if (event.intentKind === "contract_authoring" || event.intentKind === "project_execution") {
+        requestReconcileForProject(event.projectCardId);
         wakeScheduledOrcProjects(generation);
         return;
       }
-      requestReconcileForProject(event.projectCardId);
+      requestReconcile(event.projectCardId);
       wakeScheduledOrcProjects(generation);
     };
     generation.disposers.push(deps.coordinator.onOwnershipReleased(onOwnershipReleased));

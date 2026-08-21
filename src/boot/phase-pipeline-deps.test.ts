@@ -7,7 +7,7 @@
  */
 import { describe, it, expect, vi } from "vitest";
 import { clearMemoryToolDependencies, createBootCtx } from "./context.js";
-import { phasePipelineDeps, buildFailureNotification, buildShaFailurePrompt, skipSelfHealForDiagnostic } from "./phase-pipeline-deps.js";
+import { phasePipelineDeps, buildFailureNotification, skipSelfHealForDiagnostic } from "./phase-pipeline-deps.js";
 import { makeTaskFailure } from "../components/tasks/task-failure.js";
 
 function fakePiTransport() {
@@ -118,7 +118,10 @@ describe("failure cascade payloads (#1588)", () => {
   });
 
   it("the operator notification carries category/code and the lane facts", () => {
-    const text = buildFailureNotification("daily-ai", diagnostic);
+    const event: import("../components/sha/sha-types.js").ScheduledFailureEvent = {
+      source: "scheduled", entryId: "daily-ai", runId: "r1", taskKind: "agent", diagnostic, occurredAt: Date.now(),
+    };
+    const text = buildFailureNotification(event);
     expect(text).toContain("Daily Ai failed - supervision/lane_late_completion");
     expect(text).toContain("card 4");
     expect(text).toContain("contract c_ce252b756fd63a25e5551f8e");
@@ -128,25 +131,16 @@ describe("failure cascade payloads (#1588)", () => {
     expect(text).not.toMatch(/[📥✅❌⏳🔧⚠️]/);
   });
 
-  it("the SHA prompt carries the structured root cause and preserves the FORBIDDEN block", () => {
-    const text = buildShaFailurePrompt("daily-ai", diagnostic, "");
-    expect(text).toContain('Task: "daily-ai"   Category: supervision/lane_late_completion');
-    expect(text).toContain("<root-cause>");
-    expect(text).toContain('cancel-reason="late_completion_timed_out: worker_completed"');
-    expect(text).toContain('hard-deadline="2026-08-06T13:46:38.195Z"');
-    expect(text).toContain('settled="2026-08-06T13:46:45.680Z"');
-    expect(text).toContain('overrun-ms="7485"');
-    expect(text).toContain('binding-limit="max_duration_ms=120000"');
-    expect(text).toContain('<criterion id="c1" status="not_run" evidence="none"/>');
-    expect(text).toContain("Permitted remediation: task_manage action=adjust (bounded) or action=escalate.");
-    expect(text).toContain("FORBIDDEN: Do NOT modify vital config files unless the bridge is in a crash loop or cannot boot:");
-    expect(text).toContain("- transport.json\n- .env / .env.skills\n- peers.json\n- users.json");
-    expect(text).toContain("A single task failure is NOT grounds for config changes.");
-  });
-
-  it("a pending failure list is preserved in the SHA prompt", () => {
-    const text = buildShaFailurePrompt("daily-ai", diagnostic, "\nAlso failed recently: finance-daily");
-    expect(text).toContain("Also failed recently: finance-daily");
+  it("the admission notice is bounded and typed per outcome (#1688)", async () => {
+    const { shaAdmissionNotice } = await import("../components/sha/sha-admission-notice.js");
+    const event: import("../components/sha/sha-types.js").ScheduledFailureEvent = {
+      source: "scheduled", entryId: "daily-ai", runId: "r1", taskKind: "agent", diagnostic, occurredAt: Date.now(),
+    };
+    expect(shaAdmissionNotice(event, { kind: "project_created", incidentId: 5, rootCardId: 9, mode: "full" })).toContain("incident #5");
+    expect(shaAdmissionNotice(event, { kind: "attached", incidentId: 5, rootCardId: 9, occurrenceCount: 2 })).toContain("occurrence 2");
+    expect(shaAdmissionNotice(event, { kind: "duplicate_event" })).toBeNull();
+    expect(shaAdmissionNotice(event, { kind: "ignored", reason: "system" })).toContain("system-kind");
+    expect(shaAdmissionNotice(event, { kind: "known_fix_started", incidentId: 7 })).toContain("known fix started");
   });
 });
 
@@ -163,7 +157,10 @@ describe("failure cascade credits guard (#1297)", () => {
   });
 
   it("the single operator notification is enriched with the remediation ask for credits", () => {
-    const text = buildFailureNotification("daily-ai", credits);
+    const event: import("../components/sha/sha-types.js").ScheduledFailureEvent = {
+      source: "scheduled", entryId: "daily-ai", runId: "r1", taskKind: "agent", diagnostic: credits, occurredAt: Date.now(),
+    };
+    const text = buildFailureNotification(event);
     expect(text).toContain("execution/credits_exhausted");
     expect(text).toContain("Requires human intervention: restore provider credits, then run /models reset.");
     // Exactly one notification payload — the remediation is part of it, not a second message.
@@ -171,7 +168,10 @@ describe("failure cascade credits guard (#1297)", () => {
   });
 
   it("non-credit failures keep the unchanged notification", () => {
-    const text = buildFailureNotification("daily-ai", other);
+    const event: import("../components/sha/sha-types.js").ScheduledFailureEvent = {
+      source: "scheduled", entryId: "daily-ai", runId: "r1", taskKind: "agent", diagnostic: other, occurredAt: Date.now(),
+    };
+    const text = buildFailureNotification(event);
     expect(text).not.toContain("Requires human intervention");
   });
 });

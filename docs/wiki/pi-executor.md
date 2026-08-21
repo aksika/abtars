@@ -57,6 +57,32 @@ Change `"enabled"` to `true` and add at least one absolute workspace path:
 }
 ```
 
+### SHA incident workspace (#1688)
+
+Self-healing incident stages (RCA/design/solution) run only inside the fixed
+`sha` alias — one dedicated clean Git checkout whose contents are disposable.
+The alias MUST set `projectTrust: "never"` (the global fallback is rejected
+for SHA) and a containing `root`:
+
+```json
+{
+  "enabled": true,
+  "command": "pi",
+  "workspaceAliases": {
+    "sha": {
+      "path": "/home/me/.abtars-sha-workspace",
+      "root": "/home/me",
+      "projectTrust": "never"
+    }
+  }
+}
+```
+
+The `sha` workspace is reset to its baseline commit before every stage and
+must never be the canonical live checkout, `ABTARS_HOME`, or a deployment
+root. When the alias is absent or misconfigured, SHA admission blocks visibly
+and never falls back to another alias or Spin.
+
 Model selection is automatic: Pi inherits the effective `coding` provider and
 model from your existing `transport.json` configuration. You do not need to
 duplicate model settings in `pi-executor.json`. An explicit per-run model

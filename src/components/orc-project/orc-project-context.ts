@@ -1,10 +1,10 @@
-import type { OrcInvocationContextV1, OrcRunReason } from "./orc-project-contracts.js";
+import type { OrcInvocationContextV2, OrcRunReason } from "./orc-project-contracts.js";
 import { OrcProjectRunStore } from "./orc-project-run-store.js";
 import { formatRunReason } from "./orc-project-contracts.js";
 
 export interface ToolContextResolution {
   ok: true;
-  context: OrcInvocationContextV1;
+  context: OrcInvocationContextV2;
   store: OrcProjectRunStore;
 }
 
@@ -22,7 +22,7 @@ export type PeerEgressResult =
 
 export function resolveCurrentOrcProject(
   args: Record<string, string>,
-  toolContext: { orcContext?: OrcInvocationContextV1 },
+  toolContext: { orcContext?: OrcInvocationContextV2 },
   store?: OrcProjectRunStore,
 ): ToolContextResult {
   const ctx = toolContext.orcContext;
@@ -51,7 +51,7 @@ export function resolveCurrentOrcProject(
 }
 
 export function authorizePeerEgress(
-  toolContext: { orcContext?: OrcInvocationContextV1 },
+  toolContext: { orcContext?: OrcInvocationContextV2 },
   store?: OrcProjectRunStore,
 ): PeerEgressResult {
   const ctx = toolContext.orcContext;

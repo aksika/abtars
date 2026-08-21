@@ -39,10 +39,23 @@ export type OrcRunOutcome =
 
 export type OrcIntentKind =
   | "contract_authoring"
+  | "project_execution"
   | "project_review"
   | "repair_review"
   | "input_resume"
   | "operator_turn";
+
+/**
+ * #1680: stable bounded vocabulary persisted into `orc_project_runs.failure_code`
+ * on every failed Orc run. Provider/model prose, prompts, tool arguments, and
+ * exception messages never cross this boundary.
+ */
+export type OrcRunFailureCode =
+  | "start_port_rejected"
+  | "prompt_round_limit"
+  | "provider_failure"
+  | "intent_postcondition_unsatisfied"
+  | "turn_cancelled";
 
 export type OrcOriginKind = "local" | "peer";
 
@@ -62,10 +75,16 @@ export type OrcRunReason =
   | "peer_relay_blocked"
   | "busy";
 
-export interface OrcInvocationContextV1 {
-  readonly version: 1;
+export interface OrcInvocationContextV2 {
+  readonly version: 2;
   readonly runId: string;
   readonly intentKey: string;
+  /** #1680: the persisted intent kind — copied from the claimed run row, never
+   *  from a model argument or prompt. Schema presentation and execution-time
+   *  authorization consume the same central intent-policy decision. */
+  readonly intentKind: OrcIntentKind;
+  /** #1680: optional run-scoped reference (review case id, input round, …). */
+  readonly intentRef?: string;
   readonly projectCardId: number;
   readonly projectGeneration: number;
   readonly ownershipGeneration: number;
@@ -77,6 +96,42 @@ export interface OrcInvocationContextV1 {
   };
   readonly sessionId?: string;
   readonly executionId?: string;
+}
+
+/**
+ * #1680: one-shot host-owned terminal outcome of an Orc turn. `intent_satisfied`
+ * is distinct from cancellation and failure: it claims the durable intent
+ * postcondition and ends the turn immediately.
+ */
+export type OrcTurnTerminal =
+  | { kind: "intent_satisfied"; code: string }
+  | { kind: "failed"; failureCode: OrcRunFailureCode }
+  | { kind: "cancelled"; failureCode: "turn_cancelled" };
+
+/**
+ * #1680: host-owned one-shot turn control. The first `complete()` call wins;
+ * every later call is rejected. An `intent_satisfied` terminal is only accepted
+ * after the durable intent postcondition is re-read under the exact bound run
+ * (never from a tool result string).
+ */
+export interface OrcTurnControl {
+  readonly runId: string;
+  /** Re-verify against durable state when needed and win the one-shot latch. */
+  complete(terminal: OrcTurnTerminal): boolean;
+  readonly completed: OrcTurnTerminal | null;
+}
+
+/**
+ * #1680: one typed turn specification replacing the loose `(context, goal)`
+ * start boundary. The immutable intent, its policy-derived prompt bound, and
+ * the host-owned one-shot turn control travel together; callers cannot select
+ * an independent intent, tool policy, or bound.
+ */
+export interface OrcTurnSpec {
+  readonly context: OrcInvocationContextV2;
+  readonly goal: string;
+  readonly maxPromptRounds: number;
+  readonly turnControl: OrcTurnControl;
 }
 
 export interface OrcProjectRunRow {
@@ -105,8 +160,8 @@ export interface OrcProjectRunRow {
 }
 
 export type OrcRunClaimResult =
-  | { kind: "claimed"; context: OrcInvocationContextV1 }
-  | { kind: "idempotent"; context: OrcInvocationContextV1 }
+  | { kind: "claimed"; context: OrcInvocationContextV2 }
+  | { kind: "idempotent"; context: OrcInvocationContextV2 }
   | { kind: "busy"; activeRunId: string }
   | { kind: "not_actionable"; reason: OrcRunReason }
   | { kind: "conflict"; reason: OrcRunReason };
@@ -143,6 +198,8 @@ export function deriveIntentKey(
   switch (intentKind) {
     case "contract_authoring":
       return `contract:${projectCardId}:${projectGeneration}`;
+    case "project_execution":
+      return `execute:${projectCardId}:${projectGeneration}`;
     case "project_review":
       return `review:${ref ?? projectCardId}`;
     case "repair_review":

@@ -120,7 +120,12 @@ export interface BootCtx {
    * memory readiness, and the normal transport.
    */
   emergencyExecution: import("../components/emergency-execution-service.js").EmergencyExecutionService | null;
-  selfHealerTask: { enabled: boolean } | null;
+  /** #1688: the log-source heartbeat task; no process-local enable toggle. */
+  selfHealerTask: import("../types/index.js").HeartbeatTask | null;
+  /** #1688: sole SHA admission/transition owner. Set by phase-pipeline-deps. */
+  shaCoordinator: import("../components/sha/sha-incident-coordinator.js").ShaIncidentCoordinator | null;
+  /** #1688: stage-progression nerve subscriber disposer (shutdown). */
+  _shaStageSubscriberDisposer?: () => void;
   dashboardServer: IDashboardSlot | null;
   agentApiServer: AgentApiServer | null;
   actionGate: any;
@@ -168,7 +173,7 @@ export interface BootCtx {
    * Reconciler. Consumed (not mutated) by phase-reconciler. */
   reconcilerInputs: {
     projectRunProgress: (cardId: number) => void;
-    failureCascade?: (entryId: string, diagnostic: import("../components/tasks/task-failure.js").TaskFailureDiagnosticV1) => void;
+    failureCascade?: (event: import("../components/sha/sha-types.js").ScheduledFailureEvent) => void;
   } | null;
   /** #1554: set by phase-pipeline-deps; recovery + admission by
    * phase-reconciler after the Reconciler generation starts. */
@@ -248,6 +253,7 @@ export function createBootCtx(overrides: Partial<BootCtx> = {}): BootCtx {
     hailMary: null,
     emergencyExecution: null,
     selfHealerTask: null,
+    shaCoordinator: null,
     dashboardServer: null,
     agentApiServer: null,
     actionGate: null,

@@ -213,7 +213,13 @@ export interface ManagedSession {
   activeCardId?: number;
   activeRootCardId?: number;
   // #1480: Orc invocation context for durable project ownership fencing.
-  orcContext?: import("./orc-project/orc-project-contracts.js").OrcInvocationContextV1;
+  orcContext?: import("./orc-project/orc-project-contracts.js").OrcInvocationContextV2;
+  /** #1680: host-owned one-shot turn control of the bound Orc turn. Set once
+   *  at turn start from the coordinator's typed turn spec; intent completion
+   *  terminates the active turn and Spin's release reads the terminal. */
+  orcTurnControl?: import("./orc-project/orc-project-contracts.js").OrcTurnControl;
+  /** #1680: policy-derived prompt-round bound of the bound Orc turn. */
+  orcMaxPromptRounds?: number;
 }
 
 export interface SpinRequest {
@@ -248,7 +254,11 @@ export interface SpinRequest {
   /** #1502 Task 10: explicit task-local cwd/env for tool execution. */
   executionScope?: import("./tasks/task-package.js").ToolExecutionScope;
   /** #1480: Orc invocation context for durable project ownership fencing. */
-  orcContext?: import("./orc-project/orc-project-contracts.js").OrcInvocationContextV1;
+  orcContext?: import("./orc-project/orc-project-contracts.js").OrcInvocationContextV2;
+  /** #1680: host-owned one-shot turn control of the bound Orc turn. */
+  orcTurnControl?: import("./orc-project/orc-project-contracts.js").OrcTurnControl;
+  /** #1680: policy-derived prompt-round bound of the bound Orc turn. */
+  orcMaxPromptRounds?: number;
   /** #1644: immutable project authority for supervised child creation — bound
    *  from the Orc invocation context, never from tool arguments. */
   authority?: { projectCardId: number; projectGeneration: number; scheduledRunId?: string };
@@ -334,7 +344,11 @@ export interface SpinSessionSpec {
                                         // (not merged on sessionId-reuse — see design §2)
 
   // #1480: Orc invocation context for durable project ownership fencing.
-  orcContext?: import("./orc-project/orc-project-contracts.js").OrcInvocationContextV1;
+  orcContext?: import("./orc-project/orc-project-contracts.js").OrcInvocationContextV2;
+  /** #1680: host-owned one-shot turn control of the bound Orc turn. */
+  orcTurnControl?: import("./orc-project/orc-project-contracts.js").OrcTurnControl;
+  /** #1680: policy-derived prompt-round bound of the bound Orc turn. */
+  orcMaxPromptRounds?: number;
 
   // Result
   await?: boolean;

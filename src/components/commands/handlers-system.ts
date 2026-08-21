@@ -160,38 +160,35 @@ export async function handleHealing(text: string, ctx: CommandContext): Promise<
   const arg = text.replace(/^\/healing\s*/, "").trim();
   const cmd = arg.toLowerCase().split(/\s+/)[0] ?? "";
 
-  if (cmd === "on") {
-    if (ctx.selfHealerTask) ctx.selfHealerTask.enabled = true;
-    await ctx.reply("🩺 Self-healing: ON");
-    logInfo(TAG, "Self-healer ON by user");
-    return true;
-  }
-  if (cmd === "off") {
-    if (ctx.selfHealerTask) ctx.selfHealerTask.enabled = false;
-    await ctx.reply("🩺 Self-healing: OFF");
-    logInfo(TAG, "Self-healer OFF by user");
+  // #1688 R1: no process-local on|off mutation — mode is configuration plus
+  // restart. Keep the bounded policy actions.
+  if (cmd === "on" || cmd === "off") {
+    await ctx.reply("🩺 Mode changes require configuration (`SELFHEAL_MODE=off|investigation|full`) plus restart. Status is read-only here.");
     return true;
   }
   if (cmd === "reset") {
-    const { resetAutofixState } = await import("../sha-tracker.js");
-    resetAutofixState();
-    await ctx.reply("🩺 Autofix state reset — all suppressed faults re-enabled.");
+    const { requireTaskDatabase } = await import("../tasks/kanban-board.js");
+    const { ShaIncidentStore } = await import("../sha/sha-incident-store.js");
+    const { loadMergedFixes } = await import("../sha/sha-policy.js");
+    const store = new ShaIncidentStore(requireTaskDatabase());
+    const removed = store.resetFaultState("autofix-known") + store.resetFaultState("autofix-unknown");
+    await ctx.reply(`🩺 Autofix state reset — ${removed} cooldown row(s) cleared. ${loadMergedFixes().length} fix rules remain.`);
     return true;
   }
   if (cmd === "list") {
-    const { loadFixes } = await import("../sha-tracker.js");
-    const { readFileSync } = await import("node:fs");
-    const { join } = await import("node:path");
-    const fixes = loadFixes();
+    const { loadMergedFixes } = await import("../sha/sha-policy.js");
+    const { requireTaskDatabase } = await import("../tasks/kanban-board.js");
+    const { ShaIncidentStore } = await import("../sha/sha-incident-store.js");
+    const fixes = loadMergedFixes();
+    const store = new ShaIncidentStore(requireTaskDatabase());
     if (fixes.length === 0) { await ctx.reply("🩺 No fix rules configured."); return true; }
-    let state: Record<string, { totalRuns?: number }> = {};
-    try { state = JSON.parse(readFileSync(join(process.env["ABTARS_HOME"] || join(process.env["HOME"] || "~", ".abtars"), "state", "sha-state.json"), "utf-8")); } catch { /* sha-state.json may be absent on first run or transiently corrupt; the listing falls back to zero runs */ }
     const lines = fixes.map(f => {
       const v = f.verified === false ? " ⚠️" : "";
       const src = f.createdAt ? "(self)" : "(core)";
-      const runs = state[`autofix-known:${f.pattern}`]?.totalRuns ?? 0;
-      const runsText = runs > 0 ? ` [${runs}x]` : "";
-      return `• "${f.pattern.slice(0, 20)}" → ${f.command?.[0] ?? "?"} ${src}${v}${runsText}`;
+      const hasVerifier = Array.isArray(f.verifyCommand) && f.verifyCommand.length > 0 ? " [verified]" : " [no verifier]";
+      const state = store.faultState("autofix-known", f.pattern);
+      const runs = state ? ` [${state.totalRuns}x]` : "";
+      return `• "${f.pattern.slice(0, 20)}" → ${f.command?.[0] ?? "?"} ${src}${v}${hasVerifier}${runs}`;
     });
     await ctx.reply(`🩺 Fix rules (${fixes.length}):\n${lines.join("\n")}`);
     return true;
@@ -199,7 +196,7 @@ export async function handleHealing(text: string, ctx: CommandContext): Promise<
   if (cmd === "approve") {
     const pattern = arg.slice(8).trim();
     if (!pattern) { await ctx.reply("Usage: /healing approve <pattern>"); return true; }
-    const { approveFix } = await import("../sha-tracker.js");
+    const { approveFix } = await import("../sha/sha-policy.js");
     const ok = approveFix(pattern);
     await ctx.reply(ok ? `✓ Approved: "${pattern}"` : `❌ Pattern not found in self-rules.`);
     return true;
@@ -207,15 +204,32 @@ export async function handleHealing(text: string, ctx: CommandContext): Promise<
   if (cmd === "disable") {
     const pattern = arg.slice(8).trim();
     if (!pattern) { await ctx.reply("Usage: /healing disable <pattern>"); return true; }
-    const { disableFix } = await import("../sha-tracker.js");
+    const { disableFix } = await import("../sha/sha-policy.js");
     const ok = disableFix(pattern);
     await ctx.reply(ok ? `✓ Disabled: "${pattern}"` : `❌ Pattern not found in self-rules.`);
     return true;
   }
 
-  // Default: show status
-  const status = ctx.selfHealerTask?.enabled ? "ON" : "OFF";
-  await ctx.reply(`🩺 Self-healing: ${status}\nCommands: /healing [on|off|list|reset|approve|disable]`);
+  // Default: read-only operational status (R9).
+  const { getEnv } = await import("../env-schema.js");
+  const { requireTaskDatabase } = await import("../tasks/kanban-board.js");
+  const { ShaIncidentStore } = await import("../sha/sha-incident-store.js");
+  const { isPolicyCorrupt } = await import("../sha/sha-policy.js");
+  const mode = getEnv().selfhealMode;
+  const store = new ShaIncidentStore(requireTaskDatabase());
+  const active = store.listNonTerminal();
+  const scanner = ctx.selfHealerTask ? "registered" : "not registered";
+  const lines = [
+    `🩺 Self-healing mode: ${mode}`,
+    `Log scanner: ${scanner} (mode must not be off)`,
+    `Policy: ${isPolicyCorrupt() ? "corrupt — log admission disabled" : "ok"}`,
+    `Active incidents: ${active.length}`,
+  ];
+  for (const incident of active.slice(0, 5)) {
+    lines.push(`  #${incident.id} ${incident.state} (${incident.mode}, ${incident.sourceScope.slice(0, 30)}, occ ${incident.occurrenceCount}${incident.rootCardId ? `, root #${incident.rootCardId}` : ""})`);
+  }
+  lines.push("Commands: /healing [list|reset|approve|disable] — mode changes need config + restart.");
+  await ctx.reply(lines.join("\n"));
   return true;
 }
 

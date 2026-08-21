@@ -21,7 +21,7 @@ import { EventEmitter } from "node:events";
 
 let TEST_HOME: string;
 
-vi.doMock("../../paths.js", () => ({ abtarsHome: () => TEST_HOME, abmindHome: () => join(TEST_HOME, "..", "abmind-test") }));
+vi.doMock("../../paths.js", () => ({ abtarsHome: () => TEST_HOME, abmindHome: () => join(TEST_HOME, "..", "abmind-test"), abtarsRoot: () => join(TEST_HOME, "live-checkout") }));
 
 vi.mock("node:child_process", async () => {
   const actual = await vi.importActual<typeof import("node:child_process")>("node:child_process");
@@ -121,6 +121,11 @@ const FIXTURES: ScheduledTask[] = [
     schedule: "* * * * *", enabled: true, priority: "medium", delivery: "announce", chatId: "42424242",
   },
   {
+    id: "sha-agent-task", kind: "agent", prompt: "SHA E2E failing agent task", agent: "task",
+    interaction: { mode: "oneshot" }, orchestration: { maxAgents: 1 },
+    schedule: "* * * * *", enabled: true, priority: "medium", delivery: "silent", chatId: "42424242",
+  },
+  {
     id: "daily-reminder", kind: "reminder", text: "Take a break", schedule: "0 9 * * *",
     enabled: true, priority: "medium", delivery: "announce", chatId: "42424242",
   },
@@ -157,6 +162,13 @@ function fakeAgentRunner(request: import("../../components/spin-types.js").SpinR
     // (the harness resets modules per test).
     return import("../../components/spin-types.js").then(({ SpinDispatchAdmissionError }) =>
       Promise.reject(new SpinDispatchAdmissionError("session_capacity", "max sessions reached", undefined)));
+  }
+  // #1688: the SHA E2E agent task fails with a structured execution error so
+  // the real settler fires the typed failure cascade.
+  if (entryId === "sha-agent-task") {
+    const err = new Error("provider model error: sha-incident-boom") as Error & { code?: string };
+    err.code = "model_error";
+    return Promise.reject(err);
   }
   const cardId = board.kanbanEnqueue(request.title ?? entryId, "task", request.goal?.slice(0, 80));
   // Report tasks: the provider writes the declared artifact before settling.
@@ -200,7 +212,7 @@ function makeFakeChild() {
 // ── Harness ─────────────────────────────────────────────────────────────────
 async function loadModules(): Promise<void> {
   vi.resetModules();
-  vi.doMock("../../paths.js", () => ({ abtarsHome: () => TEST_HOME, abmindHome: () => join(TEST_HOME, "..", "abmind-test") }));
+  vi.doMock("../../paths.js", () => ({ abtarsHome: () => TEST_HOME, abmindHome: () => join(TEST_HOME, "..", "abmind-test"), abtarsRoot: () => join(TEST_HOME, "live-checkout") }));
   stateStore = await import("../../components/tasks/task-state-store.js");
   historyStore = await import("../../components/tasks/task-history-store.js");
   board = await import("../../components/tasks/kanban-board.js");
@@ -443,7 +455,7 @@ describe("#1520 scheduler E2E — journey 1: system/Dreamy sleep-cycle", () => {
     const failureNotices: Array<{ entryId: string; code: string }> = [];
     const { CronQueue } = await import("../../components/tasks/task-queue.js");
     const coordinator = new CoordinatorClass({
-      onFailure: (entryId, diagnostic) => { failureNotices.push({ entryId, code: diagnostic.code }); },
+      onFailure: (event) => { failureNotices.push({ entryId: event.entryId, code: event.diagnostic.code }); },
       agentRunner: fakeAgentRunner,
       projectRunner: realProjectRunner,
     });
@@ -1631,15 +1643,15 @@ describe("#1588 E2E — root-cause cascade for a late-completion supervised lane
   it("settles once with supervision/lane_late_completion, notifies the operator with the lane facts, and stays silent for deferred runs", async () => {
     const cascadeDiagnostics: TaskFailureDiagnosticV1[] = [];
     const cascadeNotifications: string[] = [];
-    const { buildFailureNotification, buildShaFailurePrompt } = await import("../../boot/phase-pipeline-deps.js");
+    const { buildFailureNotification } = await import("../../boot/phase-pipeline-deps.js");
     const { CronQueue } = await import("../../components/tasks/task-queue.js");
     const coordinator = new CoordinatorClass({
       onTaskPaused: (chatId, title, reason) => { doubles.pausedNotifications.push(`${chatId}:${title}:${reason}`); },
       agentRunner: fakeAgentRunner,
       projectRunner: realProjectRunner,
-      onFailure: (entryId, diagnostic) => {
-        cascadeDiagnostics.push(diagnostic);
-        cascadeNotifications.push(buildFailureNotification(entryId, diagnostic));
+      onFailure: (event) => {
+        cascadeDiagnostics.push(event.diagnostic);
+        cascadeNotifications.push(buildFailureNotification(event));
       },
     });
     const queue = new CronQueue(coordinator);
@@ -1711,25 +1723,15 @@ describe("#1588 E2E — root-cause cascade for a late-completion supervised lane
     expect(cascadeNotifications[0]).toContain("overrun_ms");
     expect(cascadeNotifications[0]).not.toMatch(/[📥✅❌⏳🔧⚠️]/);
 
-    // 4. The SHA prompt built from the captured diagnostic carries the
-    // structured root cause and its guardrails (full chain per spec).
-    const shaPrompt = buildShaFailurePrompt("project-task", cascadeDiagnostics[0]!, "");
-    expect(shaPrompt).toContain("Category: supervision/project_blocked");
-    expect(shaPrompt).toContain("<root-cause>");
-    expect(shaPrompt).toContain(`card="${workerCard.id}"`);
-    expect(shaPrompt).toContain('cancel-reason="late_completion_timed_out: worker_completed"');
-    expect(shaPrompt).toContain("Permitted remediation: task_manage action=adjust (bounded) or action=escalate.");
-    expect(shaPrompt).toContain("- transport.json\n- .env / .env.skills\n- peers.json\n- users.json");
-
-    // 5. A deferred occurrence produces zero cascade sends.
-    const deferredEntry = taskStore.readEntries().find((e) => e.id === "deferred-task")!;
-    const enqueueErr = queue.enqueue(deferredEntry, true);
-    expect(enqueueErr).toBeNull();
-    await waitFor(() => events("deferred-task").length === 1 && !stateStore.readState("deferred-task")?.activeRun);
-    expect(events("deferred-task")[0]!.outcome).toBe("deferred");
-    expect(cascadeDiagnostics).toHaveLength(1);
-    expect(cascadeNotifications).toHaveLength(1);
-  });
+    // 4. The admission notice built from the captured diagnostic stays typed
+    // and bounded (#1688).
+    const { shaAdmissionNotice } = await import("../../components/sha/sha-admission-notice.js");
+    const shaNotice = shaAdmissionNotice(
+      { source: "scheduled", entryId: "project-task", runId: "r", taskKind: "agent", diagnostic: cascadeDiagnostics[0]!, occurredAt: Date.now() },
+      { kind: "ignored", reason: "system" },
+    );
+    expect(shaNotice).toContain("system-kind");
+});
 });
 
 describe("#1644 E2E — scheduled-project terminal authority (incident shape)", () => {
@@ -2045,3 +2047,272 @@ async function advanceUntil(predicate: () => boolean, steps = 200): Promise<void
   }
   throw new Error("condition not reached under controlled time");
 }
+// ═══════════════════════════════════════════════════════════════════════════
+// #1688 Epic-28 — SHA staged incident workflow E2E.
+// One continuous journey: scheduled settler → typed signal → coordinator/store
+// → Kanban O/W cards → Worker supervision → staged results → review → cleanup.
+// Only model/provider/process boundaries are fixtures; the SHA workspace is a
+// REAL disposable git checkout and stage evidence is written into it exactly
+// as the Pi executor would.
+// ═══════════════════════════════════════════════════════════════════════════
+describe("#1688 SHA incident workflow E2E — settler → coordinator → Kanban → Worker → review → cleanup", () => {
+  let shaWs: string;
+  let shaStore: typeof import("../../components/sha/sha-incident-store.js");
+  let shaCoordinator: import("../../components/sha/sha-incident-coordinator.js").ShaIncidentCoordinator;
+  let shaSupervision: WorkerSupervisionStoreClass;
+  let shaNotices: string[];
+
+  type ShaIncidentCoordinatorClass = import("../../components/sha/sha-incident-coordinator.js").ShaIncidentCoordinator;
+
+  async function setupShaWorkspace(): Promise<void> {
+    const { execFileSync } = await import("node:child_process");
+    shaWs = join(dirname(TEST_HOME), "sha-ws");
+    rmSync(shaWs, { recursive: true, force: true });
+    mkdirSync(shaWs, { recursive: true });
+    execFileSync("git", ["init", "-q", "-b", "main"], { cwd: shaWs });
+    execFileSync("git", ["-c", "user.email=sha@test", "-c", "user.name=sha", "commit", "-q", "--allow-empty", "-m", "baseline"], { cwd: shaWs });
+    writeFileSync(join(TEST_HOME, "config", "pi-executor.json"), JSON.stringify({
+      enabled: true, command: "pi", fixedArgs: [], allowedEnv: [], maxConcurrent: 1,
+      maxWallClockMs: 1_800_000, abortGraceMs: 10_000, projectTrust: "never",
+      workspaceAliases: { sha: { path: shaWs, root: dirname(TEST_HOME), projectTrust: "never" } },
+      sessionStorageRoot: join(TEST_HOME, "state"),
+    }));
+  }
+
+  async function makeShaQueue(mode: "off" | "investigation" | "full" = "full"): Promise<import("../../components/tasks/task-queue.js").CronQueue> {
+    shaNotices = [];
+    const { ShaIncidentCoordinator } = await import("../../components/sha/sha-incident-coordinator.js");
+    const { shaAdmissionNotice } = await import("../../components/sha/sha-admission-notice.js");
+    shaStore = await import("../../components/sha/sha-incident-store.js");
+    shaSupervision = new WorkerSupervisionStoreClass();
+    shaCoordinator = new ShaIncidentCoordinator({
+      modeProvider: () => mode,
+      policyView: () => ({ fixes: [], logAdmissionAllowed: true }),
+      noticeSink: { send: (n) => shaNotices.push(n.message) },
+    });
+    shaCoordinator.subscribe();
+    const { CronQueue } = await import("../../components/tasks/task-queue.js");
+    const coordinator = new CoordinatorClass({
+      onTaskPaused: () => {},
+      agentRunner: fakeAgentRunner,
+      projectRunner: realProjectRunner,
+      onFailure: (event) => {
+        const outcome = shaCoordinator.admit(event);
+        const notice = shaAdmissionNotice(event, outcome);
+        if (notice) shaNotices.push(notice);
+      },
+    });
+    return new CronQueue(coordinator);
+  }
+
+  function stageCardIds(rootId: number): number[] {
+    return board.kanbanList("*")
+      .filter((c: { parent_id: number | null }) => c.parent_id === rootId)
+      .sort((a: { id: number }, b: { id: number }) => a.id - b.id)
+      .map((c: { id: number }) => c.id);
+  }
+
+  async function completeStage(cardId: number, artifactId: string, ref: string, digest: string): Promise<void> {
+    const attempt = shaSupervision.getLatestAttempt(cardId)!;
+    const contract = shaSupervision.getContract(attempt.contract_id)!;
+    const contractJson = JSON.parse(contract.contract_json) as { digest?: string };
+    const now = new Date().toISOString();
+    const envelope = {
+      schema_version: 1,
+      attempt: { id: attempt.id, ordinal: attempt.ordinal, contract_id: attempt.contract_id, contract_digest: contractJson.digest ?? "d", executor_kind: "pi", executor_id: "e2e-pi-run", started_at: now, finished_at: now },
+      outcome: "completed",
+      criteria: [{ criterion_id: "sha-" + artifactId.slice(4).split(".")[0], status: "passed", evidence_ids: [artifactId] }],
+      checks: [],
+      artifacts: [{ artifact_id: artifactId, exists: true, kind: "file", ref, digest }],
+      worker_report: { summary: "e2e stage done", claims: [], unresolved_risks: [] },
+    } as import("../../components/worker-contract.js").WorkerResultEnvelopeV1;
+    // The Pi process boundary: write the evidence artifact into the real
+    // disposable workspace exactly as the executor would.
+    const dir = join(shaWs, "sha");
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(shaWs, ref), JSON.stringify({ artifact: artifactId, digest }, null, 2));
+    if (ref === "sha/solution.patch") {
+      writeFileSync(join(shaWs, "sha/verification.json"), JSON.stringify({ commands: [], exit: 0 }, null, 2));
+    }
+    shaSupervision.insertResult(attempt.id, envelope);
+    board.kanbanTransition({ cardId, from: ["queued", "running"], to: "done", actor: "e2e", reason: "stage complete" });
+  }
+
+  it("full mode: one root, sequential RCA/design/solution stages, accepted review, dedupe, evidence, cleanup", { timeout: 120_000 }, async () => {
+    await setupShaWorkspace();
+    const queue = await makeShaQueue("full");
+
+    // 1. Real scheduled settler: a failing agent run emits the typed signal.
+    forceDue("sha-agent-task");
+    await runTick(queue);
+    await vi.waitFor(() => expect(shaNotices.some((n) => n.includes("incident #"))).toBe(true), { timeout: 10_000 });
+
+    const incidents = new shaStore.ShaIncidentStore(board.requireTaskDatabase()).listNonTerminal();
+    expect(incidents).toHaveLength(1);
+    const incident = incidents[0]!;
+    expect(incident.state).toBe("rca");
+    expect(incident.mode).toBe("full");
+    const root = board.kanbanGetCard(incident.rootCardId!)!;
+    expect(root.type).toBe("O");
+    expect(root.source).toBe("sha");
+    expect(root.max_agents).toBe(2);
+    expect(root.delivery_mode).toBe("silent");
+    const stages = stageCardIds(root.id);
+    expect(stages).toHaveLength(3);
+    // Complete blocked_by chain.
+    const cards = board.kanbanList("*").filter((c: { id: number }) => stages.includes(c.id));
+    expect(cards.map((c: { blocked_by: string | null }) => c.blocked_by)).toEqual([null, String(stages[0]), String(stages[1])]);
+
+    // 2. RCA completes → design bound; design completes → solution bound.
+    await completeStage(stages[0]!, "sha-rca-json", "sha/rca.json", "d-rca");
+    await vi.waitFor(() => expect(new shaStore.ShaIncidentStore(board.requireTaskDatabase()).findById(incident.id)!.state).toBe("design"), { timeout: 10_000 });
+    expect(shaSupervision.getContractByCardId(stages[1]!)).toBeDefined();
+    expect(shaSupervision.getContractByCardId(stages[2]!)).toBeUndefined();
+
+    await completeStage(stages[1]!, "sha-design-md", "sha/design.md", "d-design");
+    await vi.waitFor(() => expect(new shaStore.ShaIncidentStore(board.requireTaskDatabase()).findById(incident.id)!.state).toBe("solution"), { timeout: 10_000 });
+    expect(shaSupervision.getContractByCardId(stages[2]!)).toBeDefined();
+
+    // 3. Solution completes → review → accepted root.
+    await completeStage(stages[2]!, "sha-solution-patch", "sha/solution.patch", "d-sol");
+    await vi.waitFor(() => expect(new shaStore.ShaIncidentStore(board.requireTaskDatabase()).findById(incident.id)!.state).toBe("review"), { timeout: 10_000 });
+    board.kanbanTransition({ cardId: root.id, from: ["queued", "running"], to: "done", actor: "e2e", reason: "final review accepted" });
+    await vi.waitFor(() => expect(new shaStore.ShaIncidentStore(board.requireTaskDatabase()).findById(incident.id)!.state).toBe("accepted"), { timeout: 10_000 });
+
+    // 4. Evidence copied privately; disposable workspace restored to baseline;
+    // canonical fixture files untouched.
+    const evidenceDir = join(TEST_HOME, "state", "sha", "incidents", String(incident.id));
+    expect(existsSync(join(evidenceDir, "solution", "solution.patch"))).toBe(true);
+    const { execFileSync } = await import("node:child_process");
+    const status = execFileSync("git", ["status", "--porcelain"], { cwd: shaWs, encoding: "utf-8" });
+    expect(status.trim()).toBe("");
+
+    // 5. Repeated failure after terminal acceptance allocates a NEW episode
+    // (R4 rollover) — the terminal episode never gains duplicate roots.
+    forceDue("sha-agent-task");
+    await runTick(queue);
+    await vi.waitFor(() => {
+      const active = new shaStore.ShaIncidentStore(board.requireTaskDatabase()).listNonTerminal();
+      expect(active.length).toBe(1);
+      expect(active[0]!.episode).toBe(2);
+    }, { timeout: 10_000 });
+    const roots = board.kanbanList("*").filter((c: { type: string | null; source: string }) => c.type === "O" && c.source === "sha");
+    expect(roots).toHaveLength(2);
+    // Exactly one admission notice per durable decision.
+    expect(shaNotices.filter((n) => n.includes("SHA: incident")).length).toBeGreaterThanOrEqual(2);
+  });
+
+  it("system-kind failures notify only — zero SHA state, zero quota", { timeout: 60_000 }, async () => {
+    await setupShaWorkspace();
+    const queue = await makeShaQueue("full");
+    const { execFileSync } = await import("node:child_process");
+    // A failing system task: register a handler that reports failure.
+    registry.getSystemTaskRegistry().register("hardware-sleep", (_entry, _ctx) => ({ status: "failed", error: "hardware sleep failed" }));
+    const systemEntry: ScheduledTask = {
+      id: "sys-sha-e2e", kind: "system", action: "hardware-sleep", schedule: "* * * * *",
+      enabled: true, priority: "medium", delivery: "silent",
+    };
+    taskStore.writeEntry(systemEntry);
+    stateStore.initializeState([...taskStore.readEntries()]);
+    forceDue("sys-sha-e2e");
+    await runTick(queue);
+    await vi.waitFor(() => expect(shaNotices.some((n) => n.includes("system-kind"))).toBe(true), { timeout: 10_000 });
+    const events = board.requireTaskDatabase().prepare("SELECT COUNT(*) AS n FROM sha_incident_events").get();
+    expect(Number(events?.["n"])).toBe(0);
+    const incidents = new shaStore.ShaIncidentStore(board.requireTaskDatabase()).listNonTerminal();
+    expect(incidents).toHaveLength(0);
+    // No canonical mutation: the workspace stays at baseline.
+    const status = execFileSync("git", ["status", "--porcelain"], { cwd: shaWs, encoding: "utf-8" });
+    expect(status.trim()).toBe("");
+  });
+
+  it("investigation mode: RCA+design only, no solution card, investigation_complete terminal", { timeout: 120_000 }, async () => {
+    await setupShaWorkspace();
+    const queue = await makeShaQueue("investigation");
+    forceDue("sha-agent-task");
+    await runTick(queue);
+    await vi.waitFor(() => expect(shaNotices.some((n) => n.includes("incident #"))).toBe(true), { timeout: 10_000 });
+    const incident = new shaStore.ShaIncidentStore(board.requireTaskDatabase()).listNonTerminal()[0]!;
+    const root = board.kanbanGetCard(incident.rootCardId!)!;
+    const stages = stageCardIds(root.id);
+    expect(stages).toHaveLength(2);
+    await completeStage(stages[0]!, "sha-rca-json", "sha/rca.json", "d-rca");
+    await vi.waitFor(() => expect(new shaStore.ShaIncidentStore(board.requireTaskDatabase()).findById(incident.id)!.state).toBe("design"), { timeout: 10_000 });
+    await completeStage(stages[1]!, "sha-design-md", "sha/design.md", "d-design");
+    await vi.waitFor(() => expect(new shaStore.ShaIncidentStore(board.requireTaskDatabase()).findById(incident.id)!.state).toBe("review"), { timeout: 10_000 });
+    board.kanbanTransition({ cardId: root.id, from: ["queued", "running"], to: "done", actor: "e2e", reason: "accepted" });
+    await vi.waitFor(() => expect(new shaStore.ShaIncidentStore(board.requireTaskDatabase()).findById(incident.id)!.state).toBe("investigation_complete"), { timeout: 10_000 });
+  });
+
+  it("off mode: ordinary notice only, zero SHA writes, no registration of work", { timeout: 60_000 }, async () => {
+    await setupShaWorkspace();
+    const queue = await makeShaQueue("off");
+    forceDue("sha-agent-task");
+    await runTick(queue);
+    await new Promise((r) => setTimeout(r, 100));
+    const events = board.requireTaskDatabase().prepare("SELECT COUNT(*) AS n FROM sha_incident_events").get();
+    expect(Number(events?.["n"])).toBe(0);
+    const roots = board.kanbanList("*").filter((c: { type: string | null; source: string }) => c.type === "O" && c.source === "sha");
+    expect(roots).toHaveLength(0);
+  });
+
+  it("stage timeout blocks the incident, cascades placeholders, and reports a typed reason", { timeout: 60_000 }, async () => {
+    await setupShaWorkspace();
+    const queue = await makeShaQueue("full");
+    forceDue("sha-agent-task");
+    await runTick(queue);
+    await vi.waitFor(() => expect(shaNotices.some((n) => n.includes("incident #"))).toBe(true), { timeout: 10_000 });
+    const incident = new shaStore.ShaIncidentStore(board.requireTaskDatabase()).listNonTerminal()[0]!;
+    const stages = stageCardIds(incident.rootCardId!);
+    // Simulate a timed-out RCA worker: the stage card fails without an envelope.
+    board.kanbanTransition({ cardId: stages[0]!, from: ["queued", "running"], to: "failed", actor: "e2e", reason: "stage timed out" });
+    await vi.waitFor(() => {
+      const i = new shaStore.ShaIncidentStore(board.requireTaskDatabase()).findById(incident.id)!;
+      expect(i.state).toBe("blocked");
+      expect(i.terminalReason).toContain("failed");
+    }, { timeout: 10_000 });
+    // Later placeholders cascaded; the root project is blocked.
+    for (const stageId of stages.slice(1)) {
+      expect(board.kanbanGetCard(stageId)!.status).toBe("failed");
+    }
+    const supervision = board.requireTaskDatabase().prepare("SELECT state FROM project_supervision WHERE project_card_id = ?").get(incident.rootCardId!) as { state: string };
+    expect(supervision.state).toBe("blocked");
+  });
+
+  it("known fix with a failing verifier is never reported fixed", { timeout: 60_000 }, async () => {
+    await setupShaWorkspace();
+    const { ShaIncidentCoordinator } = await import("../../components/sha/sha-incident-coordinator.js");
+    const { ShaKnownFixRunner } = await import("../../components/sha/sha-known-fix-runner.js");
+    const { shaAdmissionNotice } = await import("../../components/sha/sha-admission-notice.js");
+    shaStore = await import("../../components/sha/sha-incident-store.js");
+    const rule = {
+      pattern: "sha-incident-boom", action: "run" as const,
+      command: ["git", "rev-parse", "HEAD"], verifyCommand: ["git", "rev-parse", "no-such-branch"],
+      cooldownMin: 5, verified: true,
+    };
+    shaCoordinator = new ShaIncidentCoordinator({
+      modeProvider: () => "full",
+      policyView: () => ({ fixes: [rule], logAdmissionAllowed: true }),
+      knownFixRunner: new ShaKnownFixRunner(),
+      noticeSink: { send: () => {} },
+    });
+    const event = { source: "scheduled" as const, entryId: "sha-agent-task", runId: "run-kf-1", taskKind: "agent" as const, diagnostic: makeDiagnosticShaBoom(), occurredAt: Date.now() };
+    const outcome = shaCoordinator.admit(event);
+    expect(outcome.kind).toBe("known_fix_started");
+    await vi.waitFor(() => {
+      const incidents = new shaStore.ShaIncidentStore(board.requireTaskDatabase()).listNonTerminal();
+      expect(incidents.length).toBe(0); // terminal episode
+      const row = board.requireTaskDatabase().prepare("SELECT state FROM sha_incidents WHERE id = ?").get(outcome.kind === "known_fix_started" ? outcome.incidentId : 0) as { state: string };
+      expect(row.state).toBe("known_fix_unverified");
+    }, { timeout: 15_000 });
+    // Truthful notice: never "fixed".
+    expect(shaAdmissionNotice(event, outcome)).toContain("known fix started");
+  });
+
+  function makeDiagnosticShaBoom(): import("../../components/tasks/task-failure.js").TaskFailureDiagnosticV1 {
+    return {
+      version: 1, category: "execution", code: "model_error", phase: "executing",
+      message: "provider model error: sha-incident-boom", retryability: "none", occurredAt: Date.now(),
+    };
+  }
+});

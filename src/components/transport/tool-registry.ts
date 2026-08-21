@@ -13,7 +13,8 @@ import { checkTool, checkPath, auditDeny, type SandboxPolicy } from "../tool-san
 import { getMasterUserId } from "../master-user.js";
 import { isDefinitivePreDispatchFailure } from "../memory-runtime.js";
 import type { ToolExecutionScope } from "../tasks/task-package.js";
-import type { OrcInvocationContextV1 } from "../orc-project/orc-project-contracts.js";
+import type { OrcInvocationContextV2 } from "../orc-project/orc-project-contracts.js";
+import { orcToolAllowedOnIntent } from "../orc-project/orc-intent-policy.js";
 import { checkCommand, classifyCommand } from "../guardrails.js";
 import { SealedSecretHandles as staticSealedHandles } from "../sealed-secret-handles.js";
 
@@ -31,7 +32,7 @@ export interface ToolExecutionContext {
   userId: string;
   signal?: AbortSignal;
   executionScope?: ToolExecutionScope;
-  orcContext?: OrcInvocationContextV1;
+  orcContext?: OrcInvocationContextV2;
   /** #1552: trusted session type (from Spin); missing/invalid fails closed for memory_store. */
   sessionType?: import("../spin-types.js").SessionType;
   /** #1552: late-bound memory-tool dependencies (runtime + quota). */
@@ -42,6 +43,10 @@ export interface ToolExecutionContext {
   authorizationMode?: import("../action-gate.js").ToolAuthorizationMode;
   /** #1660: active execution id — sealed handles bind to it and expire with it. */
   executionId?: string;
+  /** #1680: host-owned one-shot turn control for the bound Orc turn. A tool
+   *  whose durable intent postcondition is satisfied requests completion
+   *  through this control; the transport stops the turn when it wins. */
+  orcTurnControl?: import("../orc-project/orc-project-contracts.js").OrcTurnControl;
 }
 
 export type ToolDefinition = {
@@ -57,6 +62,10 @@ export type ToolDefinition = {
 
 export interface ToolAvailabilityContext {
   readonly authorizationMode?: import("../action-gate.js").ToolAuthorizationMode;
+  /** #1680: the bound Orc invocation context. When present, the central intent
+   *  policy decides the allowed tool surface at both schema presentation and
+   *  execution time; a missing intent kind fails closed. */
+  readonly orcContext?: OrcInvocationContextV2;
 }
 
 /**
@@ -64,6 +73,11 @@ export interface ToolAvailabilityContext {
  * plus trusted execution context. Both schema presentation
  * (createPiAgentTools) and the execution boundary (executeToolCall) consume
  * this function — never duplicate the conditional in two modules.
+ *
+ * #1680: for a project-bound Orc turn the central intent policy is
+ * authoritative — the allowed tool surface is the policy's set, and a forged,
+ * stale, or intent-less context fails closed. For operator turns the full
+ * operator surface remains available.
  *
  * The decision is provider-neutral and derived only from trusted host context;
  * model arguments, prompt text, agent names, and provider candidates cannot
@@ -78,6 +92,21 @@ export function checkToolAvailability(toolName: string, context: ToolAvailabilit
       allowed: false,
       reason: "Tool 'send_document' is unavailable during unattended or unverified scheduled execution; delivery is owned by scheduled settlement",
     };
+  }
+  const bound = context.orcContext;
+  if (bound) {
+    if (!bound.intentKind) {
+      return {
+        allowed: false,
+        reason: "Orc invocation context carries no intent kind — project-bound tool calls fail closed",
+      };
+    }
+    if (!orcToolAllowedOnIntent(toolName, bound.intentKind)) {
+      return {
+        allowed: false,
+        reason: `Tool '${toolName}' is outside the ${bound.intentKind} intent surface`,
+      };
+    }
   }
   return { allowed: true };
 }

@@ -380,7 +380,7 @@ describe("settleExpiredRun failure cascade (#1588)", () => {
 
     const calls: string[] = [];
     dueSources.settleExpiredRun(entry, stateStore.readState(entry.id)!.activeRun!,
-      "deadline passed", "abort", (_entryId, diagnostic) => calls.push(diagnostic.code));
+      "deadline passed", "abort", (event) => calls.push(event.diagnostic.code));
     expect(calls).toEqual(["deadline_exceeded"]);
     expect(stateStore.readState(entry.id)!.activeRun).toBeUndefined();
 

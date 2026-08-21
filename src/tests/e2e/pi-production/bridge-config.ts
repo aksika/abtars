@@ -304,7 +304,7 @@ function buildBridgeEnv(
   env.ENABLE_ASYNC_DELEGATION = "true";
   env.SECURITY_MODE = "off";
   env.TRUST_MODE = "true";
-  env.SELFHEAL_ENABLED = "false";
+  env.SELFHEAL_MODE = "off";
   env.SUPERVISION = "pi-e2e";
   env.MAX_AGENT_CALL_PER_HOUR = "10000";
   env.MAX_AGENT_CALL_PER_DAY = "100000";

@@ -1,6 +1,7 @@
 import { getEnv } from "../components/env-schema.js";
 import { logAndSwallow } from "../components/log-and-swallow.js";
 import { createSelfHealerTask } from "../components/self-healer.js";
+import { shaAdmissionNotice } from "../components/sha/sha-admission-notice.js";
 import { createUserSessionExpiryTask } from "../components/heartbeat-tasks.js";
 import { createHousekeepingTask } from "../components/heartbeat-housekeeping.js";
 import { logInfo } from "../components/logger.js";
@@ -270,8 +271,19 @@ export async function registerTier3Tasks(ctx: BootCtx): Promise<void> {
   }
 
   let selfHealerTask: ReturnType<typeof createSelfHealerTask> | null = null;
-  if (getEnv().selfhealEnabled) {
-    selfHealerTask = createSelfHealerTask(() => ctx.telegramAdapter, config.telegram.allowedUserIds);
+  // #1688 (approved predicate change, 2026-08-21): register the log scanner
+  // only when mode is not off. No other heartbeat behavior changed. The task
+  // emits typed LogFailureEvents into the SHA coordinator; it owns no agent
+  // state, clone, or dispatch.
+  if (getEnv().selfhealMode !== "off") {
+    selfHealerTask = createSelfHealerTask((event) => {
+      if (!ctx.shaCoordinator) return;
+      const outcome = ctx.shaCoordinator.admit(event);
+      const notice = shaAdmissionNotice(event, outcome);
+      if (notice && ctx.telegramAdapter) {
+        ctx.telegramAdapter.sendNotification(String(getEnv().mainChatId), notice);
+      }
+    });
     heartbeat.registerTask(selfHealerTask);
   }
   ctx.selfHealerTask = selfHealerTask;

@@ -8,6 +8,7 @@ import type { TaskFailureDiagnosticV1 } from "./task-failure.js";
 import type { ScheduledTask } from "./task-types.js";
 import type { ActiveTaskRun, DeferredAdmission, RunTerminalRequest, TaskRunPhase, TaskRuntimeState } from "./task-state-store.js";
 import type { TaskOutcome } from "./task-history-store.js";
+import type { ScheduledFailureEvent } from "../sha/sha-types.js";
 
 const TAG = "task-run-settler";
 const RETRY_DELAY_MS = 10 * 60 * 1000;
@@ -61,11 +62,14 @@ export interface SettleOptions {
   /** Pause notification, emitted once per false→true transition. */
   onPaused?: (entryId: string, diagnostic: TaskFailureDiagnosticV1, notice: PauseNotice) => void;
   /**
-   * #1588: failure cascade, fired exactly once per settled failed/timed_out
+   * #1588/#1688: failure cascade, fired exactly once per settled failed/timed_out
    * run — after the append-once write and the cleared reservation check, so
-   * duplicate and late settlements never re-report.
+   * duplicate and late settlements never re-report. The event carries the
+   * complete typed payload: task identity, run identity, `TaskKind`, the
+   * optional card, and the structured diagnostic. No downstream layer
+   * reconstructs `TaskKind` or run identity from text.
    */
-  onFailure?: (entryId: string, diagnostic: TaskFailureDiagnosticV1) => void;
+  onFailure?: (event: ScheduledFailureEvent) => void;
   /**
    * #1539: the terminal fact's own occurrence time — card updated_at /
    * acceptance decision time, process exit time, or provider completion time.
@@ -237,12 +241,22 @@ export function settleRunOnce(opts: SettleOptions): SettleResult {
     });
   }
 
-  // #1588: exactly-once failure cascade. Fired only after both guards above —
-  // a duplicate settlement (append-once miss) and a late settlement (reservation
-  // lost) return before reaching here, so a settled run reports at most once.
-  // deferred and cancelled are deliberate non-failures and stay quiet.
+  // #1588/#1688: exactly-once failure cascade. Fired only after both guards
+  // above — a duplicate settlement (append-once miss) and a late settlement
+  // (reservation lost) return before reaching here, so a settled run reports
+  // at most once. deferred and cancelled are deliberate non-failures and stay
+  // quiet. The typed event keeps `TaskKind` and run identity intact for SHA
+  // classification downstream.
   if (effectiveOutcome === "failed" || effectiveOutcome === "timed_out") {
-    opts.onFailure?.(entry.id, diagnostic);
+    opts.onFailure?.({
+      source: "scheduled",
+      entryId: entry.id,
+      runId: run.runId,
+      taskKind: entry.kind,
+      cardId,
+      diagnostic,
+      occurredAt: finishedAt,
+    });
   }
 
   logInfo(TAG, `Run "${entry.id}" settled as ${effectiveOutcome}${nowPaused ? " (auto-paused)" : ""}`);

@@ -21,7 +21,8 @@ import { CronQueue } from "../components/tasks/task-queue.js";
 import { IdleSave } from "../components/idle-save.js";
 import { logInfo, logWarn } from "../components/logger.js";
 import { formatTaskLabel } from "../components/tasks/task-types.js";
-import { formatTaskFailureDetail, formatTaskFailureRootCause } from "../components/tasks/task-failure.js";
+import { formatTaskFailureDetail } from "../components/tasks/task-failure.js";
+import type { ScheduledFailureEvent } from "../components/sha/sha-types.js";
 import type { TaskFailureDiagnosticV1 } from "../components/tasks/task-failure.js";
 import { loadTransport, resolveAgent } from "../components/transport-config.js";
 import { updateCtxStart } from "./ctx-start.js";
@@ -39,7 +40,8 @@ export function skipSelfHealForDiagnostic(diagnostic: TaskFailureDiagnosticV1): 
 }
 
 /** #1588: operator failure notification — category/code + lane breakdown. */
-export function buildFailureNotification(entryId: string, diagnostic: TaskFailureDiagnosticV1): string {
+export function buildFailureNotification(event: ScheduledFailureEvent): string {
+  const { entryId, diagnostic } = event;
   // #1297: credit exhaustion is actionable, not self-healable — the operator
   // notification carries the remediation ask.
   const base = `[warn] ${formatTaskLabel(entryId)} failed - ${diagnostic.category}/${diagnostic.code}\n${formatTaskFailureDetail(diagnostic)}`;
@@ -47,11 +49,6 @@ export function buildFailureNotification(entryId: string, diagnostic: TaskFailur
     return `${base}\nRequires human intervention: restore provider credits, then run /models reset.`;
   }
   return base;
-}
-
-/** #1588: self-healer prompt — structured root cause, bounded remediation, FORBIDDEN block. */
-export function buildShaFailurePrompt(entryId: string, diagnostic: TaskFailureDiagnosticV1, pending: string): string {
-  return `[System] You ARE the self-healing agent. A scheduled task failed.\nTask: "${entryId}"   Category: ${diagnostic.category}/${diagnostic.code}${pending}\n\n${formatTaskFailureRootCause(diagnostic)}\n\nPermitted remediation: task_manage action=adjust (bounded) or action=escalate.\n\nDiagnose the root cause. If an autonomous adjust within the permitted fields fixes it, apply it. If the fix requires human action (manual browser login, external service down, fresh auth cookie), escalate with a concrete ask: "Requires human intervention: <reason>". Do NOT create a skill or suggest adding error handling (you ARE the error handling). Be concise.\n\nFORBIDDEN: Do NOT modify vital config files unless the bridge is in a crash loop or cannot boot:\n- transport.json\n- .env / .env.skills\n- peers.json\n- users.json\nException: fixing JSON structural corruption (invalid syntax, parse errors) is always allowed.\n\nA single task failure is NOT grounds for config changes. Investigate root cause, report findings.`;
 }
 
 export async function phasePipelineDeps(ctx: BootCtx): Promise<PhaseResult> {
@@ -84,67 +81,37 @@ export async function phasePipelineDeps(ctx: BootCtx): Promise<PhaseResult> {
   const wakeScheduler = new LifecycleWakeScheduler();
   const { ScheduledRunCoordinator, wireCardProgressProjection } = await import("../components/tasks/scheduled-run-coordinator.js");
 
-  let shaState: "idle" | "running" | "cooldown" = "idle";
-  const shaPending: string[] = [];
-  const shaDailyCounts = new Map<string, { date: string; count: number }>();
-  // #1588: the exactly-once failure cascade. Fires once per settled
-  // failed/timed_out run for every task kind, delivering the structured
-  // diagnostic to the operator and, when enabled, to the self-healer.
-  const onFailure = (entryId: string, diagnostic: TaskFailureDiagnosticV1): void => {
-    const label = formatTaskLabel(entryId);
+  // #1688: the SHA coordinator owns admission, classification, and the
+  // durable incident lifecycle. This phase wires it and the operator notice
+  // sink; it no longer owns SHA state or dispatches S sessions.
+  const { ShaIncidentCoordinator } = await import("../components/sha/sha-incident-coordinator.js");
+  const { shaAdmissionNotice } = await import("../components/sha/sha-admission-notice.js");
+  const shaCoordinator = new ShaIncidentCoordinator({
+    modeProvider: () => getEnv().selfhealMode,
+    noticeSink: {
+      send: (notice) => {
+        if (ctx.telegramAdapter) {
+          ctx.telegramAdapter.sendNotification(String(getEnv().mainChatId), `[warn] ${notice.message}`);
+        }
+      },
+    },
+  });
+  ctx.shaCoordinator = shaCoordinator;
+  ctx._shaStageSubscriberDisposer = shaCoordinator.subscribe();
+
+  // #1588/#1688: the exactly-once failure cascade. Fires once per settled
+  // failed/timed_out run, delivering the structured diagnostic to the
+  // operator; SHA admission runs through the coordinator and emits exactly
+  // one bounded outcome line after the durable decision.
+  const onFailure = (event: ScheduledFailureEvent): void => {
     if (ctx.telegramAdapter) {
-      ctx.telegramAdapter.sendNotification(String(getEnv().mainChatId), buildFailureNotification(entryId, diagnostic));
+      ctx.telegramAdapter.sendNotification(String(getEnv().mainChatId), buildFailureNotification(event));
     }
-    // #1297: credit exhaustion cannot be self-healed by any code change. The
-    // one actionable operator notification above is sent, then this guard
-    // returns BEFORE any SHA state read/write — daily-attempt accounting,
-    // cooldown/pending handling, the self-healer notification, and the S
-    // session spin. A skipped credit failure must not consume SHA quota.
-    if (skipSelfHealForDiagnostic(diagnostic)) {
-      logInfo("main", `Skip self-heal for "${entryId}" — credits_exhausted requires human intervention`);
-      return;
+    const outcome = shaCoordinator.admit(event);
+    const notice = shaAdmissionNotice(event, outcome);
+    if (notice && ctx.telegramAdapter) {
+      ctx.telegramAdapter.sendNotification(String(getEnv().mainChatId), notice);
     }
-    // Three-state SHA guard (#719). The operator notification above is still
-    // emitted for every settled failure; this guard only serializes SHA work.
-    if (shaState === "running") return;
-    if (!getEnv().selfhealEnabled) return;
-    // Per-day 2-attempt throttle, moved from the coordinator's tryInjectFailure.
-    const today = new Date().toISOString().slice(0, 10);
-    const fc = shaDailyCounts.get(entryId);
-    if (fc && fc.date === today && fc.count >= 2) {
-      logInfo("main", `Skip self-heal for "${entryId}" — already 2 attempts today`);
-      return;
-    }
-    shaDailyCounts.set(entryId, { date: today, count: (fc?.date === today ? fc.count : 0) + 1 });
-    if (shaState === "cooldown") {
-      shaPending.push(entryId);
-      return;
-    }
-    // SHA idle → fire
-    shaState = "running";
-    const pending = shaPending.length > 0 ? `\nAlso failed recently: ${shaPending.join(", ")}` : "";
-    shaPending.length = 0;
-    if (ctx.telegramAdapter) {
-      ctx.telegramAdapter.sendNotification(String(getEnv().mainChatId), `[warn] Calling self-healer, reason: "${label}" failed`);
-    }
-    const msg = buildShaFailurePrompt(entryId, diagnostic, pending);
-    void (async () => {
-      try {
-        // #1271: SHA goes through the unified spin() chokepoint (S profile =
-        // coding agent, call-terminate — session is created and deleted).
-        await ctx.sessionManager.spin({
-          type: "S",
-          prompt: msg,
-          settlementOwner: "spin",
-          await: true,
-        });
-      } catch (err) {
-        logWarn("main", `SHA session failed: ${err}`);
-      } finally {
-        shaState = "cooldown";
-        setTimeout(() => { shaState = "idle"; }, 60_000);
-      }
-    })();
   };
   const onTaskPaused = (chatId: number, _title: string, _reason: string, notice: import("../components/tasks/task-run-settler.js").PauseNotice): void => {
     if (!ctx.telegramAdapter) return;

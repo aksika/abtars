@@ -395,14 +395,14 @@ describe("settleRunOnce failure cascade (#1588)", () => {
 
   it("fires exactly once for a failed run — the headline agent-task defect", () => {
     const run = reserve("cascade-fail");
-    const calls: Array<[string, string]> = [];
+    const calls: Array<[string, string, string]> = [];
     const settled = settle.settleRunOnce({
       entry: ENTRY, run, outcome: "failed",
       diagnostic: failure.makeTaskFailure("execution", "model_error", "executing", "boom", "none"),
-      onFailure: (entryId, diagnostic) => calls.push([entryId, diagnostic.code]),
+      onFailure: (event) => calls.push([event.entryId, event.diagnostic.code, event.taskKind]),
     });
     expect(settled).toBe("settled");
-    expect(calls).toEqual([["finance-daily", "model_error"]]);
+    expect(calls).toEqual([["finance-daily", "model_error", "script"]]);
   });
 
   it("duplicate and late settlements add zero further invocations", () => {
@@ -411,7 +411,7 @@ describe("settleRunOnce failure cascade (#1588)", () => {
     const opts = {
       entry: ENTRY, run, outcome: "failed",
       diagnostic: failure.makeTaskFailure("execution", "model_error", "executing", "boom", "none"),
-      onFailure: (entryId: string, diagnostic: TaskFailureDiagnosticV1) => calls.push([entryId, diagnostic.code]),
+      onFailure: (event: import("../sha/sha-types.js").ScheduledFailureEvent) => calls.push([event.entryId, event.diagnostic.code]),
     };
     expect(settle.settleRunOnce(opts)).toBe("settled");
     expect(settle.settleRunOnce(opts)).toBe("duplicate");
@@ -429,13 +429,13 @@ describe("settleRunOnce failure cascade (#1588)", () => {
     settle.settleRunOnce({
       entry: ENTRY, run: runDeferred, outcome: "deferred",
       diagnostic: failure.makeTaskFailure("admission", "executor_unavailable", "queued", "busy", "transient"),
-      onFailure: (_entryId, diagnostic) => calls.push(diagnostic.code),
+      onFailure: (event) => calls.push(event.diagnostic.code),
     });
     const runCancelled = reserve("cascade-cancelled");
     settle.settleRunOnce({
       entry: ENTRY, run: runCancelled, outcome: "cancelled",
       diagnostic: failure.makeTaskFailure("interruption", "cancelled", "cancelling", "operator", "none"),
-      onFailure: (_entryId, diagnostic) => calls.push(diagnostic.code),
+      onFailure: (event) => calls.push(event.diagnostic.code),
     });
     expect(calls).toEqual([]);
   });
@@ -446,7 +446,7 @@ describe("settleRunOnce failure cascade (#1588)", () => {
     settle.settleRunOnce({
       entry: ENTRY, run, outcome: "timed_out",
       diagnostic: failure.makeTaskFailure("supervision", "lane_timed_out", "executing", "deadline", "none"),
-      onFailure: (_entryId, diagnostic) => calls.push(diagnostic.category + "/" + diagnostic.code),
+      onFailure: (event) => calls.push(event.diagnostic.category + "/" + event.diagnostic.code),
     });
     expect(calls).toEqual(["supervision/lane_timed_out"]);
   });

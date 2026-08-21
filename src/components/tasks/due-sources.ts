@@ -11,7 +11,6 @@ import { readEntries as dbReadEntries } from "./task-store.js";
 import { getRun } from "./task-history-store.js";
 import { settleRunFromHistory, settleRunOnce } from "./task-run-settler.js";
 import { makeTaskFailure } from "./task-failure.js";
-import type { TaskFailureDiagnosticV1 } from "./task-failure.js";
 import { kanbanDueRetryItems, kanbanGetCard, type KanbanCard } from "./kanban-board.js";
 import { abortProjectById } from "../reconciler.js";
 import { ProjectReviewStore } from "../project-acceptance/project-review-store.js";
@@ -46,7 +45,7 @@ export function settleExpiredRun(
   run: NonNullable<ReturnType<typeof readState>>["activeRun"],
   detail: string,
   abortReason: string,
-  onFailure?: (entryId: string, diagnostic: TaskFailureDiagnosticV1) => void,
+  onFailure?: (event: import("../sha/sha-types.js").ScheduledFailureEvent) => void,
 ): void {
   if (!run) return;
   settleRunOnce({

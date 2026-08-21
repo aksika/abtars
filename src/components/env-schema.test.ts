@@ -6,7 +6,7 @@ describe("env-schema", () => {
 
   beforeEach(() => {
     _resetEnv();
-    for (const k of ["SELFHEAL_ENABLED", "CTX_WARN_PCT", "ACTIVE_MEMORY"]) {
+    for (const k of ["SELFHEAL_MODE", "CTX_WARN_PCT", "ACTIVE_MEMORY"]) {
       saved[k] = process.env[k];
       delete process.env[k];
     }
@@ -22,10 +22,21 @@ describe("env-schema", () => {
 
   it("returns frozen config with defaults", () => {
     const env = initEnv();
-    expect(env.selfhealEnabled).toBe(false);
+    expect(env.selfhealMode).toBe("off");
     expect(env.ctxWarnPct).toBe(70);
     expect(env.activeMemory).toBe(true);
     expect(Object.isFrozen(env)).toBe(true);
+  });
+
+  it("parses SELFHEAL_MODE values and fails closed on invalid", () => {
+    process.env["SELFHEAL_MODE"] = "investigation";
+    expect(initEnv().selfhealMode).toBe("investigation");
+    _resetEnv();
+    process.env["SELFHEAL_MODE"] = "full";
+    expect(initEnv().selfhealMode).toBe("full");
+    _resetEnv();
+    process.env["SELFHEAL_MODE"] = "banana";
+    expect(initEnv().selfhealMode).toBe("off");
   });
 
   it("getEnv auto-initializes on first call", () => {

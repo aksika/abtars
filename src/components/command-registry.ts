@@ -460,13 +460,13 @@ export const COMMAND_DEFINITIONS: readonly CommandDefinition[] = [
     help: ["/short — Clean responses (default)"],
   },
   {
-    name: "healing", match: "/healing", description: "Toggle self-healer on/off",
+    name: "healing", match: "/healing", description: "Self-healing status (read-only)",
     handler: handleHealing, kind: "exact", visibility: "public", access: "master",
     platforms: ["telegram"],
-    help: ["/healing — Toggle self-healer on/off"],
+    help: ["/healing — Self-healing mode, policy and active incidents (read-only)"],
   },
   {
-    name: "healing", match: "/healing ", description: "Healing subcommands",
+    name: "healing", match: "/healing ", description: "Healing subcommands (list|reset|approve|disable)",
     handler: handleHealing, kind: "prefix", visibility: "internal", access: "master",
     platforms: ["telegram"],
   },

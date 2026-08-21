@@ -1,19 +1,27 @@
 import { OrcProjectRunStore } from "./orc-project-run-store.js";
 import type {
-  OrcInvocationContextV1,
+  OrcInvocationContextV2,
   OrcOriginKind,
   OrcRunClaimResult,
   OrcClaimInput,
   OrcOwnershipReleasedV1,
+  OrcTurnSpec,
+  OrcTurnControl,
+  OrcTurnTerminal,
+  OrcRunFailureCode,
 } from "./orc-project-contracts.js";
 import { readBridgeLockField } from "../transport/bridge-lock-transport.js";
 import { logInfo, logWarn } from "../logger.js";
 import { logAndSwallow } from "../log-and-swallow.js";
+import { intentPolicyFor, readOrcProjectSnapshot } from "./orc-intent-policy.js";
 
 const TAG = "orc-coordinator";
 
+/** #1680: the start port receives one typed turn specification — immutable
+ *  intent, policy-derived prompt bound, and the host-owned one-shot turn
+ *  control. Callers cannot pass an independently selected intent or bound. */
 export interface OrcStartPort {
-  (context: OrcInvocationContextV1, goal: string): Promise<void>;
+  (spec: OrcTurnSpec): Promise<void>;
 }
 
 /** #1618: durable root identity — card source plus the authenticated source peer. */
@@ -79,11 +87,12 @@ export class OrcProjectCoordinator {
     runId: string,
     how: "release" | "supersede",
     outcome: import("./orc-project-contracts.js").OrcRunOutcome,
-    context?: OrcInvocationContextV1,
+    context?: OrcInvocationContextV2,
+    failureCode?: OrcRunFailureCode,
   ): boolean {
     const row = this.store.getRun(runId); // read BEFORE the CAS
     const applied = how === "release"
-      ? this.store.release(context!, outcome)
+      ? this.store.release(context!, outcome, failureCode)
       : this.store.supersede(runId, outcome);
     if (!applied || !row) return applied;
     this.publishOwnershipReleased({
@@ -98,8 +107,8 @@ export class OrcProjectCoordinator {
   }
 
   /** #1628: public release entry point — publishes the ownership-released event. */
-  releaseOwnedRun(context: OrcInvocationContextV1, outcome: import("./orc-project-contracts.js").OrcRunOutcome): boolean {
-    return this.relinquish(context.runId, "release", outcome, context);
+  releaseOwnedRun(context: OrcInvocationContextV2, outcome: import("./orc-project-contracts.js").OrcRunOutcome, failureCode?: OrcRunFailureCode): boolean {
+    return this.relinquish(context.runId, "release", outcome, context, failureCode);
   }
 
   /**
@@ -130,17 +139,19 @@ export class OrcProjectCoordinator {
   }
 
   /**
-   * #1516: Goal-bearing contract-authoring start for supervised projects.
-   * Keeps the `contract_authoring` intent kind (and its derived intent key) so
-   * the Reconciler's generic re-schedule is idempotent against this claim.
-   * The first claimant's goal wins the start port.
+   * #1680: Post-contract Orc planning/synthesis for supervised projects.
+   * Persists the truthful `project_execution` intent (distinct from
+   * `contract_authoring`) and its derived `execute:<project>:<generation>`
+   * key. Valid only after a contract exists; the Reconciler's owner
+   * precedence decides whether this claim is reached at all. The first
+   * claimant's goal wins the start port.
    */
-  scheduleScheduledProject(projectCardId: number, goal: string): OrcRunClaimResult {
+  scheduleProjectExecution(projectCardId: number, goal: string): OrcRunClaimResult {
     const origin = this.deriveOrigin(projectCardId);
     if (!origin) return { kind: "conflict" as const, reason: "origin_invalid" as const };
     return this.scheduleInternal({
       projectCardId,
-      intentKind: "contract_authoring",
+      intentKind: "project_execution",
       originKind: origin.originKind,
       cardSource: this.getRootIdentity(projectCardId).source,
       sourcePeer: origin.originPeer,
@@ -217,13 +228,17 @@ export class OrcProjectCoordinator {
       if (this.store.promoteRun(runId)) {
         const promoted = this.store.getRun(runId);
         if (promoted && promoted.state === "dispatching") {
-          this.startPort(buildContextForRun(promoted), promoted.goal).catch((err) => {
+          // #1680: the turn spec is composed only from the persisted run row
+          // and its central intent policy — never from the caller's goal or an
+          // independently selected intent/bound.
+          this.startPort(buildTurnSpec(this.store, promoted)).catch((err) => {
             logWarn(TAG, `Orc start port failed for run ${runId}: ${err instanceof Error ? err.message : String(err)}`);
-            // #1628: through the funnel so the ownership-released event wakes
-            // the project — the release is the recovery signal, not the
-            // scheduler's next opportunistic scan. With pump() gone there is
-            // no second promotion attempt here.
-            this.releaseOwnedRun(buildContextForRun(promoted), "failed");
+            // #1628/#1680: through the funnel so the ownership-released event
+            // wakes the project and the failed run persists the stable
+            // `start_port_rejected` code — the release is the recovery signal,
+            // not the scheduler's next opportunistic scan. With pump() gone
+            // there is no second promotion attempt here.
+            this.releaseOwnedRun(buildContextForRun(promoted), "failed", "start_port_rejected");
           });
         }
       }
@@ -309,7 +324,7 @@ export type OrcReleaseFailure =
 
 export function classifyFailedRelease(
   store: OrcProjectRunStore,
-  context: OrcInvocationContextV1,
+  context: OrcInvocationContextV2,
 ): OrcReleaseFailure {
   const row = store.getRun(context.runId);
   if (!row) return { kind: "run_unknown" as const };
@@ -336,11 +351,13 @@ function defaultRootIdentity(projectCardId: number): OrcRootIdentity {
   }
 }
 
-function buildContextForRun(run: import("./orc-project-contracts.js").OrcProjectRunRow): OrcInvocationContextV1 {
+function buildContextForRun(run: import("./orc-project-contracts.js").OrcProjectRunRow): OrcInvocationContextV2 {
   return {
-    version: 1,
+    version: 2,
     runId: run.id,
     intentKey: run.intent_key,
+    intentKind: run.intent_kind,
+    intentRef: run.intent_ref ?? undefined,
     projectCardId: run.project_card_id,
     projectGeneration: run.project_generation,
     ownershipGeneration: run.ownership_generation,
@@ -352,5 +369,60 @@ function buildContextForRun(run: import("./orc-project-contracts.js").OrcProject
     },
     sessionId: run.session_id ?? undefined,
     executionId: run.execution_id ?? undefined,
+  };
+}
+
+/**
+ * #1680: compose the one typed turn specification from the persisted promoted
+ * run row and its central intent policy. `maxPromptRounds` and the allowed
+ * tool surface come from the policy; the turn control re-verifies the durable
+ * intent postcondition before it can win.
+ */
+function buildTurnSpec(
+  store: OrcProjectRunStore,
+  run: import("./orc-project-contracts.js").OrcProjectRunRow,
+): OrcTurnSpec {
+  const policy = intentPolicyFor(run.intent_kind);
+  const context = buildContextForRun(run);
+  return {
+    context,
+    goal: run.goal,
+    maxPromptRounds: policy.maxPromptRounds,
+    turnControl: createOrcTurnControl(run.id, (terminal) => {
+      // #1680: `intent_satisfied` is accepted only after re-reading the durable
+      // postcondition under the exact bound run — a tool result string is never
+      // proof. Read failures fail closed to unsatisfied.
+      if (terminal.kind !== "intent_satisfied") return true;
+      try {
+        const completion = policy.completion(readOrcProjectSnapshot(store.db, run.project_card_id));
+        return completion.satisfied;
+      } catch {
+        return false;
+      }
+    }),
+  };
+}
+
+/**
+ * #1680: host-owned one-shot turn control. The first `complete()` call wins;
+ * an `intent_satisfied` terminal is accepted only when the supplied durable
+ * verification succeeds. Completion is a host fact distinct from cancellation:
+ * late tool/model events after completion are rejected by the run CAS and the
+ * Spin execution generation.
+ */
+export function createOrcTurnControl(
+  runId: string,
+  verify: (terminal: OrcTurnTerminal) => boolean,
+): OrcTurnControl {
+  let completed: OrcTurnTerminal | null = null;
+  return {
+    runId,
+    get completed(): OrcTurnTerminal | null { return completed; },
+    complete(terminal: OrcTurnTerminal): boolean {
+      if (completed !== null) return false;
+      if (!verify(terminal)) return false;
+      completed = terminal;
+      return true;
+    },
   };
 }

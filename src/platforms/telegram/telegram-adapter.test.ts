@@ -191,7 +191,7 @@ describe("TelegramAdapter", () => {
     const names = payload.map(c => c.command);
     expect(new Set(names).size).toBe(names.length);
     expect(payload).toContainEqual({ command: "full", description: "Raw output, TTS disabled" });
-    expect(payload).toContainEqual({ command: "healing", description: "Toggle self-healer on/off" });
+    expect(payload).toContainEqual({ command: "healing", description: "Self-healing status (read-only)" });
     expect(payload.find(c => c.command === "pi")).toBeUndefined();
   });
 

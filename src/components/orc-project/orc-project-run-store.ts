@@ -5,7 +5,8 @@ import type {
   OrcRunClaimResult,
   OrcClaimInput,
   OrcContextValidation,
-  OrcInvocationContextV1,
+  OrcInvocationContextV2,
+  OrcRunFailureCode,
 } from "./orc-project-contracts.js";
 import { deriveIntentKey } from "./orc-project-contracts.js";
 
@@ -25,7 +26,7 @@ interface OrcOwnerFenceFacts {
 
 function evaluateOwnerFence(
   row: OrcProjectRunRow,
-  context: OrcInvocationContextV1,
+  context: OrcInvocationContextV2,
 ): OrcOwnerFenceFacts {
   return {
     ownerInstanceMatches: row.owner_instance_id === context.ownerInstanceId,
@@ -52,7 +53,8 @@ export class OrcProjectRunStore {
         intent_key            TEXT NOT NULL,
         intent_kind           TEXT NOT NULL
                                 CHECK(intent_kind IN
-                                  ('contract_authoring','project_review',
+                                  ('contract_authoring','project_execution',
+                                   'project_review',
                                    'repair_review','input_resume','operator_turn')),
         intent_ref            TEXT,
         /* #1675: the run row owns its goal — written once by the first
@@ -99,6 +101,64 @@ export class OrcProjectRunStore {
         next_generation       INTEGER NOT NULL
       );
     `);
+    this.migrateIntentCheck();
+  }
+
+  /**
+   * #1680: narrow preserving migration that admits the `project_execution`
+   * intent. SQLite cannot alter a CHECK constraint, so an old table is rebuilt
+   * in one `BEGIN IMMEDIATE` transaction: every column is copied explicitly,
+   * the table is replaced, and both live-run partial uniqueness indexes are
+   * recreated. Any copy/index failure rolls the whole rebuild back. Historical
+   * rows keep their historically truthful intent values — nothing is rewritten.
+   * Rerunning is idempotent: a table whose CHECK already admits the value is
+   * left untouched.
+   */
+  private migrateIntentCheck(): void {
+    const raw = this.db.prepare(`
+      SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'orc_project_runs'
+    `).get() as { sql: string } | undefined;
+    if (!raw || raw.sql.includes("'project_execution'")) return;
+
+    this.db.transaction(() => {
+      const replacement = raw.sql.replace(
+        "('contract_authoring','project_review',",
+        "('contract_authoring','project_execution','project_review',",
+      );
+      if (!replacement.includes("'project_execution'")) {
+        throw new Error("orc_project_runs intent CHECK migration: replacement failed");
+      }
+      this.db.exec(`
+        DROP TABLE IF EXISTS orc_project_runs_new;
+        ${replacement.replace("CREATE TABLE", "CREATE TABLE orc_project_runs_new", 1)}
+      `);
+      // Explicit-column copy: every column of the old table, preserving all
+      // rows (historical terminal rows and live runs included).
+      this.db.exec(`
+        INSERT INTO orc_project_runs_new
+          (id, intent_key, intent_kind, intent_ref, goal, project_card_id,
+           project_generation, ownership_generation, global_slot, owner_peer,
+           owner_instance_id, origin_kind, origin_peer, session_id, execution_id,
+           state, outcome, failure_code, created_at, started_at, released_at,
+           updated_at)
+        SELECT id, intent_key, intent_kind, intent_ref, goal, project_card_id,
+               project_generation, ownership_generation, global_slot, owner_peer,
+               owner_instance_id, origin_kind, origin_peer, session_id, execution_id,
+               state, outcome, failure_code, created_at, started_at, released_at,
+               updated_at
+          FROM orc_project_runs;
+      `);
+      this.db.exec(`
+        DROP TABLE orc_project_runs;
+        ALTER TABLE orc_project_runs_new RENAME TO orc_project_runs;
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_one_live_orc_run_per_project
+          ON orc_project_runs(project_card_id)
+          WHERE state IN ('scheduled','dispatching','running');
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_one_global_orc_turn
+          ON orc_project_runs(global_slot)
+          WHERE state IN ('dispatching','running');
+      `);
+    })();
   }
 
   claimIntent(input: OrcClaimInput, ownerPeer: string, ownerInstanceId: string): OrcRunClaimResult {
@@ -205,7 +265,7 @@ export class OrcProjectRunStore {
     });
   }
 
-  bindExecution(context: OrcInvocationContextV1, sessionId: string, executionId: string): OrcContextValidation {
+  bindExecution(context: OrcInvocationContextV2, sessionId: string, executionId: string): OrcContextValidation {
     return this.db.transaction(() => {
       const row = this.db.prepare(`SELECT * FROM orc_project_runs WHERE id = ?`).get(context.runId) as unknown as OrcProjectRunRow | undefined;
       if (!row) return { ok: false as const, reason: "run_unknown" as const };
@@ -239,7 +299,7 @@ export class OrcProjectRunStore {
     });
   }
 
-  validateCurrentContext(context: OrcInvocationContextV1, knownRow?: OrcProjectRunRow): OrcContextValidation {
+  validateCurrentContext(context: OrcInvocationContextV2, knownRow?: OrcProjectRunRow): OrcContextValidation {
     // #1671: a failed-release classifier may already have read this exact row;
     // reuse it so diagnostics stay bounded to one run-row read.
     const row = knownRow ?? this.db.prepare(`SELECT * FROM orc_project_runs WHERE id = ?`).get(context.runId) as unknown as OrcProjectRunRow | undefined;
@@ -285,18 +345,30 @@ export class OrcProjectRunStore {
    * `bindExecution`/`validateCurrentContext`/`withCurrentRun`, which gate
    * mutation of live project state and are unchanged.
    */
-  release(context: OrcInvocationContextV1, outcome: OrcRunOutcome): boolean {
+  /**
+   * #1680: one terminal record — outcome and the stable bounded failure code
+   * are written in the same owner-fenced CAS. Success writes `failure_code =
+   * NULL`; a failed run must persist one of the stable codes or the caller
+   * passes `provider_failure`.
+   */
+  release(context: OrcInvocationContextV2, outcome: OrcRunOutcome, failureCode?: OrcRunFailureCode | null): boolean {
     return this.db.transaction(() => {
       const now = new Date().toISOString();
+      // #1680: success leaves `failure_code = NULL`; every non-success release
+      // persists one stable bounded code, defaulting to `provider_failure`
+      // when the caller cannot state a more specific reason. A cancelled turn
+      // persists `turn_cancelled` via its outcome/`cancelled` terminal, never
+      // a bare NULL.
+      const code = outcome === "completed" ? null : (failureCode ?? "provider_failure");
       const result = this.db.prepare(`
         UPDATE orc_project_runs
-        SET state = 'released', outcome = ?, released_at = ?, updated_at = ?
+        SET state = 'released', outcome = ?, failure_code = ?, released_at = ?, updated_at = ?
         WHERE id = ? AND ownership_generation = ? AND owner_instance_id = ?
           AND project_card_id = ? AND project_generation = ?
           AND state IN ('scheduled','dispatching','running')
           AND (session_id IS NULL OR session_id = ?)
           AND (execution_id IS NULL OR execution_id = ?)
-      `).run(outcome, now, now, context.runId, context.ownershipGeneration, context.ownerInstanceId,
+      `).run(outcome, code, now, now, context.runId, context.ownershipGeneration, context.ownerInstanceId,
         context.projectCardId, context.projectGeneration, context.sessionId ?? null, context.executionId ?? null);
       return result.changes > 0;
     });
@@ -408,7 +480,7 @@ export class OrcProjectRunStore {
     return sup !== undefined && sup.generation === row.project_generation;
   }
 
-  withCurrentRun<T>(context: OrcInvocationContextV1, fn: (row: OrcProjectRunRow) => T): { ok: true; value: T } | { ok: false; reason: string } {
+  withCurrentRun<T>(context: OrcInvocationContextV2, fn: (row: OrcProjectRunRow) => T): { ok: true; value: T } | { ok: false; reason: string } {
     const validation = this.validateCurrentContext(context);
     if (!validation.ok) return { ok: false as const, reason: validation.reason };
     return this.db.transaction(() => {
@@ -445,11 +517,13 @@ export class OrcProjectRunStore {
   }
 }
 
-function buildContextFromRow(row: OrcProjectRunRow): OrcInvocationContextV1 {
+function buildContextFromRow(row: OrcProjectRunRow): OrcInvocationContextV2 {
   return {
-    version: 1,
+    version: 2,
     runId: row.id,
     intentKey: row.intent_key,
+    intentKind: row.intent_kind,
+    intentRef: row.intent_ref ?? undefined,
     projectCardId: row.project_card_id,
     projectGeneration: row.project_generation,
     ownershipGeneration: row.ownership_generation,

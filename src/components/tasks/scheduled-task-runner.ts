@@ -34,7 +34,8 @@ export interface ScheduledTaskRunOutcome {
 
 export type AgentTaskRunner = (request: import("../spin-types.js").SpinRequest) => Promise<{ cardId: number; result: string; outcome: import("../clean-response.js").ContentOutcome }>;
 export type TaskPausedCallback = (chatId: number, title: string, reason: string, notice: import("./task-run-settler.js").PauseNotice) => void;
-export type TaskFailureCallback = (entryId: string, diagnostic: TaskFailureDiagnosticV1) => void;
+/** #1688: the failure cascade carries one typed `ScheduledFailureEvent`. */
+export type TaskFailureCallback = (event: import("../sha/sha-types.js").ScheduledFailureEvent) => void;
 export type { ScheduledProjectRequest, ScheduledProjectRunner } from "./scheduled-project-runner.js";
 
 /** #1540: the production supervisor is the facade's own instance — never a second registry. */

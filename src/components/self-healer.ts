@@ -1,17 +1,17 @@
-import { readFileSync, appendFileSync, mkdirSync, existsSync, statSync, openSync, readSync, closeSync } from "node:fs";
-import { join } from "node:path";
-import { spawn, execSync } from "node:child_process";
-import { logInfo, logDebug } from "./logger.js";
+/**
+ * self-healer.ts — bounded log cursor/source adapter (#1688 Task 8).
+ *
+ * The scanner keeps its cursor, rotation, truncation, partial-line, and
+ * bounded-read behavior, but no longer owns agent state, clones source trees,
+ * dispatches `H` sessions, or executes known commands. Every ERROR record is
+ * emitted as a typed `LogFailureEvent` through the injected source callback;
+ * classification, admission, and execution belong to the SHA coordinator.
+ */
+import { statSync, openSync, readSync, closeSync } from "node:fs";
 import { getLogFile } from "./logger.js";
-import { abtarsHome } from "../paths.js";
 import { logAndSwallow } from "./log-and-swallow.js";
-import { getEnv } from "./env-schema.js";
-import { localISO } from "../utils/local-time.js";
-import { loadFixes, shouldAttempt, recordResult } from "./sha-tracker.js";
-import { isWithinBootQuietWindow } from "./self-healer-utils.js";
-import type { FixRule } from "./sha-tracker.js";
 import type { HeartbeatTask, HeartbeatTaskOutcome } from "../types/index.js";
-import type { TelegramAdapter } from "../platforms/telegram/telegram-adapter.js";
+import type { LogFailureEvent } from "./sha/sha-types.js";
 
 const TAG = "self-healer";
 const MAX_READ_BYTES = 1_048_576;
@@ -23,53 +23,21 @@ type LogCursor = {
   partial: string;
 };
 
-function logShaCall(errorKey: string, errorLine: string): void {
-  const logPath = join(abtarsHome(), "logs", "sha-call.log");
-  const entry = JSON.stringify({ ts: localISO(), errorKey, errorLine: errorLine.slice(0, 300) });
-  try { appendFileSync(logPath, entry + "\n"); } catch (err) { logAndSwallow(TAG, "append sha-call log", err); }
-}
+export type LogSourceCallback = (event: LogFailureEvent) => void;
 
-function logAutoFix(message: string): void {
-  const dir = join(abtarsHome(), "logs");
-  try { mkdirSync(dir, { recursive: true }); } catch (err) { logAndSwallow(TAG, "op", err); }
-  const date = new Date().toISOString().slice(0, 10);
-  appendFileSync(join(dir, `autofix-${date}.log`), `${localISO()} ${message}\n`);
-}
-
-function notify(adapter: TelegramAdapter, chatId: string, msg: string): void {
-  try { adapter.sendNotification(chatId, msg); } catch (err) { logAndSwallow(TAG, "send self-heal notification", err, "warn"); }
-}
-
-export function createSelfHealerTask(
-  getTelegramAdapter: () => TelegramAdapter | null,
-  allowedUserIds: Set<number>,
-): HeartbeatTask & { enabled: boolean } {
-  let enabled = getEnv().selfhealEnabled;
-  let agentRunning = false;
-  const dryRun = process.env["SELFHEAL_DRY_RUN"] === "true";
+export function createSelfHealerTask(onSignal: LogSourceCallback): HeartbeatTask {
   let logCursor: LogCursor | null = null;
 
-  const task: HeartbeatTask & { enabled: boolean } = {
+  const task: HeartbeatTask = {
     name: "self-healer",
-    get enabled() { return enabled; },
-    set enabled(v: boolean) { enabled = v; },
     execute: async (): Promise<HeartbeatTaskOutcome> => {
-      if (!enabled) return { state: "idle" };
       const logFile = getLogFile();
-
       try {
-        const fixes = loadFixes();
-        const adapter = getTelegramAdapter();
-        const chatId = String([...allowedUserIds][0] ?? "");
-        if (!adapter || !chatId) return { state: "idle" };
-
         const content = readIncremental(logFile);
         if (!content) return { state: "idle" };
 
         const lines = content.split("\n");
         let evaluatedCount = 0;
-
-        if (!logCursor?.partial && lines.length === 0) return { state: "idle" };
 
         for (let i = 0; i < lines.length; i++) {
           const line = lines[i]!;
@@ -80,23 +48,18 @@ export function createSelfHealerTask(
           if (!match) continue;
           evaluatedCount++;
 
-          const stableMsg = match[2]!.slice(0, 80)
-            .replace(/\b[0-9a-f]{8,}\b/gi, "X")
-            .replace(/\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}[:\d.]*/g, "T")
-            .replace(/\b\d{4,}\b/g, "N")
-            .replace(/\s+/g, " ").trim();
-          const errorKey = `${match[1]}:${stableMsg}`;
-
-          const rule = fixes.find(f => line.includes(f.pattern));
-          if (rule) {
-            handleKnownFault(rule, errorKey, adapter, chatId, dryRun);
-            continue;
-          }
-
-          if (!agentRunning) {
-            handleUnknownFault(line, errorKey, adapter, chatId, () => { agentRunning = false; });
-            if (!agentRunning) agentRunning = true;
-          }
+          const raw = match[2]!;
+          onSignal({
+            source: "log",
+            component: "abtars",
+            tag: match[1]!,
+            logPath: logFile,
+            inode: logCursor?.inode ?? -1,
+            lineOffset: (logCursor?.offset ?? 0) - raw.length - 1,
+            normalizedMessage: raw.slice(0, 512),
+            occurredAt: Date.now(),
+            evidence: raw.slice(0, 2048),
+          });
         }
 
         return evaluatedCount > 0
@@ -104,7 +67,7 @@ export function createSelfHealerTask(
           : { state: "idle" };
       } catch (err) {
         logAndSwallow(TAG, "op", err);
-        throw err;
+        return { state: "idle" };
       }
     },
   };
@@ -159,92 +122,8 @@ export function createSelfHealerTask(
   return task;
 }
 
-function handleKnownFault(rule: FixRule, _errorKey: string, adapter: TelegramAdapter, chatId: string, dryRun: boolean): void {
-  if (!shouldAttempt("autofix-known", rule.pattern)) return;
-
-  if (rule.action === "suppress") {
-    logDebug(TAG, `Suppressed: "${rule.pattern}"`);
-    return;
-  }
-
-  if (!rule.command?.length) return;
-
-  if (dryRun) {
-    logInfo(TAG, `[DRY-RUN] Would run: ${rule.command.join(" ")}`);
-    return;
-  }
-
-  logInfo(TAG, `Wired fix: ${rule.command.join(" ")} (pattern: "${rule.pattern}")`);
-  logAutoFix(`WIRED START: ${rule.pattern} → ${rule.command.join(" ")}`);
-
-  const child = spawn(rule.command[0]!, rule.command.slice(1), { stdio: "ignore" });
-  child.on("exit", (code) => {
-    const ok = code === 0;
-    recordResult("autofix-known", rule.pattern, ok, ok ? undefined : `exit ${code}`);
-    logAutoFix(`WIRED ${ok ? "OK" : "FAIL"}: ${rule.pattern} (exit ${code})`);
-
-    if (!ok) {
-      if (!shouldAttempt("autofix-known", rule.pattern)) {
-        notify(adapter, chatId, `⚠️ Wired fix failed 3x for "${rule.pattern}" — suppressed 24h. Manual intervention needed.`);
-      }
-    } else if (rule.verified === false) {
-      notify(adapter, chatId, `🔧 Self-fix ran: "${rule.pattern}" → ${(rule.command ?? []).join(" ")} ✓\nRun /healing approve ${rule.pattern.slice(0, 20)} to silence.`);
-    }
-  });
-}
-
-function handleUnknownFault(errorLine: string, errorKey: string, adapter: TelegramAdapter, chatId: string, onDone: () => void): void {
-  if (!shouldAttempt("autofix-unknown", errorKey)) return;
-
-  const hour = new Date().getHours();
-  if (hour < 7) { logDebug(TAG, `Skipping SHA dispatch — night hours (${hour}:xx)`); return; }
-  try {
-    const lock = JSON.parse(readFileSync(join(abtarsHome(), "bridge.lock"), "utf-8"));
-    if (isWithinBootQuietWindow(lock.startedAt, Date.now())) {
-      logDebug(TAG, "Skipping SHA dispatch — inside post-boot quiet window");
-      return;
-    }
-  } catch { /* unreadable lock: fall through and allow dispatch (fail open, as before) */ }
-
-  logInfo(TAG, `Unknown fault — dispatching agent: ${errorKey.slice(0, 60)}`);
-  logAutoFix(`AGENT START: ${errorKey}`);
-  logShaCall(errorKey, errorLine);
-
-  const srcDir = join(abtarsHome(), "src/abtars");
-  if (!existsSync(srcDir)) {
-    try {
-      mkdirSync(join(abtarsHome(), "src"), { recursive: true });
-      execSync(`git clone -b dev git@github.com:aksika/abtars.git "${srcDir}"`, { timeout: 60_000, stdio: "ignore" });
-    } catch (err) { logAndSwallow(TAG, "clone source tree for self-heal", err, "warn"); }
-  }
-
-  const prompt = `A runtime error occurred:\n"${errorLine.slice(0, 500)}"\n\nBefore investigating, check ~/.abtars/logs/sha-call.log for prior entries matching this error pattern.\nIf you find a PREVIOUS entry with a similar error pattern:\n  - This is a recurring fault you could not eliminate last time.\n  - Add a suppress rule to ~/.abtars/config/sha-policy-self.json (read existing file, append to fixes array):\n    {"pattern": "<plain substring from the error line>", "action": "suppress"}\n    Pattern is matched via substring (includes), NOT regex. Use a distinctive fragment.\n  - Report: "Recurring unfixable fault — suppressed."\n  - Do NOT attempt a fix.\n\nOtherwise, diagnose and fix it. After fixing:\n1. Report what you did (1 paragraph)\n2. If this error is likely to recur and you found a deterministic fix, write a wired rule to ~/.abtars/config/sha-policy-self.json:\n   {"pattern": "<substring>", "action": "run", "command": [...], "cooldownMin": 30}\n   Pattern is matched via substring (includes), NOT regex.\n   If the error was a one-off or no reliable automated fix exists, skip this step.\n\nIf you cannot find the root cause in the source code, tell the user:\n"This may be fixed in a newer version. Try /update to get the latest."
-Do NOT attempt to fix code you don't understand.`;
-
-  const timeout = setTimeout(() => { onDone(); }, 5 * 60_000);
-
-  (async () => {
-    try {
-      const { spin } = await import("./spin.js");
-      const { result, outcome } = await spin.dispatchAwait({ type: "H", goal: prompt, title: `SHA: ${errorKey.slice(0, 20)}`, source: "agent", settlementOwner: "spin" });
-      // #1651 v2: a healing attempt succeeds only for real text content. A
-      // fulfilled promise with no text (reaction/no-reply/empty) is not
-      // evidence of a fix — it routes through the existing failure path and
-      // never records AGENT OK.
-      if (outcome !== "text") {
-        throw new Error(`healer agent produced no text content (${outcome}) — not recorded as fixed`);
-      }
-      recordResult("autofix-unknown", errorKey, true);
-      logAutoFix(`AGENT OK: ${errorKey} → ${result.slice(0, 200)}`);
-      notify(adapter, chatId, `🧠 SHA agent fixed: ${errorKey.slice(0, 40)}\n${result.slice(0, 300)}`);
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      recordResult("autofix-unknown", errorKey, false, msg);
-      logAutoFix(`AGENT FAIL: ${errorKey} → ${msg}`);
-      notify(adapter, chatId, `⚠️ SHA agent failed: ${errorKey.slice(0, 40)}\n${msg.slice(0, 200)}`);
-    } finally {
-      clearTimeout(timeout);
-      onDone();
-    }
-  })();
+/** #1688 R3: recursion-tag suppression happens in the classifier; this helper
+ *  exists for tests asserting the source never emits for those tags. */
+export function isRecursionTag(tag: string): boolean {
+  return tag.includes("self-healer") || tag.includes("self_healer") || tag.includes("sha-") || tag.includes("watchdog");
 }

@@ -41,16 +41,22 @@ export async function phaseCapabilities(ctx: BootCtx): Promise<PhaseResult> {
     const individualCaps = [
       { name: "hotskills", load: () => import("../capabilities/hotskills/index.js") },
     ];
+    const missingDepCooldowns = new Map<string, number>();
     for (const { name, load } of individualCaps) {
       if (disabled.has(name)) continue;
       try {
-        const { shouldAttempt } = await import("../components/sha-tracker.js");
-        if (!shouldAttempt("missing-dep", name)) { logDebug("capabilities", `Skipped "${name}": SHA cooldown active`); continue; }
+        // #1688: sha-tracker is gone; a bounded in-memory cooldown covers the
+        // missing-dependency retry path for this boot fallback (never durable).
+        const last = missingDepCooldowns.get(name);
+        if (last !== undefined && Date.now() - last < 60_000) {
+          logDebug("capabilities", `Skipped "${name}": cooldown active`);
+          continue;
+        }
         const mod = await load();
         staticCaps.push({ name, module: mod });
+        missingDepCooldowns.delete(name);
       } catch (e) {
-        const { recordResult } = await import("../components/sha-tracker.js");
-        recordResult("missing-dep", name, false, e instanceof Error ? e.message : String(e));
+        missingDepCooldowns.set(name, Date.now());
         logWarn("capabilities", `Skipped "${name}": ${e instanceof Error ? e.message : String(e)}`);
       }
     }

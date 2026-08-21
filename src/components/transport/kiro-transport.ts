@@ -50,7 +50,15 @@ export interface PromptRequestContext {
   /** #1527: durable context provider for Pi-core's exclusive before-message projection. */
   contextProvider?: PiDurableContextProvider;
   /** #1480: Orc invocation context for durable project ownership fencing. */
-  orcContext?: import("../orc-project/orc-project-contracts.js").OrcInvocationContextV1;
+  orcContext?: import("../orc-project/orc-project-contracts.js").OrcInvocationContextV2;
+  /** #1680: host-owned one-shot turn control for the bound Orc turn. The Pi
+   *  transport stops the active turn when its durable intent completes; other
+   *  transports carry it unchanged so the same signal reaches every adapter. */
+  orcTurnControl?: import("../orc-project/orc-project-contracts.js").OrcTurnControl;
+  /** #1680: policy-derived prompt-round bound for the bound Orc turn. When
+   *  present it overrides transport defaults so contract authoring stays at
+   *  its narrow 3-round ceiling while execution turns keep the wide bound. */
+  maxPromptRounds?: number;
   /** #1629: trusted authorization mode derived by Spin from durable Kanban
    *  provenance. Optional so callers outside Spin fail closed at the
    *  ActionGate default; production Spin executions always set it. */

@@ -3,22 +3,8 @@ import { createSelfHealerTask } from "./self-healer.js";
 import { _resetEnv } from "./env-schema.js";
 import { BOOT_QUIET_MS, isWithinBootQuietWindow } from "./self-healer-utils.js";
 
-/*
- * TEST DEFICIENCY (2026-08-13):
- * Missing: handleUnknownFault's #1651 v2 text-only success gate — a non-text
- * dispatchAwait outcome routes through the failure path (recordResult false,
- * AGENT FAIL notification) instead of AGENT OK. The full path needs a live
- * bridge.lock, adapter notify stub, and a git-clone fallback harness.
- * Reason deferred: disproportionate harness (fs + git + adapter mocks) for a
- * 4-line guard whose policy shape is identical to the tested Agent API peer
- * gate (agent-api-adapter.test.ts) and scheduled announce gate
- * (scheduled-task-runner.test.ts).
- * Future verification: a component test mocking fs/git after the healer is
- * refactored to accept an injectable dispatch facade.
- */
-
 vi.mock("./logger.js", () => ({
-  logInfo: vi.fn(), logWarn: vi.fn(), logError: vi.fn(), logDebug: vi.fn(),
+  logInfo: vi.fn(), logWarn: vi.fn(), logError: vi.fn(), logDebug: vi.fn(), logTrace: vi.fn(),
   getLogFile: () => "/dev/null",
 }));
 
@@ -38,31 +24,23 @@ describe("isWithinBootQuietWindow (#1589)", () => {
   });
 });
 
-describe("createSelfHealerTask", () => {
+describe("createSelfHealerTask (#1688 log source)", () => {
   beforeEach(() => { _resetEnv(); });
 
-  it("creates task with correct name", () => {
-    const task = createSelfHealerTask(() => null, new Set());
+  it("creates a plain heartbeat task with no process-local enable setter", () => {
+    const task = createSelfHealerTask(vi.fn());
     expect(task.name).toBe("self-healer");
+    expect((task as { enabled?: unknown }).enabled).toBeUndefined();
   });
 
-  it("respects enabled toggle", () => {
-    const task = createSelfHealerTask(() => null, new Set());
-    expect(task.enabled).toBe(false); // default from env schema
-    task.enabled = true;
-    expect(task.enabled).toBe(true);
-  });
-
-  it("execute does nothing when disabled", async () => {
-    const task = createSelfHealerTask(() => null, new Set());
-    task.enabled = false;
+  it("execute runs without error on an empty log", async () => {
+    const task = createSelfHealerTask(vi.fn());
     await task.execute(); // should not throw
   });
 
-  it("execute runs without error when enabled with empty log", async () => {
-    const task = createSelfHealerTask(() => null, new Set());
-    task.enabled = true;
-    // /dev/null is empty — should complete without errors
-    await task.execute();
+  it("never throws on unreadable log state", async () => {
+    const task = createSelfHealerTask(vi.fn());
+    const result = await task.execute();
+    expect(["idle", "ran"]).toContain(result.state);
   });
 });

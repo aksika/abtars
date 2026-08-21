@@ -13,6 +13,8 @@
  */
 
 import { logInfo, logWarn } from "./logger.js";
+import { parseSelfHealMode } from "./sha/sha-types.js";
+import type { SelfHealMode } from "./sha/sha-types.js";
 
 // ── Schema definition ───────────────────────────────────────────────────────
 
@@ -101,8 +103,8 @@ const SCHEMA: readonly EnvVarDef[] = [
   { env: "TTS_ENABLED", type: "bool", default: "true", description: "Enable text-to-speech voice replies" },
   { env: "TTS_VOICE", type: "string", default: "alloy", description: "TTS voice name" },
 
-  // ── Self-healer ──
-  { env: "SELFHEAL_ENABLED", type: "bool", default: "false", description: "Enable self-healer task" },
+  // ── Self-healer (#1688) ──
+  { env: "SELFHEAL_MODE", type: "string", default: "off", description: "Self-healing mode: off | investigation | full" },
 
   // ── Browser ──
   { env: "BROWSING_AGENT", type: "string", description: "Model override for browsing agent" },
@@ -204,8 +206,8 @@ export interface EnvConfig {
   ttsEnabled: boolean;
   ttsVoice: string;
 
-  // Self-healer
-  selfhealEnabled: boolean;
+  // Self-healer (#1688)
+  selfhealMode: SelfHealMode;
 
   // Browser
   browsingAgent: string | undefined;
@@ -357,7 +359,12 @@ export function initEnv(): Readonly<EnvConfig> {
     ttsEnabled: parseBool(readOr("TTS_ENABLED", "false")),
     ttsVoice: readOr("TTS_VOICE", "alloy"),
 
-    selfhealEnabled: parseBool(readOr("SELFHEAL_ENABLED", "false")),
+    selfhealMode: (() => {
+      const rawMode = read("SELFHEAL_MODE");
+      const parsedMode = parseSelfHealMode(rawMode);
+      if (parsedMode.warned) warnings.push(`Invalid SELFHEAL_MODE "${rawMode}" — behaving as "off"`);
+      return parsedMode.mode;
+    })(),
 
     browsingAgent: read("BROWSING_AGENT"),
 

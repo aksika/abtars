@@ -90,16 +90,21 @@ export async function phaseReconciler(ctx: BootCtx): Promise<PhaseResult> {
     // never in agent-api, request paths, or the scheduled-project runner.
     const coordinator = new OrcProjectCoordinator({
       ownerPeer: peerName,
-      startPort: async (context, goal) => {
+      // #1680: the start port receives the typed turn specification — the
+      // immutable intent context, the policy-derived prompt bound, and the
+      // host-owned one-shot turn control travel together into Spin.
+      startPort: async (spec) => {
         await spin.spin({
           type: "O",
-          goal,
-          sessionId: context.sessionId,
-          cardId: context.projectCardId,
+          goal: spec.goal,
+          sessionId: spec.context.sessionId,
+          cardId: spec.context.projectCardId,
           settlementOwner: "spin",
           source: "agent",
-          orcContext: context,
-          executionScope: executionScopeFor(context),
+          orcContext: spec.context,
+          orcTurnControl: spec.turnControl,
+          orcMaxPromptRounds: spec.maxPromptRounds,
+          executionScope: executionScopeFor(spec.context),
         });
       },
     });
@@ -124,6 +129,12 @@ export async function phaseReconciler(ctx: BootCtx): Promise<PhaseResult> {
     handle = await startReconciler(deps);
     ctx.reconcilerHandle = handle;
     ctx.reconcilerRecovery = handle.recovery;
+
+    // #1688: one bounded SHA boot-recovery pass after the Reconciler
+    // generation exists (review-state recovery needs requestReconcileForProject).
+    if (ctx.shaCoordinator) {
+      ctx.shaCoordinator.runBootRecovery();
+    }
 
     // #1554: scheduled-run admission starts only after the generation exists.
     // Recover active runs from a prior crash FIRST, then start the scheduler —

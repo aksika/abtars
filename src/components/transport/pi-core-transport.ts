@@ -358,7 +358,10 @@ export class PiCoreTransport implements IKiroTransport {
         return this.resolveModel(candidate, Boolean(image)).model;
       };
       const safety = createPiExecutionSafetyController(this.policy, {
-        maxPromptRounds: this.maxToolRoundsOverride ?? this.maxPromptRounds,
+        // #1680: the intent-policy prompt bound overrides transport defaults
+        // when the caller carries it (contract authoring keeps its narrow
+        // 3-round ceiling; execution turns keep the wide bound).
+        maxPromptRounds: context?.maxPromptRounds ?? this.maxToolRoundsOverride ?? this.maxPromptRounds,
         maxCandidateRounds: this.maxCandidateRounds,
         modelForCandidate,
       });
@@ -448,6 +451,8 @@ export class PiCoreTransport implements IKiroTransport {
         memoryToolDeps: this._memoryToolDeps,
         // #1629: trusted per-execution tool authorization mode.
         authorizationMode: context?.authorizationMode,
+        // #1680: host-owned one-shot turn control for the bound Orc turn.
+        orcTurnControl: context?.orcTurnControl,
       };
       const tools = createPiAgentTools(toolContext);
 
@@ -562,6 +567,21 @@ export class PiCoreTransport implements IKiroTransport {
         // lifecycle contract violation (prompt returned with no agent_end).
         const terminalReason = await host.waitForSettlement();
         slot.settled = true;
+
+        // #1680: map the typed terminal outcomes onto the host-owned turn
+        // control so Spin persists stable bounded failure codes. A cancelled
+        // turn and a prompt-round-limit incident are the two transport-level
+        // terminal classes; the durable run release reads the control.
+        if (terminalReason === "cancelled" && context?.orcTurnControl) {
+          context.orcTurnControl.complete({ kind: "cancelled", failureCode: "turn_cancelled" });
+        }
+        if (
+          context?.orcTurnControl
+          && safety.terminalSafetyFailure
+          && safety.lastTerminalIncident?.type === "prompt_round_limit"
+        ) {
+          context.orcTurnControl.complete({ kind: "failed", failureCode: "prompt_round_limit" });
+        }
 
         // #1622: a resolved prompt without a terminal agent_end is a Pi
         // contract violation — the turn never actually settled. Lead with the

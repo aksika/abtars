@@ -193,7 +193,7 @@ export interface PipelineDeps extends TransportDeps, MemoryDeps, VoiceDeps {
   /** Admit a manual sleep run directly (/sleep now | /sleep resume). #1321. */
   startSleep?: (opts: { fresh: boolean; resume: boolean }) => import("../capabilities/sleep/index.js").SleepStartResult;
   loadedCapabilities?: string[];
-  selfHealerTask?: { enabled: boolean } | null;
+  selfHealerTask?: import("../types/index.js").HeartbeatTask | null;
   hailMary?: (ResolvedHailMary & { apiKey?: string }) | null;
   /**
    * #1468: boot-owned emergency execution service. First in the middleware

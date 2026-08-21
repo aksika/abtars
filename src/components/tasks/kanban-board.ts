@@ -28,6 +28,9 @@ export interface TaskDatabase {
   };
   exec(sql: string): void;
   transaction<T>(fn: () => T): T;
+  /** #1688: IMMEDIATE transaction that composes with the caller's transaction
+   * via savepoints (better-sqlite3). Used by the SHA store for admission. */
+  transactionImmediate<T>(fn: () => T): T;
 }
 
 /** #1393 — Get the canonical task database. Throws if unavailable (fail-explicit for Pi). */
@@ -45,6 +48,10 @@ export function requireTaskDatabase(): TaskDatabase {
     },
     exec(sql: string) { d.exec(sql); },
     transaction<T>(fn: () => T): T { return d.transaction(fn)(); },
+    transactionImmediate<T>(fn: () => T): T {
+      const tx = d.transaction(fn) as unknown as { immediate(): T };
+      return tx.immediate();
+    },
   };
 }
 
@@ -395,6 +402,10 @@ export function wrapTaskDatabase(db: {
     },
     exec(sql: string) { db.exec(sql); },
     transaction<T>(fn: () => T): T { return (db.transaction(fn) as () => T)(); },
+    transactionImmediate<T>(fn: () => T): T {
+      const tx = db.transaction(fn) as unknown as { immediate(): T };
+      return tx.immediate();
+    },
   };
 }
 
@@ -528,7 +539,7 @@ export function normalizePriority(raw: string | undefined | null): KanbanPriorit
   return VALID_PRIORITIES.has(upper as KanbanPriority) ? upper as KanbanPriority : "MEDIUM";
 }
 
-export function kanbanEnqueue(title: string, source: string, sourceId?: string, opts?: { priority?: string; type?: string; goal?: string; labels?: string; due_at?: string; parent_id?: number; notes?: string; deliveryMode?: DeliveryMode; delivery?: Delivery; blocked_by?: string; chatId?: string; sourcePeer?: string; maxAgents?: number; deliveryReady?: boolean }): number {
+export function kanbanEnqueue(title: string, source: string, sourceId?: string, opts?: { priority?: string; type?: string; goal?: string; labels?: string; due_at?: string; parent_id?: number; notes?: string; deliveryMode?: DeliveryMode; delivery?: Delivery; blocked_by?: string; chatId?: string; sourcePeer?: string; maxAgents?: number; deliveryReady?: boolean; /** #1688: suppress the nerve card:queued event (pre-commit provisioning). */ fireEvent?: boolean }): number {
   const d = dbOrNull();
   if (!d) return 0;
   const raw = opts?.delivery ?? opts?.deliveryMode ?? "deliver";
@@ -550,7 +561,7 @@ export function kanbanEnqueue(title: string, source: string, sourceId?: string, 
   );
   const result = stmt.run(title, source, sourceId ?? null, priority, opts?.type ?? null, opts?.goal ?? null, opts?.labels ?? null, opts?.due_at ?? null, opts?.parent_id ?? null, opts?.notes ?? null, deliveryMode, opts?.blocked_by ?? null, opts?.chatId ?? null, opts?.sourcePeer ?? null, cappedMaxAgents ?? null, opts?.deliveryReady === false ? 0 : 1);
   const id = Number(result.lastInsertRowid);
-  nerve.fire("card:queued", id);
+  if (opts?.fireEvent !== false) nerve.fire("card:queued", id);
   return id;
 }
 
