@@ -4,7 +4,7 @@ const TIMEOUT = 60000;
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync, existsSync, readFileSync, chmodSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { runLaunchctlBootstrap, deployActivation, startSystemdWatchdog } from "./deploy.js";
+import { isExpectedWatchdogAbsence, runLaunchctlBootstrap, deployActivation, startSystemdWatchdog } from "./deploy.js";
 import type { BootstrapFn } from "./deploy.js";
 import type { StagedRelease } from "../update-sources/types.js";
 
@@ -46,6 +46,16 @@ describe("deploy-lib/runLaunchctlBootstrap", () => {
     expect(calls).toHaveLength(1);
     expect(calls[0]!.cmd).toBe("launchctl");
     expect(calls[0]!.args).toEqual(["bootstrap", "gui/501", "/tmp/test.plist"]);
+  });
+});
+
+describe("deploy-lib/isExpectedWatchdogAbsence", () => {
+  it("recognizes launchd's already-absent No such process response", () => {
+    const err = Object.assign(new Error("launchctl bootout failed"), {
+      stderr: Buffer.from("Boot-out failed: 3: No such process"),
+    });
+
+    expect(isExpectedWatchdogAbsence(err)).toBe(true);
   });
 });
 

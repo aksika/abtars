@@ -46,12 +46,12 @@ function commandErrorMessage(err: unknown): string {
   return (err instanceof Error ? err.message : String(err)).trim();
 }
 
-function isExpectedWatchdogAbsence(err: unknown): boolean {
+export function isExpectedWatchdogAbsence(err: unknown): boolean {
   const message = commandErrorMessage(err).toLowerCase();
   // A platform-mocked unit test can run the Darwin branch on Linux, where the
   // shell reports a missing launchctl. The subsequent bootstrap/start step is
   // still authoritative and will fail if the service manager is unavailable.
-  return /could not find service|service .* not found|unit .* not found|not loaded|not running|inactive|not enabled|not found$/.test(message);
+  return /could not find service|service .* not found|unit .* not found|not loaded|not running|inactive|not enabled|not found$|no such process/.test(message);
 }
 
 /** Start the Linux watchdog and surface every service-manager failure. */

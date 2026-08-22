@@ -48,6 +48,16 @@ describe("bootoutLaunchAgent", () => {
       bootoutLaunchAgent("gui/501", "/tmp/com.abtars.watchdog.plist", exec, async () => {}),
     ).rejects.toThrow("Input/output error");
   });
+
+  it("treats an already-absent launchd job as a clean stop", async () => {
+    const exec = (() => {
+      throw launchctlError("Boot-out failed: 3: No such process");
+    }) as any;
+
+    const result = await bootoutLaunchAgent("gui/501", "/tmp/com.abtars.watchdog.plist", exec, async () => {});
+
+    expect(result).toBe(false);
+  });
 });
 
 describe("#372 — abtars stop", () => {

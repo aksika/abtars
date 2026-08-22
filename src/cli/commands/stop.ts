@@ -60,7 +60,7 @@ function commandErrorMessage(err: unknown): string {
 
 function isExpectedWatchdogAbsence(err: unknown): boolean {
   const message = commandErrorMessage(err).toLowerCase();
-  return /could not find service|service .* not found|unit .* not found|not loaded|not running|inactive|not enabled/.test(message);
+  return /could not find service|service .* not found|unit .* not found|not loaded|not running|inactive|not enabled|not found$|no such process/.test(message);
 }
 
 function isLaunchctlIoError(err: unknown): boolean {
