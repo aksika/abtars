@@ -1,4 +1,8 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi, afterEach } from "vitest";
+
+const execFileSyncMock = vi.hoisted(() => vi.fn());
+vi.mock("node:child_process", () => ({ execFileSync: execFileSyncMock }));
+
 import {
   processStartIdentity,
   isPidAlive,
@@ -8,6 +12,54 @@ import {
 
 const SELF_PID = process.pid;
 const SELF_IDENTITY = processStartIdentity(SELF_PID);
+
+describe("macOS process identity", () => {
+  const originalPlatform = process.platform;
+
+  afterEach(() => {
+    Object.defineProperty(process, "platform", { value: originalPlatform, configurable: true, writable: true });
+    execFileSyncMock.mockReset();
+  });
+
+  it("rejects a reused system PID by its ps command", () => {
+    Object.defineProperty(process, "platform", { value: "darwin", configurable: true, writable: true });
+    execFileSyncMock.mockImplementation((_command: string, args: string[]) => {
+      if (args[3] === "lstart=") return "Sat Aug 22 02:00:00 2026\n";
+      return "/usr/libexec/AssetCache/AssetCache\n";
+    });
+
+    const result = validateBridgePid(SELF_PID, processStartIdentity(SELF_PID), ["abtars.js", "bundle"]);
+
+    expect(result.status).toBe("wrong-command");
+    expect(result.safeToSignal).toBe(false);
+    expect(result.safeToAdopt).toBe(false);
+  });
+
+  it("accepts a live bridge identified by ps", () => {
+    Object.defineProperty(process, "platform", { value: "darwin", configurable: true, writable: true });
+    execFileSyncMock.mockImplementation((_command: string, args: string[]) => {
+      if (args[3] === "lstart=") return "Sat Aug 22 02:00:00 2026\n";
+      return "/opt/homebrew/bin/node /Users/akos/.abtars/app/bundle/abtars.js\n";
+    });
+
+    const result = validateBridgePid(SELF_PID, processStartIdentity(SELF_PID), ["abtars.js", "bundle"]);
+
+    expect(result.status).toBe("valid");
+    expect(result.safeToSignal).toBe(true);
+    expect(result.safeToAdopt).toBe(true);
+  });
+
+  it("rejects an uninspectable macOS PID", () => {
+    Object.defineProperty(process, "platform", { value: "darwin", configurable: true, writable: true });
+    execFileSyncMock.mockImplementation(() => { throw new Error("ps unavailable"); });
+
+    const result = validateBridgePid(SELF_PID, null, ["abtars.js", "bundle"]);
+
+    expect(result.status).toBe("wrong-command");
+    expect(result.safeToSignal).toBe(false);
+    expect(result.safeToAdopt).toBe(false);
+  });
+});
 
 describe("processStartIdentity", () => {
   it("returns a string with pid:starttime for a live process", () => {

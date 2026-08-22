@@ -1,4 +1,5 @@
 import { readFileSync } from "node:fs";
+import { execFileSync } from "node:child_process";
 
 export type ValidationResult =
   | { readonly status: "valid"; readonly safeToSignal: true; readonly safeToAdopt: true }
@@ -8,7 +9,24 @@ export type ValidationResult =
   | { readonly status: "mismatch"; readonly safeToSignal: false; readonly safeToAdopt: false }
   | { readonly status: "corrupt"; readonly safeToSignal: false; readonly safeToAdopt: false };
 
+function macProcessField(pid: number, field: "lstart" | "command"): string | null {
+  try {
+    const output = execFileSync("ps", ["-p", String(pid), "-o", `${field}=`], {
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    return output.trim() || null;
+  } catch {
+    return null;
+  }
+}
+
 export function processStartIdentity(pid: number): string {
+  if (process.platform === "darwin") {
+    const startedAt = macProcessField(pid, "lstart");
+    const timestamp = startedAt === null ? NaN : Date.parse(startedAt);
+    return `${pid}:${Number.isFinite(timestamp) ? timestamp : 0}`;
+  }
   try {
     const stat = readFileSync(`/proc/${pid}/stat`, "utf-8");
     // comm (field 2) is wrapped in parens and may contain spaces, so parse from
@@ -49,13 +67,23 @@ export function validateBridgePid(
     }
   }
   try {
-    const cmdline = readFileSync(`/proc/${pid}/cmdline`, "utf-8");
+    const cmdline = process.platform === "darwin"
+      ? macProcessField(pid, "command")
+      : readFileSync(`/proc/${pid}/cmdline`, "utf-8");
+    if (cmdline === null) {
+      // macOS has no /proc fallback. If ps cannot identify the process, reject
+      // the lock rather than trusting a PID that may have been reused.
+      if (process.platform === "darwin") {
+        return { status: "wrong-command", safeToSignal: false, safeToAdopt: false };
+      }
+      return { status: "valid", safeToSignal: true, safeToAdopt: true };
+    }
     const match = needles.some((n) => cmdline.includes(n));
     if (!match) {
       return { status: "wrong-command", safeToSignal: false, safeToAdopt: false };
     }
   } catch {
-    // /proc unavailable (macOS, container, etc.) — trust the lock
+    // /proc unavailable in a non-macOS container — trust the lock
     return { status: "valid", safeToSignal: true, safeToAdopt: true };
   }
   return { status: "valid", safeToSignal: true, safeToAdopt: true };
