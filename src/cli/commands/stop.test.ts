@@ -13,8 +13,42 @@ import { mkdtempSync, rmSync, mkdirSync, writeFileSync, existsSync, readFileSync
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawn, type ChildProcess } from "node:child_process";
-import { stop } from "./stop.js";
+import { bootoutLaunchAgent, stop } from "./stop.js";
 import { processStartIdentity } from "../../supervisor/identity.js";
+
+function launchctlError(message: string): Error & { stderr: Buffer } {
+  return Object.assign(new Error(message), { stderr: Buffer.from(message) });
+}
+
+describe("bootoutLaunchAgent", () => {
+  it("retries a transient launchd EIO and succeeds", async () => {
+    const calls: string[][] = [];
+    let attempt = 0;
+    const exec = ((command: string, args: string[]) => {
+      calls.push([command, ...args]);
+      attempt++;
+      if (attempt === 1) throw launchctlError("Boot-out failed: 5: Input/output error");
+    }) as any;
+
+    const result = await bootoutLaunchAgent("gui/501", "/tmp/com.abtars.watchdog.plist", exec, async () => {});
+
+    expect(result).toBe(true);
+    expect(calls).toEqual([
+      ["launchctl", "bootout", "gui/501", "/tmp/com.abtars.watchdog.plist"],
+      ["launchctl", "bootout", "gui/501", "/tmp/com.abtars.watchdog.plist"],
+    ]);
+  });
+
+  it("does not hide a persistent launchd EIO", async () => {
+    const exec = (() => {
+      throw launchctlError("Boot-out failed: 5: Input/output error");
+    }) as any;
+
+    await expect(
+      bootoutLaunchAgent("gui/501", "/tmp/com.abtars.watchdog.plist", exec, async () => {}),
+    ).rejects.toThrow("Input/output error");
+  });
+});
 
 describe("#372 — abtars stop", () => {
   let tmpHome: string;
