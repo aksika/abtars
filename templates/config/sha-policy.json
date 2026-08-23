@@ -1,10 +1,30 @@
 {
-  "_comment": "SHA fault policy — changes apply after restart or /doctor fix",
+  "_comment": "SHA fault policy — changes apply after restart or /healing reload",
+  "schemaVersion": 2,
   "faults": {
     "missing-dep": { "action": "disable-capability", "cooldown": 604800, "maxRetries": 1 },
     "db-corruption": { "action": "rebuild", "cooldown": 86400, "maxRetries": 3 },
     "autofix-known": { "action": "spawn-command", "cooldown": 86400, "maxRetries": 3 },
     "autofix-unknown": { "action": "spawn-agent", "cooldown": 86400, "maxRetries": 1 }
+  },
+  "guardrails": {
+    "orc": {
+      "sameCard": {
+        "failedOrNoProgress": { "max": 3 },
+        "startsWithoutProgress": { "max": 5 }
+      },
+      "bridge": {
+        "starts5m": 25,
+        "starts1h": 100,
+        "newRunRows5m": 50
+      }
+    },
+    "logAnomaly": {
+      "notifyMain": true,
+      "shaAllowed": true,
+      "minimumMode": "investigation",
+      "cooldownMinutes": 60
+    }
   },
   "fixes": [
     { "pattern": "FTS index", "action": "run", "command": ["abtars-edit", "--rebuild-fts"], "cooldownMin": 30 },

@@ -484,7 +484,7 @@ export const COMMAND_DEFINITIONS: readonly CommandDefinition[] = [
     help: ["/healing — Self-healing mode, policy and active incidents (read-only)"],
   },
   {
-    name: "healing", match: "/healing ", description: "Healing subcommands (list|reset|approve|disable)",
+    name: "healing", match: "/healing ", description: "Healing subcommands (list|reset|reload|approve|disable)",
     handler: handleHealing, kind: "prefix", visibility: "internal", access: "master",
     platforms: ["telegram"],
   },

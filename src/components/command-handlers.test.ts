@@ -294,3 +294,94 @@ describe("command-handlers /task validate", () => {
   });
 
 });
+
+describe("/healing reload (#1708)", () => {
+  let policyHome: string;
+  const savedHome = process.env["ABTARS_HOME"];
+
+  beforeEach(() => {
+    setUserRegistryOverride({
+      users: [{ userId: "test", role: "master", maxClass: 3, tools: ["all"], platforms: { telegram: 123 } }],
+      byPlatformId: new Map([["telegram:123", { userId: "test", role: "master", maxClass: 3, tools: ["all"], platforms: { telegram: 123 } }]]),
+      byUserId: new Map([["test", { userId: "test", role: "master", maxClass: 3, tools: ["all"], platforms: { telegram: 123 } }]]),
+    } as any);
+    policyHome = mkdtempSync(join(tmpdir(), "healing-reload-"));
+    process.env["ABTARS_HOME"] = policyHome;
+  });
+
+  afterEach(async () => {
+    setUserRegistryOverride(null);
+    if (savedHome === undefined) delete process.env["ABTARS_HOME"];
+    else process.env["ABTARS_HOME"] = savedHome;
+    // Drop any cached snapshot pointing at the removed temp home.
+    await import("./sha/sha-policy.js").then((m) => m.reload());
+    rmSync(policyHome, { recursive: true, force: true });
+  });
+
+  function writeCorePolicy(body: unknown): void {
+    mkdirSync(join(policyHome, "config"), { recursive: true });
+    writeFileSync(join(policyHome, "config", "sha-policy.json"), JSON.stringify(body), "utf-8");
+  }
+
+  it("applies a valid edit without restart and reports bounded effective values", async () => {
+    writeCorePolicy({
+      schemaVersion: 2,
+      fixes: [],
+      guardrails: {
+        orc: {
+          sameCard: { failedOrNoProgress: { max: 1 }, startsWithoutProgress: { max: 5 } },
+          bridge: { starts5m: 25, starts1h: 100, newRunRows5m: 50 },
+        },
+        logAnomaly: { notifyMain: true, shaAllowed: false, minimumMode: "full", cooldownMinutes: 120 },
+      },
+    });
+    const ctx = makeCtx();
+    const handled = await handleCommand("/healing reload", ctx);
+    expect(handled).toBe(true);
+    const reply = (ctx.reply as ReturnType<typeof vi.fn>).mock.calls[0]![0] as string;
+    expect(reply).toContain("Core: valid-v2");
+    expect(reply).toContain("failed/no-progress 1/10m");
+    expect(reply).toContain("shaAllowed=off");
+    expect(reply).toContain("cooldown=120m");
+    // Bounded operator output: no raw JSON, no file contents.
+    expect(reply).not.toContain("{");
+    expect(reply).not.toContain("guardrails\"");
+
+    const { getEffectiveOrcGuardrails, getLogAnomalyPolicy } = await import("./sha/sha-policy.js");
+    expect(getEffectiveOrcGuardrails().sameCard.failedOrNoProgress.max).toBe(1);
+    expect(getLogAnomalyPolicy().shaAllowed).toBe(false);
+  });
+
+  it("a malformed edit publishes safe defaults instead of retaining the prior policy", async () => {
+    writeCorePolicy({ schemaVersion: 2, fixes: [], guardrails: {
+      orc: { sameCard: { failedOrNoProgress: { max: 2 } } }, logAnomaly: {},
+    } });
+    await handleCommand("/healing reload", makeCtx());
+    expect((await import("./sha/sha-policy.js")).getEffectiveOrcGuardrails().sameCard.failedOrNoProgress.max).toBe(2);
+
+    mkdirSync(join(policyHome, "config"), { recursive: true });
+    writeFileSync(join(policyHome, "config", "sha-policy.json"), "{ broken", "utf-8");
+    const ctx = makeCtx();
+    await handleCommand("/healing reload", ctx);
+    const reply = (ctx.reply as ReturnType<typeof vi.fn>).mock.calls[0]![0] as string;
+    expect(reply).toContain("Core: invalid-json");
+    expect(reply).toContain("admission disabled");
+    expect((await import("./sha/sha-policy.js")).getEffectiveOrcGuardrails().sameCard.failedOrNoProgress.max).toBe(3);
+  });
+
+  it("reload never mutates SELFHEAL_MODE and is master-only", async () => {
+    const { getEnv } = await import("./env-schema.js");
+    const before = getEnv().selfhealMode;
+    await handleCommand("/healing reload", makeCtx());
+    expect(getEnv().selfhealMode).toBe(before);
+
+    setUserRegistryOverride({
+      users: [{ userId: "guest-1", role: "guest", maxClass: 0, tools: [], platforms: { telegram: 999 } }],
+      byPlatformId: new Map([["telegram:999", { userId: "guest-1", role: "guest", maxClass: 0, tools: [], platforms: { telegram: 999 } }]]),
+      byUserId: new Map([["guest-1", { userId: "guest-1", role: "guest", maxClass: 0, tools: [], platforms: { telegram: 999 } }]]),
+    } as any);
+    const guestCtx = makeCtx({ userId: "guest-1", chatId: 999, sessionKey: "telegram:999" });
+    await handleCommand("/healing reload", guestCtx);
+    expect(guestCtx.reply).toHaveBeenCalledWith(expect.stringContaining("Owner-only"));
+  });
+});

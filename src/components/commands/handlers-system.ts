@@ -212,6 +212,34 @@ export async function handleHealing(text: string, ctx: CommandContext): Promise<
     await ctx.reply(ok ? `✓ Disabled: "${pattern}"` : `❌ Pattern not found in self-rules.`);
     return true;
   }
+  if (cmd === "reload") {
+    // #1708: owner-only no-restart policy application. Re-resolves both files,
+    // atomically publishes the replacement snapshot, and reports bounded
+    // statuses plus effective guardrail values. Never prints raw policy JSON,
+    // paths, evidence, or secrets; never mutates SELFHEAL_MODE.
+    const { reloadEffectiveShaPolicy } = await import("../sha/sha-policy.js");
+    const { snapshot, diagnostics } = reloadEffectiveShaPolicy();
+    const fallbacks = diagnostics.fallbackFields;
+    const lines = [
+      "Policy reloaded (runtime mode unchanged).",
+      `Core: ${diagnostics.coreStatus} | Self: ${diagnostics.selfStatus}`,
+      fallbacks.length === 0
+        ? "Guardrail fallbacks: none"
+        : `Guardrail fallbacks (${fallbacks.length}): ${fallbacks.slice(0, 5).join(", ")}${fallbacks.length > 5 ? ", ..." : ""}`,
+      `Orc limits: card failed/no-progress ${snapshot.orc.sameCard.failedOrNoProgress.max}/${snapshot.orc.sameCard.failedOrNoProgress.windowMinutes}m`
+        + `, no-progress starts ${snapshot.orc.sameCard.startsWithWithoutProgress.max}/${snapshot.orc.sameCard.startsWithWithoutProgress.windowMinutes}m`,
+      `Orc bridge: ${snapshot.orc.bridge.starts5m}/5m, ${snapshot.orc.bridge.starts1h}/1h, ${snapshot.orc.bridge.newRunRows5m} rows/5m`,
+      `Log anomaly: notifyMain=${snapshot.logAnomaly.notifyMain ? "on" : "off"}`
+        + ` shaAllowed=${snapshot.logAnomaly.shaAllowed ? "on" : "off"}`
+        + ` minimumMode=${snapshot.logAnomaly.minimumMode}`
+        + ` cooldown=${snapshot.logAnomaly.cooldownMinutes}m`,
+    ];
+    if (!snapshot.logAdmissionAllowed) {
+      lines.push("Note: core policy problem — line-level and anomaly SHA admission disabled until a valid reload/restart.");
+    }
+    await ctx.reply(lines.join("\n"));
+    return true;
+  }
 
   // Default: read-only operational status (R9).
   const { getEnv } = await import("../env-schema.js");
@@ -231,7 +259,7 @@ export async function handleHealing(text: string, ctx: CommandContext): Promise<
   for (const incident of active.slice(0, 5)) {
     lines.push(`  #${incident.id} ${incident.state} (${incident.mode}, ${incident.sourceScope.slice(0, 30)}, occ ${incident.occurrenceCount}${incident.rootCardId ? `, root #${incident.rootCardId}` : ""})`);
   }
-  lines.push("Commands: /healing [list|reset|approve|disable] — mode changes need config + restart.");
+  lines.push("Commands: /healing [list|reset|reload|approve|disable] — mode changes need config + restart.");
   await ctx.reply(lines.join("\n"));
   return true;
 }
