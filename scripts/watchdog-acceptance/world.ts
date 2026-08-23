@@ -17,6 +17,7 @@ import {
   renameSync,
   rmSync,
   statSync,
+  symlinkSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -341,6 +342,73 @@ exit "$rc"`;
     const tmp = p + `.harness-tmp`;
     writeFileSync(tmp, JSON.stringify(state, null, 2) + "\n");
     renameSafe(tmp, p);
+  }
+
+  /**
+   * Validated direct signal to a bridge process belonging to THIS home (the
+   * fixture the WATCHDOG spawned is not registry-owned). Ownership proof:
+   * cmdline references abtars.js and its cwd is inside the harness-owned home.
+   */
+  signalBridgeProcess(home: string, pid: number, signal: NodeJS.Signals): void {
+    const snap = procSnapshot(pid);
+    if (!snap || snap.state === "Z") throw new ScenarioFailure(`bridge pid ${pid} is not observable`, "setup");
+    if (!snap.cmdline || !snap.cmdline.includes("abtars.js")) {
+      throw new ScenarioFailure(`pid ${pid} does not look like a bridge process`, "setup");
+    }
+    const cwd = processCwd(pid);
+    if (cwd !== null && cwd !== home) throw new ScenarioFailure(`pid ${pid} belongs to another home (${cwd})`, "setup");
+    process.kill(pid, signal);
+    this.timeline("bridge-signalled", `${signal} pid=${pid}`);
+  }
+
+  writeLock(home: string, lock: Record<string, unknown>): void {
+    const p = join(home, "bridge.lock");
+    const tmp = p + `.harness-tmp`;
+    writeFileSync(tmp, JSON.stringify(lock));
+    renameSafe(tmp, p);
+  }
+
+  /**
+   * B12 layout: releases/r1+r2 each carry a full app/bundle; <home>/app is a
+   * symlink to <home>/current, which points at releases/r1. The production
+   * spawn line's literal argv (`app/bundle/abtars.js`) resolves through the
+   * chain, so repointing `current` changes which release NEW spawns execute
+   * while existing processes keep running — release-invariant identity.
+   * Must be used INSTEAD of homeA()/homeB() for that scenario (it replaces the
+   * flat layout, it does not layer on top of it).
+   */
+  homeWithReleases(label = "home-a"): string {
+    let h = this.homes.get(label);
+    if (h) return h;
+    h = join(this.root, label);
+    for (const release of ["r1", "r2"]) {
+      const bundleDir = join(h, "releases", release, "app", "bundle");
+      mkdirSync(bundleDir, { recursive: true });
+      mkdirSync(join(h, "releases", release, "logs"), { recursive: true });
+      writeFileSync(join(bundleDir, "package.json"), '{"type":"module"}\n');
+      cpSync(this.builder.bundleSupervisorState(this.profileName), join(bundleDir, "abtars-supervisor-state.js"));
+      cpSync(this.builder.bundleFixtureBridge(), join(bundleDir, "abtars.js"));
+    }
+    mkdirSync(join(h, "logs"), { recursive: true });
+    symlinkSync("releases/r1", join(h, "current"));
+    symlinkSync("current", join(h, "app"));
+    this.homes.set(label, h);
+    this.timeline("home-seeded-releases", h);
+    return h;
+  }
+
+  repointRelease(home: string, release: string): void {
+    if (!["r1", "r2"].includes(release)) throw new ScenarioFailure(`unknown release ${release}`, "setup");
+    const tmp = join(home, "current.tmp");
+    const target = `releases/${release}`;
+    try {
+      rmSync(tmp, { force: true });
+      symlinkSync(target, tmp);
+      renameSync(tmp, join(home, "current"));
+    } catch (err) {
+      throw new ScenarioFailure(`release repoint failed: ${String(err)}`, "setup");
+    }
+    this.timeline("release-repointed", `${basename(home)} -> ${release}`);
   }
 
   watchdogLogLines(home: string, maxLines = LOG_TAIL_LINES): string[] {

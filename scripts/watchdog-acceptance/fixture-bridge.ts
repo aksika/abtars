@@ -11,9 +11,8 @@
  *   initBridgeLock and heartbeat through the PRODUCTION updateLastHeartbeat;
  * - The non-owner mode deliberately reproduces the ownership defect by calling
  *   the production field-mutation path against another owner's lock without
- *   initializing its own;
- * - forge-exit reproduces the unauthenticated exit-report defect by writing
- *   lastExitCode/lastExitAt through the same mutation path;
+ *   initializing its own — including an optional delayed self-reporting exit
+ *   whose fresh report outlives the non-owner (the B4 forgery shape);
  * - Exit modes self-report code/time through the bridge-lock mutation boundary
  *   available to any bridge process today. When production centralizes gated
  *   exit recording, this fixture must import that function instead of keeping
@@ -123,7 +122,7 @@ async function main(): Promise<void> {
     process.on("SIGINT", () => {});
   }
 
-  const ownsLock = !["no-lock", "non-owner", "transient", "forge-exit"].includes(mode.mode);
+  const ownsLock = !["no-lock", "non-owner", "transient"].includes(mode.mode);
   if (ownsLock) {
     initBridgeLock({
       pid: process.pid,
@@ -136,7 +135,13 @@ async function main(): Promise<void> {
   }
 
   const startedAt = Date.now();
-  const exitAfterMs = mode.mode === "exit" ? (mode.delayMs ?? 250) : mode.mode === "exit-stale-report" ? (mode.delayMs ?? 250) : null;
+  // `exit` modes self-report and leave; a `non-owner` with delayMs self-reports
+  // its own code into whatever lock exists before leaving (the B4 forgery
+  // shape: the report outlives the non-owner and is fresh when the real owner
+  // dies).
+  const scheduledExit =
+    mode.mode === "exit" || (mode.mode === "non-owner" && mode.delayMs !== undefined);
+  const exitAfterMs = scheduledExit ? (mode.delayMs ?? 250) : null;
 
   let lastLivePoll = 0;
   let reported = false;
@@ -190,12 +195,6 @@ async function main(): Promise<void> {
         // the lock ourselves.
         updateLastHeartbeat();
         break;
-      case "forge-exit":
-        // Unauthenticated exit-report defect: keep a forged code/time fresh in
-        // whatever lock exists.
-        updateBridgeLockField("lastExitCode", mode.forgedExitCode ?? 42);
-        updateBridgeLockField("lastExitAt", Date.now() - (mode.forgedExitAgeMs ?? 0));
-        break;
       default:
         break;
     }
@@ -206,16 +205,8 @@ async function main(): Promise<void> {
     if ((dueScheduled || dueLive) && !reported) {
       reported = true;
       const code = dueLive ? liveExit!.code : (mode.exitCode ?? 0);
-      const staleShape = dueLive ? liveExit!.staleReport : mode.mode === "exit-stale-report";
-      if (staleShape) {
-        // Self-report with a timestamp older than this bridge's spawn — must
-        // be rejected by the consumer's freshness gate.
-        updateBridgeLockField("lastExitCode", code);
-        updateBridgeLockField("lastExitAt", Date.now() - 60_000);
-      } else {
-        updateBridgeLockField("lastExitCode", code);
-        updateBridgeLockField("lastExitAt", Date.now());
-      }
+      updateBridgeLockField("lastExitCode", code);
+      updateBridgeLockField("lastExitAt", Date.now());
       process.exit(code);
     }
 

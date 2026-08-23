@@ -6,13 +6,13 @@ import { describe, expect, it } from "vitest";
 import type { ExpectationManifest, ScoreboardRow } from "./contracts.ts";
 import { classifyOutcome, decideExit, validateManifest } from "./scoreboard.ts";
 
-const ALL_IDS = [...Array.from({ length: 22 }, (_, i) => `A${i + 1}`), ...Array.from({ length: 10 }, (_, i) => `B${i + 1}`)];
+const ALL_IDS = [...Array.from({ length: 23 }, (_, i) => `A${i + 1}`), ...Array.from({ length: 12 }, (_, i) => `B${i + 1}`)];
 
 function validManifest(): ExpectationManifest {
   const scenarios: ExpectationManifest["scenarios"] = {};
   for (const id of ALL_IDS) scenarios[id] = { expect: "pass" };
   scenarios["A8"] = { expect: "baseline-advisory", reason: "SIGSTOP suspend simulation" };
-  for (let i = 1; i <= 10; i++) scenarios[`B${i}`] = { expect: "known-fail", owner: "#1711", reason: "test" };
+  for (let i = 1; i <= 12; i++) scenarios[`B${i}`] = { expect: "known-fail", owner: "#1711", reason: "test" };
   return { sourceCommit: null, scenarios };
 }
 

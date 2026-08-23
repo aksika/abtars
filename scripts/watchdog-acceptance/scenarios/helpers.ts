@@ -90,6 +90,41 @@ export function bridgeAliveWithIdentity(world: WorldApi, home: string, expectedP
   return true;
 }
 
+/** Sample a predicate continuously for `windowMs`, returning every result. */
+export async function sampleDuring(w: WorldApi, windowMs: number, sample: () => boolean): Promise<boolean[]> {
+  const results: boolean[] = [];
+  const deadline = Date.now() + windowMs;
+  while (Date.now() < deadline) {
+    results.push(sample());
+    await w.sleep(120);
+  }
+  return results;
+}
+
+/**
+ * Corrupt lock ownership the way the v4 draft defines it: valid JSON with
+ * `instanceId` (and `startIdentity`) removed, so `validateBridgeLock`
+ * classifies `corrupt`. The fixture is frozen (SIGSTOP) around the strip so
+ * no in-flight heartbeat read-merge-write can restore the pre-strip snapshot,
+ * then resumed. With `keepHeartbeatFrozen` (B11) the fixture is stale-shaped
+ * so `lastHeartbeat` stays readable and frozen afterwards.
+ */
+export async function stripLockOwnership(
+  w: WorldApi,
+  home: string,
+  fixturePid: number,
+): Promise<void> {
+  w.signalBridgeProcess(home, fixturePid, "SIGSTOP");
+  await w.sleep(250); // let any in-flight beat land before we mutate
+  const lock = w.lock(home);
+  if (!lock) throw new Error(`stripLockOwnership: no lock at ${home}`);
+  const stripped = { ...lock };
+  delete stripped.instanceId;
+  delete stripped.startIdentity;
+  w.writeLock(home, stripped);
+  w.signalBridgeProcess(home, fixturePid, "SIGCONT");
+}
+
 /**
  * Drive one crash cycle: command the LIVE bridge to self-exit with `code`
  * after `delayMs`, then wait for a validated replacement.

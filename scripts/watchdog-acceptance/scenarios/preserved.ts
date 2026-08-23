@@ -14,6 +14,7 @@ import {
   commandLiveExit,
   crashCycle,
   parseDeathEvents,
+  sampleDuring,
   waitForOwnedBridge,
 } from "./helpers.ts";
 
@@ -29,17 +30,6 @@ async function startHealthyBridgeUnderWatchdog(w: WorldApi, home: string): Promi
   await w.startWatchdog(home);
   const lock = await waitForOwnedBridge(w, home, 20000);
   return { pid: Number(lock.pid) };
-}
-
-/** Sample a predicate continuously for `windowMs`, returning every result. */
-async function sampleDuring(w: WorldApi, windowMs: number, sample: () => boolean): Promise<boolean[]> {
-  const results: boolean[] = [];
-  const deadline = Date.now() + windowMs;
-  while (Date.now() < deadline) {
-    results.push(sample());
-    await w.sleep(120);
-  }
-  return results;
 }
 
 /** Wait until the watchdog log contains the given marker line fragment. */
@@ -344,17 +334,27 @@ const A13 = A("A13", "Reused-PID lock never signals the unrelated process", "lif
 
 const A14 = A("A14", "Exit-report freshness gate: stale rejected, fresh used", "lifecycle", async (w) => {
   const home = w.homeA();
-  const { pid: p1 } = await startHealthyBridgeUnderWatchdog(w, home);
-  commandLiveExit(w, home, { code: 5, delayMs: 200, staleReport: true });
-  await w.expectEventually(30000, "pre-aged exit report rejected as unknown", () => {
-    const events = parseDeathEvents(w.watchdogLogLines(home, 40));
-    return events.some((e) => e.pid === String(p1)) && events.some((e) => e.reason.endsWith("exit=unknown"));
-  });
-
-  await crashCycle(w, home, 7, 200);
+  // (a) fresh self-report wins: exit:7 past boot grace is adopted.
+  await startHealthyBridgeUnderWatchdog(w, home);
+  await crashCycle(w, home, 7, 250);
   await w.expectEventually(15000, "fresh self-reported exit code adopted", () => {
     const events = parseDeathEvents(w.watchdogLogLines(home, 40));
     return events.some((e) => e.reason.endsWith("exit=7"));
+  });
+
+  // (b) a report OLDER than the spawn is rejected: pre-seed lastExitCode=9
+  // with an aged lastExitAt, then SIGKILL the bridge — the death must read
+  // `unknown`, never 9. The fixture is frozen around the preseed so no
+  // concurrent heartbeat write can drop the seeded fields.
+  const p2 = Number(w.lock(home)?.pid);
+  w.signalBridgeProcess(home, p2, "SIGSTOP");
+  await w.sleep(250);
+  const lock = w.lock(home)!;
+  w.writeLock(home, { ...lock, lastExitCode: 9, lastExitAt: Date.now() - 60_000 });
+  w.signalBridgeProcess(home, p2, "SIGKILL");
+  await w.expectEventually(30000, "stale preseeded report rejected as unknown", () => {
+    const events = parseDeathEvents(w.watchdogLogLines(home, 40));
+    return events.some((e) => e.pid === String(p2)) && events.some((e) => e.reason.endsWith("exit=unknown"));
   });
 });
 
@@ -391,6 +391,7 @@ const A17 = A("A17", "No zombies across five rapid crash cycles", "crashLoopFast
     await crashCycle(w, home, i % 2 === 0 ? 1 : 2, 110);
   }
   let zombieSeen = false;
+  let overConcurrency = false;
   await w.expectEventually(45000, "five crash cycles complete", () => {
     const l = w.lock(home);
     if (l) {
@@ -401,9 +402,13 @@ const A17 = A("A17", "No zombies across five rapid crash cycles", "crashLoopFast
       const snap = w.procSnapshot(entry.pid);
       if (snap?.state === "Z") zombieSeen = true;
     }
-    return true;
+    const liveCount = w.listLiveBridgesByHome(home).length;
+    if (liveCount > 1) overConcurrency = true;
+    const deaths = w.supervisorState(home)?.recentDeaths;
+    return Array.isArray(deaths) && deaths.length >= 5;
   });
   w.expect(!zombieSeen, "zombie state observed during continuous sampling");
+  w.expect(!overConcurrency, "more than one live bridge observed during the crash loop");
   w.expect(w.listLiveBridgesByHome(home).every((p) => w.procSnapshot(p)?.state !== "Z"), "cleanup sweep found no zombies");
 });
 
@@ -440,6 +445,9 @@ const A18 = A("A18", "Watchdog never invokes doctor or service management (canar
     const name = String(f);
     w.expect(!name.endsWith(".plist") && !name.endsWith(".service"), `no service-manager unit may be created (found ${name})`);
   }
+  // The watchdog is a dumb respawner: it must not grow log files while
+  // respawning (draft §A18 — absence is what regrows).
+  w.expect(!existsSync(join(home, "bridge.log")), "no bridge.log may be created by the watchdog");
   w.expect((statSync(join(home, "bridge.lock")).mode & 0o777) === 0o600, "bridge.lock permissions must remain 0600");
 });
 
@@ -492,13 +500,18 @@ const A21 = A("A21", "Forced future-enumeration failure: no signal, no duplicate
   const home = w.homeA();
   const survivor = await w.plantBridge(home, { mode: "healthy" });
   await waitForOwnedBridge(w, home, 15000);
-  // Injected fault marker: a future enumeration adapter MUST treat enumeration
-  // as failed when this file exists and take the conservative path (no signal,
-  // no duplicate). Today's implementation takes no enumeration action at all,
-  // which satisfies the contract trivially.
-  const { writeFileSync } = await import("node:fs");
+  // Two injection layers for the future enumeration adapter:
+  // (1) a failing `ps` stub prepended to PATH — inert today (the watchdog
+  //     never invokes ps), authoritative once enumeration lands;
+  // (2) a fault marker file the adapter must honor.
+  const psStubDir = join(w.artifactsDir(), "ps-stub");
+  const { mkdirSync, writeFileSync, chmodSync } = await import("node:fs");
+  mkdirSync(psStubDir, { recursive: true });
+  const stub = join(psStubDir, "ps");
+  writeFileSync(stub, "#!/bin/sh\nexit 3\n");
+  chmodSync(stub, 0o755);
   writeFileSync(join(w.artifactsDir(), "enumeration-fault.injected"), "enumeration forced to fail\n");
-  await w.startWatchdog(home);
+  await w.startWatchdog(home, { PATH: `${psStubDir}:${process.env.PATH ?? ""}` });
   await waitForLogMarker(w, home, `Adopted existing bridge PID=${survivor}`, 20000);
   const samples = await sampleDuring(w, 4 * 1000, () =>
     w.listLiveBridgesByHome(home).length === 1 &&
@@ -526,7 +539,37 @@ const A22 = A("A22", "Five distinct death events inside one interval stay recons
   w.expect(events.length >= 5, `at least five death events expected (got ${events.length})`);
 });
 
+/**
+ * A23 (draft v2 / D7): the SOLE survivor of an unclean watchdog death is
+ * adopted, not contained. Counterweight to B8 — there is no outage-survivor
+ * category, and this scenario stops B8's containment from ever becoming an
+ * owner-killing path. Passes today by construction.
+ */
+const A23 = A("A23", "Sole survivor after unclean watchdog death is adopted", "lifecycle", async (w) => {
+  const home = w.homeA();
+  const owner = await w.plantBridge(home, { mode: "healthy" });
+  await waitForOwnedBridge(w, home, 15000);
+  await w.startWatchdog(home);
+  await waitForLogMarker(w, home, `Adopted existing bridge PID=${owner}`, 20000);
+
+  // Unclean watchdog death: no handoff, no durable stop.
+  w.signalWatchdogProcess(home, "SIGKILL");
+  await w.expectEventually(10000, "watchdog gone after unclean death", () => w.watchdogPidOf(home) === null);
+  w.expect(bridgeAliveWithIdentity(w, home, owner), "the sole bridge must survive the watchdog's death");
+
+  // Restoration adopts the survivor; boot grace stays anchored to the
+  // bridge's own startedAt (unchanged PID proves no respawn happened).
+  await w.startWatchdog(home);
+  await waitForLogMarker(w, home, `Adopted existing bridge PID=${owner}`, 20000);
+  const samples = await sampleDuring(w, 3 * 1000, () =>
+    Number(w.lock(home)?.pid) === owner &&
+    w.listLiveBridgesByHome(home).length === 1 &&
+    bridgeAliveWithIdentity(w, home, owner),
+  );
+  w.expect(samples.length > 0 && samples.every(Boolean), "survivor must remain the sole validated owner after restoration");
+});
+
 export const PRESERVED_SCENARIOS: readonly ScenarioDefinition[] = [
   A1, A2, A3, A4, A5, A6, A7, A8, A9, A10, A11, A12,
-  A13, A14, A15, A16, A17, A18, A19, A20, A21, A22,
+  A13, A14, A15, A16, A17, A18, A19, A20, A21, A22, A23,
 ];

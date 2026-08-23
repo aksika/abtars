@@ -23,8 +23,6 @@ export type FixtureModeName =
   | "healthy"
   | "stale"
   | "exit"
-  | "exit-stale-report"
-  | "forge-exit"
   | "no-lock"
   | "non-owner"
   | "ignore-term"
@@ -35,10 +33,6 @@ export interface FixtureMode {
   readonly mode: FixtureModeName;
   readonly exitCode?: number;
   readonly delayMs?: number;
-  /** forge-exit mode: the code planted into another owner's lock. */
-  readonly forgedExitCode?: number;
-  /** forge-exit mode: how old the forged report should look (ms). */
-  readonly forgedExitAgeMs?: number;
 }
 
 export interface FixtureLiveControl {
@@ -151,6 +145,16 @@ export interface WorldApi {
   lock(home: string): Record<string, unknown> | null;
   supervisorState(home: string): Record<string, unknown> | null;
   writeSupervisorState(home: string, state: Record<string, unknown>): void;
+  writeLock(home: string, lock: Record<string, unknown>): void;
+  /**
+   * Home with releases/r1+r2 and app->current->releases/r1 symlinks (B12).
+   * Use instead of homeA()/homeB() — it replaces the flat layout.
+   */
+  homeWithReleases(label?: string): string;
+  /** Atomically repoint <home>/current to the given release (B12). */
+  repointRelease(home: string, release: string): void;
+  /** Validated signal to a bridge process belonging to this home. */
+  signalBridgeProcess(home: string, pid: number, signal: NodeJS.Signals): void;
   watchdogLogLines(home: string, maxLines?: number): string[];
   flockInode(home: string): number | null;
   procSnapshot(pid: number): {

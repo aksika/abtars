@@ -54,9 +54,15 @@ const PROFILES: Record<string, ProfileValues> = {
 
 export const PROFILE_NAMES = Object.keys(PROFILES) as string[];
 
-export function getProfile(name: string): TimingProfile {
+/** Compressed constant values for one profile (scenarios derive deadlines from these). */
+export function getProfileValues(name: string): ProfileValues {
   const v = PROFILES[name];
   if (!v) throw new Error(`unknown timing profile '${name}' (have: ${PROFILE_NAMES.join(", ")})`);
+  return v;
+}
+
+export function getProfile(name: string): TimingProfile {
+  const v = getProfileValues(name);
   return { name, transforms: [...watchdogTransforms(v), ...stateTransforms(v)] };
 }
 
