@@ -174,6 +174,8 @@ export interface OrcProjectRunRow {
   project_card_id: number;
   project_generation: number;
   ownership_generation: number;
+  /** Globally monotonic claim sequence used by the bridge-wide reset boundary. */
+  global_sequence: number | null;
   owner_peer: string;
   owner_instance_id: string;
   origin_kind: OrcOriginKind;

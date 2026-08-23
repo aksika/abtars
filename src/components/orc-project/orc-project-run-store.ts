@@ -86,6 +86,7 @@ export class OrcProjectRunStore {
         project_card_id       INTEGER NOT NULL,
         project_generation    INTEGER NOT NULL,
         ownership_generation  INTEGER NOT NULL,
+        global_sequence       INTEGER,
         global_slot           INTEGER NOT NULL DEFAULT 1 CHECK(global_slot = 1),
         owner_peer            TEXT NOT NULL,
         owner_instance_id     TEXT NOT NULL,
@@ -123,6 +124,11 @@ export class OrcProjectRunStore {
         next_generation       INTEGER NOT NULL
       );
 
+      CREATE TABLE IF NOT EXISTS orc_global_run_counter (
+        singleton             INTEGER PRIMARY KEY CHECK(singleton = 1),
+        next_sequence         INTEGER NOT NULL
+      );
+
       CREATE TABLE IF NOT EXISTS orc_fuse_state (
         scope                 TEXT PRIMARY KEY,
         opened_at             TEXT,
@@ -135,6 +141,25 @@ export class OrcProjectRunStore {
     this.migrateIntentCheck();
     this.migrateTaskRunId();
     this.migrateFuseClearedGeneration();
+    this.migrateBridgeSequence();
+  }
+
+  /** Global claim ordering for bridge-wide fuse resets; per-card generations are not comparable. */
+  private migrateBridgeSequence(): void {
+    const runColumns = this.db.prepare(`PRAGMA table_info(orc_project_runs)`).all() as Array<{ name: string }>;
+    if (!runColumns.some(c => c.name === "global_sequence")) {
+      this.db.exec(`ALTER TABLE orc_project_runs ADD COLUMN global_sequence INTEGER`);
+    }
+    const fuseColumns = this.db.prepare(`PRAGMA table_info(orc_fuse_state)`).all() as Array<{ name: string }>;
+    if (!fuseColumns.some(c => c.name === "cleared_global_sequence")) {
+      this.db.exec(`ALTER TABLE orc_fuse_state ADD COLUMN cleared_global_sequence INTEGER NOT NULL DEFAULT 0`);
+    }
+    this.db.exec(`
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_orc_runs_global_sequence
+        ON orc_project_runs(global_sequence) WHERE global_sequence IS NOT NULL;
+      INSERT INTO orc_global_run_counter (singleton, next_sequence) VALUES (1, 1)
+        ON CONFLICT(singleton) DO NOTHING;
+    `);
   }
 
   /**
@@ -301,6 +326,10 @@ export class OrcProjectRunStore {
       }
 
       const runId = `or_${input.projectCardId}_${nextGen}_${Date.now()}`;
+      const globalCounter = this.db.prepare(`
+        UPDATE orc_global_run_counter SET next_sequence = next_sequence + 1 WHERE singleton = 1
+        RETURNING next_sequence - 1 AS sequence
+      `).get() as { sequence: number };
       const now = new Date().toISOString();
       const intentKey = deriveIntentKey(input.intentKind, input.projectCardId, projectGeneration, input.intentRef);
 
@@ -310,11 +339,11 @@ export class OrcProjectRunStore {
         INSERT INTO orc_project_runs
           (id, intent_key, intent_kind, intent_ref, goal, project_card_id,
            project_generation, ownership_generation, owner_peer, owner_instance_id,
-           origin_kind, origin_peer, task_run_id, state, created_at, updated_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'scheduled', ?, ?)
+           global_sequence, origin_kind, origin_peer, task_run_id, state, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'scheduled', ?, ?)
       `).run(runId, intentKey, input.intentKind, input.intentRef ?? null, input.goal, input.projectCardId,
         projectGeneration, nextGen, ownerPeer, ownerInstanceId,
-        input.originKind, originPeer, input.taskRunId ?? null, now, now);
+        globalCounter.sequence, input.originKind, originPeer, input.taskRunId ?? null, now, now);
 
       const row = this.db.prepare(`SELECT * FROM orc_project_runs WHERE id = ?`).get(runId) as unknown as OrcProjectRunRow;
       return { kind: "claimed" as const, context: buildContextFromRow(row) };
@@ -560,29 +589,29 @@ export class OrcProjectRunStore {
    * is the claiming card — its own row insert is what would cross the line.
    */
   private evaluateBridgeFuse(bypassCardId: number): string | undefined {
-    const fuseRow = this.db.prepare(`SELECT opened_at, trip_reason, cleared_generation FROM orc_fuse_state WHERE scope = 'bridge'`).get() as { opened_at: string | null; trip_reason: string | null; cleared_generation: number | null } | undefined;
+    const fuseRow = this.db.prepare(`SELECT opened_at, trip_reason, cleared_global_sequence FROM orc_fuse_state WHERE scope = 'bridge'`).get() as { opened_at: string | null; trip_reason: string | null; cleared_global_sequence: number | null } | undefined;
     if (fuseRow?.opened_at) return fuseRow.trip_reason ?? "already_open";
-    const clearedGen = fuseRow?.cleared_generation ?? 0;
+    const clearedSequence = fuseRow?.cleared_global_sequence ?? 0;
 
     const nowSec = Math.floor(Date.now() / 1000);
     const starts5mFrom = nowSec - Math.floor(BRIDGE_STARTS_5M_WINDOW_MS / 1000);
     const starts1hFrom = nowSec - Math.floor(BRIDGE_STARTS_HOUR_WINDOW_MS / 1000);
     const rows5mFrom = nowSec - Math.floor(BRIDGE_ROWS_5M_WINDOW_MS / 1000);
 
-    const startsBase = `FROM orc_project_runs WHERE started_at IS NOT NULL AND ownership_generation > ? AND unixepoch(created_at) >= ?`;
+    const startsBase = `FROM orc_project_runs WHERE started_at IS NOT NULL AND global_sequence > ? AND unixepoch(created_at) >= ?`;
 
-    const starts5m = this.db.prepare(`SELECT COUNT(*) AS n ${startsBase}`).get(clearedGen, starts5mFrom) as { n: number };
+    const starts5m = this.db.prepare(`SELECT COUNT(*) AS n ${startsBase}`).get(clearedSequence, starts5mFrom) as { n: number };
     if (starts5m.n >= BRIDGE_STARTS_5M_LIMIT) {
       return this.openFuse("bridge", `bridge_starts_5m:${starts5m.n}`, bypassCardId);
     }
-    const starts1h = this.db.prepare(`SELECT COUNT(*) AS n ${startsBase}`).get(clearedGen, starts1hFrom) as { n: number };
+    const starts1h = this.db.prepare(`SELECT COUNT(*) AS n ${startsBase}`).get(clearedSequence, starts1hFrom) as { n: number };
     if (starts1h.n >= BRIDGE_STARTS_HOUR_LIMIT) {
       return this.openFuse("bridge", `bridge_starts_1h:${starts1h.n}`, bypassCardId);
     }
     const rows5m = this.db.prepare(`
       SELECT COUNT(*) AS n FROM orc_project_runs
-       WHERE ownership_generation > ? AND unixepoch(created_at) >= ?
-    `).get(clearedGen, rows5mFrom) as { n: number };
+       WHERE global_sequence > ? AND unixepoch(created_at) >= ?
+    `).get(clearedSequence, rows5mFrom) as { n: number };
     if (rows5m.n >= BRIDGE_ROWS_5M_LIMIT) {
       return this.openFuse("bridge", `bridge_rows_5m:${rows5m.n}`, bypassCardId);
     }
@@ -630,14 +659,14 @@ export class OrcProjectRunStore {
   /** #1707 Task 5: explicit bridge-fuse reset with a generation bump so stale events stay harmless. */
   resetBridgeFuse(): void {
     const nowIso = new Date().toISOString();
-    const maxRow = this.db.prepare(`SELECT COALESCE(MAX(ownership_generation), 0) AS g FROM orc_project_runs`).get() as { g: number };
+    const maxRow = this.db.prepare(`SELECT COALESCE(MAX(global_sequence), 0) AS sequence FROM orc_project_runs`).get() as { sequence: number };
     this.db.transaction(() => {
       this.db.prepare(`
-        INSERT INTO orc_fuse_state (scope, generation, cleared_at, cleared_generation) VALUES ('bridge', 1, ?, ?)
+        INSERT INTO orc_fuse_state (scope, generation, cleared_at, cleared_global_sequence) VALUES ('bridge', 1, ?, ?)
         ON CONFLICT(scope) DO UPDATE SET
           opened_at = NULL, trip_reason = NULL, generation = generation + 1,
-          cleared_at = excluded.cleared_at, cleared_generation = excluded.cleared_generation
-      `).run(nowIso, maxRow.g);
+          cleared_at = excluded.cleared_at, cleared_global_sequence = excluded.cleared_global_sequence
+      `).run(nowIso, maxRow.sequence);
     });
     logWarn("orc-fuse", "circuit breaker RESET scope=bridge");
   }

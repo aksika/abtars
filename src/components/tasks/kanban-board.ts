@@ -17,7 +17,7 @@ import { initTaskHistorySchema } from "./task-history-schema.js";
 import { addColumnIfMissing } from "../../utils/sqlite-migrate.js";
 
 // better-sqlite3 is external (native module, resolved from ~/.local/lib/node_modules/)
-type SqliteDb = { prepare(sql: string): any; exec(sql: string): void; pragma(s: string): void; transaction<T>(fn: () => T): () => T };
+type SqliteDb = { prepare(sql: string): any; exec(sql: string): void; pragma(s: string): void; transaction<T>(fn: () => T): () => T; close(): void };
 
 /** #1393 — Typed capability for components that need durable SQLite access alongside kanban. */
 export interface TaskDatabase {
@@ -98,6 +98,13 @@ export interface KanbanCard {
 
 let _db: SqliteDb | null = null;
 let _dbAttempted = false;
+
+/** Close the cached board handle so an in-process restart can reopen or nuke it safely. */
+export function closeTaskDatabase(): void {
+  _db?.close();
+  _db = null;
+  _dbAttempted = false;
+}
 
 /**
  * #1631: the production kanban_board bootstrap, extracted so test fixtures can

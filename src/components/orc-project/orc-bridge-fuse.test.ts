@@ -116,6 +116,22 @@ describe("#1707 bridge-wide emergency fuse", () => {
       goal: "g", originKind: "peer", cardSource: "peer", originPeer: "other-peer", sourcePeer: "other-peer",
     }, "p", "inst3");
     expect(["claimed", "idempotent"]).toContain(retry.kind);
+
+    // A reset must start a fresh bridge-wide window. Per-card ownership
+    // generations all begin at one, so this catches accidental use of those
+    // local counters as a global reset boundary.
+    if (retry.kind === "claimed") {
+      restarted.promoteRun(retry.context.runId);
+      const bound = restarted.bindExecution(retry.context, "sess-reset", "exec-reset");
+      expect(bound.ok).toBe(true);
+      restarted.release({ ...retry.context, sessionId: "sess-reset", executionId: "exec-reset" }, "completed");
+    }
+    let postResetStarts = 1;
+    for (let i = 1; i <= limit + 3; i++) {
+      if (seedAndStart(restarted, 1_000 + i)) postResetStarts++;
+    }
+    expect(postResetStarts).toBe(limit);
+    expect(restarted.getFuseSnapshot().find(f => f.scope === "bridge")?.openedAt).toBeTruthy();
   });
 
   it("alert muting suppresses delivery but never trip recording", async () => {

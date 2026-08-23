@@ -11,10 +11,17 @@ import { nerve } from "../nerve.js";
 import { logInfo, logWarn } from "../logger.js";
 import { resolveNativeDep } from "../../utils/lazy-require.js";
 
-type SqliteDb = { prepare(sql: string): any; exec(sql: string): void; pragma(s: string): void };
+type SqliteDb = { prepare(sql: string): any; exec(sql: string): void; pragma(s: string): void; close(): void };
 
 let _db: SqliteDb | null = null;
 let _dbAttempted = false;
+
+/** Close the channel's independent handle before an in-process bridge restart. */
+export function closeKanbanChannelDatabase(): void {
+  _db?.close();
+  _db = null;
+  _dbAttempted = false;
+}
 
 function db(): SqliteDb | null {
   if (_dbAttempted) return _db;

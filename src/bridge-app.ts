@@ -111,6 +111,14 @@ export class Bridge {
     // delivery synchronously before awaiting interrupt/process cleanup.
     await step("emergency", () => this.ctx.emergencyExecution?.shutdown());
     await step("transport", () => this.ctx.transport?.destroy());
+    await step("kanban-database", async () => {
+      const [{ closeTaskDatabase }, { closeKanbanChannelDatabase }] = await Promise.all([
+        import("./components/tasks/kanban-board.js"),
+        import("./components/tasks/kanban-channel.js"),
+      ]);
+      closeKanbanChannelDatabase();
+      closeTaskDatabase();
+    });
     await step("snapshot", () => {
       // Best effort — a missing/unloadable snapshot module must never abort
       // the remaining teardown steps (#1706).

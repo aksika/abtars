@@ -107,6 +107,18 @@ describe("#1707 /kanban nuke", () => {
     expect(Object.values(check)[0]).toBe("ok");
   });
 
+  it("works across the normal in-process restart after shutdown closes the cached board", async () => {
+    seedBoard(2);
+    const { ctx } = makeCtx();
+    await handlersTasks.handleKanban("/kanban nuke", ctx);
+
+    // main.ts restarts in the same process; Bridge.shutdown closes and resets
+    // the module cache before startBridge runs its next preflight.
+    kanban.closeTaskDatabase();
+    expect(nuke.runKanbanNukePreflightIfNeeded().performed).toBe(true);
+    expect(kanban.kanbanList("*")).toHaveLength(0);
+  });
+
   it("expired markers are ignored unchanged", async () => {
     seedBoard(2);
     kanban.requireTaskDatabase().exec(`CREATE TABLE IF NOT EXISTS kanban_control (key TEXT PRIMARY KEY, value TEXT NOT NULL)`);
