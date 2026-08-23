@@ -11,6 +11,7 @@ export type PhaseResult = "ran" | "skipped";
 import type { Config } from "../types/index.js";
 import type { MemoryConfig } from "abmind";
 import { createDisabledRuntime } from "../components/memory-runtime.js";
+import type { MemoryRecompositionSupervisor } from "../components/memory-recomposition.js";
 import type { IKiroTransport } from "../components/transport/kiro-transport.js";
 import type { HeartbeatSystem } from "../components/heartbeat-system.js";
 import type { ServiceRegistry } from "../components/service-registry.js";
@@ -68,6 +69,13 @@ export interface BootCtx {
   client: import("../components/abmind-client-contract.js").AbmindClientLike | null;
   /** #1380: daemon-backed memory runtime facade. Set by phase-memory. */
   memoryRuntime: import("../components/memory-runtime.js").AbtarsMemoryRuntime;
+  /**
+   * #1706: generation-owned late-composition supervisor. Created idle by
+   * phase-memory on recoverable composition failure; startBridge starts it
+   * after bootGraph finalization; shutdown cancels and drains it before the
+   * memory runtime is closed.
+   */
+  memoryRecomposition: MemoryRecompositionSupervisor | null;
   /**
    * #1527: late-bound durable context provider. Transport construction and
    * memory negotiation boot in parallel, so phase-pipeline-deps populates
@@ -222,6 +230,7 @@ export function createBootCtx(overrides: Partial<BootCtx> = {}): BootCtx {
     runtime: new SubagentRuntimeClass(),
     client: null,
     memoryRuntime: createDisabledRuntime(),
+    memoryRecomposition: null,
     durableContextProvider: { current: null },
     memoryStoreQuota: null,
     memoryToolDependencies: { current: null },

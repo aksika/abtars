@@ -1,48 +1,69 @@
 /**
- * phase-memory — boot phase 2: initialize memory layer.
+ * phase-memory — boot composition of the memory layer (#1508, #1706).
  *
- * Order of resolution (#1508):
- *   1. disabled memory → no config load, no abmind import, no connect
- *   2. resolve the abtars-owned endpoint descriptor (~/.abtars/config/abmind.json)
- *   3. local mode → loadAbmind() + existing package checks + local client
- *   4. wss mode → abtars-owned signed WSS client; ctx.abmindModule stays null
- *   5. negotiate required capabilities before registering the runtime
- *   6. typed failures map to bounded degraded status; partial clients close;
- *      an explicit endpoint never falls back to another transport
+ * One shared attempt closure serves both initial boot and every late retry:
+ *   1. re-resolve the abtars-owned endpoint descriptor (~/.abtars/config/abmind.json)
+ *   2. local mode → enforce package-layout FATALs (duplicate/legacy bundle)
+ *   3. negotiate via createMemoryRuntimeFromEndpoint (local or signed WSS)
+ *   4. typed failures map to a bounded reason code
  *
- * Populates ctx: client (AbmindClientLike or null), memoryRuntime,
- * abmindModule (local mode only).
+ * On immediate success the negotiated runtime is published through the same
+ * synchronous publication function used by retries. On any recoverable
+ * failure — invalid config, missing package, unreachable endpoint — a stable
+ * re-composable facade stays installed in ctx.memoryRuntime, an idle
+ * supervisor is stored on ctx.memoryRecomposition (started post-graph by
+ * startBridge), and a bounded MemoryCompositionPendingError is thrown so the
+ * optional `memory` boot node reports failed until late composition lands.
  *
- * Owns no module-level singletons (setMemoryLogger is a setter on abmind's
- * internal logger, not an abtars singleton).
+ * Operator-disabled memory remains terminal: disabled runtime, no supervisor.
+ *
+ * Doctor compatibility: the endpoint factory and its error classes stay
+ * exported here unchanged.
  */
 
 import { logInfo, logWarn } from "../components/logger.js";
 import { logAndSwallow } from "../components/log-and-swallow.js";
 import type { BootCtx, PhaseResult } from "./context.js";
 import { loadAbmind } from "../utils/abmind-lazy.js";
-import { createDisabledRuntime, createUnavailableRuntime } from "../components/memory-runtime.js";
+import {
+  createDisabledRuntime,
+  createClientRuntime,
+  type MemoryCompositionDiagnostics,
+  type MemoryCompositionFailureCode,
+} from "../components/memory-runtime.js";
 import { resolveAbmindEndpoint, AbmindEndpointConfigError, type ResolvedAbmindEndpoint } from "../components/abmind-endpoint-config.js";
 import type { AbmindClientLike } from "../components/abmind-client-contract.js";
-import type { AbtarsMemoryRuntime } from "../components/memory-runtime.js";
 import { AbtarsSignedWssClient } from "../components/abmind-signed-wss-client.js";
-import { createClientRuntime } from "../components/memory-runtime.js";
+import {
+  RecomposableMemoryRuntime,
+  MemoryRecompositionSupervisor,
+  type CompositionAttemptResult,
+} from "../components/memory-recomposition.js";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
 
-export interface MemoryRuntimeFactoryResult {
-  mode: "local" | "wss";
-  client: AbmindClientLike;
-  runtime: AbtarsMemoryRuntime;
-  abmindModule: typeof import("abmind") | null;
-}
+/** Boot-independent composition result owned by the component layer;
+ *  re-exported under the historical name for doctor compatibility. */
+export type MemoryRuntimeFactoryResult = CompositionAttemptResult;
 
 /** Marker error: default local mode with no resolvable abmind package. */
 export class AbmindModuleMissingError extends Error {
   constructor() {
     super("abmind package is not installed");
     this.name = "AbmindModuleMissingError";
+  }
+}
+
+/** Thrown on recoverable initial composition failure so the optional
+ *  `memory` boot node records failed while retries continue in background. */
+export class MemoryCompositionPendingError extends Error {
+  readonly code: MemoryCompositionFailureCode;
+
+  constructor(code: MemoryCompositionFailureCode) {
+    super(`memory composition pending (${code})`);
+    this.name = "MemoryCompositionPendingError";
+    this.code = code;
   }
 }
 
@@ -75,6 +96,17 @@ function wssFailureCode(err: unknown): MemoryEndpointFailureCode {
   if (/policy|grant/i.test(message)) return "policy_rejected";
   if (/retry|budget|exhaust/i.test(message)) return "retry_exhausted";
   return "endpoint_unavailable";
+}
+
+/** Map any composition failure to the closed bounded code union (#1706).
+ *  Typed errors first; bounded message matching only as fallback. */
+export function classifyCompositionFailure(err: unknown): MemoryCompositionFailureCode {
+  if (err instanceof AbmindEndpointConfigError) return "config_invalid";
+  if (err instanceof AbmindModuleMissingError) return "package_missing";
+  if (err instanceof MemoryEndpointUnavailableError) return err.code;
+  const message = err instanceof Error ? err.message : String(err);
+  if (/abmind package is not installed/.test(message)) return "package_missing";
+  return wssFailureCode(err);
 }
 
 /** Negotiate and build the memory runtime for a resolved endpoint. */
@@ -134,7 +166,7 @@ async function buildLocalClient(mod: typeof import("abmind"), socketPath?: strin
 }
 
 /** A healthy runtime must advertise the core read path after negotiation. */
-function assertNegotiatedCapabilities(runtime: AbtarsMemoryRuntime): void {
+function assertNegotiatedCapabilities(runtime: import("../components/memory-runtime.js").AbtarsMemoryRuntime): void {
   if (!runtime.supports("recall")) {
     throw new Error("negotiation did not advertise core memory capabilities");
   }
@@ -143,89 +175,110 @@ function assertNegotiatedCapabilities(runtime: AbtarsMemoryRuntime): void {
 export interface PhaseMemoryDeps {
   resolveEndpoint?: (configDir: string) => ResolvedAbmindEndpoint;
   createRuntime?: (endpoint: ResolvedAbmindEndpoint, home: string) => Promise<MemoryRuntimeFactoryResult>;
+  /** Injectable retry scheduler for deterministic tests; production uses
+   *  the supervisor's unref timeout chain. */
+  schedule?: (fn: () => void, delayMs: number) => () => void;
 }
 
-function recordDegraded(ctx: BootCtx, reason: string, detail?: string): void {
-  ctx.client = null;
-  ctx.memoryRuntime = createUnavailableRuntime();
-  ctx.phaseHealth.set("phaseMemory", { status: "failed", error: detail ? `${reason}: ${detail}` : reason });
-  logWarn("boot", `memory: ${reason}. Running without persistent memory.`);
+function updateLiveHealth(ctx: BootCtx, snap: MemoryCompositionDiagnostics): void {
+  if (snap.state === "upgraded") {
+    ctx.phaseHealth.set("memory", { status: "ok" });
+    return;
+  }
+  const detail = snap.lastFailure !== undefined
+    ? `${snap.state} (${snap.attempts}, ${snap.lastFailure})`
+    : `${snap.state} (${snap.attempts})`;
+  ctx.phaseHealth.set("memory", { status: "failed", error: detail });
 }
 
 export async function phaseMemory(ctx: BootCtx, deps: PhaseMemoryDeps = {}): Promise<PhaseResult> {
   const home = process.env["ABTARS_HOME"] ?? join(homedir(), ".abtars");
   const configDir = join(home, "config");
 
-  // A BootCtx may be reused by an in-process restart. Clear prior ownership
-  // before disabled, invalid-config, or remote branches can return early.
+  // In-process generation reset: drain any stale supervisor before rebuilding
+  // ownership, so two generations can never retry concurrently.
+  await ctx.memoryRecomposition?.cancel();
+  ctx.memoryRecomposition = null;
   ctx.client = null;
   ctx.abmindModule = null;
 
   if (!ctx.memoryConfig.memoryEnabled) {
     logInfo("main", "Memory disabled");
     ctx.memoryRuntime = createDisabledRuntime();
-    ctx.phaseHealth.set("phaseMemory", { status: "skipped", error: "memory disabled" });
+    ctx.phaseHealth.set("memory", { status: "skipped", error: "memory disabled" });
     return "skipped";
   }
 
   const resolveEndpoint = deps.resolveEndpoint ?? resolveAbmindEndpoint;
-  let endpoint: ResolvedAbmindEndpoint;
-  try {
-    endpoint = resolveEndpoint(configDir);
-  } catch (err) {
-    const code = err instanceof AbmindEndpointConfigError ? err.code : "config_invalid";
-    recordDegraded(ctx, `memory endpoint config rejected (${code})`, err instanceof Error ? err.message : undefined);
-    return "skipped";
-  }
-
-  // ── Local mode: retain abmind package discovery and local transport ─────
-  if (endpoint.mode === "local") {
-    const legacyAbmindPkgs = [
-      join(home, "app", "bundle", "node_modules", "abmind", "package.json"),
-      join(home, "app", "node_modules", "abmind", "package.json"),
-    ].filter(p => existsSync(p));
-
-    const mod = await loadAbmind();
-    ctx.abmindModule = mod;
-
-    if (legacyAbmindPkgs.length > 1) {
-      const { logError } = await import("../components/logger.js");
-      logError("boot", `FATAL: duplicate bundled abmind at ${legacyAbmindPkgs.map(p => p.replace("/package.json", "")).join(" + ")}. Delete one to prevent dual DB connections. Refusing to start.`);
-      process.exit(1);
-    }
-    if (legacyAbmindPkgs.length === 1 && !mod) {
-      const { logError } = await import("../components/logger.js");
-      logError("boot", `FATAL: legacy bundled abmind at ${legacyAbmindPkgs[0]!.replace("/package.json", "")} but no global abmind is resolvable. #1243 ships abmind separately — install it first: npm install -g abmind@latest. Refusing to start without memory.`);
-      process.exit(1);
-    }
-    if (!mod) {
-      if (endpoint.source === "explicit") {
-        recordDegraded(ctx, "explicit local memory endpoint unavailable (abmind package missing)");
-        return "skipped";
-      }
-      ctx.memoryRuntime = createDisabledRuntime();
-      ctx.phaseHealth.set("phaseMemory", { status: "skipped", error: "abmind package not installed" });
-      return "skipped";
-    }
-  }
-
   const createRuntime = deps.createRuntime ?? createMemoryRuntimeFromEndpoint;
-  try {
-    const result = await createRuntime(endpoint, home);
-    ctx.client = result.client;
-    ctx.memoryRuntime = result.runtime;
-    ctx.abmindModule = result.abmindModule;
-    ctx.phaseHealth.set("phaseMemory", { status: "ok", error: undefined });
-    logInfo("main", `Memory enabled via ${result.mode} endpoint`);
 
+  // Stable facade installed before the first attempt: consumers that capture
+  // it during boot always hold the reference that later upgrades in place.
+  const controller = new RecomposableMemoryRuntime();
+  ctx.memoryRuntime = controller.runtime;
+
+  // Shared composition attempt — initial boot and every retry execute exactly
+  // this: fresh endpoint resolution, local package-layout FATALs, negotiate.
+  const attempt = async (): Promise<CompositionAttemptResult> => {
+    const endpoint = resolveEndpoint(configDir);
+
+    if (endpoint.mode === "local") {
+      const legacyAbmindPkgs = [
+        join(home, "app", "bundle", "node_modules", "abmind", "package.json"),
+        join(home, "app", "node_modules", "abmind", "package.json"),
+      ].filter(p => existsSync(p));
+
+      const mod = await loadAbmind();
+
+      if (legacyAbmindPkgs.length > 1) {
+        const { logError } = await import("../components/logger.js");
+        logError("boot", `FATAL: duplicate bundled abmind at ${legacyAbmindPkgs.map(p => p.replace("/package.json", "")).join(" + ")}. Delete one to prevent dual DB connections. Refusing to start.`);
+        process.exit(1);
+      }
+      if (legacyAbmindPkgs.length === 1 && !mod) {
+        const { logError } = await import("../components/logger.js");
+        logError("boot", `FATAL: legacy bundled abmind at ${legacyAbmindPkgs[0]!.replace("/package.json", "")} but no global abmind is resolvable. #1243 ships abmind separately — install it first: npm install -g abmind@latest. Refusing to start without memory.`);
+        process.exit(1);
+      }
+      // A missing global package falls through to the factory, which throws
+      // the typed missing-package errors for implicit and explicit sources.
+    }
+
+    return createRuntime(endpoint, home);
+  };
+
+  // Synchronous publication, identical for initial success and late retry:
+  // assign ctx ownership, swap the facade delegate, flip live health.
+  const publish = (result: CompositionAttemptResult): void => {
+    ctx.client = result.client;
+    ctx.abmindModule = result.abmindModule;
+    controller.upgrade(result.runtime);
+    logInfo("main", `Memory enabled via ${result.mode} endpoint`);
+    ctx.phaseHealth.set("memory", { status: "ok" });
+  };
+
+  try {
+    const result = await attempt();
+    publish(result);
     return "ran";
   } catch (err) {
-    const reason = err instanceof AbmindModuleMissingError
-      ? "abmind package not installed"
-      : err instanceof MemoryEndpointUnavailableError
-        ? `memory endpoint unavailable (${endpoint.mode}, ${err.code})`
-        : `memory endpoint unavailable (${endpoint.mode})`;
-    recordDegraded(ctx, reason, err instanceof Error ? err.message : undefined);
-    return "skipped";
+    const code = classifyCompositionFailure(err);
+    controller.setDiagnostics({ state: "idle", attempts: 1, lastAttemptAt: Date.now(), lastFailure: code });
+    const onDiagnostics = (snap: MemoryCompositionDiagnostics): void => {
+      controller.setDiagnostics(snap);
+      updateLiveHealth(ctx, snap);
+    };
+    ctx.memoryRecomposition = new MemoryRecompositionSupervisor({
+      attempt,
+      classifyFailure: classifyCompositionFailure,
+      publish,
+      dispose: (result) => result.client.close(),
+      onDiagnostics,
+      initial: { attempts: 1, lastFailure: code },
+      ...(deps.schedule ? { schedule: deps.schedule } : {}),
+    });
+    logWarn("boot", `memory: composition deferred (${code}). Will keep retrying without blocking boot.`);
+    updateLiveHealth(ctx, { state: "idle", attempts: 1, lastFailure: code });
+    throw new MemoryCompositionPendingError(code);
   }
 }

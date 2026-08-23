@@ -152,6 +152,9 @@ export interface MemoryRecompositionSupervisorDeps {
   delaysMs?: readonly number[];
   /** Interval for all attempts after `delaysMs` is exhausted. */
   repeatDelayMs?: number;
+  /** Diagnostics seed for the boot-time attempt that already ran and failed
+   *  before this supervisor existed (attempts includes it). */
+  initial?: { attempts: number; lastFailure?: MemoryCompositionFailureCode };
 }
 
 const DEFAULT_DELAYS_MS: readonly number[] = [5_000, 15_000, 60_000];
@@ -184,6 +187,13 @@ export class MemoryRecompositionSupervisor {
       delaysMs: deps.delaysMs ?? DEFAULT_DELAYS_MS,
       repeatDelayMs: deps.repeatDelayMs ?? DEFAULT_REPEAT_DELAY_MS,
     };
+    if (deps.initial && deps.initial.attempts > 0) {
+      this.diag = {
+        state: "idle",
+        attempts: deps.initial.attempts,
+        ...(deps.initial.lastFailure !== undefined ? { lastFailure: deps.initial.lastFailure } : {}),
+      };
+    }
   }
 
   get diagnostics(): MemoryCompositionDiagnostics {
