@@ -5,3 +5,4 @@ export { handleMemory, handleFacts, handleNlm } from "./handlers-memory.js";
 export { handleSleep, handleSleepSub } from "./handlers-sleep.js";
 export { handleTasksList, handleTasksTrigger, handleTasksLog, handleTaskPause, handleTasksValidate, handleKanban, handleChannel, handleTodo, handleProjectUnquarantine } from "./handlers-tasks.js";
 export { handleUsers, handleSkills, handleHooks, handleMcp, handleHelp, handleTribe } from "./handlers-admin.js";
+export { handleOrc } from "./handlers-orc.js";

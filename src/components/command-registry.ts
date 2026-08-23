@@ -25,7 +25,7 @@ import {
   handleMemory, handleNlm,
   handleSleep, handleSleepSub, handleHelp, handleSkills,
   handleHooks, handleMcp, handleUsers, handleUsage, handleOpenRouter, handleWhoami,
-  handleSoftware, handleTribe, handleMetrics,
+  handleSoftware, handleTribe, handleMetrics, handleOrc,
 } from "./commands/handlers.js";
 import { handleSession } from "./commands/session-handler.js";
 import { handleCoding } from "./commands/handlers-coding.js";
@@ -361,6 +361,21 @@ export const COMMAND_DEFINITIONS: readonly CommandDefinition[] = [
     name: "tribe", match: "/tribe", description: "Peer status (Orc + enrolled peers)",
     handler: handleTribe, kind: "exact", visibility: "public", access: "master",
     help: ["/tribe — Peer status (Orc + enrolled peers)"],
+  },
+  {
+    name: "orc", match: "/orc", description: "Orc fuse status and reset",
+    handler: handleOrc, kind: "exact", visibility: "public", access: "master",
+    help: [
+      "/orc — Orc circuit-breaker status (fuses, limits, window counts)",
+      "/orc limits — Configured fuse limits",
+      "/orc reset project <card-id> — Clear one card's fuse/counters",
+      "/orc reset bridge — Clear the bridge-wide emergency fuse",
+      "/orc alerts status | test | mute <minutes>",
+    ],
+  },
+  {
+    name: "orc", match: "/orc ", description: "Orc subcommands",
+    handler: handleOrc, kind: "prefix", visibility: "internal", access: "master",
   },
 
   // ── Pi coding runs ────────────────────────────────────────────────────────

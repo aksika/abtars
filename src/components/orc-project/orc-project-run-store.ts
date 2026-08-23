@@ -14,9 +14,16 @@ import {
   CARD_FAILED_ATTEMPTS_WINDOW_MS,
   CARD_NO_PROGRESS_STARTS_LIMIT,
   CARD_NO_PROGRESS_WINDOW_MS,
+  BRIDGE_STARTS_5M_LIMIT,
+  BRIDGE_STARTS_5M_WINDOW_MS,
+  BRIDGE_STARTS_HOUR_LIMIT,
+  BRIDGE_STARTS_HOUR_WINDOW_MS,
+  BRIDGE_ROWS_5M_LIMIT,
+  BRIDGE_ROWS_5M_WINDOW_MS,
 } from "./orc-project-contracts.js";
 import { intentPolicyFor, readOrcProjectSnapshot } from "./orc-intent-policy.js";
 import { logWarn } from "../logger.js";
+import { emitOrcAlert } from "./orc-alerts.js";
 
 /**
  * #1679: the read-side owner fence, defined once. Every method composes these
@@ -268,6 +275,11 @@ export class OrcProjectRunStore {
       // fuse refuses the claim at the store boundary itself.
       const fuse = this.evaluateCardFuse(input);
       if (fuse) return { kind: "not_actionable" as const, reason: "fuse_open" as const };
+
+      // #1707 Task 5: the bridge-wide emergency fuse is the last containment
+      // layer — a card-level guard bypass cannot consume the whole process.
+      const bridgeTrip = this.evaluateBridgeFuse(input.projectCardId);
+      if (bridgeTrip) return { kind: "not_actionable" as const, reason: "fuse_open" as const };
 
       const counter = this.db.prepare(`
         UPDATE orc_project_ownership_counters SET next_generation = next_generation + 1
@@ -542,8 +554,44 @@ export class OrcProjectRunStore {
     return undefined;
   }
 
+  /**
+   * #1707 Task 5: bridge-wide emergency fuse. Process-wide start/row windows;
+   * the first exceeded limit opens the durable 'bridge' scope. `bypassCardId`
+   * is the claiming card — its own row insert is what would cross the line.
+   */
+  private evaluateBridgeFuse(bypassCardId: number): string | undefined {
+    const fuseRow = this.db.prepare(`SELECT opened_at, trip_reason, cleared_generation FROM orc_fuse_state WHERE scope = 'bridge'`).get() as { opened_at: string | null; trip_reason: string | null; cleared_generation: number | null } | undefined;
+    if (fuseRow?.opened_at) return fuseRow.trip_reason ?? "already_open";
+    const clearedGen = fuseRow?.cleared_generation ?? 0;
+
+    const nowSec = Math.floor(Date.now() / 1000);
+    const starts5mFrom = nowSec - Math.floor(BRIDGE_STARTS_5M_WINDOW_MS / 1000);
+    const starts1hFrom = nowSec - Math.floor(BRIDGE_STARTS_HOUR_WINDOW_MS / 1000);
+    const rows5mFrom = nowSec - Math.floor(BRIDGE_ROWS_5M_WINDOW_MS / 1000);
+
+    const startsBase = `FROM orc_project_runs WHERE started_at IS NOT NULL AND ownership_generation > ? AND unixepoch(created_at) >= ?`;
+
+    const starts5m = this.db.prepare(`SELECT COUNT(*) AS n ${startsBase}`).get(clearedGen, starts5mFrom) as { n: number };
+    if (starts5m.n >= BRIDGE_STARTS_5M_LIMIT) {
+      return this.openFuse("bridge", `bridge_starts_5m:${starts5m.n}`, bypassCardId);
+    }
+    const starts1h = this.db.prepare(`SELECT COUNT(*) AS n ${startsBase}`).get(clearedGen, starts1hFrom) as { n: number };
+    if (starts1h.n >= BRIDGE_STARTS_HOUR_LIMIT) {
+      return this.openFuse("bridge", `bridge_starts_1h:${starts1h.n}`, bypassCardId);
+    }
+    const rows5m = this.db.prepare(`
+      SELECT COUNT(*) AS n FROM orc_project_runs
+       WHERE ownership_generation > ? AND unixepoch(created_at) >= ?
+    `).get(clearedGen, rows5mFrom) as { n: number };
+    if (rows5m.n >= BRIDGE_ROWS_5M_LIMIT) {
+      return this.openFuse("bridge", `bridge_rows_5m:${rows5m.n}`, bypassCardId);
+    }
+
+    return undefined;
+  }
+
   /** Open a durable fuse inside the caller's transaction. Returns the trip reason. */
-  private openFuse(scope: string, reason: string): string {
+  private openFuse(scope: string, reason: string, cardId?: number): string {
     const nowIso = new Date().toISOString();
     this.db.prepare(`
       UPDATE orc_fuse_state SET opened_at = ?, trip_reason = ?
@@ -554,7 +602,9 @@ export class OrcProjectRunStore {
       VALUES (?, ?, ?)
       ON CONFLICT(scope) DO NOTHING
     `).run(scope, nowIso, reason);
-    logWarn("orc-fuse", `circuit breaker OPEN scope=${scope} reason=${reason}`);
+    logWarn("orc-fuse", `circuit breaker OPEN scope=${scope} reason=${reason}${cardId !== undefined ? ` card=${cardId}` : ""}`);
+    // Bounded delivery: rate-limited per kind, mute-aware, no secrets.
+    emitOrcAlert(`trip:${scope}`, `[orc-fuse] circuit breaker OPEN scope=${scope} reason=${reason}${cardId !== undefined ? ` card=${cardId}` : ""}`);
     return reason;
   }
 
@@ -602,6 +652,15 @@ export class OrcProjectRunStore {
       generation: Number(r.generation ?? 0),
       clearedAt: (r.cleared_at as string | null) ?? null,
     }));
+  }
+
+  /** #1707 Task 5: live bridge window counters for /orc status. */
+  getBridgeWindowCounts(): { starts5m: number; starts1h: number; rows5m: number } {
+    const nowSec = Math.floor(Date.now() / 1000);
+    const starts5m = this.db.prepare(`SELECT COUNT(*) AS n FROM orc_project_runs WHERE started_at IS NOT NULL AND unixepoch(created_at) >= ?`).get(nowSec - Math.floor(BRIDGE_STARTS_5M_WINDOW_MS / 1000)) as { n: number };
+    const starts1h = this.db.prepare(`SELECT COUNT(*) AS n FROM orc_project_runs WHERE started_at IS NOT NULL AND unixepoch(created_at) >= ?`).get(nowSec - Math.floor(BRIDGE_STARTS_HOUR_WINDOW_MS / 1000)) as { n: number };
+    const rows5m = this.db.prepare(`SELECT COUNT(*) AS n FROM orc_project_runs WHERE unixepoch(created_at) >= ?`).get(nowSec - Math.floor(BRIDGE_ROWS_5M_WINDOW_MS / 1000)) as { n: number };
+    return { starts5m: starts5m.n, starts1h: starts1h.n, rows5m: rows5m.n };
   }
 
   supersede(runId: string, outcome: OrcRunOutcome): boolean {

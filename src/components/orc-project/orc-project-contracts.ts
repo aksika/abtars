@@ -28,6 +28,19 @@ export const CARD_FAILED_ATTEMPTS_WINDOW_MS = 600_000;
 export const CARD_NO_PROGRESS_STARTS_LIMIT = 5;
 export const CARD_NO_PROGRESS_WINDOW_MS = 300_000;
 
+// ── #1707 Task 5: bridge-wide emergency fuse policy ───────────────────────────
+//
+// The last containment layer: even if every per-card guard is bypassed, the
+// bridge refuses new automatic claims past these process-wide limits. Durable
+// across ordinary restarts; `/orc reset bridge` is the explicit clear.
+
+export const BRIDGE_STARTS_5M_LIMIT = 25;
+export const BRIDGE_STARTS_5M_WINDOW_MS = 300_000;
+export const BRIDGE_STARTS_HOUR_LIMIT = 100;
+export const BRIDGE_STARTS_HOUR_WINDOW_MS = 3_600_000;
+export const BRIDGE_ROWS_5M_LIMIT = 50;
+export const BRIDGE_ROWS_5M_WINDOW_MS = 300_000;
+
 /**
  * #1628: in-process fact published after every committed Orc ownership
  * relinquishment (release/supersede). The reconciler wakes the affected
