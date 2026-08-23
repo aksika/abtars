@@ -49,3 +49,6 @@ test-results/pi-production-e2e/
 test-results/report-pipeline-e2e/
 # Epic17 local Pi/TUI journey results (run artifacts; kept out of git)
 test-results/pi-local-journey/
+
+# watchdog acceptance harness runtime output
+scripts/watchdog-acceptance/.artifacts/
