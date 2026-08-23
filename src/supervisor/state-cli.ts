@@ -17,6 +17,8 @@ import {
 } from "./state.js";
 import { validateBridgeLock, signalValidatedBridge, processStartIdentity, exactBridgeProcesses } from "./identity.js";
 import { atomicWriteSync } from "../components/atomic-write.js";
+import { runReconciliationTick, containCandidate } from "./reconcile-executor.js";
+import type { TransitionState } from "./reconcile.js";
 
 const home = process.env.ABTARS_HOME ?? resolve(homedir(), ".abtars");
 
@@ -26,7 +28,7 @@ enum Exit {
   Error = 2,
 }
 
-function main(): void {
+async function main(): Promise<void> {
   const cmd = process.argv[2];
 
   switch (cmd) {
@@ -194,6 +196,43 @@ function main(): void {
       process.exit(Exit.Ok);
     }
 
+    case "reconcile": {
+      // One typed boundary invocation per watchdog tick (#1711 R6). Output is
+      // a fixed-vocabulary line; the shell never classifies processes.
+      const transition = (process.argv[3] ?? "stable") as TransitionState;
+      const validTransitions: readonly TransitionState[] = ["stable", "planned-restart", "update", "rollback", "stop", "handoff"];
+      if (!validTransitions.includes(transition)) {
+        process.stderr.write(`Usage: supervisor-state reconcile <${validTransitions.join("|")}> [prevHeartbeat] [advancedFlag]\n`);
+        process.exit(Exit.Usage);
+      }
+      const prevHb = process.argv[4] !== undefined && process.argv[4] !== "-" ? Number(process.argv[4]) : null;
+      const advanced = process.argv[5] === "1";
+      if (prevHb !== null && !Number.isFinite(prevHb)) {
+        process.stderr.write("prevHeartbeat must be numeric or '-'\n");
+        process.exit(Exit.Usage);
+      }
+      const { line } = runReconciliationTick(home, transition, prevHb, advanced);
+      process.stdout.write(line + "\n");
+      process.exit(Exit.Ok);
+    }
+
+    case "contain": {
+      // Final authorization + bounded escalation (#1711 R6/R7). The executor
+      // revalidates everything fresh immediately before each signal.
+      const pid = Number(process.argv[3]);
+      const startIdentity = process.argv[4];
+      const authority = process.argv[5];
+      const transition = (process.argv[6] ?? "stable") as TransitionState;
+      if (!Number.isInteger(pid) || pid <= 0 || !startIdentity || (authority !== "owner" && authority !== "liveness")) {
+        process.stderr.write("Usage: supervisor-state contain <pid> <startIdentity> <owner|liveness> [transition]\n");
+        process.exit(Exit.Usage);
+      }
+      const result = await containCandidate(home, pid, startIdentity, authority, transition);
+      const detail = result.outcome === "contained" ? result.via : result.why;
+      process.stdout.write(`${result.outcome} ${detail}\n`);
+      process.exit(Exit.Ok);
+    }
+
     case "set-watchdog-pid": {
       // Atomic read-merge-write of the watchdog-owned watchdogPid field in
       // bridge.lock (R1.3). Replaces the watchdog's former inline python3
@@ -245,4 +284,4 @@ function setBridgeWatchdogPid(home: string, pid: number): void {
   atomicWriteSync(p, JSON.stringify(lock));
 }
 
-main();
+void main();
