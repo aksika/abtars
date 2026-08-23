@@ -336,8 +336,25 @@ export async function handleKanban(text: string, ctx: CommandContext): Promise<b
       return true;
     }
 
+    // /kanban nuke — schedule a Kanban database reset on next bridge start.
+    // Owner-only regardless of the /kanban root's access level: this is
+    // destructive. It writes a timestamp marker and returns immediately; it
+    // does not pause or wait for the bridge.
+    if (arg === "nuke") {
+      const isMaster = !ctx.userId || ctx.userId === "master"
+        || (await import("../user-registry.js")).loadUsers().byUserId.get(ctx.userId)?.role === "master";
+      if (!isMaster) {
+        await ctx.reply("⛔ Owner-only command.");
+        return true;
+      }
+      const { requestKanbanNuke } = await import("../tasks/kanban-nuke.js");
+      requestKanbanNuke();
+      await ctx.reply("+ Nuke requested. The Kanban database will be reset on the NEXT bridge start (within 5 minutes). Nothing is paused now.");
+      return true;
+    }
+
     // Anything else — usage hint
-    await ctx.reply(`Usage:\n  /kanban          — active cards\n  /kanban all      — all cards\n  /kanban <id>     — ticket detail\n  /kanban "<term>" — search`);
+    await ctx.reply(`Usage:\n  /kanban          — active cards\n  /kanban all      — all cards\n  /kanban <id>     — ticket detail\n  /kanban "<term>" — search\n  /kanban nuke     — reset board DB on next start (owner)`);
   } catch (err) {
     await ctx.reply(`Failed: ${err instanceof Error ? err.message : String(err)}`);
   }

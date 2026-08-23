@@ -165,6 +165,19 @@ export const BOOT_PHASES = [
 export async function startBridge(): Promise<number> {
   const ctx = createBootCtx();
 
+  // #1707 Task 8: /kanban nuke preflight — MUST run before the first cached
+  // Kanban connection is opened by any phase. A pending request younger than
+  // five minutes removes exactly the canonical kanban database files and
+  // rebuilds an empty valid board; anything else is ignored unchanged.
+  try {
+    const { runKanbanNukePreflightIfNeeded } = await import("./components/tasks/kanban-nuke.js");
+    const nuke = runKanbanNukePreflightIfNeeded();
+    if (nuke.performed) logInfo("boot", "kanban nuke preflight performed — board rebuilt empty");
+  } catch (err) {
+    logError("boot", "kanban nuke preflight failed — refusing to boot against a half-initialized board", err);
+    throw err;
+  }
+
   // Phase 1: config — own try/catch, falls back to empty defaults (#331)
   {
     const t = Date.now();

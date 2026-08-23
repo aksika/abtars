@@ -28,6 +28,18 @@ vi.mock("./spin.js", () => ({
   spin: { dispatch: dispatchMock, spawnChild: spawnChildMock },
 }));
 
+// #1707: the durable occurrence gate reads the real task catalog, which this
+// mocked-environment file does not provide (cards are kanbanGetCard mocks).
+// Default to "active" so driver tests exercise the claim paths; the terminal
+// boundary itself is covered by the real-store reconciler-last-resort suite.
+vi.mock("./tasks/scheduled-occurrence-gate.js", () => ({
+  isScheduledRootIdentity: (card: { type?: string; parent_id?: number | null; source?: string; source_id?: string | null }): boolean =>
+    card.type === "O" && card.parent_id === null && card.source === "task" && !!card.source_id && card.source_id.length > 0,
+  findActiveScheduledOccurrence: (): undefined => undefined,
+  scheduledOccurrenceState: (): "active" => "active",
+}));
+
+
 const kanbanGetCardMock = vi.fn();
 const kanbanGetChildrenMock = vi.fn();
 const isUnblockedMock = vi.fn().mockReturnValue(true);

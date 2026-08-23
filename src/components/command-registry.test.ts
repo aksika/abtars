@@ -120,7 +120,7 @@ describe("command-registry platform projections", () => {
     const base = [
       "coding", "compact", "continue", "doctor", "effort", "emergency",
       "facts", "health", "heartbeat", "help", "hooks",
-      "kanban", "mcp", "memory", "model", "nlm", "project", "reset",
+      "kanban", "mcp", "memory", "model", "nlm", "orc", "project", "reset",
       "restart", "route", "session", "skill", "skills", "sleep",
       "software", "status", "stop", "tasks", "thinking", "todo", "tribe",
       "update", "usage", "wait", "whoami",

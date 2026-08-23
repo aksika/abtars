@@ -342,7 +342,10 @@ export const COMMAND_DEFINITIONS: readonly CommandDefinition[] = [
   {
     name: "kanban", match: "/kanban", description: "Kanban board",
     handler: handleKanban, kind: "exact", visibility: "public", access: "all",
-    help: ["/kanban — Kanban board"],
+    help: [
+      "/kanban — Kanban board",
+      "/kanban nuke — Reset the Kanban database on next bridge start (owner-only)",
+    ],
   },
   {
     name: "kanban", match: "/kanban ", description: "Kanban subcommands",
