@@ -16,13 +16,10 @@ function fmtFuse(f: { scope: string; openedAt: string | null; tripReason: string
 export async function handleOrc(text: string, ctx: CommandContext): Promise<boolean> {
   const arg = text.replace(/^\/orc\s*/i, "").trim().toLowerCase();
   const { OrcProjectRunStore } = await import("../orc-project/orc-project-run-store.js");
-  const {
-    CARD_FAILED_ATTEMPTS_LIMIT, CARD_FAILED_ATTEMPTS_WINDOW_MS,
-    CARD_NO_PROGRESS_STARTS_LIMIT, CARD_NO_PROGRESS_WINDOW_MS,
-    BRIDGE_STARTS_5M_LIMIT, BRIDGE_STARTS_5M_WINDOW_MS,
-    BRIDGE_STARTS_HOUR_LIMIT, BRIDGE_STARTS_HOUR_WINDOW_MS,
-    BRIDGE_ROWS_5M_LIMIT, BRIDGE_ROWS_5M_WINDOW_MS,
-  } = await import("../orc-project/orc-project-contracts.js");
+  // #1708: one effective guardrail snapshot per command read — the same values
+  // claim admission consumes, never a second hard-coded formatter.
+  const { getEffectiveOrcGuardrails } = await import("../sha/sha-policy.js");
+  const g = getEffectiveOrcGuardrails();
 
   try {
     if (arg === "" || arg === "status") {
@@ -35,7 +32,7 @@ export async function handleOrc(text: string, ctx: CommandContext): Promise<bool
         ...open.map(fmtFuse),
         ...fuses.filter(f => !f.openedAt).slice(0, 10).map(fmtFuse),
         "",
-        `Bridge windows: starts/5m=${counts.starts5m}/${BRIDGE_STARTS_5M_LIMIT} starts/1h=${counts.starts1h}/${BRIDGE_STARTS_HOUR_LIMIT} rows/5m=${counts.rows5m}/${BRIDGE_ROWS_5M_LIMIT}`,
+        `Bridge windows: starts/5m=${counts.starts5m}/${g.bridge.starts5m} starts/1h=${counts.starts1h}/${g.bridge.starts1h} rows/5m=${counts.rows5m}/${g.bridge.newRunRows5m}`,
         `Alert mute: ${orcAlertsMutedUntil() > Date.now() ? new Date(orcAlertsMutedUntil()).toISOString() : "off"}`,
       ];
       await ctx.reply(lines.join("\n"));
@@ -44,12 +41,12 @@ export async function handleOrc(text: string, ctx: CommandContext): Promise<bool
 
     if (arg === "limits") {
       await ctx.reply([
-        "Orc fuse limits:",
-        `  card: ${CARD_FAILED_ATTEMPTS_LIMIT} failed attempts/${Math.round(CARD_FAILED_ATTEMPTS_WINDOW_MS / 60_000)}m`,
-        `  card: ${CARD_NO_PROGRESS_STARTS_LIMIT} no-progress starts/${Math.round(CARD_NO_PROGRESS_WINDOW_MS / 60_000)}m`,
-        `  bridge: ${BRIDGE_STARTS_5M_LIMIT} starts/${Math.round(BRIDGE_STARTS_5M_WINDOW_MS / 60_000)}m`,
-        `  bridge: ${BRIDGE_STARTS_HOUR_LIMIT} starts/${Math.round(BRIDGE_STARTS_HOUR_WINDOW_MS / 3_600_000)}h`,
-        `  bridge: ${BRIDGE_ROWS_5M_LIMIT} new run rows/${Math.round(BRIDGE_ROWS_5M_WINDOW_MS / 60_000)}m`,
+        "Orc fuse limits (effective policy):",
+        `  card: ${g.sameCard.failedOrNoProgress.max} failed attempts/${g.sameCard.failedOrNoProgress.windowMinutes}m`,
+        `  card: ${g.sameCard.startsWithWithoutProgress.max} no-progress starts/${g.sameCard.startsWithWithoutProgress.windowMinutes}m`,
+        `  bridge: ${g.bridge.starts5m} starts/5m`,
+        `  bridge: ${g.bridge.starts1h} starts/1h`,
+        `  bridge: ${g.bridge.newRunRows5m} new run rows/5m`,
         `  alert min interval: ${Math.round(ORC_ALERT_MIN_INTERVAL_MS / 1000)}s`,
       ].join("\n"));
       return true;

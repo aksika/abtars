@@ -10,20 +10,32 @@ import type {
 } from "./orc-project-contracts.js";
 import {
   deriveIntentKey,
-  CARD_FAILED_ATTEMPTS_LIMIT,
   CARD_FAILED_ATTEMPTS_WINDOW_MS,
-  CARD_NO_PROGRESS_STARTS_LIMIT,
   CARD_NO_PROGRESS_WINDOW_MS,
-  BRIDGE_STARTS_5M_LIMIT,
   BRIDGE_STARTS_5M_WINDOW_MS,
-  BRIDGE_STARTS_HOUR_LIMIT,
   BRIDGE_STARTS_HOUR_WINDOW_MS,
-  BRIDGE_ROWS_5M_LIMIT,
   BRIDGE_ROWS_5M_WINDOW_MS,
+  DEFAULT_ORC_GUARDRAILS,
 } from "./orc-project-contracts.js";
 import { intentPolicyFor, readOrcProjectSnapshot } from "./orc-intent-policy.js";
 import { logWarn } from "../logger.js";
 import { emitOrcAlert } from "./orc-alerts.js";
+import { getEffectiveOrcGuardrails } from "../sha/sha-policy.js";
+import type { EffectiveOrcGuardrails } from "../sha/sha-policy.js";
+
+/**
+ * #1708: one effective guardrail snapshot per claim/status read. The provider
+ * is resolved OUTSIDE any database transaction; a throwing provider falls
+ * back to the shipped hard defaults (fail-closed) rather than skipping fuse
+ * evaluation.
+ */
+export type OrcGuardrailsProvider = () => EffectiveOrcGuardrails;
+
+export interface OrcProjectRunStoreDeps {
+  /** Defaults to the shared effective-policy getter; tests may inject fixed
+   *  or swapping providers to prove reload behavior. */
+  guardrailsProvider?: OrcGuardrailsProvider;
+}
 
 /**
  * #1679: the read-side owner fence, defined once. Every method composes these
@@ -62,10 +74,26 @@ function evaluateOwnerFence(
 
 export class OrcProjectRunStore {
   readonly db: TaskDatabase;
+  private readonly guardrailsProvider: OrcGuardrailsProvider;
 
-  constructor(db?: TaskDatabase) {
+  constructor(db?: TaskDatabase, deps?: OrcProjectRunStoreDeps) {
     this.db = db ?? requireTaskDatabase();
+    this.guardrailsProvider = deps?.guardrailsProvider ?? (() => getEffectiveOrcGuardrails());
     this.migrate();
+  }
+
+  /**
+   * #1708: resolve one complete guardrail snapshot. Never throws — a policy
+   * read failure uses the shipped hard defaults and never removes or weakens
+   * an existing fuse.
+   */
+  private effectiveGuardrails(): EffectiveOrcGuardrails {
+    try {
+      return this.guardrailsProvider();
+    } catch (err) {
+      logWarn("orc-fuse", `guardrails provider failed — using shipped defaults: ${err instanceof Error ? err.message : String(err)}`);
+      return DEFAULT_ORC_GUARDRAILS;
+    }
   }
 
   migrate(): void {
@@ -250,6 +278,11 @@ export class OrcProjectRunStore {
   }
 
   claimIntent(input: OrcClaimInput, ownerPeer: string, ownerInstanceId: string): OrcRunClaimResult {
+    // #1708: one complete guardrail snapshot per claim, resolved BEFORE the
+    // transaction opens — file parsing or a throwing provider must never hold
+    // a database transaction open. The transaction sees only this captured
+    // snapshot; a concurrent reload affects the next claim, never this one.
+    const guardrails = this.effectiveGuardrails();
     return this.db.transaction(() => {
       const sup = this.db.prepare(`
         SELECT state, generation FROM project_supervision WHERE project_card_id = ?
@@ -298,12 +331,12 @@ export class OrcProjectRunStore {
       // #1707 Task 4: the card circuit breaker is evaluated inside the claim
       // transaction BEFORE any counter increment or row insertion — a tripped
       // fuse refuses the claim at the store boundary itself.
-      const fuse = this.evaluateCardFuse(input);
+      const fuse = this.evaluateCardFuse(input, guardrails);
       if (fuse) return { kind: "not_actionable" as const, reason: "fuse_open" as const };
 
       // #1707 Task 5: the bridge-wide emergency fuse is the last containment
       // layer — a card-level guard bypass cannot consume the whole process.
-      const bridgeTrip = this.evaluateBridgeFuse(input.projectCardId);
+      const bridgeTrip = this.evaluateBridgeFuse(input.projectCardId, guardrails);
       if (bridgeTrip) return { kind: "not_actionable" as const, reason: "fuse_open" as const };
 
       const counter = this.db.prepare(`
@@ -520,9 +553,10 @@ export class OrcProjectRunStore {
   /**
    * Returns a trip reason when the claim must be refused, undefined when the
    * card may proceed. Opening a fuse writes the durable trip row in the SAME
-   * transaction as the refusal.
+   * transaction as the refusal. Thresholds come from the captured effective
+   * guardrail snapshot (#1708); windows stay code-owned.
    */
-  private evaluateCardFuse(input: OrcClaimInput): string | undefined {
+  private evaluateCardFuse(input: OrcClaimInput, guardrails: EffectiveOrcGuardrails): string | undefined {
     const scope = `card:${input.projectCardId}`;
     const fuseRow = this.db.prepare(`SELECT opened_at, trip_reason, cleared_generation FROM orc_fuse_state WHERE scope = ?`).get(scope) as { opened_at: string | null; trip_reason: string | null; cleared_generation: number | null } | undefined;
     if (fuseRow?.opened_at) return fuseRow.trip_reason ?? "already_open";
@@ -545,7 +579,7 @@ export class OrcProjectRunStore {
          AND ownership_generation > ?
          AND unixepoch(created_at) >= ?
     `).get(input.projectCardId, clearedGen, failedFrom) as { n: number };
-    if (failedAttempts.n >= CARD_FAILED_ATTEMPTS_LIMIT) {
+    if (failedAttempts.n >= guardrails.sameCard.failedOrNoProgress.max) {
       return this.openFuse(scope, `failed_attempts:${failedAttempts.n}`);
     }
 
@@ -560,7 +594,7 @@ export class OrcProjectRunStore {
          AND ownership_generation > ?
          AND unixepoch(created_at) >= ?
     `).get(input.projectCardId, clearedGen, churnFrom) as { n: number };
-    if (noProgressStarts.n >= CARD_NO_PROGRESS_STARTS_LIMIT) {
+    if (noProgressStarts.n >= guardrails.sameCard.startsWithWithoutProgress.max) {
       return this.openFuse(scope, `no_progress_starts:${noProgressStarts.n}`);
     }
 
@@ -587,8 +621,9 @@ export class OrcProjectRunStore {
    * #1707 Task 5: bridge-wide emergency fuse. Process-wide start/row windows;
    * the first exceeded limit opens the durable 'bridge' scope. `bypassCardId`
    * is the claiming card — its own row insert is what would cross the line.
+   * Thresholds come from the captured effective guardrail snapshot (#1708).
    */
-  private evaluateBridgeFuse(bypassCardId: number): string | undefined {
+  private evaluateBridgeFuse(bypassCardId: number, guardrails: EffectiveOrcGuardrails): string | undefined {
     const fuseRow = this.db.prepare(`SELECT opened_at, trip_reason, cleared_global_sequence FROM orc_fuse_state WHERE scope = 'bridge'`).get() as { opened_at: string | null; trip_reason: string | null; cleared_global_sequence: number | null } | undefined;
     if (fuseRow?.opened_at) return fuseRow.trip_reason ?? "already_open";
     const clearedSequence = fuseRow?.cleared_global_sequence ?? 0;
@@ -601,18 +636,18 @@ export class OrcProjectRunStore {
     const startsBase = `FROM orc_project_runs WHERE started_at IS NOT NULL AND global_sequence > ? AND unixepoch(created_at) >= ?`;
 
     const starts5m = this.db.prepare(`SELECT COUNT(*) AS n ${startsBase}`).get(clearedSequence, starts5mFrom) as { n: number };
-    if (starts5m.n >= BRIDGE_STARTS_5M_LIMIT) {
+    if (starts5m.n >= guardrails.bridge.starts5m) {
       return this.openFuse("bridge", `bridge_starts_5m:${starts5m.n}`, bypassCardId);
     }
     const starts1h = this.db.prepare(`SELECT COUNT(*) AS n ${startsBase}`).get(clearedSequence, starts1hFrom) as { n: number };
-    if (starts1h.n >= BRIDGE_STARTS_HOUR_LIMIT) {
+    if (starts1h.n >= guardrails.bridge.starts1h) {
       return this.openFuse("bridge", `bridge_starts_1h:${starts1h.n}`, bypassCardId);
     }
     const rows5m = this.db.prepare(`
       SELECT COUNT(*) AS n FROM orc_project_runs
        WHERE global_sequence > ? AND unixepoch(created_at) >= ?
     `).get(clearedSequence, rows5mFrom) as { n: number };
-    if (rows5m.n >= BRIDGE_ROWS_5M_LIMIT) {
+    if (rows5m.n >= guardrails.bridge.newRunRows5m) {
       return this.openFuse("bridge", `bridge_rows_5m:${rows5m.n}`, bypassCardId);
     }
 

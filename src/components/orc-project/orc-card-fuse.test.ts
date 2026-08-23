@@ -13,6 +13,7 @@ import type { ProjectAcceptanceContractV1 } from "../project-acceptance/project-
 let TEST_HOME: string;
 let kanban: typeof import("../tasks/kanban-board.js");
 let runStoreMod: typeof import("./orc-project-run-store.js");
+let contractsMod: typeof import("./orc-project-contracts.js");
 let reviewStoreMod: typeof import("../project-acceptance/project-review-store.js");
 let stateStore: typeof import("../tasks/task-state-store.js");
 let taskStore: typeof import("../tasks/task-store.js");
@@ -37,6 +38,7 @@ beforeEach(async () => {
   vi.doMock("../../paths.js", () => ({ abtarsHome: () => TEST_HOME }));
   kanban = await import("../tasks/kanban-board.js");
   runStoreMod = await import("./orc-project-run-store.js");
+  contractsMod = await import("./orc-project-contracts.js");
   reviewStoreMod = await import("../project-acceptance/project-review-store.js");
   stateStore = await import("../tasks/task-state-store.js");
   taskStore = await import("../tasks/task-store.js");
@@ -206,5 +208,90 @@ describe("#1707 same-card circuit breaker", () => {
     );
     const claimed = results.filter(r => r.kind === "claimed");
     expect(claimed.length).toBeLessThanOrEqual(3 + 1); // window limit + in-flight winner
+  });
+});
+
+describe("#1708 policy-controlled guardrails", () => {
+  it("a lowered policy threshold trips on the next claim when durable history already meets it", async () => {
+    const { rootId } = seedScheduledProject();
+    let limit = 3;
+    const store = new runStoreMod.OrcProjectRunStore(undefined, {
+      guardrailsProvider: () => ({ ...contractsMod.DEFAULT_ORC_GUARDRAILS, sameCard: { ...contractsMod.DEFAULT_ORC_GUARDRAILS.sameCard, failedOrNoProgress: { max: limit, windowMinutes: 10 } } }),
+    });
+
+    // Two failures under the shipped default of 3: no fuse yet.
+    for (let i = 0; i < 2; i++) {
+      const r = claim(store, rootId);
+      if (r.kind !== "claimed") throw new Error(`claim ${i} refused unexpectedly`);
+      store.release(r.context, "failed", "provider_failure");
+    }
+    const third = claim(store, rootId);
+    if (third.kind !== "claimed") throw new Error("third claim refused unexpectedly");
+    expect(store.release(third.context, "failed", "provider_failure")).toBe(true);
+
+    // Policy "reload" lowers the threshold to 2: the NEXT claim sees it and
+    // the existing window counts already meet it.
+    limit = 2;
+    const afterReload = store.claimIntent({
+      projectCardId: rootId, intentKind: "project_execution", goal: "execute",
+      originKind: "local", cardSource: "task", sourcePeer: null,
+    }, "p", "inst");
+    expect(afterReload).toMatchObject({ kind: "not_actionable", reason: "fuse_open" });
+    const trip = store.getFuseSnapshot().find(f => f.scope === `card:${rootId}`);
+    expect(trip?.openedAt).toBeTruthy();
+  });
+
+  it("a throwing provider falls back to shipped defaults instead of skipping the fuse", async () => {
+    const { rootId } = seedScheduledProject();
+    let shouldThrow = false;
+    const store = new runStoreMod.OrcProjectRunStore(undefined, {
+      guardrailsProvider: () => {
+        if (shouldThrow) throw new Error("policy read failed");
+        return contractsMod.DEFAULT_ORC_GUARDRAILS;
+      },
+    });
+
+    for (let i = 0; i < 3; i++) {
+      const r = claim(store, rootId);
+      if (r.kind !== "claimed") throw new Error(`claim ${i} refused unexpectedly`);
+      store.release(r.context, "failed", "provider_failure");
+    }
+    // Provider breaks AFTER the durable history exists: defaults still apply.
+    shouldThrow = true;
+    expect(claim(store, rootId)).toMatchObject({ kind: "not_actionable", reason: "fuse_open" });
+  });
+
+  it("an already-open fuse stays open across a policy reload that raises thresholds", async () => {
+    const { rootId } = seedScheduledProject();
+    let max = 1;
+    const store = new runStoreMod.OrcProjectRunStore(undefined, {
+      guardrailsProvider: () => ({ ...contractsMod.DEFAULT_ORC_GUARDRAILS, sameCard: { ...contractsMod.DEFAULT_ORC_GUARDRAILS.sameCard, failedOrNoProgress: { max, windowMinutes: 10 } } }),
+    });
+
+    const r = claim(store, rootId);
+    if (r.kind !== "claimed") throw new Error("claim refused unexpectedly");
+    store.release(r.context, "failed", "provider_failure");
+    expect(claim(store, rootId)).toMatchObject({ kind: "not_actionable", reason: "fuse_open" });
+
+    // A reload that raises the limit must NOT clear or bypass the open fuse.
+    max = 3;
+    expect(claim(store, rootId)).toMatchObject({ kind: "not_actionable", reason: "fuse_open" });
+    const row = store.db.prepare(`SELECT opened_at FROM orc_fuse_state WHERE scope = ?`).get(`card:${rootId}`) as { opened_at: string };
+    expect(row.opened_at).toBeTruthy();
+  });
+
+  it("ordinary restart reconstructs from durable state and reads current effective policy", async () => {
+    const { rootId } = seedScheduledProject();
+    const first = new runStoreMod.OrcProjectRunStore(undefined, {
+      guardrailsProvider: () => ({ ...contractsMod.DEFAULT_ORC_GUARDRAILS, sameCard: { ...contractsMod.DEFAULT_ORC_GUARDRAILS.sameCard, failedOrNoProgress: { max: 1, windowMinutes: 10 } } }),
+    });
+    const r = claim(first, rootId);
+    if (r.kind !== "claimed") throw new Error("claim refused unexpectedly");
+    first.release(r.context, "failed", "provider_failure");
+    expect(claim(first, rootId)).toMatchObject({ kind: "not_actionable", reason: "fuse_open" });
+
+    // Fresh store (restart), default provider: the durable fuse still holds.
+    const restarted = new runStoreMod.OrcProjectRunStore();
+    expect(claim(restarted, rootId)).toMatchObject({ kind: "not_actionable", reason: "fuse_open" });
   });
 });
