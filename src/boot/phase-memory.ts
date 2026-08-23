@@ -141,9 +141,17 @@ export async function createMemoryRuntimeFromEndpoint(
   }
 
   const client = await buildLocalClient(mod, endpoint.socketPath);
-  const runtime = createClientRuntime(client);
-  assertNegotiatedCapabilities(runtime);
-  return { mode: "local", client, runtime, abmindModule: mod };
+  try {
+    const runtime = createClientRuntime(client);
+    assertNegotiatedCapabilities(runtime);
+    return { mode: "local", client, runtime, abmindModule: mod };
+  } catch (err) {
+    // A local client returned by getMemoryClient(true) can already own a
+    // database/socket when capability validation fails. Retries must not leak
+    // one client per failed negotiation.
+    await client.close().catch(closeErr => logAndSwallow("memory", "close local client after failed composition", closeErr));
+    throw err;
+  }
 }
 
 async function buildLocalClient(mod: typeof import("abmind"), socketPath?: string): Promise<AbmindClientLike> {
@@ -267,9 +275,14 @@ export async function phaseMemory(ctx: BootCtx, deps: PhaseMemoryDeps = {}): Pro
     ctx.phaseHealth.set("memory", { status: "ok" });
   };
 
+  const initialAttemptAt = Date.now();
   try {
     const result = await attempt();
     publish(result);
+    // A facade exists for every enabled generation, including immediate
+    // success. Mark that generation ready so /status does not mistake the
+    // controller's initial idle diagnostics for an active retry loop.
+    controller.setDiagnostics({ state: "upgraded", attempts: 1, lastAttemptAt: initialAttemptAt, upgradedAt: Date.now() });
     return "ran";
   } catch (err) {
     const code = classifyCompositionFailure(err);

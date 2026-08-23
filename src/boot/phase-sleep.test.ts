@@ -303,4 +303,37 @@ describe("#1706 late composition", () => {
     expect(ctx.sleepHandle).toBe(first);
     expect(mockCreateSleepHandle).toHaveBeenCalledTimes(1);
   });
+
+  it("keeps the process-scoped dispatcher on the newest restart generation", async () => {
+    const firstCtx = createBootCtx({
+      memoryConfig: { memoryEnabled: false, memoryDir: "" } as any,
+      client: null,
+      sendSystemMessage: vi.fn(),
+    });
+    const fakeSessionManager = {
+      spin: vi.fn().mockResolvedValue({ result: "ok", sessionId: "sess-1" }),
+      getSessionById: vi.fn().mockReturnValue(null),
+      allocateDreamySession: vi.fn(),
+    };
+    const secondClient = makeFakeClient();
+    const secondCtx = createBootCtx({
+      memoryConfig: { memoryEnabled: true, memoryDir: "/tmp" } as any,
+      client: secondClient,
+      sendSystemMessage: vi.fn(),
+      sessionManager: fakeSessionManager as any,
+    });
+
+    const { phaseSleep } = await import("./phase-sleep.js");
+    await phaseSleep(firstCtx);
+    await phaseSleep(secondCtx);
+
+    const registry = (await import("../components/tasks/system-task-registry.js")).getSystemTaskRegistry();
+    const result = await registry.dispatch(
+      { id: "sleep-cycle", kind: "system", action: "sleep-cycle", schedule: "0 2 * * *", enabled: true, priority: "medium", delivery: "silent" },
+      { progress: vi.fn(), signal: new AbortController().signal },
+    );
+
+    expect(result.status).toBe("ok");
+    expect(mockCreateSleepHandle.mock.calls.at(-1)?.[0]?.client).toBe(secondClient);
+  });
 });

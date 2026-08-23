@@ -143,6 +143,7 @@ describe("phaseMemory — endpoint selection (#1508)", () => {
     expect(ctx.abmindModule).toBe(fakeModule);
     expect(ctx.client).not.toBeNull();
     expect(ctx.memoryRuntime.state).toBe("ready");
+    expect(ctx.memoryRuntime.compositionDiagnostics).toMatchObject({ state: "upgraded", attempts: 1 });
     expect(ctx.memoryRecomposition).toBeNull();
     expect(ctx.phaseHealth.get("memory")?.status).toBe("ok");
   });
@@ -317,13 +318,15 @@ describe("createMemoryRuntimeFromEndpoint", () => {
   });
 
   it("negotiation without core capabilities is rejected", async () => {
+    const client = fakeClient({
+      capabilities: { version: 1, methods: [], features: {} },
+    });
     mockLoadAbmind.mockResolvedValue({
-      getMemoryClient: vi.fn().mockResolvedValue(fakeClient({
-        capabilities: { version: 1, methods: [], features: {} },
-      })),
+      getMemoryClient: vi.fn().mockResolvedValue(client),
     });
     await expect(createMemoryRuntimeFromEndpoint({ mode: "local", source: "default" }, factoryHome))
       .rejects.toThrow(/capabilities/i);
+    expect(client.close).toHaveBeenCalledTimes(1);
   });
 
   it("a wss endpoint that cannot connect fails with a bounded endpoint_unavailable code and closes the client", async () => {

@@ -18,16 +18,23 @@ import { getMasterUserId } from "../components/master-user.js";
 import type { AbmindClientLike } from "../components/abmind-client-contract.js";
 import { unavailable, createSleepHandle } from "../capabilities/sleep/index.js";
 
+// The system-task registry is process-scoped, while the bridge creates a new
+// BootCtx for each in-process /restart generation. Keep the registered handler
+// stable, but point it at the current generation's context.
+let activeSleepCtx: BootCtx | null = null;
+
 /** Register the stable sleep-cycle dispatcher once per process. The handler
  *  reads current BootCtx state on every dispatch — late composition (#1706)
  *  changes behavior without touching the registry. */
 function registerSleepCycleDispatcher(ctx: BootCtx): void {
+  activeSleepCtx = ctx;
   const registry = getSystemTaskRegistry();
   if (registry.has("sleep-cycle")) return;
   registry.register("sleep-cycle", async (_entry, taskCtx: SystemTaskContext) => {
-    const handle = ctx.sleepHandle;
+    const currentCtx = activeSleepCtx;
+    const handle = currentCtx?.sleepHandle;
     if (!handle) {
-      return { status: "failed" as const, error: ctx.sleepUnavailable?.reason ?? "sleep not composed" };
+      return { status: "failed" as const, error: currentCtx?.sleepUnavailable?.reason ?? "sleep not composed" };
     }
     // #1603: the scheduled run settles on the cycle's REAL outcome, not on
     // the dispatch. Progress keeps the run alive past the idle budget.
