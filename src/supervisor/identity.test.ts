@@ -1,4 +1,8 @@
 import { describe, it, expect, vi, afterEach } from "vitest";
+import { readFileSync, mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
+import { join } from "node:path";
+import { tmpdir } from "node:os";
+import { fileURLToPath } from "node:url";
 
 const execFileSyncMock = vi.hoisted(() => vi.fn());
 vi.mock("node:child_process", () => ({ execFileSync: execFileSyncMock }));
@@ -8,6 +12,9 @@ import {
   isPidAlive,
   validateBridgePid,
   validateBridgeLock,
+  spawnTarget,
+  enumerateBridgeProcesses,
+  type BridgeProcess,
 } from "./identity.js";
 
 const SELF_PID = process.pid;
@@ -192,4 +199,120 @@ describe("validateBridgeLock", () => {
     );
     expect(result.status).toBe("wrong-command");
   });
+});
+
+describe("spawnTarget — canonical literal identity (#1711 R2)", () => {
+  it("composes the canonical absolute target", () => {
+    expect(spawnTarget("/home/u/.abtars")).toBe("/home/u/.abtars/app/bundle/abtars.js");
+  });
+
+  it("rejects a relative home — it would create an unreachable identity class", () => {
+    expect(() => spawnTarget("relative/home")).toThrow(/absolute/);
+  });
+
+  it("strips one trailing separator", () => {
+    expect(spawnTarget("/home/u/.abtars/")).toBe("/home/u/.abtars/app/bundle/abtars.js");
+  });
+
+  it("strips multiple trailing separators", () => {
+    expect(spawnTarget("/home/u/.abtars///")).toBe("/home/u/.abtars/app/bundle/abtars.js");
+  });
+
+  it("maps differently-spelled homes to ONE identity literal", () => {
+    expect(spawnTarget("/home/u/.abtars/")).toBe(spawnTarget("/home/u/.abtars"));
+  });
+
+  it("never resolves symlinks — old-release argv stays stable across current repointing (B12)", () => {
+    // Pure string composition: /x/app must survive even though app is a
+    // symlink to releases/<gen> in the real deployment layout.
+    expect(spawnTarget("/srv/with-app-link/app-target-home")).toBe(
+      "/srv/with-app-link/app-target-home/app/bundle/abtars.js",
+    );
+  });
+});
+
+describe("identity spelling parity across shell, launcher, TypeScript, and doctor (#1711 R2)", () => {
+  const repoRoot = fileURLToPath(new URL("../..", import.meta.url));
+
+  const watchdog = readFileSync(join(repoRoot, "scripts", "abtars-watchdog.sh"), "utf-8");
+  const launcher = readFileSync(join(repoRoot, "scripts", "abtars.sh"), "utf-8");
+
+  it("watchdog normalizes ABTARS_HOME before any identity-bearing use", () => {
+    expect(watchdog).toMatch(/AB="\$\{ABTARS_HOME:-\$HOME\/\.abtars\}"/);
+    expect(watchdog).toMatch(/while \[\[ "\$AB" == \*\/ && "\$AB" != "\/" \]\]; do AB="\$\{AB%\/\}"; done/);
+  });
+
+  it("watchdog spawns the canonical absolute literal exactly once", () => {
+    const spellings = watchdog.match(/[^\s"']*app\/bundle\/abtars\.js/g) ?? [];
+    // Exactly one spawn spelling: $AB/app/bundle/abtars.js
+    expect(spellings).toEqual(["$AB/app/bundle/abtars.js"]);
+  });
+
+  it("launcher normalizes ABTARS_HOME and uses the same literal", () => {
+    expect(launcher).toMatch(/while \[\[ "\$ABTARS_HOME" == \*\/ && "\$ABTARS_HOME" != "\/" \]\]/);
+    expect(launcher).toContain('exec node "$ABTARS_HOME/app/bundle/abtars.js"');
+  });
+
+  it("TypeScript contract agrees with the shell literal", () => {
+    expect(spawnTarget("/home/u/.abtars")).toBe("/home/u/.abtars/app/bundle/abtars.js");
+  });
+});
+
+describe("enumerateBridgeProcesses on Linux /proc (#1711 R2)", () => {
+  const isDarwin = process.platform === "darwin";
+
+  it("returns a fail-closed marker for a relative home instead of throwing", () => {
+    const result = enumerateBridgeProcesses("relative/home");
+    expect(result.complete).toBe(false);
+    if (!result.complete) expect(result.reason).toBe("invalid-home");
+  });
+
+  it.runIf(!isDarwin)("finds a real same-home bridge child by exact literal argv and separates homes", async () => {
+    const { spawn } = await vi.importActual<typeof import("node:child_process")>("node:child_process");
+    const home = mkdtempSync(join(tmpdir(), "abtars-enum-"));
+    try {
+      mkdirSync(join(home, "app", "bundle"), { recursive: true });
+      const target = join(home, "app", "bundle", "abtars.js");
+      writeFileSync(target, 'setInterval(() => {}, 10_000);\n');
+
+      const child = spawn(process.execPath, [target], { stdio: "ignore", cwd: "/tmp" });
+      try {
+        let found: BridgeProcess | undefined;
+        const deadline = Date.now() + 5000;
+        while (Date.now() < deadline) {
+          const result = enumerateBridgeProcesses(home);
+          expect(result.complete).toBe(true);
+          if (result.complete) {
+            found = result.processes.find((p) => p.pid === child.pid);
+            if (found?.exactTarget) break;
+          }
+          await new Promise((r) => setTimeout(r, 100));
+        }
+        expect(found).toBeDefined();
+        expect(found!.exactTarget).toBe(true);
+        expect(found!.startIdentity).toMatch(new RegExp(`^${child.pid}:\\d+$`));
+        expect(found!.argv[0]).toBe(process.execPath);
+
+        // A different home must NOT claim this process — two identity classes.
+        const otherHome = `${home}-other`;
+        const otherResult = enumerateBridgeProcesses(otherHome);
+        expect(otherResult.complete).toBe(true);
+        if (otherResult.complete) {
+          expect(otherResult.processes.some((p) => p.exactTarget)).toBe(false);
+        }
+
+        // A trailing-slash spelling of the SAME home must still find it (R2 normalization).
+        const slashed = enumerateBridgeProcesses(`${home}/`);
+        expect(slashed.complete).toBe(true);
+        if (slashed.complete) {
+          expect(slashed.processes.some((p) => p.exactTarget)).toBe(true);
+        }
+      } finally {
+        child.kill("SIGKILL");
+        await new Promise<void>((resolve) => child.on("exit", () => resolve()));
+      }
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
+  }, 15000);
 });

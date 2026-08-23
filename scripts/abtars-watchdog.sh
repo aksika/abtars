@@ -3,6 +3,9 @@
 # Uses supervisor.state for durable command and desired-state arbitration.
 # Exit codes (R4): 0 no-op/duplicate, 1 fault, 2 durable stop, 3 running handoff
 AB="${ABTARS_HOME:-$HOME/.abtars}"
+# #1711 R2: identity is a literal argv comparison, so a trailing separator here
+# would create a second identity class (never contained, never spawned beside).
+while [[ "$AB" == */ && "$AB" != "/" ]]; do AB="${AB%/}"; done
 LOCK="$AB/bridge.lock"
 STALE=300        # heartbeat staleness threshold (seconds)
 POLL=60          # documented poll cadence
@@ -193,7 +196,7 @@ fi
 # NB: `exec` and `nohup node` MUST stay on one physical line — the #1261 guard
 # asserts this so $! is the node PID, not a bash subshell.
 spawn_bridge() {
-  cd "$AB" && exec env ABTARS_WATCHDOG_PID=$$ NODE_PATH="$HOME/.local/lib/node_modules:${NODE_PATH:-}" ABTARS_START_REASON="${START_REASON:-watchdog-respawn}" nohup node --max-old-space-size=1024 app/bundle/abtars.js 200>&- &
+  cd "$AB" && exec env ABTARS_WATCHDOG_PID=$$ NODE_PATH="$HOME/.local/lib/node_modules:${NODE_PATH:-}" ABTARS_START_REASON="${START_REASON:-watchdog-respawn}" nohup node --max-old-space-size=1024 "$AB/app/bundle/abtars.js" 200>&- &
   PID=$!
   disown $PID   # #1050: survive watchdog SIGTERM/HUP — bridge must not die with us
   SPAWNED_AT=$(date +%s)

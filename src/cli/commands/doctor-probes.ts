@@ -245,12 +245,19 @@ async function probeWatchdog(): Promise<ProbeResult> {
 }
 
 async function probeBridge(): Promise<ProbeResult> {
-  const { spawnSync } = await import("node:child_process");
-  const pgrep = spawnSync("pgrep", ["-f", "app/bundle/abtars.js"], { encoding: "utf-8" });
-  const pids = pgrep.stdout ? pgrep.stdout.trim().split("\n").filter(Boolean) : [];
-  if (pids.length === 0) return { name: "bridge", status: "skipped", evidence: "runtime", detail: "no bridge running", ms: 0 };
-  if (pids.length === 1) return { name: "bridge", status: "ok", evidence: "runtime", detail: `pid:${pids[0]}`, ms: 0 };
-  return { name: "bridge", status: "failed", evidence: "runtime", detail: `${pids.length} bridges: ${pids.join(",")}`, remediation: "Run abtars restart", ms: 0 };
+  // #1711 R2/B5: doctor uses the SAME literal identity predicate and
+  // enumeration as reconciliation — never a substring pgrep. Read-only: this
+  // probe observes, it never signals or repairs.
+  const { enumerateBridgeProcesses } = await import("../../supervisor/identity.js");
+  const enumeration = enumerateBridgeProcesses(home);
+  if (!enumeration.complete) {
+    return { name: "bridge", status: "warning", evidence: "runtime", detail: `process enumeration failed (${enumeration.reason})`, ms: 0 };
+  }
+  const exact = enumeration.processes.filter((p) => p.exactTarget);
+  const pids = exact.map((p) => p.pid).slice(0, 5).join(",");
+  if (exact.length === 0) return { name: "bridge", status: "skipped", evidence: "runtime", detail: "no bridge running", ms: 0 };
+  if (exact.length === 1) return { name: "bridge", status: "ok", evidence: "runtime", detail: `pid:${exact[0]!.pid}`, ms: 0 };
+  return { name: "bridge", status: "failed", evidence: "runtime", detail: `${exact.length} bridges: ${pids}`, remediation: "Run abtars restart", ms: 0 };
 }
 
 async function probeTui(): Promise<ProbeResult> {
