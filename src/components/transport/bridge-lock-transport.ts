@@ -5,7 +5,7 @@
  */
 import { logAndSwallow } from "../log-and-swallow.js";
 import { logWarn } from "../logger.js";
-import { readFileSync } from "node:fs";
+import { readFileSync, writeFileSync } from "node:fs";
 import { atomicWriteSync } from "../atomic-write.js";
 import { join } from "node:path";
 import { abtarsHome } from "../../paths.js";
@@ -169,7 +169,21 @@ export function initBridgeLock(opts: { pid: number; startedAt: number; version: 
   try {
     // Read existing state (may have watchdogPid from watchdog, or stale pid from previous bridge)
     let existing: Record<string, unknown> = {};
-    try { existing = JSON.parse(readFileSync(p, "utf-8")); } catch { /* missing or corrupt — cold boot */ }
+    let rawText: string | null = null;
+    try { rawText = readFileSync(p, "utf-8"); } catch { /* missing — cold boot */ }
+    if (rawText !== null) {
+      try {
+        existing = JSON.parse(rawText);
+      } catch {
+        // #1711 R3: preserve ONE timestamped forensic copy before repair. The
+        // copy proves nothing about liveness — the zero-process enumeration
+        // gate owns spawn authorization; this only keeps evidence readable.
+        try {
+          const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+          writeFileSync(join(abtarsHome(), `bridge.lock.corrupt.${stamp}`), rawText);
+        } catch { /* best effort */ }
+      }
+    }
     const prevPid = typeof existing.pid === "number" ? existing.pid : null;
     prev = { pid: prevPid, lastHeartbeat: typeof existing.lastHeartbeat === "number" ? existing.lastHeartbeat : null };
     // Classify boot type from previous heartbeat gap. The value reflects the

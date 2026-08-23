@@ -16,7 +16,7 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { mkdtempSync, rmSync, writeFileSync, readFileSync, existsSync, utimesSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync, readFileSync, existsSync, utimesSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 
@@ -206,5 +206,47 @@ describe("owner-scoped lock writes (#1711 R1)", () => {
     updateOwnedBridgeLockField("acpPids", [101, 102]);
 
     expect(readBridgeLockField<number[]>("acpPids")).toEqual([101, 102]);
+  });
+});
+
+describe("corrupt-lock forensic copy before repair (#1711 R3)", () => {
+  let home: string;
+  let lockPath: string;
+  let previousHome: string | undefined;
+
+  beforeEach(() => {
+    home = mkdtempSync(join(tmpdir(), "abtars-forensic-"));
+    previousHome = process.env.ABTARS_HOME;
+    process.env.ABTARS_HOME = home;
+    lockPath = join(home, "bridge.lock");
+  });
+
+  afterEach(() => {
+    if (previousHome === undefined) delete process.env.ABTARS_HOME;
+    else process.env.ABTARS_HOME = previousHome;
+    rmSync(home, { recursive: true, force: true });
+  });
+
+  it("preserves one timestamped copy of a corrupt lock during initBridgeLock repair", () => {
+    const corrupt = '{"pid": 123, "instanceId": "trunc';
+    writeFileSync(lockPath, corrupt);
+
+    initBridgeLock({ pid: process.pid, startedAt: Date.now(), version: "test", argv: [] });
+
+    // Lock was repaired with fresh boot state...
+    expect(JSON.parse(readFileSync(lockPath, "utf-8")).pid).toBe(process.pid);
+
+    // ...and exactly one forensic copy preserves the original bytes.
+    const copies = readdirSync(home).filter((f) => f.startsWith("bridge.lock.corrupt."));
+    expect(copies).toHaveLength(1);
+    expect(readFileSync(join(home, copies[0]!), "utf-8")).toBe(corrupt);
+  });
+
+  it("creates no forensic copy when the previous lock parsed fine", () => {
+    writeFileSync(lockPath, JSON.stringify({ pid: 5, lastHeartbeat: 7 }));
+
+    initBridgeLock({ pid: process.pid, startedAt: Date.now(), version: "test", argv: [] });
+
+    expect(readdirSync(home).filter((f) => f.startsWith("bridge.lock.corrupt."))).toHaveLength(0);
   });
 });

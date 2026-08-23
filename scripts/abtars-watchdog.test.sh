@@ -402,5 +402,85 @@ echo "OK: bounded resume wait wording present (one-cycle grace removed)"
 
 rm -rf "$T1499_HOME"
 
+# ── #1711 R3: zero-process spawn gate (source-only harness) ──────────────
+# NOTE: $(svc ...) runs in a subshell, so the stub tracks call order in a
+# COUNTER FILE, not a shell variable.
+GATE_HOME="$(mktemp -d)"
+mkdir -p "$GATE_HOME/logs"
+GATE_LOG="$GATE_HOME/logs/watchdog.log"
+
+GATE_RUNNER="$GATE_HOME/gate-runner.sh"
+cat > "$GATE_RUNNER" <<'RUNNER_EOF'
+#!/usr/bin/env bash
+set -u
+source "$WD_SH_PATH"
+SPAWNED=0
+svc() {
+  if [[ "$1" == "prove-empty" ]]; then
+    local n seqs out
+    n="$(cat "$GATE_COUNTER" 2>/dev/null || echo 0)"
+    echo $((n+1)) > "$GATE_COUNTER"
+    IFS=';' read -ra seqs <<< "$GATE_SEQ"
+    out="${seqs[$n]:-}"
+    [[ -z "$out" ]] && out="inconclusive"
+    printf "%s" "$out"
+  fi
+}
+spawn_bridge() { SPAWNED=$((SPAWNED+1)); }
+poll_state() { :; }
+POLL_INTERVAL=0
+spawn_if_proven_empty >/dev/null 2>&1
+echo "spawned=$SPAWNED"
+RUNNER_EOF
+
+gate_run() {
+  : > "$GATE_LOG"
+  rm -f "$GATE_HOME/.gate-counter"
+  WD_SH_PATH="$WD_SH" ABTARS_WATCHDOG_SOURCE_ONLY=1 ABTARS_HOME="$GATE_HOME" \
+    GATE_SEQ="$1" GATE_COUNTER="$GATE_HOME/.gate-counter" bash "$GATE_RUNNER" 2>/dev/null
+}
+
+RESULT=$(gate_run "empty")
+if [[ "$RESULT" != "spawned=1"* ]] || [[ -s "$GATE_LOG" ]]; then
+  echo "FAIL: gate must spawn silently on complete empty proof — got: $RESULT log=$(cat "$GATE_LOG")"
+  exit 1
+fi
+echo "OK: gate spawns on a complete empty enumeration"
+
+RESULT=$(gate_run "occupied 2;occupied 2;empty")
+SPAWN_COUNT=$(echo "$RESULT" | grep -o "spawned=[0-9]*" | cut -d= -f2)
+WITHHELD_LINES=$(grep -c "Spawn withheld" "$GATE_LOG")
+if [[ "$SPAWN_COUNT" != "1" || "$WITHHELD_LINES" != "1" ]]; then
+  echo "FAIL: gate must withhold while occupied, spawn once after empty, log ONCE — got: $RESULT lines=$WITHHELD_LINES"
+  exit 1
+fi
+echo "OK: gate withholds spawn on occupied snapshot until proof turns empty (one event line)"
+
+RESULT=$(gate_run "inconclusive;inconclusive;empty")
+SPAWN_COUNT=$(echo "$RESULT" | grep -o "spawned=[0-9]*" | cut -d= -f2)
+INCONCLUSIVE_LINES=$(grep -c "enumeration inconclusive" "$GATE_LOG")
+if [[ "$SPAWN_COUNT" != "1" || "$INCONCLUSIVE_LINES" != "1" ]]; then
+  echo "FAIL: gate must hold fail-closed on inconclusive enumeration without repeating logs — got: $RESULT lines=$INCONCLUSIVE_LINES"
+  exit 1
+fi
+echo "OK: gate holds fail-closed on inconclusive enumeration (one event line)"
+
+RESULT=$(gate_run "")
+SPAWN_COUNT=$(echo "$RESULT" | grep -o "spawned=[0-9]*" | cut -d= -f2)
+if [[ "$SPAWN_COUNT" != "1" ]]; then
+  echo "FAIL: boundary invocation failure must behave as inconclusive (hold, then proceed) — got: $RESULT"
+  exit 1
+fi
+echo "OK: boundary invocation failure is treated as inconclusive"
+
+# R4: validate-bridge consumer tolerates trailing metadata.
+if grep -q '\-z "\$vextra"' "$WD_SH"; then
+  echo "FAIL: read_bridge_identity must not require empty trailing field (#1711 R4 additive metadata)"
+  exit 1
+fi
+echo "OK: read_bridge_identity tolerates declared trailing fields"
+
+rm -rf "$GATE_HOME"
+
 echo "ALL TESTS PASSED"
 exit 0

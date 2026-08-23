@@ -148,7 +148,9 @@ read_bridge_identity() {
     read -r vstatus vpid vstarted vextra <<< "$identity"
     case "$vstatus" in
       valid|dead|reused|wrong-command|mismatch)
-        if [[ "$vpid" =~ ^[0-9]+$ && "$vstarted" =~ ^[0-9]+$ && -z "$vextra" ]]; then
+        # #1711 R4: required fields are status/pid/startedAt; declared trailing
+        # metadata is tolerated. Only missing/malformed REQUIRED fields retry.
+        if [[ "$vpid" =~ ^[0-9]+$ && "$vstarted" =~ ^[0-9]+$ ]]; then
           if [[ "$vstatus" != "valid" || "$vpid" != "0" ]]; then
             printf '%s %s %s\n' "$vstatus" "$vpid" "$vstarted"
             return 0
@@ -188,6 +190,38 @@ wait_for_resume_heartbeat() {
   return 0
 }
 
+# Zero-process proof before ANY spawn (#1711 R3). Only a complete, successful
+# enumeration proving zero exact same-home bridge processes authorizes
+# spawn_bridge. Corrupt-lock repair never bypasses this; occupied or
+# inconclusive snapshots hold (never spawn) and re-check durable state each
+# slice so stop/handoff stay responsive. Unchanged state logs once.
+spawn_if_proven_empty() {
+  local proof state=""
+  while true; do
+    proof="$(svc prove-empty 2>/dev/null || echo inconclusive)"
+    case "$proof" in
+      empty)
+        spawn_bridge
+        return 0
+        ;;
+      occupied*)
+        if [[ "$state" != "occupied" ]]; then
+          logw "Spawn withheld: ${proof} exact same-home process(es) — refusing to create a duplicate"
+        fi
+        state="occupied"
+        ;;
+      *)
+        if [[ "$state" != "inconclusive" ]]; then
+          logw "Spawn withheld: process enumeration inconclusive"
+        fi
+        state="inconclusive"
+        ;;
+    esac
+    poll_state
+    sleep "$POLL_INTERVAL"
+  done
+}
+
 if [[ "${ABTARS_WATCHDOG_SOURCE_ONLY:-0}" == "1" ]]; then
   return 0 2>/dev/null || exit 0
 fi
@@ -203,7 +237,8 @@ spawn_bridge() {
   PLANNED_RESTART=0
 }
 
-# Adopt one valid existing bridge, otherwise spawn exactly one (R6.4).
+# Adopt one valid existing bridge, otherwise hold until a complete enumeration
+# proves zero same-home processes, then spawn exactly one (R6.4 + #1711 R3).
 adopt_or_spawn() {
   local vstatus vpid vstarted
   read -r vstatus vpid vstarted <<< "$(svc validate-bridge 2>/dev/null)"
@@ -219,8 +254,9 @@ adopt_or_spawn() {
     PLANNED_RESTART=0
     logw "Adopted existing bridge PID=$PID (startedAt=$SPAWNED_AT)"
   else
-    logw "Adoption skipped (${vstatus:-none}) — spawning new bridge"
-    spawn_bridge
+    logw "Adoption skipped (${vstatus:-none}) — requiring zero-process proof before spawn"
+    PID=""
+    spawn_if_proven_empty
   fi
 }
 
@@ -365,7 +401,7 @@ except Exception:
   if [[ "$PLANNED_RESTART" -eq 1 ]]; then
     PLANNED_RESTART=0
     [[ "$(read_desired_state)" == "stopped" ]] && handle_stopped
-    spawn_bridge
+    spawn_if_proven_empty
     continue
   fi
 
@@ -389,5 +425,5 @@ except Exception:
   fi
 
   [[ "$(read_desired_state)" == "stopped" ]] && handle_stopped
-  spawn_bridge
+  spawn_if_proven_empty
 done

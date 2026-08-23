@@ -13,10 +13,14 @@ import { checkCircuitBreaker } from "./boot/circuit-breaker.js";
 
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { validateBridgeLock } from "./supervisor/identity.js";
+import { validateBridgeLock, enumerateBridgeProcesses } from "./supervisor/identity.js";
 
 // Duplicate-bridge gate runs BEFORE the circuit breaker: a duplicate bridge
 // must exit without touching rollback counters or release links (R6).
+// #1711 R3: boot follows the same zero-process rule as the watchdog — only a
+// complete enumeration proving zero OTHER exact same-home processes authorizes
+// this boot to proceed. A live process behind a corrupt lock is caught here
+// even when its own lock no longer validates.
 try {
   const home = process.env["ABTARS_HOME"] ?? join(process.env["HOME"] ?? "/tmp", ".abtars");
   const lockPath = join(home, "bridge.lock");
@@ -25,6 +29,16 @@ try {
   const result = validateBridgeLock(lock, ["abtars.js", "bundle"]);
   if (result.status === "valid" && lock && typeof lock.pid === "number" && lock.pid !== process.pid) {
     console.error(`[FATAL] Another bridge running (PID ${lock.pid}) — exiting`);
+    process.exit(1);
+  }
+  const enumeration = enumerateBridgeProcesses(home);
+  if (!enumeration.complete) {
+    console.error(`[FATAL] Duplicate gate: process enumeration failed (${enumeration.reason}) — refusing to start`);
+    process.exit(1);
+  }
+  const exactOthers = enumeration.processes.filter((p) => p.exactTarget && p.pid !== process.pid);
+  if (exactOthers.length > 0) {
+    console.error(`[FATAL] Another bridge running (PID ${exactOthers[0]!.pid}, unvalidated lock) — exiting`);
     process.exit(1);
   }
 } catch { /* proceed */ }

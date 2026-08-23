@@ -13,7 +13,7 @@ import {
   migrateSupervisorState,
   getBackoffDelayMs,
 } from "./state.js";
-import { validateBridgeLock, signalValidatedBridge, processStartIdentity } from "./identity.js";
+import { validateBridgeLock, signalValidatedBridge, processStartIdentity, exactBridgeProcesses } from "./identity.js";
 import { atomicWriteSync } from "../components/atomic-write.js";
 
 const home = process.env.ABTARS_HOME ?? resolve(homedir(), ".abtars");
@@ -160,6 +160,23 @@ function main(): void {
       process.exit(Exit.Ok);
     }
 
+    case "prove-empty": {
+      // Zero-process proof before any spawn (#1711 R3). Shell-friendly output:
+      // "empty" | "occupied <n>" | "inconclusive". Only "empty" authorizes the
+      // existing spawn path; anything else must hold.
+      const exact = exactBridgeProcesses(home);
+      if (exact === null) {
+        process.stdout.write("inconclusive\n");
+        process.exit(Exit.Ok);
+      }
+      if (exact.length === 0) {
+        process.stdout.write("empty\n");
+        process.exit(Exit.Ok);
+      }
+      process.stdout.write(`occupied ${exact.length}\n`);
+      process.exit(Exit.Ok);
+    }
+
     case "set-watchdog-pid": {
       // Atomic read-merge-write of the watchdog-owned watchdogPid field in
       // bridge.lock (R1.3). Replaces the watchdog's former inline python3
@@ -197,7 +214,7 @@ function main(): void {
 
     default:
       process.stderr.write(`Unknown command: ${cmd}\n`);
-      process.stderr.write("Available: read, desired-state, is-stopped, set-desired-state, publish-command, claim-command, ack-command, record-death, record-healthy, reset-restart-count, get-backoff, migrate, validate-bridge, set-watchdog-pid, signal-bridge\n");
+      process.stderr.write("Available: read, desired-state, is-stopped, set-desired-state, publish-command, claim-command, ack-command, record-death, record-healthy, reset-restart-count, get-backoff, migrate, validate-bridge, prove-empty, set-watchdog-pid, signal-bridge\n");
       process.exit(Exit.Usage);
   }
 }
