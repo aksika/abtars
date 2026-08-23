@@ -12,6 +12,7 @@ import { PiRuntimeHost } from "./pi-runtime-host.js";
 import type { PiRunRecord, PiRunStatus, PiPendingRequestType, PiUiReply, PendingUiClaim, ResumeCapability } from "./types.js";
 import { captureGitEvidence, computeChangedFilesSummary } from "./evidence.js";
 import { nerve } from "../nerve.js";
+import { boundedError, DIALOG_METHODS } from "./turn-utils.js";
 
 const TAG = "pi-executor";
 
@@ -855,9 +856,8 @@ export class PiExecutor {
     this.store.touchActivity(runId, expectedGeneration);
 
     const method = request.method;
-    const dialogMethods = new Set(["select", "confirm", "input", "editor"]);
 
-    if (dialogMethods.has(method)) {
+    if (DIALOG_METHODS.has(method)) {
       // #1638: supervised runs suspend for input instead of parking in
       // awaiting_input — the question becomes structured Worker failure
       // evidence and Orc answers on the retry.
@@ -1030,10 +1030,4 @@ export class PiExecutor {
       sessionFile: state.sessionFile,
     });
   }
-}
-
-/** Bounded, content-free error text (never raw RPC frame content). */
-function boundedError(err: unknown): string {
-  const message = err instanceof Error ? err.message : String(err);
-  return message.slice(0, 300);
 }

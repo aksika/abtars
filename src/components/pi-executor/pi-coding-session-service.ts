@@ -32,6 +32,7 @@ import type { PiUiReply, ResumeCapability } from "./types.js";
 import { logInfo, logWarn, logDebug } from "../logger.js";
 import { logAndSwallow } from "../log-and-swallow.js";
 import type { NativeCodingHandoffInfo } from "../../platforms/tui/tui-protocol.js";
+import { boundedError, DIALOG_METHODS } from "./turn-utils.js";
 
 const TAG = "pi-coding";
 const NATIVE_RECOVERY_POLL_MS = 250;
@@ -1397,8 +1398,7 @@ export class PiCodingSessionService {
     if (owned.settling || owned.released) return;
     this.deps.store.touchActivity(owned.sessionId, owned.generation);
     const method = request.method;
-    const dialogMethods = new Set(["select", "confirm", "input", "editor"]);
-    if (dialogMethods.has(method)) {
+    if (DIALOG_METHODS.has(method)) {
       const result = this.deps.store.casTransition(owned.sessionId, "running", "awaiting_input", {
         pendingRequestId: request.id,
         pendingRequestType: method as PiCodingUiType,
@@ -1450,12 +1450,6 @@ export class PiCodingSessionService {
 }
 
 type PiCodingUiType = "select" | "confirm" | "input" | "editor";
-
-/** Bounded, content-free error text. */
-function boundedError(err: unknown): string {
-  const message = err instanceof Error ? err.message : String(err);
-  return message.slice(0, 300);
-}
 
 /** True when a pid names a live process on this host (ESRCH = gone). */
 export function isProcessAlive(pid: number): boolean {

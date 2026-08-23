@@ -456,12 +456,10 @@ export class PiRunStore {
           }, this.db);
       if (cardOutcome.kind !== "applied") throw ROLLBACK_SENTINEL;
 
-      // #1647 — release the exact generation's workspace claim in the same
-      // transaction (exact (run_id, execution_generation) fence).
-      this.db.prepare(`
-        DELETE FROM pi_workspace_claims
-        WHERE run_id = ? AND execution_generation = ?
-      `).run(input.runId, input.generation);
+      // #1647/#1693 — release the exact generation's workspace claim in the
+      // same transaction (exact (run_id, execution_generation) fence) via
+      // the shared claim-store primitive.
+      this.claims.releaseForGeneration({ ownerId: input.runId, generation: input.generation });
 
       return { committed: true, outcome: input.outcome, cardId };
     };
@@ -534,11 +532,9 @@ export class PiRunStore {
       }, this.db);
       if (cardOutcome.kind !== "applied") throw ROLLBACK_SENTINEL;
 
-      // Generation-fenced workspace release inside the same transaction.
-      this.db.prepare(`
-        DELETE FROM pi_workspace_claims
-        WHERE run_id = ? AND execution_generation = ?
-      `).run(input.runId, input.generation);
+      // Generation-fenced workspace release inside the same transaction
+      // (#1693 — shared claim-store primitive).
+      this.claims.releaseForGeneration({ ownerId: input.runId, generation: input.generation });
 
       // #1358 review — mechanism A: interruption and its fact commit together.
       if (this.remoteEmitter) {
@@ -1305,10 +1301,7 @@ export class PiRunStore {
               WHERE id = ? AND execution_generation = ? AND status IN ('starting', 'running', 'awaiting_input', 'cancelling')
             `).run(capability, runId, generation);
             if (runResult.changes === 1) {
-              this.db.prepare(`
-                DELETE FROM pi_workspace_claims
-                WHERE run_id = ? AND execution_generation = ?
-              `).run(runId, generation);
+              this.claims.releaseForGeneration({ ownerId: runId, generation: generation });
               if (this.remoteEmitter) {
                 this.remoteEmitter.emitTransitionInTx({ runId, fromStatus: status, toStatus: "interrupted" });
               }
@@ -1347,11 +1340,8 @@ export class PiRunStore {
             }, this.db);
             if (cardOutcome.kind !== "applied") throw ROLLBACK_SENTINEL;
             // Release the stale exact-generation workspace claim in the
-            // winning transaction.
-            this.db.prepare(`
-              DELETE FROM pi_workspace_claims
-              WHERE run_id = ? AND execution_generation = ?
-            `).run(runId, generation);
+            // winning transaction (#1693 — shared claim-store primitive).
+            this.claims.releaseForGeneration({ ownerId: runId, generation: generation });
             // #1358 review — mechanism A: boot interruption is a public
             // transition; its `interrupted` fact commits with the status
             // change so the origin sees it after a restart.
