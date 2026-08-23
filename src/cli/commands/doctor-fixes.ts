@@ -5,6 +5,7 @@ import { resolveNativeDep } from "../../utils/lazy-require.js";
 import type { FixResult, DoctorOutputV2 } from "./doctor-types.js";
 // Static import (not require) — the CLI bundle is ESM; require is undefined there.
 import { kanbanTransition, wrapTaskDatabase, sqliteNow } from "../../components/tasks/kanban-board.js";
+import { OrcProjectRunStore } from "../../components/orc-project/orc-project-run-store.js";
 
 const STALE_MS = 5 * 60 * 1000;
 
@@ -184,6 +185,41 @@ const definitions: DoctorFixDefinition[] = [
             emit: false,
           }, taskDb);
         }
+        db.close();
+      } catch { /* best-effort */ }
+    },
+  },
+  {
+    id: "orc-orphan-run-cleanup",
+    probe: "kanban",
+    bootSafe: false,
+    applicable: (before: DoctorOutputV2) => {
+      const brainProbes = before.layers.brain ?? [];
+      return brainProbes.some(p => p.name === "kanban" && p.status !== "failed");
+    },
+    revalidate: (): { ok: true } | { ok: false; reason: string } => {
+      const dbPath = join(home, "kanban", "kanban.db");
+      if (!existsSync(dbPath)) return { ok: false, reason: "no kanban.db" };
+      try {
+        resolveNativeDep("better-sqlite3");
+        return { ok: true };
+      } catch {
+        return { ok: false, reason: "better-sqlite3 not installed" };
+      }
+    },
+    apply: () => {
+      // #1707: bounded-batch cleanup of terminal Orc run rows whose project
+      // is gone or settled. Never unbounded, never live rows, PASSIVE WAL
+      // checkpoint afterwards is safe even if the bridge is running.
+      const dbPath = join(home, "kanban", "kanban.db");
+      if (!existsSync(dbPath)) return;
+      try {
+        const Database = resolveNativeDep("better-sqlite3");
+        const db = new Database(dbPath);
+        const store = new OrcProjectRunStore(wrapTaskDatabase(db));
+        const result = store.cleanupOrphanedRuns();
+        store.checkpointWalPassive();
+        console.log(`orc-orphan-run-cleanup: selected=${result.selected} deleted=${result.deleted} batches=${result.batches}`);
         db.close();
       } catch { /* best-effort */ }
     },

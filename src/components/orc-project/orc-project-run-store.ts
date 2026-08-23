@@ -663,6 +663,71 @@ export class OrcProjectRunStore {
     return { starts5m: starts5m.n, starts1h: starts1h.n, rows5m: rows5m.n };
   }
 
+  // ── #1707 Task 6: orphaned run-row cleanup ───────────────────────────────────
+  //
+  // Maintenance-only: NEVER called from the reconciler tick. Deletes terminal
+  // run rows whose project is gone or settled, in bounded batches, skipping
+  // any project that still has a live run row (history stays intact for
+  // diagnostics of anything active).
+
+  /**
+   * Bounded-batch deletion of orphaned `orc_project_runs` rows. Eligible rows
+   * are terminal (released/superseded) AND their project card is missing, or
+   * its supervision is missing/terminal (accepted/blocked), AND the project
+   * has no live run row at all. Returns selected/deleted/skipped counts.
+   */
+  cleanupOrphanedRuns(opts: { batchSize?: number; maxBatches?: number } = {}): { selected: number; deleted: number; batches: number } {
+    const batchSize = Math.min(Math.max(opts.batchSize ?? 200, 1), 5_000);
+    const maxBatches = Math.min(Math.max(opts.maxBatches ?? 250, 1), 10_000);
+    const selectSql = `
+      SELECT r.id FROM orc_project_runs r
+       WHERE r.state IN ('released','superseded')
+         AND NOT EXISTS (
+           SELECT 1 FROM orc_project_runs live
+            WHERE live.project_card_id = r.project_card_id
+              AND live.state IN ('scheduled','dispatching','running')
+         )
+         AND (
+           NOT EXISTS (SELECT 1 FROM kanban_board k WHERE k.id = r.project_card_id)
+           OR EXISTS (
+             SELECT 1 FROM project_supervision s
+              WHERE s.project_card_id = r.project_card_id AND s.state IN ('accepted','blocked')
+           )
+           OR NOT EXISTS (SELECT 1 FROM project_supervision s2 WHERE s2.project_card_id = r.project_card_id)
+         )
+         AND r.id > ?
+         ORDER BY r.id
+         LIMIT ?
+    `;
+    let lastId = "";
+    let selected = 0;
+    let deleted = 0;
+    let batches = 0;
+    while (batches < maxBatches) {
+      const ids = (this.db.prepare(selectSql).all(lastId, batchSize) as Array<{ id: string }>).map(r => r.id);
+      if (ids.length === 0) break;
+      batches++;
+      selected += ids.length;
+      const placeholders = ids.map(() => "?").join(", ");
+      deleted += this.db.prepare(`DELETE FROM orc_project_runs WHERE id IN (${placeholders})`).run(...ids).changes;
+      // Run IDs are TEXT: keep the raw key for pagination, never coerce.
+      lastId = ids[ids.length - 1]!;
+      if (ids.length < batchSize) break;
+    }
+    return { selected, deleted, batches };
+  }
+
+  /**
+   * Safe WAL compaction for maintenance paths. PASSIVE never blocks writers,
+   * so it is safe even if the bridge is live; a TRUNCATE-style compaction
+   * belongs to stopped-bridge tooling outside this method.
+   */
+  checkpointWalPassive(): void {
+    try {
+      this.db.exec(`PRAGMA wal_checkpoint(PASSIVE)`);
+    } catch { /* best-effort compaction */ }
+  }
+
   supersede(runId: string, outcome: OrcRunOutcome): boolean {
     const now = new Date().toISOString();
     const result = this.db.prepare(`
