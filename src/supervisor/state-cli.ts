@@ -12,6 +12,8 @@ import {
   resetRestartCount,
   migrateSupervisorState,
   getBackoffDelayMs,
+  setOwnershipEpisode,
+  clearOwnershipEpisode,
 } from "./state.js";
 import { validateBridgeLock, signalValidatedBridge, processStartIdentity, exactBridgeProcesses } from "./identity.js";
 import { atomicWriteSync } from "../components/atomic-write.js";
@@ -160,6 +162,21 @@ function main(): void {
       process.exit(Exit.Ok);
     }
 
+    case "set-ownership-episode": {
+      // #1711 R5/P7: durable ownership-inconclusive marker. No candidate PID
+      // or signal authorization is ever persisted — reason text only.
+      const reason = process.argv[3] ?? "unspecified";
+      setOwnershipEpisode(home, { kind: "ownership-inconclusive", reason, since: Date.now() });
+      process.stdout.write("ok\n");
+      process.exit(Exit.Ok);
+    }
+
+    case "clear-ownership-episode": {
+      clearOwnershipEpisode(home);
+      process.stdout.write("ok\n");
+      process.exit(Exit.Ok);
+    }
+
     case "prove-empty": {
       // Zero-process proof before any spawn (#1711 R3). Shell-friendly output:
       // "empty" | "occupied <n>" | "inconclusive". Only "empty" authorizes the
@@ -214,7 +231,7 @@ function main(): void {
 
     default:
       process.stderr.write(`Unknown command: ${cmd}\n`);
-      process.stderr.write("Available: read, desired-state, is-stopped, set-desired-state, publish-command, claim-command, ack-command, record-death, record-healthy, reset-restart-count, get-backoff, migrate, validate-bridge, prove-empty, set-watchdog-pid, signal-bridge\n");
+      process.stderr.write("Available: read, desired-state, is-stopped, set-desired-state, publish-command, claim-command, ack-command, record-death, record-healthy, reset-restart-count, get-backoff, migrate, validate-bridge, prove-empty, set-ownership-episode, clear-ownership-episode, set-watchdog-pid, signal-bridge\n");
       process.exit(Exit.Usage);
   }
 }

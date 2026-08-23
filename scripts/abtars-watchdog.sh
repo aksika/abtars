@@ -32,6 +32,24 @@ fi
 svc() { node "$SUPERVISOR_CLI" "$@"; }
 logw() { echo "$(date +%FT%T) $*" >> "$WD_LOG"; }
 
+# R8 transition-only logging: one line per distinct event, zero repetition for
+# unchanged state. The key encodes the episode; a new episode re-logs.
+log_event() {
+  local key="$1"; shift
+  if [[ "${LAST_EVENT_KEY:-}" != "$key" ]]; then
+    logw "$*"
+    LAST_EVENT_KEY="$key"
+  fi
+}
+
+clear_ownership_episode() {
+  if [[ "${OWNERSHIP_EPISODE_OPEN:-0}" == "1" ]]; then
+    svc clear-ownership-episode 2>/dev/null || true
+    OWNERSHIP_EPISODE_OPEN=0
+    LAST_EVENT_KEY=""
+  fi
+}
+
 # Read numeric lastHeartbeat from bridge.lock (R2.2: read-only, never mutates).
 read_heartbeat() {
   grep -o '"lastHeartbeat":[0-9]*' "$LOCK" 2>/dev/null | grep -o '[0-9]*'
@@ -271,6 +289,8 @@ PID=""
 PLANNED_RESTART=0
 START_REASON="watchdog-respawn"
 LAST_OBSERVED_HB=""
+OWNERSHIP_EPISODE_OPEN=0
+LAST_EVENT_KEY=""
 adopt_or_spawn
 LAST_OBSERVED_HB="$(read_heartbeat)"
 
@@ -311,6 +331,7 @@ while true; do
       valid)
         if [[ "$_vpid" != "$PID" ]]; then
           # Validated PID mismatch — existing terminal behavior.
+          clear_ownership_episode
           wait "$PID" 2>/dev/null   # reap the child
           # #1328: read the bridge's SELF-REPORTED exit code (lastExitCode), gated on
           # lastExitAt > SPAWNED_AT so a stale prior-death code is never reused.
@@ -330,17 +351,27 @@ except Exception:
           break
         fi
         # Update observed heartbeat for resume-baseline tracking.
+        clear_ownership_episode
         _fresh_hb=$(read_heartbeat)
         [[ -n "$_fresh_hb" ]] && LAST_OBSERVED_HB="$_fresh_hb"
         ;;
       transient)
         # Exhausted transient validation attempts: fall back to cached PID liveness.
         if kill -0 "$PID" 2>/dev/null; then
-          logw "Validation transient after 3 attempts — cached PID $PID still alive, deferring cycle"
+          # #1711 R5/P7: enter a BOUNDED ownership-inconclusive episode — one
+          # durable marker, ONE log line, no repetition while unchanged. The
+          # healthy-or-not question stays open; we never signal here.
+          if [[ "${OWNERSHIP_EPISODE_OPEN:-0}" != "1" ]]; then
+            svc set-ownership-episode "validation-inconclusive:cached-pid=$PID" 2>/dev/null || true
+            OWNERSHIP_EPISODE_OPEN=1
+            LAST_EVENT_KEY=""
+            log_event "episode:$PID" "Ownership inconclusive after validation attempts — holding supervision of cached PID $PID"
+          fi
           sleep "$POLL_INTERVAL"
           continue
         fi
         # Cached PID is dead — existing process-gone path.
+        clear_ownership_episode
         wait "$PID" 2>/dev/null   # reap the child
         EXIT_CODE=$(python3 -c "
 import json
@@ -358,6 +389,7 @@ except Exception:
         ;;
       dead|reused|wrong-command|mismatch)
         # Definitive identity result — existing terminal behavior unchanged.
+        clear_ownership_episode
         wait "$PID" 2>/dev/null   # reap the child
         EXIT_CODE=$(python3 -c "
 import json

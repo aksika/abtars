@@ -15,6 +15,8 @@ import {
   migrateSupervisorState,
   stateFilePath,
   getBackoffDelayMs,
+  setOwnershipEpisode,
+  clearOwnershipEpisode,
 } from "./state.js";
 
 let home: string;
@@ -405,5 +407,67 @@ describe("getBackoffDelayMs", () => {
     const state = readState();
     state.backoffAttempt = 10;
     expect(getBackoffDelayMs(state)).toBe(60000);
+  });
+});
+
+describe("ownership episode marker (#1711 R5)", () => {
+  it("accepts old state files without the marker (no schema bump)", () => {
+    publishCommand(home, "restart", "seed");
+    const state = readState();
+    expect(state.schemaVersion).toBe(1);
+    expect(state.ownershipEpisode).toBeUndefined();
+  });
+
+  it("round-trips a set marker and reports kind/reason/since", () => {
+    const since = Date.now() - 1000;
+    setOwnershipEpisode(home, { kind: "ownership-inconclusive", reason: "validation-inconclusive:cached-pid=42", since });
+    const state = readState();
+    expect(state.ownershipEpisode?.kind).toBe("ownership-inconclusive");
+    expect(state.ownershipEpisode?.reason).toContain("cached-pid=42");
+    expect(state.ownershipEpisode?.since).toBe(since);
+  });
+
+  it("clears an open marker", () => {
+    setOwnershipEpisode(home, { kind: "ownership-inconclusive", reason: "x", since: Date.now() });
+    clearOwnershipEpisode(home);
+    expect(readState().ownershipEpisode).toBeNull();
+  });
+
+  it("rejects a marker with an unknown kind", () => {
+    writeFileSync(stateFilePath(home), JSON.stringify({
+      schemaVersion: 1, desiredState: "running", nextCommandSeq: 1, pendingCommand: null,
+      acknowledgedCommandSeq: 0, restartCount: 0, backoffAttempt: 0, recentDeaths: [], lastDeathAt: null,
+      ownershipEpisode: { kind: "something-else", reason: "x", since: 1 },
+    }));
+    const r = readSupervisorState(home);
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.reason).toBe("invalid-schema");
+  });
+
+  it("rejects a marker without a non-empty reason", () => {
+    writeFileSync(stateFilePath(home), JSON.stringify({
+      schemaVersion: 1, desiredState: "running", nextCommandSeq: 1, pendingCommand: null,
+      acknowledgedCommandSeq: 0, restartCount: 0, backoffAttempt: 0, recentDeaths: [], lastDeathAt: null,
+      ownershipEpisode: { kind: "ownership-inconclusive", reason: "", since: 1 },
+    }));
+    expect(readSupervisorState(home)).toMatchObject({ ok: false });
+  });
+
+  it("rejects a marker with a non-integer since", () => {
+    writeFileSync(stateFilePath(home), JSON.stringify({
+      schemaVersion: 1, desiredState: "running", nextCommandSeq: 1, pendingCommand: null,
+      acknowledgedCommandSeq: 0, restartCount: 0, backoffAttempt: 0, recentDeaths: [], lastDeathAt: null,
+      ownershipEpisode: { kind: "ownership-inconclusive", reason: "x", since: "now" },
+    }));
+    expect(readSupervisorState(home)).toMatchObject({ ok: false });
+  });
+
+  it("preserves other fields across a set/clear cycle", () => {
+    recordBridgeDeath(home, { at: Date.now(), reason: "test" });
+    setOwnershipEpisode(home, { kind: "ownership-inconclusive", reason: "y", since: Date.now() });
+    clearOwnershipEpisode(home);
+    const state = readState();
+    expect(state.restartCount).toBe(1);
+    expect(state.ownershipEpisode).toBeNull();
   });
 });

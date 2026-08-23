@@ -238,6 +238,24 @@ async function probeWatchdog(): Promise<ProbeResult> {
   const bridgeAlive = bridgePid > 0 && pidAlive(bridgePid);
   const wdAlive = wdPid > 0 && pidAlive(wdPid);
 
+  // #1711 R5/P7: an ownership-inconclusive episode must be visible to the
+  // operator here — watchdog absence or ownership uncertainty is never
+  // reported as a healthy supervised bridge.
+  const { readSupervisorState } = await import("../../supervisor/state.js");
+  const supState = readSupervisorState(home);
+  const episode = supState.ok ? supState.state.ownershipEpisode : undefined;
+  if (episode) {
+    const ageMin = Math.max(0, Math.round((Date.now() - episode.since) / 60000));
+    return {
+      name: "watchdog",
+      status: "warning",
+      evidence: "runtime",
+      detail: `${bridgePid}, wd:${wdPid}, ownership-inconclusive ${ageMin}m (${episode.reason})`,
+      remediation: "Verify bridge.lock integrity and check logs/watchdog.log; resolve manually if a duplicate bridge exists",
+      ms: 0,
+    };
+  }
+
   if (bridgeAlive && wdAlive) return { name: "watchdog", status: "ok", evidence: "runtime", detail: `${bridgePid}, wd:${wdPid}`, ms: 0 };
   if (!bridgeAlive && !wdAlive) return { name: "watchdog", status: "failed", evidence: "runtime", detail: `${bridgePid} dead, wd:${wdPid} dead`, remediation: "Run abtars start", ms: 0 };
   if (!wdAlive) return { name: "watchdog", status: "failed", evidence: "runtime", detail: `${bridgePid} alive, wd:${wdPid} dead`, remediation: "Check watchdog configuration", ms: 0 };
