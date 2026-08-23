@@ -1447,6 +1447,21 @@ async function reconcileProject(generation: ReconcilerGeneration, projectId: num
   if (!isProjectReconcileEligible(project)) return;
 
   const reviewStore = new ProjectReviewStore();
+  // #1707 hot patch: a scheduled project must never outlive its owning task
+  // occurrence. A failed/cancelled occurrence can leave its O card running;
+  // allowing the generic contract/continuation path to proceed resurrects
+  // the job and can release/reclaim Orc turns forever. Reuse the existing
+  // last-resort terminal settlement so the card and supervision become
+  // terminal before any Orc claim is attempted.
+  if (isScheduledRootIdentity(project)) {
+    const scheduledRun = findActiveScheduledRun(project);
+    if (!scheduledRun || scheduledRun.run.terminalRequest) {
+      logWarn(TAG, `Project ${projectId}: scheduled task run ${project.source_id ?? "unknown"} is no longer active — refusing Orc restart`);
+      settleProjectLastResortFor(generation, projectId);
+      return;
+    }
+  }
+
   const hasRootContract = reviewStore.contractExists(projectId);
   const contractRow = hasRootContract ? reviewStore.getContractByProjectCardId(projectId) : undefined;
 

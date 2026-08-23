@@ -218,6 +218,28 @@ describe("reconciler #1546 last-resort and claim ordering (real stores)", () => 
     expect(historyStore.recentRuns(ENTRY.id, 10)).toHaveLength(0);
   });
 
+  it("does not resurrect a scheduled project after its task run failed (#1707 hot patch)", async () => {
+    const { rootId, run } = await seedScheduledProject();
+    kanban._kanbanExecForTest(
+      `UPDATE task_runs SET finished_at = ?, outcome = 'failed' WHERE run_id = ?`,
+      [Date.now(), run.runId],
+    );
+
+    const starts: number[] = [];
+    await startGeneration(new coordinatorMod.OrcProjectCoordinator({
+      ownerPeer: "test-peer",
+      startPort: async () => { starts.push(1); },
+    }));
+    reconciler.requestReconcile(rootId);
+    await flush();
+    await flush();
+
+    expect(starts).toHaveLength(0);
+    expect(new runStoreMod.OrcProjectRunStore().getRunsForProject(rootId)).toHaveLength(0);
+    expect(kanban.kanbanGetCard(rootId)!.status).toBe("failed");
+    expect(new reviewStoreMod.ProjectReviewStore().getSupervision(rootId)!.state).toBe("blocked");
+  });
+
   it("recovers claim -> queued/due -> retry wake to a single owner and promotes exactly once", async () => {
     const coordinator = new coordinatorMod.OrcProjectCoordinator({
       ownerPeer: "test-peer",

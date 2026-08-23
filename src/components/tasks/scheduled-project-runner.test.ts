@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { mkdirSync, rmSync } from "node:fs";
+import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { vi } from "vitest";
@@ -132,7 +132,32 @@ function buildRequest(overrides: Record<string, unknown> = {}): {
   } as never;
 }
 
+const TASK_ENTRY = {
+  id: "daily-ai",
+  kind: "agent" as const,
+  prompt: "Produce the daily briefing",
+  agent: "task",
+  interaction: { mode: "oneshot" as const },
+  orchestration: { maxAgents: 4 },
+  schedule: "* * * * *",
+  enabled: true,
+  priority: "medium" as const,
+  delivery: "report" as const,
+  report: {
+    artifact: "/tmp/daily-ai-report.md",
+    requiredSections: ["Summary"],
+    minBytes: 100,
+    requires: { files: [], executables: [], tools: [] },
+  },
+};
+
 async function seedReservation(entryId = "daily-ai", runId = "daily-ai_1"): Promise<void> {
+  // #1707: the reconciler's abandoned-occurrence guard looks up the owning
+  // task definition before deciding whether an O card may be resumed. Keep
+  // these reattach fixtures shaped like production state instead of relying
+  // on a task_state row without its tasks.json catalog entry.
+  mkdirSync(join(TEST_HOME, "tasks"), { recursive: true });
+  writeFileSync(join(TEST_HOME, "tasks", "tasks.json"), JSON.stringify([TASK_ENTRY], null, 2));
   const now = Date.now();
   const result = stateStore.reserveRun(entryId, {
     runId,
