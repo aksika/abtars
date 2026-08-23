@@ -14,6 +14,20 @@ export const MAX_CONSECUTIVE_UNSTARTABLE_AUTHORING_TURNS = 3;
 /** Minimum interval between authoring claims for one project generation. */
 export const MIN_AUTHORING_CLAIM_INTERVAL_MS = 5_000;
 
+// ── #1707 Task 4: same-card circuit breaker policy ────────────────────────────
+//
+// Counts derive from immutable run rows (no mutable counters to race). A
+// tripped card fuse is durable, survives ordinary restarts, and is cleared
+// only by an explicit operator reset (/orc reset project <id>) which never
+// resurrects a terminal task occurrence or reuses a terminal run_id.
+
+/** Failed/no-progress attempts for one card within the window before the fuse trips. */
+export const CARD_FAILED_ATTEMPTS_LIMIT = 3;
+export const CARD_FAILED_ATTEMPTS_WINDOW_MS = 600_000;
+/** Starts without durable progress for one card within the window before the fuse trips. */
+export const CARD_NO_PROGRESS_STARTS_LIMIT = 5;
+export const CARD_NO_PROGRESS_WINDOW_MS = 300_000;
+
 /**
  * #1628: in-process fact published after every committed Orc ownership
  * relinquishment (release/supersede). The reconciler wakes the affected

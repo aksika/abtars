@@ -8,8 +8,15 @@ import type {
   OrcInvocationContextV2,
   OrcRunFailureCode,
 } from "./orc-project-contracts.js";
-import { deriveIntentKey } from "./orc-project-contracts.js";
+import {
+  deriveIntentKey,
+  CARD_FAILED_ATTEMPTS_LIMIT,
+  CARD_FAILED_ATTEMPTS_WINDOW_MS,
+  CARD_NO_PROGRESS_STARTS_LIMIT,
+  CARD_NO_PROGRESS_WINDOW_MS,
+} from "./orc-project-contracts.js";
 import { intentPolicyFor, readOrcProjectSnapshot } from "./orc-intent-policy.js";
+import { logWarn } from "../logger.js";
 
 /**
  * #1679: the read-side owner fence, defined once. Every method composes these
@@ -114,11 +121,31 @@ export class OrcProjectRunStore {
         opened_at             TEXT,
         trip_reason           TEXT,
         generation            INTEGER NOT NULL DEFAULT 0,
-        cleared_at            TEXT
+        cleared_at            TEXT,
+        cleared_generation    INTEGER NOT NULL DEFAULT 0
       );
     `);
     this.migrateIntentCheck();
     this.migrateTaskRunId();
+    this.migrateFuseClearedGeneration();
+  }
+
+  /**
+   * #1707 Task 4: the cleared boundary must be monotonic, not clock-based —
+   * ISO millisecond stamps cannot order operations inside one millisecond.
+   * `cleared_generation` pins the boundary at an ownership-generation value
+   * that only ever grows, so resets are exact under any timing.
+   */
+  private migrateFuseClearedGeneration(): void {
+    const columns = this.db.prepare(`PRAGMA table_info(orc_fuse_state)`).all() as Array<{ name: string }>;
+    if (columns.some(c => c.name === "cleared_generation")) return;
+    this.db.exec(`ALTER TABLE orc_fuse_state ADD COLUMN cleared_generation INTEGER NOT NULL DEFAULT 0`);
+  }
+
+  /** Highest ownership generation ever assigned for a card (monotonic). */
+  private maxOwnershipGeneration(projectCardId: number): number {
+    const row = this.db.prepare(`SELECT COALESCE(MAX(ownership_generation), 0) AS g FROM orc_project_runs WHERE project_card_id = ?`).get(projectCardId) as { g: number };
+    return row.g;
   }
 
   /**
@@ -235,6 +262,12 @@ export class OrcProjectRunStore {
       if (!intentPolicyFor(input.intentKind).isActionable(readOrcProjectSnapshot(this.db, input.projectCardId))) {
         return { kind: "not_actionable" as const, reason: "intent_not_actionable" as const };
       }
+
+      // #1707 Task 4: the card circuit breaker is evaluated inside the claim
+      // transaction BEFORE any counter increment or row insertion — a tripped
+      // fuse refuses the claim at the store boundary itself.
+      const fuse = this.evaluateCardFuse(input);
+      if (fuse) return { kind: "not_actionable" as const, reason: "fuse_open" as const };
 
       const counter = this.db.prepare(`
         UPDATE orc_project_ownership_counters SET next_generation = next_generation + 1
@@ -429,10 +462,146 @@ export class OrcProjectRunStore {
 
   /** #1707: durable progress marker — resets the no-progress/failure windows for one card. */
   private recordCardProgress(projectCardId: number, nowIso: string): void {
+    const clearedGen = this.maxOwnershipGeneration(projectCardId);
     this.db.prepare(`
-      INSERT INTO orc_fuse_state (scope, cleared_at) VALUES (?, ?)
-      ON CONFLICT(scope) DO UPDATE SET cleared_at = excluded.cleared_at
-    `).run(`card:${projectCardId}`, nowIso);
+      INSERT INTO orc_fuse_state (scope, cleared_at, cleared_generation) VALUES (?, ?, ?)
+      ON CONFLICT(scope) DO UPDATE SET
+        cleared_at = excluded.cleared_at, cleared_generation = excluded.cleared_generation
+    `).run(`card:${projectCardId}`, nowIso, clearedGen);
+  }
+
+  // ── #1707 Task 4: card circuit breaker ───────────────────────────────────────
+  //
+  // All counters derive from immutable orc_project_runs rows inside the claim
+  // transaction; concurrent wakes cannot double-count or race a trip. The
+  // tripped state is durable in orc_fuse_state and survives ordinary restarts.
+
+  /**
+   * Returns a trip reason when the claim must be refused, undefined when the
+   * card may proceed. Opening a fuse writes the durable trip row in the SAME
+   * transaction as the refusal.
+   */
+  private evaluateCardFuse(input: OrcClaimInput): string | undefined {
+    const scope = `card:${input.projectCardId}`;
+    const fuseRow = this.db.prepare(`SELECT opened_at, trip_reason, cleared_generation FROM orc_fuse_state WHERE scope = ?`).get(scope) as { opened_at: string | null; trip_reason: string | null; cleared_generation: number | null } | undefined;
+    if (fuseRow?.opened_at) return fuseRow.trip_reason ?? "already_open";
+    // The cleared boundary is the monotonic ownership generation, never a
+    // clock: rows claimed after a progress/reset event have strictly higher
+    // generations, immune to millisecond-resolution collisions.
+    const clearedGen = fuseRow?.cleared_generation ?? 0;
+
+    const nowSec = Math.floor(Date.now() / 1000);
+    const failedFrom = nowSec - Math.floor(CARD_FAILED_ATTEMPTS_WINDOW_MS / 1000);
+    const churnFrom = nowSec - Math.floor(CARD_NO_PROGRESS_WINDOW_MS / 1000);
+
+    // Failed/no-progress attempts: provider/turn failures persisted as
+    // outcome='failed' (start rejections included — they release with
+    // started_at NULL).
+    const failedAttempts = this.db.prepare(`
+      SELECT COUNT(*) AS n FROM orc_project_runs
+       WHERE project_card_id = ? AND state = 'released'
+         AND outcome = 'failed'
+         AND ownership_generation > ?
+         AND unixepoch(created_at) >= ?
+    `).get(input.projectCardId, clearedGen, failedFrom) as { n: number };
+    if (failedAttempts.n >= CARD_FAILED_ATTEMPTS_LIMIT) {
+      return this.openFuse(scope, `failed_attempts:${failedAttempts.n}`);
+    }
+
+    // Starts that never produced durable progress (bound then cancelled or
+    // otherwise ended non-completed) — distinct churn shape from outright
+    // failures.
+    const noProgressStarts = this.db.prepare(`
+      SELECT COUNT(*) AS n FROM orc_project_runs
+       WHERE project_card_id = ? AND started_at IS NOT NULL
+         AND state IN ('released','superseded')
+         AND outcome IS NOT NULL AND outcome != 'completed' AND outcome != 'failed'
+         AND ownership_generation > ?
+         AND unixepoch(created_at) >= ?
+    `).get(input.projectCardId, clearedGen, churnFrom) as { n: number };
+    if (noProgressStarts.n >= CARD_NO_PROGRESS_STARTS_LIMIT) {
+      return this.openFuse(scope, `no_progress_starts:${noProgressStarts.n}`);
+    }
+
+    // Hard boundary: one automatic execution attempt per scheduled task run;
+    // a terminal failure means no automatic restart, only an operator reset
+    // (which requires and produces a NEW attempt identity).
+    if (input.intentKind === "project_execution" && input.taskRunId) {
+      const priorFailure = this.db.prepare(`
+        SELECT 1 FROM orc_project_runs
+         WHERE project_card_id = ? AND task_run_id = ? AND intent_kind = 'project_execution'
+           AND state = 'released' AND outcome = 'failed'
+           AND ownership_generation > ?
+         LIMIT 1
+      `).get(input.projectCardId, input.taskRunId, clearedGen);
+      if (priorFailure) {
+        return this.openFuse(scope, "terminal_execution_attempt");
+      }
+    }
+
+    return undefined;
+  }
+
+  /** Open a durable fuse inside the caller's transaction. Returns the trip reason. */
+  private openFuse(scope: string, reason: string): string {
+    const nowIso = new Date().toISOString();
+    this.db.prepare(`
+      UPDATE orc_fuse_state SET opened_at = ?, trip_reason = ?
+      WHERE scope = ? AND opened_at IS NULL
+    `).run(nowIso, reason, scope);
+    this.db.prepare(`
+      INSERT INTO orc_fuse_state (scope, opened_at, trip_reason)
+      VALUES (?, ?, ?)
+      ON CONFLICT(scope) DO NOTHING
+    `).run(scope, nowIso, reason);
+    logWarn("orc-fuse", `circuit breaker OPEN scope=${scope} reason=${reason}`);
+    return reason;
+  }
+
+  /**
+   * #1707: explicit operator reset — clears ONLY fuse state and windows.
+   * Terminal run rows stay terminal; a terminal task occurrence stays settled;
+   * the next attempt gets a new identity because history rows are untouched.
+   */
+  resetProjectFuse(projectCardId: number): void {
+    const nowIso = new Date().toISOString();
+    const clearedGen = this.maxOwnershipGeneration(projectCardId);
+    this.db.transaction(() => {
+      this.db.prepare(`
+        INSERT INTO orc_fuse_state (scope, generation, cleared_at, cleared_generation) VALUES (?, 1, ?, ?)
+        ON CONFLICT(scope) DO UPDATE SET
+          opened_at = NULL, trip_reason = NULL, generation = generation + 1,
+          cleared_at = excluded.cleared_at, cleared_generation = excluded.cleared_generation
+      `).run(`card:${projectCardId}`, nowIso, clearedGen);
+    });
+    logWarn("orc-fuse", `circuit breaker RESET scope=card:${projectCardId}`);
+  }
+
+  /** #1707 Task 5: explicit bridge-fuse reset with a generation bump so stale events stay harmless. */
+  resetBridgeFuse(): void {
+    const nowIso = new Date().toISOString();
+    const maxRow = this.db.prepare(`SELECT COALESCE(MAX(ownership_generation), 0) AS g FROM orc_project_runs`).get() as { g: number };
+    this.db.transaction(() => {
+      this.db.prepare(`
+        INSERT INTO orc_fuse_state (scope, generation, cleared_at, cleared_generation) VALUES ('bridge', 1, ?, ?)
+        ON CONFLICT(scope) DO UPDATE SET
+          opened_at = NULL, trip_reason = NULL, generation = generation + 1,
+          cleared_at = excluded.cleared_at, cleared_generation = excluded.cleared_generation
+      `).run(nowIso, maxRow.g);
+    });
+    logWarn("orc-fuse", "circuit breaker RESET scope=bridge");
+  }
+
+  /** Durable fuse rows for the operator status surface. */
+  getFuseSnapshot(): Array<{ scope: string; openedAt: string | null; tripReason: string | null; generation: number; clearedAt: string | null }> {
+    const rows = this.db.prepare(`SELECT * FROM orc_fuse_state ORDER BY scope`).all() as Array<Record<string, unknown>>;
+    return rows.map(r => ({
+      scope: String(r.scope),
+      openedAt: (r.opened_at as string | null) ?? null,
+      tripReason: (r.trip_reason as string | null) ?? null,
+      generation: Number(r.generation ?? 0),
+      clearedAt: (r.cleared_at as string | null) ?? null,
+    }));
   }
 
   supersede(runId: string, outcome: OrcRunOutcome): boolean {

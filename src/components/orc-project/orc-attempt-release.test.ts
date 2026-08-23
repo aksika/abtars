@@ -142,7 +142,7 @@ describe("#1707 attempt identity and release semantics", () => {
     expect(coordinator.getStore().release(claimed.context, "failed", "provider_failure")).toBe(false);
   });
 
-  it("a released failed attempt cannot synchronously re-claim the same attempt — the next claim is a new identity", async () => {
+  it("a released failed attempt cannot synchronously re-claim — the card fuse demands an operator reset", async () => {
     const { rootId, runId } = seedScheduledProject();
     const coordinator = new coordinatorMod.OrcProjectCoordinator({ ownerPeer: "p", startPort: async () => {} });
     const store = coordinator.getStore();
@@ -153,11 +153,19 @@ describe("#1707 attempt identity and release semantics", () => {
     if (first.kind !== "claimed") throw new Error("first claim failed");
     expect(store.release(first.context, "failed", "provider_failure")).toBe(true);
 
+    // A terminal execution attempt is final for automatic retries:
+    expect(store.claimIntent({
+      projectCardId: rootId, intentKind: "project_execution", goal: "attempt work",
+      originKind: "local", cardSource: "task", sourcePeer: null, taskRunId: runId,
+    }, "p", "inst")).toMatchObject({ kind: "not_actionable", reason: "fuse_open" });
+
+    // Operator reset clears the fuse; the retry gets a NEW attempt identity.
+    store.resetProjectFuse(rootId);
     const second = store.claimIntent({
       projectCardId: rootId, intentKind: "project_execution", goal: "attempt work",
       originKind: "local", cardSource: "task", sourcePeer: null, taskRunId: runId,
     }, "p", "inst");
-    if (second.kind !== "claimed") throw new Error(`second claim: ${second.kind}`);
+    if (second.kind !== "claimed") throw new Error(`post-reset claim: ${second.kind}`);
     expect(second.context.ownershipGeneration).toBe(first.context.ownershipGeneration + 1);
     expect(second.context.runId).not.toBe(first.context.runId);
   });

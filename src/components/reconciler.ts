@@ -312,6 +312,12 @@ function scheduleContractAuthoringOrSettle(generation: ReconcilerGeneration, pro
 
   const result = generation.deps.coordinator.scheduleContractAuthoring(projectId);
   if (result.kind === "not_actionable") {
+    if (result.reason === "fuse_open") {
+      // #1707: a tripped circuit breaker is recoverable by operator reset —
+      // never a terminal settlement signal. The next wake re-reads state.
+      logWarn(TAG, `Project ${projectId}: authoring claim blocked by circuit breaker — deferring until operator reset`);
+      return { kind: "deferred", reason: "busy" };
+    }
     logWarn(TAG, `Project ${projectId}: contract-authoring claim not actionable (${result.reason}) — settling as last resort`);
     settleProjectLastResortFor(generation, projectId);
     return { kind: "unavailable" };
@@ -779,6 +785,13 @@ function claimOrcContinuation(generation: ReconcilerGeneration, projectId: numbe
       return "settled";
     }
     case "not_actionable":
+      // #1707: a tripped circuit breaker is recoverable by operator reset —
+      // never a settlement signal. Wake-only; the fuse row holds the state.
+      if (result.reason === "fuse_open") {
+        const tripReason = coordinator.getStore().getFuseSnapshot().find(f => f.scope === `card:${projectId}`)?.tripReason ?? "unknown";
+        logWarn(TAG, `Project ${projectId}: continuation blocked by circuit breaker (${tripReason}) — deferring until operator reset`);
+        return "owned";
+      }
       // A project_execution claim is intentionally limited to an executing
       // root with no higher-priority owner. A non-executing supervision state
       // can still be a valid recovery state whose owner is represented by a
