@@ -1,5 +1,10 @@
 import { describe, it, expect, vi } from "vitest";
-import { RecomposableMemoryRuntime } from "./memory-recomposition.js";
+import {
+  RecomposableMemoryRuntime,
+  MemoryRecompositionSupervisor,
+  createUnrefTimeoutScheduler,
+  type CompositionAttemptResult,
+} from "./memory-recomposition.js";
 import type {
   AbtarsMemoryRuntime,
   MemoryCompositionDiagnostics,
@@ -9,6 +14,8 @@ vi.mock("./logger.js", () => ({
   logWarn: vi.fn(),
   logInfo: vi.fn(),
   logError: vi.fn(),
+  logDebug: vi.fn(),
+  logTrace: vi.fn(),
 }));
 
 function makeReadyRuntime(overrides: Partial<AbtarsMemoryRuntime> = {}): AbtarsMemoryRuntime {
@@ -162,5 +169,288 @@ describe("RecomposableMemoryRuntime — stable reference across upgrade (#1706)"
       lastAttemptAt: 1234,
       lastFailure: "endpoint_unavailable",
     });
+  });
+});
+
+// ── Supervisor (#1706 Task 2) ───────────────────────────────────────────────
+
+interface ManualTimer { fn: () => void; delayMs: number; cleared: boolean }
+
+class ManualScheduler {
+  readonly timers: ManualTimer[] = [];
+
+  schedule(fn: () => void, delayMs: number): () => void {
+    const t: ManualTimer = { fn, delayMs, cleared: false };
+    this.timers.push(t);
+    return () => { t.cleared = true; };
+  }
+
+  get pending(): ManualTimer[] {
+    return this.timers.filter(t => !t.cleared);
+  }
+
+  fire(delayMs?: number): void {
+    const t = this.pending.find(x => delayMs === undefined || x.delayMs === delayMs);
+    if (!t) throw new Error(`no pending timer${delayMs === undefined ? "" : ` at ${delayMs}ms`}`);
+    t.cleared = true;
+    t.fn();
+  }
+}
+
+function makeResult(): CompositionAttemptResult {
+  return {
+    mode: "local",
+    client: { close: vi.fn(async () => undefined), negotiate: vi.fn() } as unknown as CompositionAttemptResult["client"],
+    runtime: makeReadyRuntime({ state: "ready" }),
+    abmindModule: null,
+  };
+}
+
+function flush(): Promise<void> {
+  return new Promise(resolve => setImmediate(resolve));
+}
+
+describe("MemoryRecompositionSupervisor — backoff progression", () => {
+  it("escalates 5s → 15s → 60s → 120s → 120s and stops after success", async () => {
+    const scheduler = new ManualScheduler();
+    let calls = 0;
+    const supervisor = new MemoryRecompositionSupervisor({
+      attempt: vi.fn(async () => {
+        calls++;
+        if (calls < 5) throw new Error("connection failed");
+        return makeResult();
+      }),
+      classifyFailure: () => "endpoint_unavailable",
+      publish: vi.fn(),
+      dispose: vi.fn(async () => undefined),
+      onDiagnostics: () => {},
+      schedule: (fn, ms) => scheduler.schedule(fn, ms),
+      delaysMs: [5_000, 15_000, 60_000],
+      repeatDelayMs: 120_000,
+    });
+
+    supervisor.start();
+    expect(supervisor.diagnostics.state).toBe("retrying");
+
+    for (const expectedDelay of [5_000, 15_000, 60_000, 120_000]) {
+      expect(scheduler.pending).toHaveLength(1);
+      expect(scheduler.pending[0]!.delayMs).toBe(expectedDelay);
+      scheduler.fire();
+      await flush(); // settle the failed attempt + next arm
+    }
+    // fifth attempt succeeds at the second 120s tick
+    expect(scheduler.pending[0]!.delayMs).toBe(120_000);
+    scheduler.fire();
+    await flush();
+
+    expect(calls).toBe(5);
+    expect(scheduler.pending).toHaveLength(0); // chain stopped after upgrade
+    expect(supervisor.diagnostics.state).toBe("upgraded");
+    expect(supervisor.diagnostics.upgradedAt).toBeDefined();
+  });
+
+  it("start is idempotent", async () => {
+    const scheduler = new ManualScheduler();
+    const supervisor = new MemoryRecompositionSupervisor({
+      attempt: vi.fn(async () => { throw new Error("x"); }),
+      classifyFailure: () => "endpoint_unavailable",
+      publish: vi.fn(),
+      dispose: vi.fn(async () => undefined),
+      onDiagnostics: () => {},
+      schedule: (fn, ms) => scheduler.schedule(fn, ms),
+    });
+
+    supervisor.start();
+    supervisor.start();
+    supervisor.start();
+
+    expect(scheduler.pending).toHaveLength(1);
+  });
+
+  it("never overlaps attempts: a coalesced tick waits instead of stacking", async () => {
+    const scheduler = new ManualScheduler();
+    let release!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    let started = 0;
+    const supervisor = new MemoryRecompositionSupervisor({
+      attempt: vi.fn(async () => {
+        started++;
+        await gate;
+        throw new Error("slow negotiation");
+      }),
+      classifyFailure: () => "negotiation_failed",
+      publish: vi.fn(),
+      dispose: vi.fn(async () => undefined),
+      onDiagnostics: () => {},
+      schedule: (fn, ms) => scheduler.schedule(fn, ms),
+    });
+
+    supervisor.start();
+    scheduler.fire(); // consumes T1 via the scheduler (marks it cleared)
+    await flush();
+    expect(started).toBe(1);
+
+    // Forced duplicate tick while attempt 1 is in flight must coalesce.
+    const tickFn = scheduler.timers[0]!.fn;
+    tickFn();
+    await flush();
+    expect(started).toBe(1); // no second concurrent attempt
+
+    release();
+    await flush();
+    await flush();
+    // original chain rearmed itself exactly once; no attempt ran concurrently
+    expect(started).toBe(1);
+    expect(scheduler.pending).toHaveLength(1);
+
+    scheduler.pending[0]!.fn();
+    await flush();
+    expect(started).toBe(2);
+  });
+});
+
+describe("MemoryRecompositionSupervisor — cancellation precedence", () => {
+  it("cancel before any timer fires: no attempt ever runs", async () => {
+    const scheduler = new ManualScheduler();
+    const attempt = vi.fn(async () => makeResult());
+    const supervisor = new MemoryRecompositionSupervisor({
+      attempt,
+      classifyFailure: () => "endpoint_unavailable",
+      publish: vi.fn(),
+      dispose: vi.fn(async () => undefined),
+      onDiagnostics: () => {},
+      schedule: (fn, ms) => scheduler.schedule(fn, ms),
+    });
+
+    supervisor.start();
+    const armed = scheduler.timers[0]!;
+    await supervisor.cancel();
+
+    expect(attempt).not.toHaveBeenCalled();
+    expect(scheduler.pending).toHaveLength(0);
+    expect(armed.cleared).toBe(true);
+    expect(supervisor.diagnostics.state).toBe("cancelled");
+
+    armed.fn(); // even a forced late tick must be terminal
+    await flush();
+    expect(attempt).not.toHaveBeenCalled();
+  });
+
+  it("cancel during a successful in-flight attempt: no publication, client disposed once", async () => {
+    const scheduler = new ManualScheduler();
+    let release!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    const result = makeResult();
+    const publish = vi.fn();
+    // Production dispose contract: close the negotiated client.
+    const dispose = vi.fn(async (r: CompositionAttemptResult) => { await r.client.close(); });
+
+    const supervisor = new MemoryRecompositionSupervisor({
+      attempt: vi.fn(async () => { await gate; return result; }),
+      classifyFailure: () => "endpoint_unavailable",
+      publish,
+      dispose,
+      onDiagnostics: () => {},
+      schedule: (fn, ms) => scheduler.schedule(fn, ms),
+    });
+
+    supervisor.start();
+    scheduler.fire();
+    await flush();
+    expect(publish).not.toHaveBeenCalled(); // still gated
+
+    const drained = supervisor.cancel();
+    release();
+    await drained;
+
+    expect(dispose).toHaveBeenCalledTimes(1);
+    expect(dispose.mock.calls[0]![0]).toBe(result);
+    expect(result.client.close).toHaveBeenCalledTimes(1);
+    expect(publish).not.toHaveBeenCalled();
+    expect(supervisor.diagnostics.state).toBe("cancelled");
+    expect(scheduler.pending).toHaveLength(0);
+  });
+
+  it("cancel after upgrade keeps upgraded diagnostics and publishes nothing twice", async () => {
+    const scheduler = new ManualScheduler();
+    const publish = vi.fn();
+    const result = makeResult();
+    const supervisor = new MemoryRecompositionSupervisor({
+      attempt: vi.fn(async () => result),
+      classifyFailure: () => "endpoint_unavailable",
+      publish,
+      dispose: vi.fn(async () => undefined),
+      onDiagnostics: () => {},
+      schedule: (fn, ms) => scheduler.schedule(fn, ms),
+    });
+
+    supervisor.start();
+    scheduler.fire();
+    await flush();
+    expect(publish).toHaveBeenCalledWith(result);
+
+    await supervisor.cancel();
+    expect(supervisor.diagnostics.state).toBe("upgraded");
+    expect(publish).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("MemoryRecompositionSupervisor — diagnostics stream", () => {
+  it("emits immutable snapshots with bounded failure codes", async () => {
+    const scheduler = new ManualScheduler();
+    const snapshots: MemoryCompositionDiagnostics[] = [];
+    let calls = 0;
+    const supervisor = new MemoryRecompositionSupervisor({
+      attempt: vi.fn(async () => {
+        calls++;
+        if (calls === 1) throw new Error("pin mismatch");
+        if (calls === 2) throw new Error("auth failed");
+        return makeResult();
+      }),
+      classifyFailure: (err) => /pin/i.test(err instanceof Error ? err.message : "") ? "pin_mismatch" : "authentication_failed",
+      publish: vi.fn(),
+      dispose: vi.fn(async () => undefined),
+      onDiagnostics: s => snapshots.push(s),
+      schedule: (fn, ms) => scheduler.schedule(fn, ms),
+      now: () => 42,
+    });
+
+    supervisor.start();
+    scheduler.fire();
+    await flush();
+    scheduler.fire();
+    await flush();
+    scheduler.fire(); // third attempt succeeds
+    await flush();
+
+    const states = snapshots.map(s => s.state);
+    expect(states[0]).toBe("retrying");
+    expect(states[states.length - 1]).toBe("upgraded");
+    // lastFailure is sticky across emissions; assert the ordered unique codes
+    const failures = [...new Set(snapshots.filter(s => s.lastFailure !== undefined).map(s => s.lastFailure))];
+    expect(failures).toEqual(["pin_mismatch", "authentication_failed"]);
+    const final = supervisor.diagnostics;
+    expect(final.attempts).toBe(3); // two failures + one success
+    expect(final.lastAttemptAt).toBe(42);
+    expect(final.state).toBe("upgraded");
+    // snapshot immutability: mutating a returned copy must not corrupt internals
+    final.attempts = 999;
+    expect(supervisor.diagnostics.attempts).toBe(3);
+  });
+});
+
+describe("createUnrefTimeoutScheduler — production timer factory", () => {
+  it("schedules a real unref-ed timeout and clears it without leaving a live timer", () => {
+    vi.useFakeTimers();
+    try {
+      const schedule = createUnrefTimeoutScheduler();
+      const fired: number[] = [];
+      const clear = schedule(() => fired.push(1), 10_000);
+      clear();
+      vi.advanceTimersByTime(20_000);
+      expect(fired).toEqual([]);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
