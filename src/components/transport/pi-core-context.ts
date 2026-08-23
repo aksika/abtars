@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { logWarn, logError, logDebug } from "../logger.js";
+import { logWarn, logError, logTrace } from "../logger.js";
 import type { AssistantMessage, ModelApi, PiExecutionContextSeed, AgentMessage, AbtarsCurrentTurnMessage } from "./pi-core-types.js";
 import type { DurableContextProjectionInput, DurableContextProjectionResult } from "../memory-runtime.js";
 
@@ -64,6 +64,40 @@ export interface TransformResult {
 /** Bounded, content-free session fingerprint for diagnostics. */
 function sessionFingerprint(sessionKey: string): string {
   return createHash("sha256").update(sessionKey, "utf-8").digest("hex").slice(0, 12);
+}
+
+// ── #1705: bounded context_projection diagnostics ─────────────────────────────
+//
+// The per-transform projection line was a DEBUG flood under runaway Orc
+// re-claim loops (1.14M+ lines/day on one deployment, heartbeat starved).
+// The success line is TRACE-level AND deduplicated per session: at most one
+// line per session per interval, so even a trace-level deployment stays far
+// below the <100 lines/hour/session containment target. Projection FAILURE
+// warnings keep their own path — they are actionable and rare by definition.
+
+/** Minimum interval between context_projection success lines per session. */
+export const PROJECTION_DIAGNOSTIC_MIN_INTERVAL_MS = 60_000;
+
+const lastProjectionEmitAt = new Map<string, number>();
+
+/** Testable pure gate: true when this session may emit one diagnostic now. */
+export function shouldEmitProjectionDiagnostic(sessionKey: string, now: number): boolean {
+  const fingerprint = sessionFingerprint(sessionKey);
+  const last = lastProjectionEmitAt.get(fingerprint);
+  if (last !== undefined && now - last < PROJECTION_DIAGNOSTIC_MIN_INTERVAL_MS) return false;
+  lastProjectionEmitAt.set(fingerprint, now);
+  // Bound the map: drop entries idle for 10 intervals.
+  if (lastProjectionEmitAt.size > 256) {
+    const cutoff = now - 10 * PROJECTION_DIAGNOSTIC_MIN_INTERVAL_MS;
+    for (const [key, at] of lastProjectionEmitAt) {
+      if (at < cutoff) lastProjectionEmitAt.delete(key);
+    }
+  }
+  return true;
+}
+
+export function resetProjectionDiagnosticStateForTest(): void {
+  lastProjectionEmitAt.clear();
 }
 
 export class PiCoreContextProjection {
@@ -144,7 +178,11 @@ export class PiCoreContextProjection {
       }
 
       const mode = this.seed.source.mode;
-      logDebug(TAG, `context_projection session=${sessionFingerprint(this.seed.source.sessionKey)} mode=${mode} source=${durableMessages.length} suffix=${suffix.length}`);
+      // #1705: TRACE + per-session dedup — one line per session per interval
+      // bounds the runaway reproduction far below 100 lines/hour/session.
+      if (shouldEmitProjectionDiagnostic(this.seed.source.sessionKey, Date.now())) {
+        logTrace(TAG, `context_projection session=${sessionFingerprint(this.seed.source.sessionKey)} mode=${mode} source=${durableMessages.length} suffix=${suffix.length}`);
+      }
 
       return { messages: result, contextDegraded };
     } catch (err) {
