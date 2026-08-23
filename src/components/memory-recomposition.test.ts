@@ -454,3 +454,27 @@ describe("createUnrefTimeoutScheduler — production timer factory", () => {
     }
   });
 });
+
+describe("#1706: durable-context provider over the facade", () => {
+  it("a provider composed before upgrade rejects closed, then succeeds through the same object", async () => {
+    const { createDurableContextProvider } = await import("./transport/pi-core-context.js");
+    const controller = new RecomposableMemoryRuntime();
+    const provider = createDurableContextProvider(controller.runtime);
+    const input = { userId: "u", sessionId: "s", beforeMessageId: 0, maxContext: 1000 };
+
+    await expect(provider.projectContext(input)).rejects.toThrow(/unavailable/i);
+
+    const ready = makeReadyRuntime({
+      projectDurableContext: vi.fn(async () => ({
+        messages: [{ role: "user" as const, content: "ctx" }],
+        estimatedTokens: 3,
+        sourceMessageCount: 1,
+      })),
+    });
+    controller.upgrade(ready);
+
+    const result = await provider.projectContext(input);
+    expect(result.messages).toHaveLength(1);
+    expect(ready.projectDurableContext).toHaveBeenCalledTimes(1);
+  });
+});

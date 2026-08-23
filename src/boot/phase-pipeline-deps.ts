@@ -270,18 +270,15 @@ export async function phasePipelineDeps(ctx: BootCtx): Promise<PhaseResult> {
     if (bundle) (transport as { setSystemPrompt: (p: string) => void }).setSystemPrompt(bundle);
   }
 
-  // #1527: compose the durable context provider once memory state is known.
-  // Transport and memory boot in parallel, so the holder (captured by every
-  // Pi transport at construction) is populated here, after both resolved.
+  // #1527/#1706: compose the durable context provider over the stable memory
+  // facade unconditionally. Transport and memory boot in parallel; before a
+  // late composition the projection rejects closed, after it the same
+  // provider succeeds — Pi transports read the holder per call either way.
   const { createDurableContextProvider } = await import("../components/transport/pi-core-context.js");
-  if (ctx.memoryRuntime.state === "ready" && ctx.memoryRuntime.supports("durableContext")) {
-    ctx.durableContextProvider.current = createDurableContextProvider(ctx.memoryRuntime);
-    spin.setContextProvider(ctx.durableContextProvider);
-    ctx.runtime.setContextProvider(ctx.durableContextProvider);
-    logInfo("boot", "Durable context provider composed into Pi transports");
-  } else {
-    logWarn("boot", `Durable context provider not composed (memory=${ctx.memoryRuntime.state}) — durable Pi requests will fail closed`);
-  }
+  ctx.durableContextProvider.current = createDurableContextProvider(ctx.memoryRuntime);
+  spin.setContextProvider(ctx.durableContextProvider);
+  ctx.runtime.setContextProvider(ctx.durableContextProvider);
+  logInfo("boot", "Durable context provider composed into Pi transports");
 
   // #1552: compose the memory-tool dependency holder (runtime + durable
   // quota) once memory initialization has resolved. A stale quota service

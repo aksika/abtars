@@ -224,3 +224,83 @@ describe("phaseSleep — #1429 precedence and construction", () => {
     if (result.status === "failed") expect(result.error).toContain("retro-derive");
   });
 });
+
+describe("#1706 late composition", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    _resetSystemTaskRegistry();
+    mockUnavailable.mockImplementation((code: string) => ({
+      status: "unavailable" as const,
+      code,
+      reason: `reason:${code}`,
+    }));
+    mockCreateSleepHandle.mockImplementation(() => ({
+      isActive: false,
+      progress: null,
+      startScheduled: vi.fn(() => ({
+        status: "accepted" as const,
+        completion: Promise.resolve({ status: "completed" as const, failedSteps: [] as string[], report: "test report" }),
+      })),
+      startManual: vi.fn(() => ({ status: "accepted" })),
+    }));
+  });
+
+  it("dispatch fails closed before memory composes; after late composeSleep the SAME registration uses the client", async () => {
+    const fakeSessionManager = {
+      spin: vi.fn().mockResolvedValue({ result: "ok", sessionId: "sess-1" }),
+      getSessionById: vi.fn().mockReturnValue(null),
+      allocateDreamySession: vi.fn(),
+    };
+    const ctx = createBootCtx({
+      memoryConfig: { memoryEnabled: true, memoryDir: "/tmp" } as any,
+      client: null,
+      sendSystemMessage: vi.fn(),
+      sessionManager: fakeSessionManager as any,
+    });
+    const { phaseSleep, composeSleep } = await import("./phase-sleep.js");
+    await phaseSleep(ctx);
+
+    const registry = (await import("../components/tasks/system-task-registry.js")).getSystemTaskRegistry();
+    expect(registry.has("sleep-cycle")).toBe(true);
+    const entry = { id: "sleep-cycle", kind: "system", action: "sleep-cycle", schedule: "0 2 * * *", enabled: true, priority: "medium", delivery: "silent" };
+    const taskCtx = { progress: vi.fn(), signal: new AbortController().signal };
+
+    const before = await registry.dispatch(entry, taskCtx);
+    expect(before.status).toBe("failed");
+    if (before.status === "failed") expect(before.error).toBe("reason:daemon_not_connected");
+
+    // Late memory publication delivers the client through the same ctx.
+    composeSleep(ctx, makeFakeClient());
+
+    expect(ctx.sleepHandle).not.toBeNull();
+    expect(mockCreateSleepHandle).toHaveBeenCalledTimes(1); // no duplicate handle
+    expect(registry.has("sleep-cycle")).toBe(true);          // no duplicate registration
+
+    const handleInstance = mockCreateSleepHandle.mock.results[0]!.value;
+    const after = await registry.dispatch(entry, taskCtx);
+    expect(after.status).toBe("ok");
+    expect(handleInstance.startScheduled).toHaveBeenCalledTimes(1);
+  });
+
+  it("composeSleep is idempotent — an existing handle is never replaced", async () => {
+    const fakeSessionManager = {
+      spin: vi.fn().mockResolvedValue({ result: "ok", sessionId: "sess-1" }),
+      getSessionById: vi.fn().mockReturnValue(null),
+      allocateDreamySession: vi.fn(),
+    };
+    const ctx = createBootCtx({
+      memoryConfig: { memoryEnabled: true, memoryDir: "/tmp" } as any,
+      client: makeFakeClient(),
+      sendSystemMessage: vi.fn(),
+      sessionManager: fakeSessionManager as any,
+    });
+    const { composeSleep } = await import("./phase-sleep.js");
+
+    composeSleep(ctx, makeFakeClient());
+    const first = ctx.sleepHandle;
+    composeSleep(ctx, makeFakeClient());
+
+    expect(ctx.sleepHandle).toBe(first);
+    expect(mockCreateSleepHandle).toHaveBeenCalledTimes(1);
+  });
+});

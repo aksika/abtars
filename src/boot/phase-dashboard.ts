@@ -122,9 +122,10 @@ export async function phaseDashboard(ctx: BootCtx): Promise<PhaseResult> {
   };
 
   const authGate = new AuthGate(dashConfig.webAuthToken);
-  const memorySearchController = ctx.memoryRuntime.state === "ready"
-    ? new MemorySearchController({ memoryRuntime: ctx.memoryRuntime, defaultUserId: masterUserId })
-    : null;
+  // #1706: always construct over the stable facade — the controller contains
+  // recall failures per request, so searches fail closed until late memory
+  // composition upgrades the same reference, then succeed unchanged.
+  const memorySearchController = new MemorySearchController({ memoryRuntime: ctx.memoryRuntime, defaultUserId: masterUserId });
 
   const customModule = getEnv().dashboardModule;
   let dashboardServer: IDashboardSlot;

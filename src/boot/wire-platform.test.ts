@@ -196,3 +196,42 @@ describe("drainRecoveryQueue (#1306)", () => {
     expect(queue).toHaveLength(0);
   });
 });
+
+// ── #1706: captured runtime reference upgrades in place ────────────────────
+
+describe("#1706 wireTelegram — captured memoryRuntime reference", () => {
+  it("the deps object handed to the adapter upgrades in place when memory composes late", async () => {
+    const { RecomposableMemoryRuntime } = await import("../components/memory-recomposition.js");
+    const controller = new RecomposableMemoryRuntime();
+    const ctx = createBootCtx({ memoryRuntime: controller.runtime });
+    ctx.config = { mainChatId: null } as BootCtx["config"];
+    ctx.pipelineDeps = makeMockPipelineDeps();
+    ctx.transport = makeMockTransport();
+    const adapter = makeTelegramAdapter();
+    ctx.telegramAdapter = adapter as unknown as BootCtx["telegramAdapter"];
+
+    const { wireTelegram } = await import("./wire-platform.js");
+    await wireTelegram(ctx);
+
+    const capturedDeps = (adapter.setMessageHandler as ReturnType<typeof vi.fn>).mock.calls[0]![0] as {
+      memoryRuntime: { state: string; recordMessage: (...args: unknown[]) => Promise<unknown> };
+    };
+    expect(capturedDeps.memoryRuntime.state).toBe("unavailable");
+    await expect(capturedDeps.memoryRuntime.recordMessage({ userId: "u", sessionId: "s", role: "user", content: "hi", timestamp: 1 }, "op")).rejects.toThrow();
+
+    // Late composition through the SAME reference — no re-wiring.
+    const readyRuntime = {
+      state: "ready",
+      capabilities: new Set(["recall"]),
+      routeSnapshot: { version: 1, state: "ready", generation: 1, retryEligible: 0, terminalUnknown: 0 },
+      supports: () => true,
+      recordMessage: vi.fn(async () => ({ id: 7 })),
+      close: vi.fn(async () => undefined),
+    };
+    controller.upgrade(readyRuntime as never);
+
+    expect(capturedDeps.memoryRuntime.state).toBe("ready");
+    const result = await capturedDeps.memoryRuntime.recordMessage({ userId: "u", sessionId: "s", role: "user", content: "hi again", timestamp: 2 }, "op-2");
+    expect(result).toEqual({ id: 7 });
+  });
+});

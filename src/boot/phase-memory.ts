@@ -42,6 +42,7 @@ import {
 import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
+import { composeSleep } from "./phase-sleep.js";
 
 /** Boot-independent composition result owned by the component layer;
  *  re-exported under the historical name for doctor compatibility. */
@@ -248,8 +249,17 @@ export async function phaseMemory(ctx: BootCtx, deps: PhaseMemoryDeps = {}): Pro
   };
 
   // Synchronous publication, identical for initial success and late retry:
-  // assign ctx ownership, swap the facade delegate, flip live health.
+  // contained dependent composition first (sleep), then ctx ownership, facade
+  // delegate swap, live health. Consumers never observe a ready facade paired
+  // with stale boot ownership.
   const publish = (result: CompositionAttemptResult): void => {
+    try {
+      composeSleep(ctx, result.client);
+    } catch (err) {
+      // Contained: a failed sleep composition never rolls back the memory
+      // upgrade; sleep keeps its unavailable dispatcher state.
+      logWarn("boot", `sleep composition after memory publication failed (contained): ${err instanceof Error ? err.message : String(err)}`);
+    }
     ctx.client = result.client;
     ctx.abmindModule = result.abmindModule;
     controller.upgrade(result.runtime);
