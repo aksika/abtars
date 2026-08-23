@@ -57,6 +57,26 @@ SQLite database at `~/.abtars/kanban/kanban.db`. Included in `abtars backup --co
 
 Cards older than 7 days (after delivery) are automatically purged.
 
+## Recovery
+
+If the board state itself becomes corrupted or wedged, `/kanban nuke`
+(owner-only) schedules a full board reset:
+
+1. `/kanban nuke` records a timestamp marker and returns immediately —
+   nothing is paused.
+2. On the **next** bridge start, a request younger than 5 minutes removes
+   only `kanban.db`, `kanban.db-wal`, and `kanban.db-shm` and rebuilds an
+   empty, valid board before normal startup continues.
+
+Tasks, configuration, secrets, logs, and supervisor state are never touched.
+An expired request is ignored unchanged; issuing the command again overwrites
+it.
+
+Scheduled projects are additionally protected by circuit breakers: a broken
+card cannot spin Orc work indefinitely. If `/orc status` shows a tripped fuse,
+`/orc reset project <id>` (or `/orc reset bridge`) clears it after you have
+fixed the underlying cause.
+
 ## Schema
 
 Each card has: title, source, priority, status, type, labels, notes, due date, result file, parent card (for subtasks), and blocked-by (dependencies).
