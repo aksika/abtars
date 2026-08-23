@@ -91,7 +91,7 @@ describe("tui startup — pi-tui load failure (#1441)", () => {
         };
       }
       // coding-agent without UserMessageComponent — must fail pre-ready.
-      return { initTheme: () => {}, getMarkdownTheme: () => ({}) };
+      return { initTheme: () => {}, getMarkdownTheme: () => ({}), getSelectListTheme: () => ({}) };
     });
 
     const exitCode = await tui([]);

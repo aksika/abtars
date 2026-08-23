@@ -12,13 +12,25 @@ import { join, resolve } from "node:path";
 import { tmpdir } from "node:os";
 import { randomUUID } from "node:crypto";
 import { execFileSync } from "node:child_process";
-import { TIMEOUTS, type PiAcceptanceLane, type PiAcceptanceMatrixV1, type PiAcceptanceProfile, type PiLaneResult, type PiScenarioResult } from "./contracts.js";import { ScriptedProvider } from "./scripted-provider.js";
+import {
+  TIMEOUTS,
+  type PiAcceptanceLane,
+  type PiAcceptanceMatrixV1,
+  type PiAcceptanceProfile,
+  type PiLaneResult,
+  type PiRuntimeEvidence,
+  type PiRuntimeReport,
+  type PiScenarioResult,
+} from "./contracts.js";
+import { ScriptedProvider } from "./scripted-provider.js";
 import { TuiAcceptanceClient } from "./tui-client.js";
 import { OwnerControllerClient, FixtureLaneBlockedError } from "./controller-client.js";
 import { SpawnedChild, waitFor } from "./child-process.js";
 import { buildBridgeConfig, resolvePiExecutable, resolveAbmindPackageDir, FIXTURE_MODEL_A } from "./bridge-config.js";
 import { scenariosForProfile, MarkerFactory, type PiAcceptanceContext } from "./scenarios.js";
 import { ResultWriter } from "./result-writer.js";
+import { inspectPiRuntime } from "./runtime-report.js";
+import { runInteractiveTuiSmoke } from "./interactive-tui.js";
 
 export interface PiE2EOptions {
   profile: PiAcceptanceProfile;
@@ -27,6 +39,7 @@ export interface PiE2EOptions {
   abmindRoot?: string;
   /** Keep the disposable run root after completion (diagnostics). */
   keepArtifacts?: boolean;
+  piRuntime?: PiRuntimeEvidence;
 }
 
 export interface PiE2ERunResult {
@@ -51,6 +64,27 @@ function runBuild(abtarsRoot: string, abmindRoot: string | undefined): void {
 
 function blockedResult(lane: PiAcceptanceLane, profile: PiAcceptanceProfile, reason: string): PiLaneResult {
   return { lane, profile, state: "blocked", blockedBy: reason, scenarios: [] };
+}
+
+function runtimeFailureResult(lane: PiAcceptanceLane, profile: PiAcceptanceProfile, report: PiRuntimeReport): PiLaneResult {
+  const failures = report.checks
+    .filter((entry) => entry.state === "failed")
+    .map((entry) => `${entry.component}/${entry.capability}${entry.detail ? `: ${entry.detail}` : ""}`)
+    .join("; ");
+  return {
+    lane,
+    profile,
+    state: "failed",
+    scenarios: [{
+      name: "pi-runtime-surface",
+      lane,
+      profile,
+      state: "failed",
+      durationMs: 0,
+      providerRequestIds: [],
+      failure: { stage: "pi-runtime-surface", code: "runtime_contract_failed", message: failures.slice(0, 2000) },
+    }],
+  };
 }
 
 export async function runPiProductionE2E(opts: PiE2EOptions): Promise<PiE2ERunResult> {
@@ -79,6 +113,28 @@ export async function runPiProductionE2E(opts: PiE2EOptions): Promise<PiE2ERunRe
       runId,
       startedAt,
       durationMs: Date.now() - overallStart,
+      piRuntime: opts.piRuntime,
+      piRuntimeReport: undefined,
+      lanes,
+    };
+    writer.writeMatrix(matrix);
+    writer.writeJunit(matrix);
+    return { matrix, exitCode: 1 };
+  }
+
+  const piRuntimeReport = await inspectPiRuntime();
+  if (!piRuntimeReport.ok) {
+    for (const lane of desiredLanes) {
+      lanes.push(runtimeFailureResult(lane, opts.profile, piRuntimeReport));
+    }
+    const matrix: PiAcceptanceMatrixV1 = {
+      schemaVersion: 1,
+      kind: "pi-production-e2e",
+      runId,
+      startedAt,
+      durationMs: Date.now() - overallStart,
+      piRuntime: opts.piRuntime,
+      piRuntimeReport,
       lanes,
     };
     writer.writeMatrix(matrix);
@@ -99,6 +155,8 @@ export async function runPiProductionE2E(opts: PiE2EOptions): Promise<PiE2ERunRe
       runId,
       startedAt,
       durationMs: Date.now() - overallStart,
+      piRuntime: opts.piRuntime,
+      piRuntimeReport,
       lanes,
     };
     writer.writeMatrix(matrix);
@@ -117,6 +175,8 @@ export async function runPiProductionE2E(opts: PiE2EOptions): Promise<PiE2ERunRe
     runId,
     startedAt,
     durationMs: Date.now() - overallStart,
+    piRuntime: opts.piRuntime,
+    piRuntimeReport,
     lanes,
   };
   writer.writeMatrix(matrix);
@@ -174,7 +234,42 @@ async function runLane(
     // 4. Spawn the built bridge entry point.
     bridge = await spawnBridge(opts.abtarsRoot, logDir, bridgeEnv, lane, provider!);
 
-    // 5. TUI readiness + one smoke exchange through the real Pi/SSE path.
+    // 5. Exercise the actual terminal client through a pseudo-terminal. The
+    // protocol client below remains separate so later scenarios can assert
+    // frames without having a renderer own the socket.
+    const tuiSmokeStart = Date.now();
+    try {
+      await runInteractiveTuiSmoke({
+        abtarsRoot: opts.abtarsRoot,
+        config,
+        lane,
+        logDir,
+        provider: provider!,
+        runId,
+      });
+      scenarioResults.push({
+        name: "interactive-tui-smoke",
+        lane,
+        profile,
+        state: "passed",
+        durationMs: Date.now() - tuiSmokeStart,
+        providerRequestIds: provider!.summaries.map((s) => `seq${s.seq}`),
+      });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      scenarioResults.push({
+        name: "interactive-tui-smoke",
+        lane,
+        profile,
+        state: "failed",
+        durationMs: Date.now() - tuiSmokeStart,
+        providerRequestIds: provider!.summaries.map((s) => `seq${s.seq}`),
+        failure: { stage: "interactive-tui-smoke", code: "tui_renderer_failed", message: message.slice(0, 2000) },
+      });
+      throw err;
+    }
+
+    // 6. TUI readiness + one smoke exchange through the real Pi/SSE path.
     tui = new TuiAcceptanceClient(config.abtarsHome);
     await tui.connect("new");
     const smokeMarker = `PI-SMOKE-${runId}`;
@@ -185,7 +280,7 @@ async function runLane(
       throw new Error(`smoke exchange failed: reply did not contain ${smokeReply} (got: ${smokeReplyFrame.markdown.slice(0, 200)})`);
     }
 
-    // 6. Scenarios serially against the isolated state.
+    // 7. Scenarios serially against the isolated state.
     const laneProvider = provider!;
     const restartBridge = async (): Promise<SpawnedChild> => {
       if (bridge && !bridge.exited) await bridge.terminate();
@@ -248,7 +343,7 @@ async function runLane(
       lane,
       profile,
       state: "failed",
-      scenarios: [{
+      scenarios: [...scenarioResults, {
         name: "lane-setup",
         lane,
         profile,

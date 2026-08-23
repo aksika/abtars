@@ -38,6 +38,11 @@ import {
 } from "../../platforms/tui/tui-protocol.js";
 import { TuiApp, nativeEditorTheme, type TuiPresentationModules } from "./tui-ui.js";
 import {
+  REQUIRED_PI_CODING_AGENT_EXPORTS,
+  REQUIRED_PI_TUI_EXPORTS,
+  missingRuntimeExports,
+} from "./tui-runtime-contract.js";
+import {
   isNativeHandoffCommand,
   readClientPiConfig,
   buildNativeHandoffArgs,
@@ -179,17 +184,12 @@ export async function tui(args: string[]): Promise<number> {
       loadPiModule<Record<string, unknown>>(piResult.installation, codingAgentSpec),
     ]);
 
-    const requiredTui = ["ProcessTerminal", "TUI", "Container", "Editor", "Text", "Markdown", "Loader", "matchesKey"] as const;
-    const missingTui = requiredTui.filter(name => typeof rawPit[name] !== "function");
+    const missingTui = missingRuntimeExports(rawPit, REQUIRED_PI_TUI_EXPORTS);
     if (missingTui.length > 0) {
       throw new Error(`pi-tui: missing required export(s): ${missingTui.join(", ")}`);
     }
 
-    const requiredCodingAgent = [
-      "initTheme", "getMarkdownTheme",
-      "UserMessageComponent", "AssistantMessageComponent", "DynamicBorder",
-    ] as const;
-    const missingCodingAgent = requiredCodingAgent.filter(name => typeof rawCodingAgent[name] !== "function");
+    const missingCodingAgent = missingRuntimeExports(rawCodingAgent, REQUIRED_PI_CODING_AGENT_EXPORTS);
     if (missingCodingAgent.length > 0) {
       throw new Error(`pi-coding-agent: missing required export(s): ${missingCodingAgent.join(", ")}`);
     }

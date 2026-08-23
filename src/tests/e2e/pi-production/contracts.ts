@@ -9,6 +9,26 @@ export type PiAcceptanceLane = "local-unix" | "remote-wss";
 export type PiAcceptanceProfile = "core" | "full";
 export type PiScenarioState = "passed" | "failed" | "blocked";
 
+export interface PiRuntimeEvidence {
+  source: "host" | "latest" | "pinned";
+  version?: string;
+  executable?: string;
+}
+
+export interface PiRuntimeCheck {
+  component: string;
+  capability: string;
+  state: "passed" | "failed";
+  detail?: string;
+}
+
+export interface PiRuntimeReport {
+  ok: boolean;
+  version?: string;
+  packageVersions: Record<string, string>;
+  checks: PiRuntimeCheck[];
+}
+
 export interface PiAcceptanceFailure {
   stage: string;
   code: string;
@@ -39,6 +59,8 @@ export interface PiAcceptanceMatrixV1 {
   runId: string;
   startedAt: string;
   durationMs: number;
+  piRuntime?: PiRuntimeEvidence;
+  piRuntimeReport?: PiRuntimeReport;
   lanes: PiLaneResult[];
 }
 

@@ -1,0 +1,76 @@
+name: Pi latest canary
+
+on:
+  schedule:
+    - cron: "17 3 * * 1"
+  workflow_dispatch:
+    inputs:
+      profile:
+        description: "Production acceptance profile"
+        required: true
+        default: core
+        type: choice
+        options:
+          - core
+          - full
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pi-latest-canary
+  cancel-in-progress: false
+
+jobs:
+  verify:
+    name: Verify latest Pi
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Check out abtars
+        uses: actions/checkout@v4
+        with:
+          path: abtars
+
+      - name: Check out abmind fixture controller
+        uses: actions/checkout@v4
+        with:
+          repository: aksika/abmind
+          ref: dev
+          path: abmind
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: abtars/package-lock.json
+
+      - name: Install abtars dependencies
+        working-directory: abtars
+        run: npm ci
+
+      - name: Install abmind dependencies
+        working-directory: abmind
+        run: npm ci
+
+      - name: Build abmind fixture controller
+        working-directory: abmind
+        run: npm run build
+
+      - name: Run latest-Pi production E2E
+        working-directory: abtars
+        run: |
+          PROFILE="${{ inputs.profile || 'core' }}"
+          npm run test:e2e:pi:latest -- \
+            --profile "$PROFILE" \
+            --abmind-root "$GITHUB_WORKSPACE/abmind"
+
+      - name: Upload Pi canary evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pi-latest-canary-${{ github.run_id }}
+          path: abtars/test-results/pi-production-e2e/
+          if-no-files-found: warn
