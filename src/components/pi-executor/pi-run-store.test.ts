@@ -1119,4 +1119,45 @@ describe("PiRunStore — #1395 UI claim/restore/setPending", () => {
       } finally { cleanup(); }
     });
   });
+
+  // #1693 Phase A — the remote outbox moved to PiRemoteOutboxStore. A fresh
+  // PiRunStore over an existing database must still create all four remote
+  // tables (idempotent migration) and retain their rows.
+  describe("#1693 outbox extraction: reopen retains remote tables and rows", () => {
+    it("second construction re-migrates idempotently; outbox rows survive", () => {
+      const store = makeStore();
+      const append = store.appendEventAuto({
+        runId: "reopen-1", cardId: 1, generation: 1,
+        originPeer: "peer-a", originRequestId: "req-1",
+        kind: "accepted", occurredAt: "2026-01-01T00:00:00Z",
+        projectionJson: "{}",
+        computeFields: () => ({ eventId: "evt-1", contentSha256: "h1" }),
+      });
+      expect(append.idempotent).toBe(false);
+      store.setDrainCursor(7);
+      store.reserveCommand({ originPeer: "peer-a", commandId: "cmd-1", runId: "reopen-1", payloadHash: "ph" });
+      store.consumeApproval({ approvalId: "appr-1", runId: "reopen-1", originPeer: "peer-a", commandId: "cmd-1" });
+
+      // Fresh PiRunStore over the same database (suite's reopen idiom).
+      const db = (store as any).db as TaskDatabase;
+      const reopened = new PiRunStore({ db, sessionStorageRoot: "/tmp/sessions" });
+
+      const tables = (db.prepare(
+        `SELECT name FROM sqlite_master WHERE type = 'table' AND name IN
+         ('remote_pi_events', 'remote_pi_drain_state', 'remote_pi_commands', 'remote_pi_approvals_consumed')
+         ORDER BY name`
+      ).all() as Array<{ name: string }>).map(r => r.name);
+      expect(tables).toEqual([
+        "remote_pi_approvals_consumed",
+        "remote_pi_commands",
+        "remote_pi_drain_state",
+        "remote_pi_events",
+      ]);
+
+      expect(reopened.getMaxSequence("reopen-1")).toBe(1);
+      expect(reopened.getDrainCursor()).toBe(7);
+      expect(reopened.getCommand("peer-a", "cmd-1")?.state).toBe("received");
+      expect(reopened.isApprovalConsumed("appr-1")).toBe(true);
+    });
+  });
 });
