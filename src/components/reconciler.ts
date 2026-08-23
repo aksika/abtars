@@ -32,10 +32,9 @@ import { intentPolicyFor, readOrcProjectSnapshot } from "./orc-project/orc-inten
 import { hasLiveContributionForProject } from "./peer-help/contribution-store.js";
 import { REVIEW_REQUEST_ABANDONED, REPAIR_SOURCE_CONTRACT_INVALID } from "./project-acceptance/project-review-contract.js";
 import { deriveRepairContract } from "./retry/retry-directive.js";
-import { readEntries } from "./tasks/task-store.js";
-import { readState } from "./tasks/task-state-store.js";
 import { settleRunOnce } from "./tasks/task-run-settler.js";
 import { makeTaskFailure } from "./tasks/task-failure.js";
+import { scheduledOccurrenceState, findActiveScheduledOccurrence, isScheduledRootIdentity as sharedIsScheduledRootIdentity, type ScheduledOccurrence } from "./tasks/scheduled-occurrence-gate.js";
 import type { PiRunService } from "./pi-executor/pi-run-service.js";
 import type { AttemptLifecycle, AttemptRow } from "./worker-supervision-store.js";
 import type { WorkerAcceptanceContractV1 } from "./worker-contract.js";
@@ -317,6 +316,14 @@ function scheduleContractAuthoringOrSettle(generation: ReconcilerGeneration, pro
     settleProjectLastResortFor(generation, projectId);
     return { kind: "unavailable" };
   }
+  if (result.kind === "conflict" && result.reason === "occurrence_terminal") {
+    // #1707: the coordinator's durable occurrence gate refused the claim —
+    // the owning occurrence is terminal and the project must settle, never
+    // wait for another wake.
+    logWarn(TAG, `Project ${projectId}: authoring claim refused — scheduled occurrence terminal — settling as last resort`);
+    settleProjectLastResortFor(generation, projectId);
+    return { kind: "settled", blockerClass: "occurrence_terminal" };
+  }
   if (result.kind === "busy") {
     logWarn(TAG, `Project ${projectId}: authoring claim busy (run ${result.activeRunId}) — deferring; the ownership-released event will re-wake`);
     return { kind: "deferred", reason: "busy", activeRunId: result.activeRunId };
@@ -487,12 +494,10 @@ async function reconcileCard(generation: ReconcilerGeneration, cardId: number): 
  * facts: type O, no parent, task source, non-empty source_id (the scheduled
  * runId), and a non-terminal `project_supervision` row. Unsupervised
  * parentless cards and Worker children are never classified here.
+ * #1707: the durable-facts predicate is shared with the coordinator claim
+ * path (scheduled-occurrence-gate.ts) so both layers classify identically.
  */
-function isScheduledRootIdentity(card: KanbanCard): boolean {
-  if (card.type !== "O" || card.parent_id !== null) return false;
-  if (card.source !== "task" || !card.source_id || card.source_id.length === 0) return false;
-  return true;
-}
+const isScheduledRootIdentity = sharedIsScheduledRootIdentity;
 
 function isScheduledProjectRoot(card: KanbanCard): boolean {
   if (!isScheduledRootIdentity(card)) return false;
@@ -749,6 +754,14 @@ function claimOrcContinuation(generation: ReconcilerGeneration, projectId: numbe
       return "owned";
     }
     case "conflict": {
+      // #1707: the coordinator's durable occurrence gate refused the claim —
+      // terminal authority settles immediately; no re-derive can resurrect a
+      // dead occurrence.
+      if (result.reason === "occurrence_terminal") {
+        logWarn(TAG, `Project ${projectId}: continuation claim refused — scheduled occurrence terminal — settling as last resort`);
+        settleProjectLastResortFor(generation, projectId);
+        return "settled";
+      }
       // #1546 R3: conflict is never a direct settle signal. Re-read supervision
       // and re-derive ownership once; only a second pass that still finds no
       // owner and no claimable continuation may settle.
@@ -856,17 +869,8 @@ export function settleProjectLastResort(projectId: number): void {
   settleProjectLastResortFor(generation, projectId);
 }
 
-function findActiveScheduledRun(card: KanbanCard): { entry: import("./tasks/task-types.js").ScheduledTask; run: import("./tasks/task-state-store.js").ActiveTaskRun } | undefined {
-  try {
-    for (const entry of readEntries()) {
-      const state = readState(entry.id);
-      const run = state?.activeRun;
-      if (run && run.runId === card.source_id && run.cardId === card.id) return { entry, run };
-    }
-  } catch (err) {
-    logWarn(TAG, `findActiveScheduledRun failed for card ${card.id}: ${err instanceof Error ? err.message : String(err)}`);
-  }
-  return undefined;
+function findActiveScheduledRun(card: KanbanCard): ScheduledOccurrence | undefined {
+  return findActiveScheduledOccurrence(card);
 }
 
 /**
@@ -1447,19 +1451,15 @@ async function reconcileProject(generation: ReconcilerGeneration, projectId: num
   if (!isProjectReconcileEligible(project)) return;
 
   const reviewStore = new ProjectReviewStore();
-  // #1707 hot patch: a scheduled project must never outlive its owning task
-  // occurrence. A failed/cancelled occurrence can leave its O card running;
-  // allowing the generic contract/continuation path to proceed resurrects
-  // the job and can release/reclaim Orc turns forever. Reuse the existing
-  // last-resort terminal settlement so the card and supervision become
-  // terminal before any Orc claim is attempted.
-  if (isScheduledRootIdentity(project)) {
-    const scheduledRun = findActiveScheduledRun(project);
-    if (!scheduledRun || scheduledRun.run.terminalRequest) {
-      logWarn(TAG, `Project ${projectId}: scheduled task run ${project.source_id ?? "unknown"} is no longer active — refusing Orc restart`);
-      settleProjectLastResortFor(generation, projectId);
-      return;
-    }
+  // #1707: a scheduled project must never outlive its owning task occurrence.
+  // A failed/cancelled occurrence can leave its O card running; allowing the
+  // generic contract/continuation path to proceed resurrects the job and can
+  // release/reclaim Orc turns forever. The shared fail-closed gate is the
+  // reconciler-side defensive layer; the coordinator refuses claims too.
+  if (scheduledOccurrenceState(project) === "terminal") {
+    logWarn(TAG, `Project ${projectId}: scheduled task run ${project.source_id ?? "unknown"} is no longer active — refusing Orc restart`);
+    settleProjectLastResortFor(generation, projectId);
+    return;
   }
 
   const hasRootContract = reviewStore.contractExists(projectId);

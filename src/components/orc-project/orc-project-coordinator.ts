@@ -14,6 +14,8 @@ import { readBridgeLockField } from "../transport/bridge-lock-transport.js";
 import { logInfo, logWarn } from "../logger.js";
 import { logAndSwallow } from "../log-and-swallow.js";
 import { intentPolicyFor, readOrcProjectSnapshot } from "./orc-intent-policy.js";
+import { kanbanGetCard } from "../tasks/kanban-board.js";
+import { scheduledOccurrenceState } from "../tasks/scheduled-occurrence-gate.js";
 
 const TAG = "orc-coordinator";
 
@@ -40,6 +42,11 @@ export interface OrcCoordinatorDeps {
   ownerInstanceId?: string;
   /** Override root identity read; defaults to reading kanban source + source_peer. */
   getRootIdentity?: (projectCardId: number) => OrcRootIdentity;
+  /**
+   * #1707: override the scheduled-occurrence admission read. Defaults to the
+   * shared fail-closed gate. Tests may inject a stub to avoid a task catalog.
+   */
+  scheduledOccurrenceState?: (projectCardId: number) => "active" | "terminal" | "not_scheduled";
 }
 
 export class OrcProjectCoordinator {
@@ -48,6 +55,7 @@ export class OrcProjectCoordinator {
   private readonly ownerPeer: string;
   private readonly ownerInstanceId: string;
   private readonly getRootIdentity: (projectCardId: number) => OrcRootIdentity;
+  private readonly scheduledOccurrenceState: (projectCardId: number) => "active" | "terminal" | "not_scheduled";
   private readonly ownershipListeners = new Set<(event: OrcOwnershipReleasedV1) => void>();
 
   constructor(deps: OrcCoordinatorDeps) {
@@ -56,6 +64,7 @@ export class OrcProjectCoordinator {
     this.ownerPeer = deps.ownerPeer;
     this.ownerInstanceId = deps.ownerInstanceId ?? readBridgeLockField<string>("instanceId") ?? "unknown";
     this.getRootIdentity = deps.getRootIdentity ?? defaultRootIdentity;
+    this.scheduledOccurrenceState = deps.scheduledOccurrenceState ?? defaultScheduledOccurrenceState;
   }
 
   /**
@@ -214,6 +223,15 @@ export class OrcProjectCoordinator {
   }
 
   private scheduleInternal(input: Omit<OrcClaimInput, "goal">, goal: string): OrcRunClaimResult {
+    // #1707: the durable occurrence gate is an absolute ownership boundary and
+    // runs BEFORE any run-row insertion or provider start. A scheduled root
+    // whose task occurrence is terminal/missing is never claimed here; the
+    // reconciler's last-resort settlement owns that project instead.
+    if (this.scheduledOccurrenceState(input.projectCardId) === "terminal") {
+      logWarn(TAG, `Project ${input.projectCardId}: refusing ${input.intentKind} claim — owning scheduled occurrence is terminal`);
+      return { kind: "conflict" as const, reason: "occurrence_terminal" as const };
+    }
+
     const result = this.store.claimIntent({ ...input, goal }, this.ownerPeer, this.ownerInstanceId);
 
     // #1675: promote exactly the run this claim owns (or the existing run an
@@ -343,11 +361,22 @@ export function classifyFailedRelease(
 
 function defaultRootIdentity(projectCardId: number): OrcRootIdentity {
   try {
-    const { kanbanGetCard } = require("../tasks/kanban-board.js");
     const card = kanbanGetCard(projectCardId);
     return { source: card?.source ?? "agent", sourcePeer: card?.source_peer ?? null };
   } catch {
     return { source: "agent", sourcePeer: null };
+  }
+}
+
+/** #1707: shared fail-closed occurrence gate — the coordinator-side default. */
+function defaultScheduledOccurrenceState(projectCardId: number): "active" | "terminal" | "not_scheduled" {
+  try {
+    const card = kanbanGetCard(projectCardId);
+    if (!card) return "not_scheduled";
+    return scheduledOccurrenceState(card);
+  } catch {
+    // Fail closed: an unreadable board never admits a claim.
+    return "terminal";
   }
 }
 

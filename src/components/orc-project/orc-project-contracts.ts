@@ -73,6 +73,8 @@ export type OrcRunReason =
   | "origin_invalid"
   | "project_terminal"
   | "intent_not_actionable"
+  | "occurrence_terminal"
+  | "fuse_open"
   | "peer_relay_blocked"
   | "busy";
 
@@ -227,6 +229,8 @@ export function formatRunReason(reason: OrcRunReason): string {
     case "origin_invalid": return "Project origin is missing or inconsistent with authenticated admission";
     case "project_terminal": return "Project is in a terminal state";
     case "intent_not_actionable": return "Underlying intent is no longer actionable";
+    case "occurrence_terminal": return "Owning scheduled task occurrence is terminal — the project may never be restarted";
+    case "fuse_open": return "Circuit breaker is open for this scope — operator reset required";
     case "peer_relay_blocked": return "Peer-origin project may not relay to third peers";
     case "busy": return "Another Orc intent owns this project";
   }
