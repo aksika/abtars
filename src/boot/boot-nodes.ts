@@ -39,13 +39,21 @@ export const BOOT_NODES: BootNode[] = [
   { name: "heartbeat",    deps: [],                            optional: false, run: phaseHeartbeat },
   { name: "platforms",    deps: [],                          optional: true,  run: phasePlatformsConnect },
   { name: "transport",    deps: [],                          optional: true,  run: phaseTransport },
+  // #1706: memory may end boot in a composing state (re-composable facade).
+  // Facade consumers must await this node as OPTIONAL so a failed initial
+  // attempt does not skip them — they hold the facade reference and upgrade
+  // in place when late composition lands.
   { name: "memory",       deps: [],                          optional: true,  run: phaseMemory },
   { name: "pipelineDeps", deps: ["transport", "platforms"],  optionalDeps: ["memory"], optional: false, run: phasePipelineDeps },
   { name: "capabilities", deps: ["pipelineDeps"],             optionalDeps: ["memory"], optional: true,  run: phaseCapabilities },
   // memoryIpc removed in #1380 — daemon replaces legacy IPC server
-  { name: "sleep",        deps: ["memory", "heartbeat"],     optional: true,  run: phaseSleep },
+  // #1706: sleep composes against ctx.client; it awaits memory optionally and
+  // re-composes when late memory publication delivers the client.
+  { name: "sleep",        deps: ["heartbeat"],               optionalDeps: ["memory"], optional: true,  run: phaseSleep },
   { name: "power",        deps: ["heartbeat"],              optionalDeps: ["sleep"], optional: true, run: phasePower },
-  { name: "dashboard",    deps: ["heartbeat"],               optionalDeps: ["transport"], optional: true, run: phaseDashboard },
+  // #1706: dashboard awaits memory optionally so its search controller is
+  // built over the facade, never over a default disabled runtime.
+  { name: "dashboard",    deps: ["heartbeat"],               optionalDeps: ["transport", "memory"], optional: true,  run: phaseDashboard },
   { name: "agentApi",     deps: ["pipelineDeps"],            optional: true,  run: phaseAgentApi },
   { name: "piExecutor",   deps: ["pipelineDeps", "heartbeat"], optionalDeps: ["memory"], optional: true, run: phasePiExecutor },
   // #1554: the Reconciler owns the bridge-generation lifecycle. It requires
@@ -54,5 +62,6 @@ export const BOOT_NODES: BootNode[] = [
   // the Pi service exists. BootGraph awaits optional deps regardless of their
   // success status, so phaseReconciler never races the Pi phase.
   { name: "reconciler",   deps: ["pipelineDeps", "heartbeat"], optionalDeps: ["piExecutor"], optional: false, run: phaseReconciler },
-  { name: "sessionControl", deps: ["memory"], optionalDeps: ["piExecutor"], optional: true, run: phaseSessionControl },
+  // #1706: session control self-gates per call against the facade.
+  { name: "sessionControl", deps: [], optionalDeps: ["piExecutor", "memory"], optional: true, run: phaseSessionControl },
 ];

@@ -197,6 +197,11 @@ export async function startBridge(): Promise<number> {
   // Run boot graph — all phases execute in dependency order (#944)
   await bootGraph(BOOT_NODES, ctx);
 
+  // #1706: arm memory re-composition retries only after the graph has copied
+  // its final report into ctx.phaseHealth, so diagnostics callbacks can never
+  // lose an update to graph finalization.
+  ctx.memoryRecomposition?.start();
+
   // phaseShutdown is special (needs Bridge instance) — run after graph
   {
     const t = Date.now();
