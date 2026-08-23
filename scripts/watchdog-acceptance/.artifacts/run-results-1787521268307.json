@@ -1,0 +1,2581 @@
+{
+  "commit": "{\n  \"commit\": \"e5d5831b86813c9e96a41a26fe91257d839e9305\",\n  \"nodeVersion\": \"v22.22.0\",\n  \"platform\": \"linux/x64\",\n  \"sources\": {\n    \"scripts/abtars-watchdog.sh\": \"ef67cfdbeab75bef4b7d6ef99b4ce20ae4aa9bb096c60e0ac92d335a0e097cd7\",\n    \"src/supervisor/state-cli.ts\": \"2322e84d031db765796dd5a6d21e1c96c943805046270f49d547c35c0bd3c2c4\",\n    \"src/supervisor/state.ts\": \"fea4c46b85c5cccafa0785992a18cd22b1a57b51eabce2611c7c2e47e8a80930\",\n    \"src/cli/abtars.ts\": \"e05a116cb85509f1fced3223b3a60ac0266f151f20f7c9d1f08b04f3685cce97\",\n    \"scripts/watchdog-acceptance/fixture-bridge.ts\": \"493db0ee9d3ede262d9dbba101cb728a9cf3c102025e38f01a1aeda7ce9e548e\"\n  },\n  \"artifacts\": {\n    \"supervisor-state:lifecycle\": \"183a5120c1d96656ca1e7ba2c4a2c7f80015443cbce7455798efa79923dca84b\",\n    \"supervisor-state:staleFast\": \"183a5120c1d96656ca1e7ba2c4a2c7f80015443cbce7455798efa79923dca84b\",\n    \"supervisor-state:suspendFast\": \"183a5120c1d96656ca1e7ba2c4a2c7f80015443cbce7455798efa79923dca84b\",\n    \"supervisor-state:decayFast\": \"ae717aee0f78d145220fcad8a45392787e348f3dbc5680527f99fe97535d5fcd\",\n    \"supervisor-state:crashLoopFast\": \"dbd4e6b57c9122272ff396b38a5aa4f2cd1bb3c791b85ff66a301c995facae87\",\n    \"fixture-bridge\": \"0d9d86bc5fe9609eaa7ba746799d62d3fe5b244419741af0317ff6382661a287\",\n    \"doctor\": \"d0879de90950b028c0dff58b6f7c069538a7a74eb17cca6f008e5995970db3f8\",\n    \"watchdog:lifecycle\": \"2649a406a3235236e287f48ac76ab38627dfabcc941912e6cb455c3d7e8f8ead\",\n    \"watchdog:decayFast\": \"e9d0c23b44c4d8f1b8e8d7ed0cd82bd3008486bf5475f9d4ad4f9b7151a15e02\",\n    \"watchdog:staleFast\": \"8c9dde106d6d273ca20a3bd550e70818652d5716f675ebcee7d29d0b6edaaf64\",\n    \"watchdog:suspendFast\": \"2de9e96cd46d56a0998f48be3e27a908bdfe33555c8eeec8087e2e2ee917cc68\",\n    \"watchdog:crashLoopFast\": \"2930e6e5ffb6641dc3b19ae41e2df0646e7d25b268070b462c497b109db14c17\"\n  }\n}",
+  "rows": [
+    {
+      "id": "A1",
+      "title": "Empty home starts exactly one identified bridge",
+      "outcomeStatus": "pass",
+      "verdict": "ok",
+      "durationMs": 705,
+      "expect": {
+        "expect": "pass"
+      }
+    },
+    {
+      "id": "A2",
+      "title": "Self-reported non-zero death recorded once, then a new PID",
+      "outcomeStatus": "pass",
+      "verdict": "ok",
+      "durationMs": 1548,
+      "expect": {
+        "expect": "pass"
+      }
+    },
+    {
+      "id": "A3",
+      "title": "Backoff escalates with repeated deaths; backdated expiry decays it",
+      "outcomeStatus": "pass",
+      "verdict": "ok",
+      "durationMs": 4859,
+      "expect": {
+        "expect": "pass"
+      }
+    },
+    {
+      "id": "A4",
+      "title": "Valid existing bridge adopted without a new boot grace",
+      "outcomeStatus": "pass",
+      "verdict": "ok",
+      "durationMs": 10337,
+      "expect": {
+        "expect": "pass"
+      }
+    },
+    {
+      "id": "A5",
+      "title": "Duplicate watchdog contender exits 0 without side effects",
+      "outcomeStatus": "pass",
+      "verdict": "ok",
+      "durationMs": 5811,
+      "expect": {
+        "expect": "pass"
+      }
+    },
+    {
+      "id": "A6",
+      "title": "Stale validated owner is killed and respawned",
+      "outcomeStatus": "pass",
+      "verdict": "ok",
+      "durationMs": 6145,
+      "expect": {
+        "expect": "pass"
+      }
+    },
+    {
+      "id": "A7",
+      "title": "Fresh bridge is not killed before boot grace ends",
+      "outcomeStatus": "pass",
+      "verdict": "ok",
+      "durationMs": 6112,
+      "expect": {
+        "expect": "pass"
+      }
+    },
+    {
+      "id": "A8",
+      "title": "Suspend-sized gap enters bounded resume handling",
+      "outcomeStatus": "pass",
+      "verdict": "advisory",
+      "durationMs": 9391,
+      "expect": {
+        "expect": "baseline-advisory",
+        "reason": "current suspend simulation is a SIGSTOP gap; wall clock does not freeze. Gating before redesign acceptance via host smoke."
+      }
+    },
+    {
+      "id": "A9",
+      "title": "Restart command acknowledged, applied, restart state reset",
+      "outcomeStatus": "pass",
+      "verdict": "ok",
+      "durationMs": 1734,
+      "expect": {
+        "expect": "pass"
+      }
+    },
+    {
+      "id": "A10",
+      "title": "Stop terminates the bridge and exits 2 without respawn",
+      "outcomeStatus": "pass",
+      "verdict": "ok",
+      "durationMs": 951,
+      "expect": {
+        "expect": "pass"
+      }
+    },
+    {
+      "id": "A11",
+      "title": "Durable stop dominates a pending restart deterministically",
+      "outcomeStatus": "pass",
+      "verdict": "ok",
+      "durationMs": 883,
+      "expect": {
+        "expect": "pass"
+      }
+    },
+    {
+      "id": "A12",
+      "title": "Unknown command acked and dropped; later valid command applies",
+      "outcomeStatus": "pass",
+      "verdict": "ok",
+      "durationMs": 2190,
+      "expect": {
+        "expect": "pass"
+      }
+    },
+    {
+      "id": "A13",
+      "title": "Reused-PID lock never signals the unrelated process",
+      "outcomeStatus": "pass",
+      "verdict": "ok",
+      "durationMs": 785,
+      "expect": {
+        "expect": "pass"
+      }
+    },
+    {
+      "id": "A14",
+      "title": "Exit-report freshness gate: stale rejected, fresh used",
+      "outcomeStatus": "pass",
+      "verdict": "ok",
+      "durationMs": 2566,
+      "expect": {
+        "expect": "pass"
+      }
+    },
+    {
+      "id": "A15",
+      "title": "SIGHUP ignored; SIGTERM hands off with bridge preserved (exit 3)",
+      "outcomeStatus": "pass",
+      "verdict": "ok",
+      "durationMs": 1936,
+      "expect": {
+        "expect": "pass"
+      }
+    },
+    {
+      "id": "A16",
+      "title": "Recorded spawned PID is the Node bridge, not a wrapper",
+      "outcomeStatus": "pass",
+      "verdict": "ok",
+      "durationMs": 1059,
+      "expect": {
+        "expect": "pass"
+      }
+    },
+    {
+      "id": "A17",
+      "title": "No zombies across five rapid crash cycles",
+      "outcomeStatus": "pass",
+      "verdict": "ok",
+      "durationMs": 5948,
+      "expect": {
+        "expect": "pass"
+      }
+    },
+    {
+      "id": "A18",
+      "title": "Watchdog never invokes doctor or service management (canaries)",
+      "outcomeStatus": "pass",
+      "verdict": "ok",
+      "durationMs": 1796,
+      "expect": {
+        "expect": "pass"
+      }
+    },
+    {
+      "id": "A19",
+      "title": "Released stale flock does not block startup; inode never unlinked",
+      "outcomeStatus": "pass",
+      "verdict": "ok",
+      "durationMs": 1335,
+      "expect": {
+        "expect": "pass"
+      }
+    },
+    {
+      "id": "A20",
+      "title": "Planned-restart fence never signals harness-owned transients",
+      "outcomeStatus": "pass",
+      "verdict": "ok",
+      "durationMs": 2308,
+      "expect": {
+        "expect": "pass"
+      }
+    },
+    {
+      "id": "A21",
+      "title": "Forced future-enumeration failure: no signal, no duplicate",
+      "outcomeStatus": "pass",
+      "verdict": "ok",
+      "durationMs": 4653,
+      "expect": {
+        "expect": "pass"
+      }
+    },
+    {
+      "id": "A22",
+      "title": "Five distinct death events inside one interval stay reconstructible",
+      "outcomeStatus": "pass",
+      "verdict": "ok",
+      "durationMs": 5514,
+      "expect": {
+        "expect": "pass"
+      }
+    },
+    {
+      "id": "B1",
+      "title": "Corrupt lock reaches a bounded ownership decision",
+      "outcomeStatus": "fail",
+      "verdict": "ok-known-fail",
+      "durationMs": 15514,
+      "expect": {
+        "expect": "known-fail",
+        "owner": "#1711 P7",
+        "reason": "corrupt lock defers validation forever; no bounded recorded ownership decision"
+      }
+    },
+    {
+      "id": "B2",
+      "title": "Corrupt-lock startup never duplicates the live bridge",
+      "outcomeStatus": "pass",
+      "verdict": "unexpected-pass",
+      "durationMs": 6452,
+      "expect": {
+        "expect": "known-fail",
+        "owner": "#1711 P3",
+        "reason": "startup with corrupt lock spawns a duplicate bridge instead of reconciling the live one"
+      }
+    },
+    {
+      "id": "B3",
+      "title": "Non-owner heartbeat writes cannot mask a stale owner",
+      "outcomeStatus": "fail",
+      "verdict": "ok-known-fail",
+      "durationMs": 32788,
+      "expect": {
+        "expect": "known-fail",
+        "owner": "#1711 P1",
+        "reason": "non-owner heartbeat writes refresh the owner's timestamp and mask staleness"
+      }
+    },
+    {
+      "id": "B4",
+      "title": "Non-owner exit self-report cannot forge the owner's death code",
+      "outcomeStatus": "fail",
+      "verdict": "ok-known-fail",
+      "durationMs": 25456,
+      "expect": {
+        "expect": "known-fail",
+        "owner": "#1711 P1",
+        "reason": "non-owner exit self-report can become the owner's recorded death code"
+      }
+    },
+    {
+      "id": "B5",
+      "title": "Doctor scope excludes bridges from other homes",
+      "outcomeStatus": "fail",
+      "verdict": "ok-known-fail",
+      "durationMs": 3658,
+      "expect": {
+        "expect": "known-fail",
+        "owner": "#1711 P2",
+        "reason": "doctor enumerates abtars.js processes globally, so other-home bridges leak into diagnosis scope"
+      }
+    },
+    {
+      "id": "B6",
+      "title": "Unowned same-home extra is contained",
+      "outcomeStatus": "fail",
+      "verdict": "ok-known-fail",
+      "durationMs": 31330,
+      "expect": {
+        "expect": "known-fail",
+        "owner": "#1711",
+        "reason": "no containment exists for a stable unowned same-home extra"
+      }
+    },
+    {
+      "id": "B7",
+      "title": "SIGTERM-ignoring extra is contained without harming the owner",
+      "outcomeStatus": "fail",
+      "verdict": "ok-known-fail",
+      "durationMs": 33583,
+      "expect": {
+        "expect": "known-fail",
+        "owner": "#1711",
+        "reason": "no containment escalation exists for a SIGTERM-ignoring same-home extra"
+      }
+    },
+    {
+      "id": "B8",
+      "title": "Outage survivor removed at startup before normal adoption",
+      "outcomeStatus": "fail",
+      "verdict": "ok-known-fail",
+      "durationMs": 25504,
+      "expect": {
+        "expect": "known-fail",
+        "owner": "#1711 P5",
+        "reason": "restored watchdog adopts an outage survivor instead of reconciling it away first"
+      }
+    },
+    {
+      "id": "B9",
+      "title": "Fault repetition throttled; healthy state silent",
+      "outcomeStatus": "fail",
+      "verdict": "ok-known-fail",
+      "durationMs": 6704,
+      "expect": {
+        "expect": "known-fail",
+        "owner": "#1711 P7 / #1709",
+        "reason": "unchanged fault repetition is logged every cycle; no per-interval throttle exists"
+      }
+    },
+    {
+      "id": "B10",
+      "title": "Additive supervisor metadata keeps supervision live",
+      "outcomeStatus": "fail",
+      "verdict": "ok-known-fail",
+      "durationMs": 21221,
+      "expect": {
+        "expect": "known-fail",
+        "owner": "#1711 P4",
+        "reason": "additive supervisor-output metadata breaks positional parsing into permanent transient/defer"
+      }
+    }
+  ],
+  "evidence": [
+    {
+      "row": {
+        "id": "A1",
+        "title": "Empty home starts exactly one identified bridge",
+        "outcomeStatus": "pass",
+        "verdict": "ok",
+        "durationMs": 705,
+        "expect": {
+          "expect": "pass"
+        }
+      },
+      "timeline": [
+        {
+          "t": 1,
+          "event": "world-created",
+          "detail": "/tmp/abtars-wd-acc-a1-5zR29J"
+        },
+        {
+          "t": 3,
+          "event": "home-seeded",
+          "detail": "/tmp/abtars-wd-acc-a1-5zR29J/home-a"
+        },
+        {
+          "t": 8,
+          "event": "watchdog-started",
+          "detail": "home=home-a wrapper=3770827"
+        },
+        {
+          "t": 8,
+          "event": "until:owned bridge.lock present:initial=false"
+        },
+        {
+          "t": 312,
+          "event": "until:owned bridge.lock present:false->true"
+        }
+      ],
+      "logTails": {
+        "/tmp/abtars-wd-acc-a1-5zR29J/home-a": [
+          "2026-08-23T23:36:27 Supervisor state migrated from legacy",
+          "2026-08-23T23:36:27 Adoption skipped (dead) — spawning new bridge",
+          "2026-08-23T23:36:28 Watchdog exit: handoff with running bridge (PID=3770863)"
+        ]
+      },
+      "failure": null,
+      "expect": {
+        "expect": "pass"
+      }
+    },
+    {
+      "row": {
+        "id": "A2",
+        "title": "Self-reported non-zero death recorded once, then a new PID",
+        "outcomeStatus": "pass",
+        "verdict": "ok",
+        "durationMs": 1548,
+        "expect": {
+          "expect": "pass"
+        }
+      },
+      "timeline": [
+        {
+          "t": 0,
+          "event": "world-created",
+          "detail": "/tmp/abtars-wd-acc-a2-fu0zVF"
+        },
+        {
+          "t": 2,
+          "event": "home-seeded",
+          "detail": "/tmp/abtars-wd-acc-a2-fu0zVF/home-a"
+        },
+        {
+          "t": 5,
+          "event": "watchdog-started",
+          "detail": "home=home-a wrapper=3770906"
+        },
+        {
+          "t": 6,
+          "event": "until:owned bridge.lock present:initial=false"
+        },
+        {
+          "t": 309,
+          "event": "until:owned bridge.lock present:false->true"
+        },
+        {
+          "t": 310,
+          "event": "until:current bridge alive before crash cycle:initial=true"
+        },
+        {
+          "t": 310,
+          "event": "until:bridge 3770942 self-exits(code=1) and is replaced:initial=false"
+        },
+        {
+          "t": 1167,
+          "event": "until:bridge 3770942 self-exits(code=1) and is replaced:false->true"
+        },
+        {
+          "t": 1167,
+          "event": "until:exactly one death recorded:initial=true"
+        }
+      ],
+      "logTails": {
+        "/tmp/abtars-wd-acc-a2-fu0zVF/home-a": [
+          "2026-08-23T23:36:28 Supervisor state migrated from legacy",
+          "2026-08-23T23:36:28 Adoption skipped (dead) — spawning new bridge",
+          "2026-08-23T23:36:29 Bridge died: process-gone:exit=1 (PID=3770942)",
+          "2026-08-23T23:36:29 Watchdog exit: handoff with running bridge (PID=3771047)"
+        ]
+      },
+      "failure": null,
+      "expect": {
+        "expect": "pass"
+      }
+    },
+    {
+      "row": {
+        "id": "A3",
+        "title": "Backoff escalates with repeated deaths; backdated expiry decays it",
+        "outcomeStatus": "pass",
+        "verdict": "ok",
+        "durationMs": 4859,
+        "expect": {
+          "expect": "pass"
+        }
+      },
+      "timeline": [
+        {
+          "t": 0,
+          "event": "world-created",
+          "detail": "/tmp/abtars-wd-acc-a3-CDbxDR"
+        },
+        {
+          "t": 2,
+          "event": "home-seeded",
+          "detail": "/tmp/abtars-wd-acc-a3-CDbxDR/home-a"
+        },
+        {
+          "t": 6,
+          "event": "watchdog-started",
+          "detail": "home=home-a wrapper=3771089"
+        },
+        {
+          "t": 6,
+          "event": "until:owned bridge.lock present:initial=false"
+        },
+        {
+          "t": 309,
+          "event": "until:owned bridge.lock present:false->true"
+        },
+        {
+          "t": 309,
+          "event": "until:current bridge alive before crash cycle:initial=true"
+        },
+        {
+          "t": 309,
+          "event": "until:bridge 3771129 self-exits(code=1) and is replaced:initial=false"
+        },
+        {
+          "t": 1217,
+          "event": "until:bridge 3771129 self-exits(code=1) and is replaced:false->true"
+        },
+        {
+          "t": 1217,
+          "event": "until:backoffAttempt should reach 1:initial=true"
+        },
+        {
+          "t": 1217,
+          "event": "until:current bridge alive before crash cycle:initial=true"
+        },
+        {
+          "t": 1217,
+          "event": "until:bridge 3771248 self-exits(code=1) and is replaced:initial=false"
+        },
+        {
+          "t": 2074,
+          "event": "until:bridge 3771248 self-exits(code=1) and is replaced:false->true"
+        },
+        {
+          "t": 2074,
+          "event": "until:backoffAttempt should reach 2:initial=true"
+        },
+        {
+          "t": 2074,
+          "event": "until:current bridge alive before crash cycle:initial=true"
+        },
+        {
+          "t": 2075,
+          "event": "until:bridge 3771349 self-exits(code=1) and is replaced:initial=false"
+        },
+        {
+          "t": 2933,
+          "event": "until:bridge 3771349 self-exits(code=1) and is replaced:false->true"
+        },
+        {
+          "t": 2933,
+          "event": "until:backoffAttempt should reach 3:initial=true"
+        },
+        {
+          "t": 2990,
+          "event": "watchdog-signalled",
+          "detail": "SIGTERM pid=3771090"
+        },
+        {
+          "t": 3393,
+          "event": "watchdog-stopped",
+          "detail": "home=home-a code=3"
+        },
+        {
+          "t": 3398,
+          "event": "watchdog-started",
+          "detail": "home=home-a wrapper=3771506"
+        },
+        {
+          "t": 3398,
+          "event": "until:health accounting decays backoff and restart state after expiry:initial=false"
+        },
+        {
+          "t": 4759,
+          "event": "until:health accounting decays backoff and restart state after expiry:false->true"
+        }
+      ],
+      "logTails": {
+        "/tmp/abtars-wd-acc-a3-CDbxDR/home-a": [
+          "2026-08-23T23:36:29 Supervisor state migrated from legacy",
+          "2026-08-23T23:36:29 Adoption skipped (dead) — spawning new bridge",
+          "2026-08-23T23:36:30 Bridge died: process-gone:exit=1 (PID=3771129)",
+          "2026-08-23T23:36:31 Bridge died: process-gone:exit=1 (PID=3771248)",
+          "2026-08-23T23:36:32 Bridge died: process-gone:exit=1 (PID=3771349)",
+          "2026-08-23T23:36:33 Watchdog exit: handoff with running bridge (PID=3771450)",
+          "2026-08-23T23:36:33 Adopted existing bridge PID=3771450 (startedAt=1787520992)",
+          "2026-08-23T23:36:34 Watchdog exit: handoff with running bridge (PID=3771450)"
+        ]
+      },
+      "failure": null,
+      "expect": {
+        "expect": "pass"
+      }
+    },
+    {
+      "row": {
+        "id": "A4",
+        "title": "Valid existing bridge adopted without a new boot grace",
+        "outcomeStatus": "pass",
+        "verdict": "ok",
+        "durationMs": 10337,
+        "expect": {
+          "expect": "pass"
+        }
+      },
+      "timeline": [
+        {
+          "t": 1,
+          "event": "world-created",
+          "detail": "/tmp/abtars-wd-acc-a4-SGYnM2"
+        },
+        {
+          "t": 2,
+          "event": "home-seeded",
+          "detail": "/tmp/abtars-wd-acc-a4-SGYnM2/home-a"
+        },
+        {
+          "t": 4,
+          "event": "bridge-planted",
+          "detail": "home=home-a pid=3771664 mode=healthy"
+        },
+        {
+          "t": 4,
+          "event": "until:owned bridge.lock present:initial=false"
+        },
+        {
+          "t": 55,
+          "event": "until:owned bridge.lock present:false->true"
+        },
+        {
+          "t": 59,
+          "event": "watchdog-started",
+          "detail": "home=home-a wrapper=3771671"
+        },
+        {
+          "t": 59,
+          "event": "until:watchdog log should contain \"Adopted existing bridge PID=3771664\":initial=false"
+        },
+        {
+          "t": 261,
+          "event": "until:watchdog log should contain \"Adopted existing bridge PID=3771664\":false->true"
+        },
+        {
+          "t": 262,
+          "event": "until:adopted stale owner is killed and respawned with a stale-heartbeat reason:initial=false"
+        },
+        {
+          "t": 9958,
+          "event": "until:adopted stale owner is killed and respawned with a stale-heartbeat reason:false->true"
+        }
+      ],
+      "logTails": {
+        "/tmp/abtars-wd-acc-a4-SGYnM2/home-a": [
+          "2026-08-23T23:36:34 Supervisor state migrated from legacy",
+          "2026-08-23T23:36:34 Adopted existing bridge PID=3771664 (startedAt=1787520994)",
+          "2026-08-23T23:36:44 Bridge died: stale-heartbeat:9s (PID=3771664)",
+          "2026-08-23T23:36:44 Bridge died: process-gone:exit=unknown (PID=3772601)",
+          "2026-08-23T23:36:44 Watchdog exit: handoff with running bridge (PID=3772671)"
+        ]
+      },
+      "failure": null,
+      "expect": {
+        "expect": "pass"
+      }
+    },
+    {
+      "row": {
+        "id": "A5",
+        "title": "Duplicate watchdog contender exits 0 without side effects",
+        "outcomeStatus": "pass",
+        "verdict": "ok",
+        "durationMs": 5811,
+        "expect": {
+          "expect": "pass"
+        }
+      },
+      "timeline": [
+        {
+          "t": 0,
+          "event": "world-created",
+          "detail": "/tmp/abtars-wd-acc-a5-C1YvPO"
+        },
+        {
+          "t": 2,
+          "event": "home-seeded",
+          "detail": "/tmp/abtars-wd-acc-a5-C1YvPO/home-a"
+        },
+        {
+          "t": 5,
+          "event": "watchdog-started",
+          "detail": "home=home-a wrapper=3772690"
+        },
+        {
+          "t": 5,
+          "event": "until:owned bridge.lock present:initial=false"
+        },
+        {
+          "t": 307,
+          "event": "until:owned bridge.lock present:false->true"
+        },
+        {
+          "t": 313,
+          "event": "watchdog-started",
+          "detail": "home=home-a wrapper=3772754"
+        },
+        {
+          "t": 5347,
+          "event": "until:contender watchdog records its exit code:initial=true"
+        }
+      ],
+      "logTails": {
+        "/tmp/abtars-wd-acc-a5-C1YvPO/home-a": [
+          "2026-08-23T23:36:45 Supervisor state migrated from legacy",
+          "2026-08-23T23:36:45 Adoption skipped (dead) — spawning new bridge",
+          "2026-08-23T23:36:50 Watchdog exit: handoff with running bridge (PID=3772726)"
+        ]
+      },
+      "failure": null,
+      "expect": {
+        "expect": "pass"
+      }
+    },
+    {
+      "row": {
+        "id": "A6",
+        "title": "Stale validated owner is killed and respawned",
+        "outcomeStatus": "pass",
+        "verdict": "ok",
+        "durationMs": 6145,
+        "expect": {
+          "expect": "pass"
+        }
+      },
+      "timeline": [
+        {
+          "t": 0,
+          "event": "world-created",
+          "detail": "/tmp/abtars-wd-acc-a6-W489DK"
+        },
+        {
+          "t": 1,
+          "event": "home-seeded",
+          "detail": "/tmp/abtars-wd-acc-a6-W489DK/home-a"
+        },
+        {
+          "t": 4,
+          "event": "bridge-planted",
+          "detail": "home=home-a pid=3773160 mode=healthy"
+        },
+        {
+          "t": 4,
+          "event": "until:owned bridge.lock present:initial=false"
+        },
+        {
+          "t": 55,
+          "event": "until:owned bridge.lock present:false->true"
+        },
+        {
+          "t": 59,
+          "event": "watchdog-started",
+          "detail": "home=home-a wrapper=3773167"
+        },
+        {
+          "t": 59,
+          "event": "until:watchdog log should contain \"Adopted existing bridge PID=3773160\":initial=false"
+        },
+        {
+          "t": 312,
+          "event": "until:watchdog log should contain \"Adopted existing bridge PID=3773160\":false->true"
+        },
+        {
+          "t": 312,
+          "event": "until:stale owner killed and replaced:initial=false"
+        },
+        {
+          "t": 5760,
+          "event": "until:stale owner killed and replaced:false->true"
+        }
+      ],
+      "logTails": {
+        "/tmp/abtars-wd-acc-a6-W489DK/home-a": [
+          "2026-08-23T23:36:50 Supervisor state migrated from legacy",
+          "2026-08-23T23:36:51 Adopted existing bridge PID=3773160 (startedAt=1787521010)",
+          "2026-08-23T23:36:56 Bridge died: stale-heartbeat:4s (PID=3773160)",
+          "2026-08-23T23:36:56 Bridge died: process-gone:exit=unknown (PID=3773696)",
+          "2026-08-23T23:36:56 Watchdog exit: handoff with running bridge (PID=3773765)"
+        ]
+      },
+      "failure": null,
+      "expect": {
+        "expect": "pass"
+      }
+    },
+    {
+      "row": {
+        "id": "A7",
+        "title": "Fresh bridge is not killed before boot grace ends",
+        "outcomeStatus": "pass",
+        "verdict": "ok",
+        "durationMs": 6112,
+        "expect": {
+          "expect": "pass"
+        }
+      },
+      "timeline": [
+        {
+          "t": 0,
+          "event": "world-created",
+          "detail": "/tmp/abtars-wd-acc-a7-FztUHT"
+        },
+        {
+          "t": 2,
+          "event": "home-seeded",
+          "detail": "/tmp/abtars-wd-acc-a7-FztUHT/home-a"
+        },
+        {
+          "t": 5,
+          "event": "watchdog-started",
+          "detail": "home=home-a wrapper=3773783"
+        },
+        {
+          "t": 5,
+          "event": "until:owned bridge.lock present:initial=false"
+        },
+        {
+          "t": 307,
+          "event": "until:owned bridge.lock present:false->true"
+        },
+        {
+          "t": 5626,
+          "event": "until:stale-heartbeat death logged:initial=false"
+        },
+        {
+          "t": 5677,
+          "event": "until:stale-heartbeat death logged:false->true"
+        }
+      ],
+      "logTails": {
+        "/tmp/abtars-wd-acc-a7-FztUHT/home-a": [
+          "2026-08-23T23:36:57 Supervisor state migrated from legacy",
+          "2026-08-23T23:36:57 Adoption skipped (dead) — spawning new bridge",
+          "2026-08-23T23:37:02 Bridge died: stale-heartbeat:4s (PID=3773819)",
+          "2026-08-23T23:37:02 Watchdog exit: handoff with running bridge (PID=3774301)"
+        ]
+      },
+      "failure": null,
+      "expect": {
+        "expect": "pass"
+      }
+    },
+    {
+      "row": {
+        "id": "A8",
+        "title": "Suspend-sized gap enters bounded resume handling",
+        "outcomeStatus": "pass",
+        "verdict": "advisory",
+        "durationMs": 9391,
+        "expect": {
+          "expect": "baseline-advisory",
+          "reason": "current suspend simulation is a SIGSTOP gap; wall clock does not freeze. Gating before redesign acceptance via host smoke."
+        }
+      },
+      "timeline": [
+        {
+          "t": 1,
+          "event": "world-created",
+          "detail": "/tmp/abtars-wd-acc-a8-5kl0Jg"
+        },
+        {
+          "t": 3,
+          "event": "home-seeded",
+          "detail": "/tmp/abtars-wd-acc-a8-5kl0Jg/home-a"
+        },
+        {
+          "t": 8,
+          "event": "watchdog-started",
+          "detail": "home=home-a wrapper=3774319"
+        },
+        {
+          "t": 8,
+          "event": "until:owned bridge.lock present:initial=false"
+        },
+        {
+          "t": 462,
+          "event": "until:owned bridge.lock present:false->true"
+        },
+        {
+          "t": 463,
+          "event": "watchdog-signalled",
+          "detail": "SIGSTOP pid=3774320"
+        },
+        {
+          "t": 8465,
+          "event": "watchdog-signalled",
+          "detail": "SIGCONT pid=3774320"
+        },
+        {
+          "t": 8465,
+          "event": "until:watchdog log should contain \"Suspend detected\":initial=false"
+        },
+        {
+          "t": 8515,
+          "event": "until:watchdog log should contain \"Suspend detected\":false->true"
+        },
+        {
+          "t": 8516,
+          "event": "until:watchdog log should contain \"Resume recovery\":initial=false"
+        },
+        {
+          "t": 8717,
+          "event": "until:watchdog log should contain \"Resume recovery\":false->true"
+        },
+        {
+          "t": 8718,
+          "event": "until:bridge preserved with a fresh heartbeat after resume:initial=true"
+        }
+      ],
+      "logTails": {
+        "/tmp/abtars-wd-acc-a8-5kl0Jg/home-a": [
+          "2026-08-23T23:37:03 Supervisor state migrated from legacy",
+          "2026-08-23T23:37:03 Adoption skipped (dead) — spawning new bridge",
+          "2026-08-23T23:37:11 Suspend detected (poll gap 8s >> 2s) — entering bounded resume wait",
+          "2026-08-23T23:37:11 Resume recovery: fresh heartbeat detected within 2s — resuming normal monitoring",
+          "2026-08-23T23:37:11 Bridge died: process-gone:exit=unknown (PID=3774355)",
+          "2026-08-23T23:37:12 Watchdog exit: handoff with running bridge (PID=3774523)"
+        ]
+      },
+      "failure": null,
+      "expect": {
+        "expect": "baseline-advisory",
+        "reason": "current suspend simulation is a SIGSTOP gap; wall clock does not freeze. Gating before redesign acceptance via host smoke."
+      }
+    },
+    {
+      "row": {
+        "id": "A9",
+        "title": "Restart command acknowledged, applied, restart state reset",
+        "outcomeStatus": "pass",
+        "verdict": "ok",
+        "durationMs": 1734,
+        "expect": {
+          "expect": "pass"
+        }
+      },
+      "timeline": [
+        {
+          "t": 0,
+          "event": "world-created",
+          "detail": "/tmp/abtars-wd-acc-a9-GjmyJW"
+        },
+        {
+          "t": 2,
+          "event": "home-seeded",
+          "detail": "/tmp/abtars-wd-acc-a9-GjmyJW/home-a"
+        },
+        {
+          "t": 5,
+          "event": "watchdog-started",
+          "detail": "home=home-a wrapper=3774541"
+        },
+        {
+          "t": 6,
+          "event": "until:owned bridge.lock present:initial=false"
+        },
+        {
+          "t": 358,
+          "event": "until:owned bridge.lock present:false->true"
+        },
+        {
+          "t": 448,
+          "event": "until:restart acknowledged and a replacement bridge is running:initial=false"
+        },
+        {
+          "t": 1306,
+          "event": "until:restart acknowledged and a replacement bridge is running:false->true"
+        },
+        {
+          "t": 1306,
+          "event": "until:watchdog log should contain \"Planned bridge restart: command=restart\":initial=true"
+        }
+      ],
+      "logTails": {
+        "/tmp/abtars-wd-acc-a9-GjmyJW/home-a": [
+          "2026-08-23T23:37:12 Supervisor state migrated from legacy",
+          "2026-08-23T23:37:12 Adoption skipped (dead) — spawning new bridge",
+          "2026-08-23T23:37:13 Planned bridge restart: command=restart",
+          "2026-08-23T23:37:13 Bridge died: process-gone:exit=unknown (PID=3774673)",
+          "2026-08-23T23:37:14 Watchdog exit: handoff with running bridge (PID=3774744)"
+        ]
+      },
+      "failure": null,
+      "expect": {
+        "expect": "pass"
+      }
+    },
+    {
+      "row": {
+        "id": "A10",
+        "title": "Stop terminates the bridge and exits 2 without respawn",
+        "outcomeStatus": "pass",
+        "verdict": "ok",
+        "durationMs": 951,
+        "expect": {
+          "expect": "pass"
+        }
+      },
+      "timeline": [
+        {
+          "t": 0,
+          "event": "world-created",
+          "detail": "/tmp/abtars-wd-acc-a10-N3E0Gq"
+        },
+        {
+          "t": 2,
+          "event": "home-seeded",
+          "detail": "/tmp/abtars-wd-acc-a10-N3E0Gq/home-a"
+        },
+        {
+          "t": 7,
+          "event": "watchdog-started",
+          "detail": "home=home-a wrapper=3774762"
+        },
+        {
+          "t": 7,
+          "event": "until:owned bridge.lock present:initial=false"
+        },
+        {
+          "t": 411,
+          "event": "until:owned bridge.lock present:false->true"
+        },
+        {
+          "t": 875,
+          "event": "until:watchdog must record its durable-stop exit code:initial=true"
+        },
+        {
+          "t": 881,
+          "event": "until:bridge terminated with no respawn:initial=true"
+        }
+      ],
+      "logTails": {
+        "/tmp/abtars-wd-acc-a10-N3E0Gq/home-a": [
+          "2026-08-23T23:37:14 Supervisor state migrated from legacy",
+          "2026-08-23T23:37:14 Adoption skipped (dead) — spawning new bridge",
+          "2026-08-23T23:37:15 Watchdog exit: desiredState=stopped"
+        ]
+      },
+      "failure": null,
+      "expect": {
+        "expect": "pass"
+      }
+    },
+    {
+      "row": {
+        "id": "A11",
+        "title": "Durable stop dominates a pending restart deterministically",
+        "outcomeStatus": "pass",
+        "verdict": "ok",
+        "durationMs": 883,
+        "expect": {
+          "expect": "pass"
+        }
+      },
+      "timeline": [
+        {
+          "t": 1,
+          "event": "world-created",
+          "detail": "/tmp/abtars-wd-acc-a11-qZlzmw"
+        },
+        {
+          "t": 2,
+          "event": "home-seeded",
+          "detail": "/tmp/abtars-wd-acc-a11-qZlzmw/home-a"
+        },
+        {
+          "t": 5,
+          "event": "watchdog-started",
+          "detail": "home=home-a wrapper=3774875"
+        },
+        {
+          "t": 5,
+          "event": "until:owned bridge.lock present:initial=false"
+        },
+        {
+          "t": 358,
+          "event": "until:owned bridge.lock present:false->true"
+        },
+        {
+          "t": 858,
+          "event": "until:watchdog must record its durable-stop exit code:initial=true"
+        },
+        {
+          "t": 866,
+          "event": "until:no bridge may remain after stop dominance:initial=true"
+        }
+      ],
+      "logTails": {
+        "/tmp/abtars-wd-acc-a11-qZlzmw/home-a": [
+          "2026-08-23T23:37:15 Supervisor state migrated from legacy",
+          "2026-08-23T23:37:15 Adoption skipped (dead) — spawning new bridge",
+          "2026-08-23T23:37:15 Watchdog exit: desiredState=stopped"
+        ]
+      },
+      "failure": null,
+      "expect": {
+        "expect": "pass"
+      }
+    },
+    {
+      "row": {
+        "id": "A12",
+        "title": "Unknown command acked and dropped; later valid command applies",
+        "outcomeStatus": "pass",
+        "verdict": "ok",
+        "durationMs": 2190,
+        "expect": {
+          "expect": "pass"
+        }
+      },
+      "timeline": [
+        {
+          "t": 0,
+          "event": "world-created",
+          "detail": "/tmp/abtars-wd-acc-a12-H4MK5T"
+        },
+        {
+          "t": 2,
+          "event": "home-seeded",
+          "detail": "/tmp/abtars-wd-acc-a12-H4MK5T/home-a"
+        },
+        {
+          "t": 5,
+          "event": "watchdog-started",
+          "detail": "home=home-a wrapper=3774996"
+        },
+        {
+          "t": 5,
+          "event": "until:owned bridge.lock present:initial=false"
+        },
+        {
+          "t": 411,
+          "event": "until:owned bridge.lock present:false->true"
+        },
+        {
+          "t": 485,
+          "event": "until:unknown command acknowledged and dropped:initial=false"
+        },
+        {
+          "t": 1040,
+          "event": "until:unknown command acknowledged and dropped:false->true"
+        },
+        {
+          "t": 1107,
+          "event": "until:legitimate restart published afterwards is applied:initial=false"
+        },
+        {
+          "t": 1763,
+          "event": "until:legitimate restart published afterwards is applied:false->true"
+        }
+      ],
+      "logTails": {
+        "/tmp/abtars-wd-acc-a12-H4MK5T/home-a": [
+          "2026-08-23T23:37:16 Supervisor state migrated from legacy",
+          "2026-08-23T23:37:16 Adoption skipped (dead) — spawning new bridge",
+          "2026-08-23T23:37:17 Planned bridge restart: command=restart",
+          "2026-08-23T23:37:17 Bridge died: process-gone:exit=unknown (PID=3775185)",
+          "2026-08-23T23:37:18 Watchdog exit: handoff with running bridge (PID=3775253)"
+        ]
+      },
+      "failure": null,
+      "expect": {
+        "expect": "pass"
+      }
+    },
+    {
+      "row": {
+        "id": "A13",
+        "title": "Reused-PID lock never signals the unrelated process",
+        "outcomeStatus": "pass",
+        "verdict": "ok",
+        "durationMs": 785,
+        "expect": {
+          "expect": "pass"
+        }
+      },
+      "timeline": [
+        {
+          "t": 1,
+          "event": "world-created",
+          "detail": "/tmp/abtars-wd-acc-a13-N2MFzK"
+        },
+        {
+          "t": 2,
+          "event": "home-seeded",
+          "detail": "/tmp/abtars-wd-acc-a13-N2MFzK/home-a"
+        },
+        {
+          "t": 8,
+          "event": "watchdog-started",
+          "detail": "home=home-a wrapper=3775272"
+        },
+        {
+          "t": 9,
+          "event": "until:watchdog log should contain \"Adoption skipped (reused)\":initial=false"
+        },
+        {
+          "t": 261,
+          "event": "until:watchdog log should contain \"Adoption skipped (reused)\":false->true"
+        },
+        {
+          "t": 261,
+          "event": "until:watchdog spawns its own validated bridge instead:initial=false"
+        },
+        {
+          "t": 363,
+          "event": "until:watchdog spawns its own validated bridge instead:false->true"
+        }
+      ],
+      "logTails": {
+        "/tmp/abtars-wd-acc-a13-N2MFzK/home-a": [
+          "2026-08-23T23:37:18 Supervisor state migrated from legacy",
+          "2026-08-23T23:37:18 Adoption skipped (reused) — spawning new bridge",
+          "2026-08-23T23:37:18 Bridge died: process-gone:exit=unknown (PID=3775308)",
+          "2026-08-23T23:37:18 Watchdog exit: handoff with running bridge (PID=3775380)"
+        ]
+      },
+      "failure": null,
+      "expect": {
+        "expect": "pass"
+      }
+    },
+    {
+      "row": {
+        "id": "A14",
+        "title": "Exit-report freshness gate: stale rejected, fresh used",
+        "outcomeStatus": "pass",
+        "verdict": "ok",
+        "durationMs": 2566,
+        "expect": {
+          "expect": "pass"
+        }
+      },
+      "timeline": [
+        {
+          "t": 1,
+          "event": "world-created",
+          "detail": "/tmp/abtars-wd-acc-a14-8CK5GI"
+        },
+        {
+          "t": 2,
+          "event": "home-seeded",
+          "detail": "/tmp/abtars-wd-acc-a14-8CK5GI/home-a"
+        },
+        {
+          "t": 5,
+          "event": "watchdog-started",
+          "detail": "home=home-a wrapper=3775398"
+        },
+        {
+          "t": 5,
+          "event": "until:owned bridge.lock present:initial=false"
+        },
+        {
+          "t": 409,
+          "event": "until:owned bridge.lock present:false->true"
+        },
+        {
+          "t": 409,
+          "event": "until:pre-aged exit report rejected as unknown:initial=false"
+        },
+        {
+          "t": 1016,
+          "event": "until:pre-aged exit report rejected as unknown:false->true"
+        },
+        {
+          "t": 1016,
+          "event": "until:current bridge alive before crash cycle:initial=false"
+        },
+        {
+          "t": 1268,
+          "event": "until:current bridge alive before crash cycle:false->true"
+        },
+        {
+          "t": 1269,
+          "event": "until:bridge 3775541 self-exits(code=7) and is replaced:initial=false"
+        },
+        {
+          "t": 2176,
+          "event": "until:bridge 3775541 self-exits(code=7) and is replaced:false->true"
+        },
+        {
+          "t": 2177,
+          "event": "until:fresh self-reported exit code adopted:initial=true"
+        }
+      ],
+      "logTails": {
+        "/tmp/abtars-wd-acc-a14-8CK5GI/home-a": [
+          "2026-08-23T23:37:19 Supervisor state migrated from legacy",
+          "2026-08-23T23:37:19 Adoption skipped (dead) — spawning new bridge",
+          "2026-08-23T23:37:19 Bridge died: process-gone:exit=unknown (PID=3775435)",
+          "2026-08-23T23:37:20 Bridge died: process-gone:exit=7 (PID=3775541)",
+          "2026-08-23T23:37:21 Bridge died: process-gone:exit=unknown (PID=3775642)",
+          "2026-08-23T23:37:21 Watchdog exit: handoff with running bridge (PID=3775642)"
+        ]
+      },
+      "failure": null,
+      "expect": {
+        "expect": "pass"
+      }
+    },
+    {
+      "row": {
+        "id": "A15",
+        "title": "SIGHUP ignored; SIGTERM hands off with bridge preserved (exit 3)",
+        "outcomeStatus": "pass",
+        "verdict": "ok",
+        "durationMs": 1936,
+        "expect": {
+          "expect": "pass"
+        }
+      },
+      "timeline": [
+        {
+          "t": 0,
+          "event": "world-created",
+          "detail": "/tmp/abtars-wd-acc-a15-PfQo9f"
+        },
+        {
+          "t": 2,
+          "event": "home-seeded",
+          "detail": "/tmp/abtars-wd-acc-a15-PfQo9f/home-a"
+        },
+        {
+          "t": 6,
+          "event": "watchdog-started",
+          "detail": "home=home-a wrapper=3775723"
+        },
+        {
+          "t": 7,
+          "event": "until:owned bridge.lock present:initial=false"
+        },
+        {
+          "t": 410,
+          "event": "until:owned bridge.lock present:false->true"
+        },
+        {
+          "t": 410,
+          "event": "watchdog-signalled",
+          "detail": "SIGHUP pid=3775724"
+        },
+        {
+          "t": 1612,
+          "event": "watchdog-signalled",
+          "detail": "SIGTERM pid=3775724"
+        },
+        {
+          "t": 1913,
+          "event": "until:watchdog must record its handoff exit code:initial=true"
+        }
+      ],
+      "logTails": {
+        "/tmp/abtars-wd-acc-a15-PfQo9f/home-a": [
+          "2026-08-23T23:37:21 Supervisor state migrated from legacy",
+          "2026-08-23T23:37:21 Adoption skipped (dead) — spawning new bridge",
+          "2026-08-23T23:37:23 Watchdog exit: handoff with running bridge (PID=3775766)"
+        ]
+      },
+      "failure": null,
+      "expect": {
+        "expect": "pass"
+      }
+    },
+    {
+      "row": {
+        "id": "A16",
+        "title": "Recorded spawned PID is the Node bridge, not a wrapper",
+        "outcomeStatus": "pass",
+        "verdict": "ok",
+        "durationMs": 1059,
+        "expect": {
+          "expect": "pass"
+        }
+      },
+      "timeline": [
+        {
+          "t": 0,
+          "event": "world-created",
+          "detail": "/tmp/abtars-wd-acc-a16-zYrQ3D"
+        },
+        {
+          "t": 3,
+          "event": "home-seeded",
+          "detail": "/tmp/abtars-wd-acc-a16-zYrQ3D/home-a"
+        },
+        {
+          "t": 6,
+          "event": "watchdog-started",
+          "detail": "home=home-a wrapper=3775882"
+        },
+        {
+          "t": 6,
+          "event": "until:owned bridge.lock present:initial=false"
+        },
+        {
+          "t": 460,
+          "event": "until:owned bridge.lock present:false->true"
+        }
+      ],
+      "logTails": {
+        "/tmp/abtars-wd-acc-a16-zYrQ3D/home-a": [
+          "2026-08-23T23:37:23 Supervisor state migrated from legacy",
+          "2026-08-23T23:37:23 Adoption skipped (dead) — spawning new bridge",
+          "2026-08-23T23:37:24 Bridge died: process-gone:exit=unknown (PID=3775920)",
+          "2026-08-23T23:37:24 Watchdog exit: handoff with running bridge (PID=3775993)"
+        ]
+      },
+      "failure": null,
+      "expect": {
+        "expect": "pass"
+      }
+    },
+    {
+      "row": {
+        "id": "A17",
+        "title": "No zombies across five rapid crash cycles",
+        "outcomeStatus": "pass",
+        "verdict": "ok",
+        "durationMs": 5948,
+        "expect": {
+          "expect": "pass"
+        }
+      },
+      "timeline": [
+        {
+          "t": 0,
+          "event": "world-created",
+          "detail": "/tmp/abtars-wd-acc-a17-eZdzAY"
+        },
+        {
+          "t": 11,
+          "event": "home-seeded",
+          "detail": "/tmp/abtars-wd-acc-a17-eZdzAY/home-a"
+        },
+        {
+          "t": 16,
+          "event": "watchdog-started",
+          "detail": "home=home-a wrapper=3776012"
+        },
+        {
+          "t": 16,
+          "event": "until:owned bridge.lock present:initial=false"
+        },
+        {
+          "t": 420,
+          "event": "until:owned bridge.lock present:false->true"
+        },
+        {
+          "t": 420,
+          "event": "until:current bridge alive before crash cycle:initial=true"
+        },
+        {
+          "t": 420,
+          "event": "until:bridge 3776052 self-exits(code=1) and is replaced:initial=false"
+        },
+        {
+          "t": 1380,
+          "event": "until:bridge 3776052 self-exits(code=1) and is replaced:false->true"
+        },
+        {
+          "t": 1380,
+          "event": "until:current bridge alive before crash cycle:initial=true"
+        },
+        {
+          "t": 1380,
+          "event": "until:bridge 3776170 self-exits(code=2) and is replaced:initial=false"
+        },
+        {
+          "t": 2289,
+          "event": "until:bridge 3776170 self-exits(code=2) and is replaced:false->true"
+        },
+        {
+          "t": 2289,
+          "event": "until:current bridge alive before crash cycle:initial=true"
+        },
+        {
+          "t": 2290,
+          "event": "until:bridge 3776271 self-exits(code=1) and is replaced:initial=false"
+        },
+        {
+          "t": 3356,
+          "event": "until:bridge 3776271 self-exits(code=1) and is replaced:false->true"
+        },
+        {
+          "t": 3356,
+          "event": "until:current bridge alive before crash cycle:initial=true"
+        },
+        {
+          "t": 3357,
+          "event": "until:bridge 3776389 self-exits(code=2) and is replaced:initial=false"
+        },
+        {
+          "t": 4567,
+          "event": "until:bridge 3776389 self-exits(code=2) and is replaced:false->true"
+        },
+        {
+          "t": 4567,
+          "event": "until:current bridge alive before crash cycle:initial=true"
+        },
+        {
+          "t": 4568,
+          "event": "until:bridge 3776503 self-exits(code=1) and is replaced:initial=false"
+        },
+        {
+          "t": 5476,
+          "event": "until:bridge 3776503 self-exits(code=1) and is replaced:false->true"
+        },
+        {
+          "t": 5477,
+          "event": "until:five crash cycles complete:initial=true"
+        }
+      ],
+      "logTails": {
+        "/tmp/abtars-wd-acc-a17-eZdzAY/home-a": [
+          "2026-08-23T23:37:24 Supervisor state migrated from legacy",
+          "2026-08-23T23:37:24 Adoption skipped (dead) — spawning new bridge",
+          "2026-08-23T23:37:25 Bridge died: process-gone:exit=1 (PID=3776052)",
+          "2026-08-23T23:37:26 Bridge died: process-gone:exit=2 (PID=3776170)",
+          "2026-08-23T23:37:27 Bridge died: process-gone:exit=1 (PID=3776271)",
+          "2026-08-23T23:37:28 Bridge died: process-gone:exit=2 (PID=3776389)",
+          "2026-08-23T23:37:29 Bridge died: process-gone:exit=1 (PID=3776503)",
+          "2026-08-23T23:37:30 Bridge died: process-gone:exit=unknown (PID=3776611)",
+          "2026-08-23T23:37:30 Watchdog exit: handoff with running bridge (PID=3776680)"
+        ]
+      },
+      "failure": null,
+      "expect": {
+        "expect": "pass"
+      }
+    },
+    {
+      "row": {
+        "id": "A18",
+        "title": "Watchdog never invokes doctor or service management (canaries)",
+        "outcomeStatus": "pass",
+        "verdict": "ok",
+        "durationMs": 1796,
+        "expect": {
+          "expect": "pass"
+        }
+      },
+      "timeline": [
+        {
+          "t": 0,
+          "event": "world-created",
+          "detail": "/tmp/abtars-wd-acc-a18-8Swd5p"
+        },
+        {
+          "t": 2,
+          "event": "home-seeded",
+          "detail": "/tmp/abtars-wd-acc-a18-8Swd5p/home-a"
+        },
+        {
+          "t": 6,
+          "event": "watchdog-started",
+          "detail": "home=home-a wrapper=3776699"
+        },
+        {
+          "t": 6,
+          "event": "until:owned bridge.lock present:initial=false"
+        },
+        {
+          "t": 409,
+          "event": "until:owned bridge.lock present:false->true"
+        },
+        {
+          "t": 483,
+          "event": "until:planned restart applied under canary PATH:initial=false"
+        },
+        {
+          "t": 1240,
+          "event": "until:planned restart applied under canary PATH:false->true"
+        },
+        {
+          "t": 1778,
+          "event": "until:durable stop completes:initial=true"
+        }
+      ],
+      "logTails": {
+        "/tmp/abtars-wd-acc-a18-8Swd5p/home-a": [
+          "2026-08-23T23:37:30 Supervisor state migrated from legacy",
+          "2026-08-23T23:37:30 Adoption skipped (dead) — spawning new bridge",
+          "2026-08-23T23:37:31 Planned bridge restart: command=restart",
+          "2026-08-23T23:37:32 Watchdog exit: desiredState=stopped"
+        ]
+      },
+      "failure": null,
+      "expect": {
+        "expect": "pass"
+      }
+    },
+    {
+      "row": {
+        "id": "A19",
+        "title": "Released stale flock does not block startup; inode never unlinked",
+        "outcomeStatus": "pass",
+        "verdict": "ok",
+        "durationMs": 1335,
+        "expect": {
+          "expect": "pass"
+        }
+      },
+      "timeline": [
+        {
+          "t": 0,
+          "event": "world-created",
+          "detail": "/tmp/abtars-wd-acc-a19-IxEo27"
+        },
+        {
+          "t": 1,
+          "event": "home-seeded",
+          "detail": "/tmp/abtars-wd-acc-a19-IxEo27/home-a"
+        },
+        {
+          "t": 4,
+          "event": "watchdog-started",
+          "detail": "home=home-a wrapper=3776932"
+        },
+        {
+          "t": 4,
+          "event": "until:owned bridge.lock present:initial=false"
+        },
+        {
+          "t": 410,
+          "event": "until:owned bridge.lock present:false->true"
+        },
+        {
+          "t": 410,
+          "event": "watchdog-signalled",
+          "detail": "SIGTERM pid=3776933"
+        },
+        {
+          "t": 963,
+          "event": "watchdog-stopped",
+          "detail": "home=home-a code=3"
+        },
+        {
+          "t": 967,
+          "event": "watchdog-started",
+          "detail": "home=home-a wrapper=3777038"
+        },
+        {
+          "t": 967,
+          "event": "until:second watchdog takes ownership over the released flock:initial=false"
+        },
+        {
+          "t": 1069,
+          "event": "until:second watchdog takes ownership over the released flock:false->true"
+        }
+      ],
+      "logTails": {
+        "/tmp/abtars-wd-acc-a19-IxEo27/home-a": [
+          "2026-08-23T23:37:32 Supervisor state migrated from legacy",
+          "2026-08-23T23:37:32 Adoption skipped (dead) — spawning new bridge",
+          "2026-08-23T23:37:33 Watchdog exit: handoff with running bridge (PID=3776971)",
+          "2026-08-23T23:37:33 Adopted existing bridge PID=3776971 (startedAt=1787521052)",
+          "2026-08-23T23:37:33 Watchdog exit: handoff with running bridge (PID=3776971)"
+        ]
+      },
+      "failure": null,
+      "expect": {
+        "expect": "pass"
+      }
+    },
+    {
+      "row": {
+        "id": "A20",
+        "title": "Planned-restart fence never signals harness-owned transients",
+        "outcomeStatus": "pass",
+        "verdict": "ok",
+        "durationMs": 2308,
+        "expect": {
+          "expect": "pass"
+        }
+      },
+      "timeline": [
+        {
+          "t": 1,
+          "event": "world-created",
+          "detail": "/tmp/abtars-wd-acc-a20-Bu1wlS"
+        },
+        {
+          "t": 5,
+          "event": "home-seeded",
+          "detail": "/tmp/abtars-wd-acc-a20-Bu1wlS/home-a"
+        },
+        {
+          "t": 8,
+          "event": "watchdog-started",
+          "detail": "home=home-a wrapper=3777085"
+        },
+        {
+          "t": 9,
+          "event": "until:owned bridge.lock present:initial=false"
+        },
+        {
+          "t": 515,
+          "event": "until:owned bridge.lock present:false->true"
+        },
+        {
+          "t": 515,
+          "event": "watchdog-signalled",
+          "detail": "SIGSTOP pid=3777086"
+        },
+        {
+          "t": 519,
+          "event": "bridge-planted",
+          "detail": "home=home-a pid=3777151 mode=transient"
+        },
+        {
+          "t": 622,
+          "event": "watchdog-signalled",
+          "detail": "SIGCONT pid=3777086"
+        },
+        {
+          "t": 623,
+          "event": "until:fence completes: restart applied:initial=false"
+        },
+        {
+          "t": 1697,
+          "event": "until:fence completes: restart applied:false->true"
+        },
+        {
+          "t": 1708,
+          "event": "until:exactly one owned bridge remains:initial=true"
+        }
+      ],
+      "logTails": {
+        "/tmp/abtars-wd-acc-a20-Bu1wlS/home-a": [
+          "2026-08-23T23:37:33 Supervisor state migrated from legacy",
+          "2026-08-23T23:37:33 Adoption skipped (dead) — spawning new bridge",
+          "2026-08-23T23:37:35 Planned bridge restart: command=restart",
+          "2026-08-23T23:37:35 Bridge died: process-gone:exit=unknown (PID=3777231)",
+          "2026-08-23T23:37:35 Watchdog exit: handoff with running bridge (PID=3777301)"
+        ]
+      },
+      "failure": null,
+      "expect": {
+        "expect": "pass"
+      }
+    },
+    {
+      "row": {
+        "id": "A21",
+        "title": "Forced future-enumeration failure: no signal, no duplicate",
+        "outcomeStatus": "pass",
+        "verdict": "ok",
+        "durationMs": 4653,
+        "expect": {
+          "expect": "pass"
+        }
+      },
+      "timeline": [
+        {
+          "t": 1,
+          "event": "world-created",
+          "detail": "/tmp/abtars-wd-acc-a21-mCjEuS"
+        },
+        {
+          "t": 4,
+          "event": "home-seeded",
+          "detail": "/tmp/abtars-wd-acc-a21-mCjEuS/home-a"
+        },
+        {
+          "t": 8,
+          "event": "bridge-planted",
+          "detail": "home=home-a pid=3777319 mode=healthy"
+        },
+        {
+          "t": 8,
+          "event": "until:owned bridge.lock present:initial=false"
+        },
+        {
+          "t": 109,
+          "event": "until:owned bridge.lock present:false->true"
+        },
+        {
+          "t": 114,
+          "event": "watchdog-started",
+          "detail": "home=home-a wrapper=3777326"
+        },
+        {
+          "t": 114,
+          "event": "until:watchdog log should contain \"Adopted existing bridge PID=3777319\":initial=false"
+        },
+        {
+          "t": 477,
+          "event": "until:watchdog log should contain \"Adopted existing bridge PID=3777319\":false->true"
+        }
+      ],
+      "logTails": {
+        "/tmp/abtars-wd-acc-a21-mCjEuS/home-a": [
+          "2026-08-23T23:37:36 Supervisor state migrated from legacy",
+          "2026-08-23T23:37:36 Adopted existing bridge PID=3777319 (startedAt=1787521055)",
+          "2026-08-23T23:37:40 Watchdog exit: handoff with running bridge (PID=3777319)"
+        ]
+      },
+      "failure": null,
+      "expect": {
+        "expect": "pass"
+      }
+    },
+    {
+      "row": {
+        "id": "A22",
+        "title": "Five distinct death events inside one interval stay reconstructible",
+        "outcomeStatus": "pass",
+        "verdict": "ok",
+        "durationMs": 5514,
+        "expect": {
+          "expect": "pass"
+        }
+      },
+      "timeline": [
+        {
+          "t": 1,
+          "event": "world-created",
+          "detail": "/tmp/abtars-wd-acc-a22-8mQ9NU"
+        },
+        {
+          "t": 3,
+          "event": "home-seeded",
+          "detail": "/tmp/abtars-wd-acc-a22-8mQ9NU/home-a"
+        },
+        {
+          "t": 7,
+          "event": "watchdog-started",
+          "detail": "home=home-a wrapper=3777693"
+        },
+        {
+          "t": 7,
+          "event": "until:owned bridge.lock present:initial=false"
+        },
+        {
+          "t": 360,
+          "event": "until:owned bridge.lock present:false->true"
+        },
+        {
+          "t": 360,
+          "event": "until:current bridge alive before crash cycle:initial=true"
+        },
+        {
+          "t": 360,
+          "event": "until:bridge 3777730 self-exits(code=11) and is replaced:initial=false"
+        },
+        {
+          "t": 1217,
+          "event": "until:bridge 3777730 self-exits(code=11) and is replaced:false->true"
+        },
+        {
+          "t": 1217,
+          "event": "until:current bridge alive before crash cycle:initial=true"
+        },
+        {
+          "t": 1218,
+          "event": "until:bridge 3777846 self-exits(code=12) and is replaced:initial=false"
+        },
+        {
+          "t": 2128,
+          "event": "until:bridge 3777846 self-exits(code=12) and is replaced:false->true"
+        },
+        {
+          "t": 2128,
+          "event": "until:current bridge alive before crash cycle:initial=true"
+        },
+        {
+          "t": 2129,
+          "event": "until:bridge 3777947 self-exits(code=13) and is replaced:initial=false"
+        },
+        {
+          "t": 2987,
+          "event": "until:bridge 3777947 self-exits(code=13) and is replaced:false->true"
+        },
+        {
+          "t": 2987,
+          "event": "until:current bridge alive before crash cycle:initial=true"
+        },
+        {
+          "t": 2988,
+          "event": "until:bridge 3778046 self-exits(code=14) and is replaced:initial=false"
+        },
+        {
+          "t": 3953,
+          "event": "until:bridge 3778046 self-exits(code=14) and is replaced:false->true"
+        },
+        {
+          "t": 3953,
+          "event": "until:current bridge alive before crash cycle:initial=true"
+        },
+        {
+          "t": 3954,
+          "event": "until:bridge 3778176 self-exits(code=15) and is replaced:initial=false"
+        },
+        {
+          "t": 4964,
+          "event": "until:bridge 3778176 self-exits(code=15) and is replaced:false->true"
+        },
+        {
+          "t": 4964,
+          "event": "until:five deaths recorded in supervisor state:initial=true"
+        }
+      ],
+      "logTails": {
+        "/tmp/abtars-wd-acc-a22-8mQ9NU/home-a": [
+          "2026-08-23T23:37:40 Supervisor state migrated from legacy",
+          "2026-08-23T23:37:40 Adoption skipped (dead) — spawning new bridge",
+          "2026-08-23T23:37:41 Bridge died: process-gone:exit=11 (PID=3777730)",
+          "2026-08-23T23:37:42 Bridge died: process-gone:exit=12 (PID=3777846)",
+          "2026-08-23T23:37:43 Bridge died: process-gone:exit=13 (PID=3777947)",
+          "2026-08-23T23:37:44 Bridge died: process-gone:exit=14 (PID=3778046)",
+          "2026-08-23T23:37:45 Bridge died: process-gone:exit=15 (PID=3778176)",
+          "2026-08-23T23:37:45 Bridge died: process-gone:exit=unknown (PID=3778307)",
+          "2026-08-23T23:37:46 Watchdog exit: handoff with running bridge (PID=3778390)"
+        ]
+      },
+      "failure": null,
+      "expect": {
+        "expect": "pass"
+      }
+    },
+    {
+      "row": {
+        "id": "B1",
+        "title": "Corrupt lock reaches a bounded ownership decision",
+        "outcomeStatus": "fail",
+        "verdict": "ok-known-fail",
+        "durationMs": 15514,
+        "expect": {
+          "expect": "known-fail",
+          "owner": "#1711 P7",
+          "reason": "corrupt lock defers validation forever; no bounded recorded ownership decision"
+        }
+      },
+      "timeline": [
+        {
+          "t": 1,
+          "event": "world-created",
+          "detail": "/tmp/abtars-wd-acc-b1-N6b8Ru"
+        },
+        {
+          "t": 3,
+          "event": "home-seeded",
+          "detail": "/tmp/abtars-wd-acc-b1-N6b8Ru/home-a"
+        },
+        {
+          "t": 7,
+          "event": "watchdog-started",
+          "detail": "home=home-a wrapper=3778417"
+        },
+        {
+          "t": 7,
+          "event": "until:owned bridge.lock present:initial=false"
+        },
+        {
+          "t": 410,
+          "event": "until:owned bridge.lock present:false->true"
+        },
+        {
+          "t": 411,
+          "event": "until:bounded ownership decision reached after lock corruption:initial=false"
+        }
+      ],
+      "logTails": {
+        "/tmp/abtars-wd-acc-b1-N6b8Ru/home-a": [
+          "2026-08-23T23:37:46 Supervisor state migrated from legacy",
+          "2026-08-23T23:37:46 Adoption skipped (dead) — spawning new bridge",
+          "2026-08-23T23:38:01 Watchdog exit: handoff with running bridge (PID=3778461)"
+        ]
+      },
+      "failure": "[assertion] B1 final-form failure: a corrupt lock defers the watchdog indefinitely — no bounded, recorded ownership decision was reached",
+      "expect": {
+        "expect": "known-fail",
+        "owner": "#1711 P7",
+        "reason": "corrupt lock defers validation forever; no bounded recorded ownership decision"
+      }
+    },
+    {
+      "row": {
+        "id": "B2",
+        "title": "Corrupt-lock startup never duplicates the live bridge",
+        "outcomeStatus": "pass",
+        "verdict": "unexpected-pass",
+        "durationMs": 6452,
+        "expect": {
+          "expect": "known-fail",
+          "owner": "#1711 P3",
+          "reason": "startup with corrupt lock spawns a duplicate bridge instead of reconciling the live one"
+        }
+      },
+      "timeline": [
+        {
+          "t": 1,
+          "event": "world-created",
+          "detail": "/tmp/abtars-wd-acc-b2-x5T2mj"
+        },
+        {
+          "t": 2,
+          "event": "home-seeded",
+          "detail": "/tmp/abtars-wd-acc-b2-x5T2mj/home-a"
+        },
+        {
+          "t": 6,
+          "event": "bridge-planted",
+          "detail": "home=home-a pid=3779699 mode=healthy"
+        },
+        {
+          "t": 6,
+          "event": "until:owned bridge.lock present:initial=false"
+        },
+        {
+          "t": 55,
+          "event": "until:owned bridge.lock present:false->true"
+        },
+        {
+          "t": 60,
+          "event": "watchdog-started",
+          "detail": "home=home-a wrapper=3779706"
+        }
+      ],
+      "logTails": {
+        "/tmp/abtars-wd-acc-b2-x5T2mj/home-a": [
+          "2026-08-23T23:38:01 Supervisor state migrated from legacy",
+          "2026-08-23T23:38:01 Adopted existing bridge PID=3779699 (startedAt=1787521081)",
+          "2026-08-23T23:38:07 Bridge died: process-gone:exit=unknown (PID=3779699)",
+          "2026-08-23T23:38:08 Watchdog exit: handoff with running bridge (PID=3780259)"
+        ]
+      },
+      "failure": null,
+      "expect": {
+        "expect": "known-fail",
+        "owner": "#1711 P3",
+        "reason": "startup with corrupt lock spawns a duplicate bridge instead of reconciling the live one"
+      }
+    },
+    {
+      "row": {
+        "id": "B3",
+        "title": "Non-owner heartbeat writes cannot mask a stale owner",
+        "outcomeStatus": "fail",
+        "verdict": "ok-known-fail",
+        "durationMs": 32788,
+        "expect": {
+          "expect": "known-fail",
+          "owner": "#1711 P1",
+          "reason": "non-owner heartbeat writes refresh the owner's timestamp and mask staleness"
+        }
+      },
+      "timeline": [
+        {
+          "t": 0,
+          "event": "world-created",
+          "detail": "/tmp/abtars-wd-acc-b3-5cprAt"
+        },
+        {
+          "t": 3,
+          "event": "home-seeded",
+          "detail": "/tmp/abtars-wd-acc-b3-5cprAt/home-a"
+        },
+        {
+          "t": 7,
+          "event": "bridge-planted",
+          "detail": "home=home-a pid=3780279 mode=healthy"
+        },
+        {
+          "t": 7,
+          "event": "until:owned bridge.lock present:initial=false"
+        },
+        {
+          "t": 108,
+          "event": "until:owned bridge.lock present:false->true"
+        },
+        {
+          "t": 111,
+          "event": "watchdog-started",
+          "detail": "home=home-a wrapper=3780292"
+        },
+        {
+          "t": 112,
+          "event": "until:watchdog adopts the planted owner:initial=false"
+        },
+        {
+          "t": 363,
+          "event": "until:watchdog adopts the planted owner:false->true"
+        },
+        {
+          "t": 366,
+          "event": "bridge-planted",
+          "detail": "home=home-a pid=3780348 mode=non-owner"
+        },
+        {
+          "t": 2367,
+          "event": "until:stale owner killed despite foreign heartbeats:initial=false"
+        }
+      ],
+      "logTails": {
+        "/tmp/abtars-wd-acc-b3-5cprAt/home-a": [
+          "2026-08-23T23:38:08 Supervisor state migrated from legacy",
+          "2026-08-23T23:38:08 Adopted existing bridge PID=3780279 (startedAt=1787521088)",
+          "2026-08-23T23:38:40 Watchdog exit: handoff with running bridge (PID=3780279)"
+        ]
+      },
+      "failure": "[assertion] B3 final-form failure: non-owner heartbeat writes keep the stale owner looking healthy indefinitely",
+      "expect": {
+        "expect": "known-fail",
+        "owner": "#1711 P1",
+        "reason": "non-owner heartbeat writes refresh the owner's timestamp and mask staleness"
+      }
+    },
+    {
+      "row": {
+        "id": "B4",
+        "title": "Non-owner exit self-report cannot forge the owner's death code",
+        "outcomeStatus": "fail",
+        "verdict": "ok-known-fail",
+        "durationMs": 25456,
+        "expect": {
+          "expect": "known-fail",
+          "owner": "#1711 P1",
+          "reason": "non-owner exit self-report can become the owner's recorded death code"
+        }
+      },
+      "timeline": [
+        {
+          "t": 0,
+          "event": "world-created",
+          "detail": "/tmp/abtars-wd-acc-b4-qWzJwr"
+        },
+        {
+          "t": 2,
+          "event": "home-seeded",
+          "detail": "/tmp/abtars-wd-acc-b4-qWzJwr/home-a"
+        },
+        {
+          "t": 6,
+          "event": "bridge-planted",
+          "detail": "home=home-a pid=3783044 mode=healthy"
+        },
+        {
+          "t": 6,
+          "event": "until:owned bridge.lock present:initial=false"
+        },
+        {
+          "t": 57,
+          "event": "until:owned bridge.lock present:false->true"
+        },
+        {
+          "t": 61,
+          "event": "watchdog-started",
+          "detail": "home=home-a wrapper=3783051"
+        },
+        {
+          "t": 61,
+          "event": "until:watchdog adopts the planted owner:initial=false"
+        },
+        {
+          "t": 314,
+          "event": "until:watchdog adopts the planted owner:false->true"
+        },
+        {
+          "t": 314,
+          "event": "watchdog-signalled",
+          "detail": "SIGSTOP pid=3783052"
+        },
+        {
+          "t": 318,
+          "event": "bridge-planted",
+          "detail": "home=home-a pid=3783101 mode=forge-exit"
+        },
+        {
+          "t": 331,
+          "event": "watchdog-signalled",
+          "detail": "SIGCONT pid=3783052"
+        },
+        {
+          "t": 331,
+          "event": "until:owner death recorded with its true exit code 0:initial=false"
+        }
+      ],
+      "logTails": {
+        "/tmp/abtars-wd-acc-b4-qWzJwr/home-a": [
+          "2026-08-23T23:38:41 Supervisor state migrated from legacy",
+          "2026-08-23T23:38:41 Adopted existing bridge PID=3783044 (startedAt=1787521120)",
+          "2026-08-23T23:38:41 Bridge died: process-gone:exit=42 (PID=3783044)",
+          "2026-08-23T23:39:06 Watchdog exit: handoff with running bridge (PID=3783170)"
+        ]
+      },
+      "failure": "[timeout] owner death recorded with its true exit code 0",
+      "expect": {
+        "expect": "known-fail",
+        "owner": "#1711 P1",
+        "reason": "non-owner exit self-report can become the owner's recorded death code"
+      }
+    },
+    {
+      "row": {
+        "id": "B5",
+        "title": "Doctor scope excludes bridges from other homes",
+        "outcomeStatus": "fail",
+        "verdict": "ok-known-fail",
+        "durationMs": 3658,
+        "expect": {
+          "expect": "known-fail",
+          "owner": "#1711 P2",
+          "reason": "doctor enumerates abtars.js processes globally, so other-home bridges leak into diagnosis scope"
+        }
+      },
+      "timeline": [
+        {
+          "t": 1,
+          "event": "world-created",
+          "detail": "/tmp/abtars-wd-acc-b5-rvtqJY"
+        },
+        {
+          "t": 3,
+          "event": "home-seeded",
+          "detail": "/tmp/abtars-wd-acc-b5-rvtqJY/home-a"
+        },
+        {
+          "t": 8,
+          "event": "watchdog-started",
+          "detail": "home=home-a wrapper=3785274"
+        },
+        {
+          "t": 8,
+          "event": "until:owned bridge.lock present:initial=false"
+        },
+        {
+          "t": 413,
+          "event": "until:owned bridge.lock present:false->true"
+        },
+        {
+          "t": 416,
+          "event": "home-seeded",
+          "detail": "/tmp/abtars-wd-acc-b5-rvtqJY/home-b"
+        },
+        {
+          "t": 419,
+          "event": "bridge-planted",
+          "detail": "home=home-b pid=3785339 mode=healthy"
+        },
+        {
+          "t": 419,
+          "event": "until:owned bridge.lock present:initial=false"
+        },
+        {
+          "t": 520,
+          "event": "until:owned bridge.lock present:false->true"
+        }
+      ],
+      "logTails": {
+        "/tmp/abtars-wd-acc-b5-rvtqJY/home-a": [
+          "2026-08-23T23:39:06 Supervisor state migrated from legacy",
+          "2026-08-23T23:39:06 Adoption skipped (dead) — spawning new bridge",
+          "2026-08-23T23:39:09 Bridge died: process-gone:exit=unknown (PID=3785311)",
+          "2026-08-23T23:39:09 Watchdog exit: handoff with running bridge (PID=3785602)"
+        ],
+        "/tmp/abtars-wd-acc-b5-rvtqJY/home-b": []
+      },
+      "failure": "[assertion] doctor --json must include a bridge probe",
+      "expect": {
+        "expect": "known-fail",
+        "owner": "#1711 P2",
+        "reason": "doctor enumerates abtars.js processes globally, so other-home bridges leak into diagnosis scope"
+      }
+    },
+    {
+      "row": {
+        "id": "B6",
+        "title": "Unowned same-home extra is contained",
+        "outcomeStatus": "fail",
+        "verdict": "ok-known-fail",
+        "durationMs": 31330,
+        "expect": {
+          "expect": "known-fail",
+          "owner": "#1711",
+          "reason": "no containment exists for a stable unowned same-home extra"
+        }
+      },
+      "timeline": [
+        {
+          "t": 0,
+          "event": "world-created",
+          "detail": "/tmp/abtars-wd-acc-b6-J7KV1q"
+        },
+        {
+          "t": 3,
+          "event": "home-seeded",
+          "detail": "/tmp/abtars-wd-acc-b6-J7KV1q/home-a"
+        },
+        {
+          "t": 7,
+          "event": "watchdog-started",
+          "detail": "home=home-a wrapper=3785622"
+        },
+        {
+          "t": 7,
+          "event": "until:owned bridge.lock present:initial=false"
+        },
+        {
+          "t": 513,
+          "event": "until:owned bridge.lock present:false->true"
+        },
+        {
+          "t": 517,
+          "event": "bridge-planted",
+          "detail": "home=home-a pid=3785687 mode=no-lock"
+        },
+        {
+          "t": 517,
+          "event": "until:unowned extra contained while owner preserved:initial=false"
+        }
+      ],
+      "logTails": {
+        "/tmp/abtars-wd-acc-b6-J7KV1q/home-a": [
+          "2026-08-23T23:39:10 Supervisor state migrated from legacy",
+          "2026-08-23T23:39:10 Adoption skipped (dead) — spawning new bridge",
+          "2026-08-23T23:39:40 Bridge died: process-gone:exit=unknown (PID=3785658)",
+          "2026-08-23T23:39:41 Watchdog exit: handoff with running bridge (PID=3790398)"
+        ]
+      },
+      "failure": "[assertion] B6 final-form failure: stable unowned same-home extra was not contained",
+      "expect": {
+        "expect": "known-fail",
+        "owner": "#1711",
+        "reason": "no containment exists for a stable unowned same-home extra"
+      }
+    },
+    {
+      "row": {
+        "id": "B7",
+        "title": "SIGTERM-ignoring extra is contained without harming the owner",
+        "outcomeStatus": "fail",
+        "verdict": "ok-known-fail",
+        "durationMs": 33583,
+        "expect": {
+          "expect": "known-fail",
+          "owner": "#1711",
+          "reason": "no containment escalation exists for a SIGTERM-ignoring same-home extra"
+        }
+      },
+      "timeline": [
+        {
+          "t": 1,
+          "event": "world-created",
+          "detail": "/tmp/abtars-wd-acc-b7-IBFRxy"
+        },
+        {
+          "t": 3,
+          "event": "home-seeded",
+          "detail": "/tmp/abtars-wd-acc-b7-IBFRxy/home-a"
+        },
+        {
+          "t": 7,
+          "event": "watchdog-started",
+          "detail": "home=home-a wrapper=3790416"
+        },
+        {
+          "t": 7,
+          "event": "until:owned bridge.lock present:initial=false"
+        },
+        {
+          "t": 461,
+          "event": "until:owned bridge.lock present:false->true"
+        },
+        {
+          "t": 468,
+          "event": "bridge-planted",
+          "detail": "home=home-a pid=3790481 mode=ignore-term"
+        },
+        {
+          "t": 468,
+          "event": "until:TERM-ignoring extra contained while owner preserved:initial=false"
+        }
+      ],
+      "logTails": {
+        "/tmp/abtars-wd-acc-b7-IBFRxy/home-a": [
+          "2026-08-23T23:39:41 Supervisor state migrated from legacy",
+          "2026-08-23T23:39:41 Adoption skipped (dead) — spawning new bridge",
+          "2026-08-23T23:39:41 Bridge died: process-gone:exit=unknown (PID=3790453)",
+          "2026-08-23T23:40:11 Watchdog exit: handoff with running bridge (PID=3790533)"
+        ]
+      },
+      "failure": "[assertion] B7 final-form failure: SIGTERM-ignoring same-home extra was not contained",
+      "expect": {
+        "expect": "known-fail",
+        "owner": "#1711",
+        "reason": "no containment escalation exists for a SIGTERM-ignoring same-home extra"
+      }
+    },
+    {
+      "row": {
+        "id": "B8",
+        "title": "Outage survivor removed at startup before normal adoption",
+        "outcomeStatus": "fail",
+        "verdict": "ok-known-fail",
+        "durationMs": 25504,
+        "expect": {
+          "expect": "known-fail",
+          "owner": "#1711 P5",
+          "reason": "restored watchdog adopts an outage survivor instead of reconciling it away first"
+        }
+      },
+      "timeline": [
+        {
+          "t": 0,
+          "event": "world-created",
+          "detail": "/tmp/abtars-wd-acc-b8-d1Zz1M"
+        },
+        {
+          "t": 2,
+          "event": "home-seeded",
+          "detail": "/tmp/abtars-wd-acc-b8-d1Zz1M/home-a"
+        },
+        {
+          "t": 5,
+          "event": "bridge-planted",
+          "detail": "home=home-a pid=3793660 mode=healthy"
+        },
+        {
+          "t": 5,
+          "event": "until:owned bridge.lock present:initial=false"
+        },
+        {
+          "t": 106,
+          "event": "until:owned bridge.lock present:false->true"
+        },
+        {
+          "t": 110,
+          "event": "watchdog-started",
+          "detail": "home=home-a wrapper=3793668"
+        },
+        {
+          "t": 111,
+          "event": "until:watchdog adopts the survivor (pre-outage normal behavior):initial=false"
+        },
+        {
+          "t": 362,
+          "event": "until:watchdog adopts the survivor (pre-outage normal behavior):false->true"
+        },
+        {
+          "t": 362,
+          "event": "watchdog-signalled",
+          "detail": "SIGKILL pid=3793669"
+        },
+        {
+          "t": 362,
+          "event": "until:watchdog process gone after simulated outage:initial=true"
+        },
+        {
+          "t": 366,
+          "event": "watchdog-started",
+          "detail": "home=home-a wrapper=3793708"
+        },
+        {
+          "t": 366,
+          "event": "until:startup reconciliation removes the survivor and establishes a fresh owner:initial=false"
+        }
+      ],
+      "logTails": {
+        "/tmp/abtars-wd-acc-b8-d1Zz1M/home-a": [
+          "2026-08-23T23:40:15 Supervisor state migrated from legacy",
+          "2026-08-23T23:40:15 Adopted existing bridge PID=3793660 (startedAt=1787521214)",
+          "2026-08-23T23:40:15 Adopted existing bridge PID=3793660 (startedAt=1787521214)",
+          "2026-08-23T23:40:40 Watchdog exit: handoff with running bridge (PID=3793660)"
+        ]
+      },
+      "failure": "[assertion] B8 final-form failure: restored watchdog adopted the outage survivor instead of reconciling it away",
+      "expect": {
+        "expect": "known-fail",
+        "owner": "#1711 P5",
+        "reason": "restored watchdog adopts an outage survivor instead of reconciling it away first"
+      }
+    },
+    {
+      "row": {
+        "id": "B9",
+        "title": "Fault repetition throttled; healthy state silent",
+        "outcomeStatus": "fail",
+        "verdict": "ok-known-fail",
+        "durationMs": 6704,
+        "expect": {
+          "expect": "known-fail",
+          "owner": "#1711 P7 / #1709",
+          "reason": "unchanged fault repetition is logged every cycle; no per-interval throttle exists"
+        }
+      },
+      "timeline": [
+        {
+          "t": 0,
+          "event": "world-created",
+          "detail": "/tmp/abtars-wd-acc-b9-ASdsc8"
+        },
+        {
+          "t": 1,
+          "event": "home-seeded",
+          "detail": "/tmp/abtars-wd-acc-b9-ASdsc8/home-a"
+        },
+        {
+          "t": 5,
+          "event": "watchdog-started",
+          "detail": "home=home-a wrapper=3796764"
+        },
+        {
+          "t": 5,
+          "event": "until:owned bridge.lock present:initial=false"
+        },
+        {
+          "t": 357,
+          "event": "until:owned bridge.lock present:false->true"
+        }
+      ],
+      "logTails": {
+        "/tmp/abtars-wd-acc-b9-ASdsc8/home-a": [
+          "2026-08-23T23:40:40 Supervisor state migrated from legacy",
+          "2026-08-23T23:40:40 Adoption skipped (dead) — spawning new bridge",
+          "2026-08-23T23:40:47 Watchdog exit: handoff with running bridge (PID=3796802)"
+        ]
+      },
+      "failure": "[assertion] healthy steady state must emit no watchdog log lines",
+      "expect": {
+        "expect": "known-fail",
+        "owner": "#1711 P7 / #1709",
+        "reason": "unchanged fault repetition is logged every cycle; no per-interval throttle exists"
+      }
+    },
+    {
+      "row": {
+        "id": "B10",
+        "title": "Additive supervisor metadata keeps supervision live",
+        "outcomeStatus": "fail",
+        "verdict": "ok-known-fail",
+        "durationMs": 21221,
+        "expect": {
+          "expect": "known-fail",
+          "owner": "#1711 P4",
+          "reason": "additive supervisor-output metadata breaks positional parsing into permanent transient/defer"
+        }
+      },
+      "timeline": [
+        {
+          "t": 1,
+          "event": "world-created",
+          "detail": "/tmp/abtars-wd-acc-b10-KjvFle"
+        },
+        {
+          "t": 4,
+          "event": "home-seeded",
+          "detail": "/tmp/abtars-wd-acc-b10-KjvFle/home-a"
+        },
+        {
+          "t": 9,
+          "event": "watchdog-started",
+          "detail": "home=home-a wrapper=3797456"
+        },
+        {
+          "t": 9,
+          "event": "until:owned bridge.lock present:initial=false"
+        },
+        {
+          "t": 512,
+          "event": "until:owned bridge.lock present:false->true"
+        },
+        {
+          "t": 512,
+          "event": "until:shimmed validation drives the watchdog into deferred cycles:initial=false"
+        }
+      ],
+      "logTails": {
+        "/tmp/abtars-wd-acc-b10-KjvFle/home-a": [
+          "2026-08-23T23:40:47 Supervisor state migrated from legacy",
+          "2026-08-23T23:40:47 Adoption skipped (dead) — spawning new bridge",
+          "2026-08-23T23:41:07 Bridge died: process-gone:exit=unknown (PID=3797523)",
+          "2026-08-23T23:41:08 Watchdog exit: handoff with running bridge (PID=3799561)"
+        ]
+      },
+      "failure": "[timeout] shimmed validation drives the watchdog into deferred cycles",
+      "expect": {
+        "expect": "known-fail",
+        "owner": "#1711 P4",
+        "reason": "additive supervisor-output metadata breaks positional parsing into permanent transient/defer"
+      }
+    }
+  ]
+}

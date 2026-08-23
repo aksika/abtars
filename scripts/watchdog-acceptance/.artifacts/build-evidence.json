@@ -1,0 +1,21 @@
+{
+  "commit": "e5d5831b86813c9e96a41a26fe91257d839e9305",
+  "nodeVersion": "v22.22.0",
+  "platform": "linux/x64",
+  "sources": {
+    "scripts/abtars-watchdog.sh": "ef67cfdbeab75bef4b7d6ef99b4ce20ae4aa9bb096c60e0ac92d335a0e097cd7",
+    "src/supervisor/state-cli.ts": "2322e84d031db765796dd5a6d21e1c96c943805046270f49d547c35c0bd3c2c4",
+    "src/supervisor/state.ts": "fea4c46b85c5cccafa0785992a18cd22b1a57b51eabce2611c7c2e47e8a80930",
+    "src/cli/abtars.ts": "e05a116cb85509f1fced3223b3a60ac0266f151f20f7c9d1f08b04f3685cce97",
+    "scripts/watchdog-acceptance/fixture-bridge.ts": "493db0ee9d3ede262d9dbba101cb728a9cf3c102025e38f01a1aeda7ce9e548e"
+  },
+  "artifacts": {
+    "supervisor-state:lifecycle": "183a5120c1d96656ca1e7ba2c4a2c7f80015443cbce7455798efa79923dca84b",
+    "supervisor-state:staleFast": "183a5120c1d96656ca1e7ba2c4a2c7f80015443cbce7455798efa79923dca84b",
+    "supervisor-state:suspendFast": "183a5120c1d96656ca1e7ba2c4a2c7f80015443cbce7455798efa79923dca84b",
+    "supervisor-state:decayFast": "ae717aee0f78d145220fcad8a45392787e348f3dbc5680527f99fe97535d5fcd",
+    "supervisor-state:crashLoopFast": "dbd4e6b57c9122272ff396b38a5aa4f2cd1bb3c791b85ff66a301c995facae87",
+    "fixture-bridge": "0d9d86bc5fe9609eaa7ba746799d62d3fe5b244419741af0317ff6382661a287",
+    "doctor": "d0879de90950b028c0dff58b6f7c069538a7a74eb17cca6f008e5995970db3f8"
+  }
+}
