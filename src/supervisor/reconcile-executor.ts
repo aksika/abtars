@@ -7,7 +7,7 @@
  */
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { readBridgeLock, validateBridgeLock, enumerateBridgeProcesses, isPidAlive } from "./identity.js";
+import { validateBridgeLock, enumerateBridgeProcesses, isPidAlive } from "./identity.js";
 import {
   decideReconciliation,
   isLivenessContainmentEligible,
