@@ -1,6 +1,6 @@
 import { logInfo, logWarn, logDebug } from "./logger.js";
 import { isWsl, WSL_STANDBY_THRESHOLD_MS } from "./platform-detect.js";
-import { updateLastHeartbeat, updateBridgeLockField } from "./transport/bridge-lock-transport.js";
+import { updateLastHeartbeat, updateOwnedBridgeLockField } from "./transport/bridge-lock-transport.js";
 import type { HeartbeatTask, HeartbeatTaskOutcome, HeartbeatTaskStatus } from "../types/index.js";
 
 export type HeartbeatConfig = {
@@ -153,7 +153,7 @@ export class HeartbeatSystem implements ITaskSlot {
       this.tickCount++;
       if (this.tickCount % 60 === 0) {
         const heap = Math.round(process.memoryUsage().heapUsed / 1048576);
-        updateBridgeLockField("heapUsedMB", heap);
+        updateOwnedBridgeLockField("heapUsedMB", heap);
         if (heap > 820) {
           logWarn(TAG, `Heap high: ${heap}MB / 1024MB (80%+)`);
         } else {

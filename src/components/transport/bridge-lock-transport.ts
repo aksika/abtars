@@ -4,6 +4,7 @@
  *         sleepStatus, restartReason, restartRequested.
  */
 import { logAndSwallow } from "../log-and-swallow.js";
+import { logWarn } from "../logger.js";
 import { readFileSync } from "node:fs";
 import { atomicWriteSync } from "../atomic-write.js";
 import { join } from "node:path";
@@ -14,17 +15,93 @@ import { processStartIdentity } from "../../supervisor/identity.js";
 
 export type SleepStatus = "awake" | "sleeping";
 
+// ── Owner-scoped writes (#1711 R1) ────────────────────────────────────────
+// Fields describing the bridge PROCESS ITSELF (lastHeartbeat, exit fields,
+// memory/prompt markers, startedAt, acpPids, sleepStatus, restartReason) are
+// writable only by the process the lock names. A non-owner must never be able
+// to forge liveness evidence (B3) or exit records (B4). The generic
+// updateBridgeLockField stays available for fields that are intentionally NOT
+// bridge-owned: restartRequested (written by the abtars restart CLI process,
+// whose PID differs from the bridge), watchdogPid/watchdogStartIdentity
+// (watchdog), and whole-lock creation in initBridgeLock.
+
+interface LockOwnerContext { readonly pid: number; readonly instanceId: string }
+
+let ownerContext: LockOwnerContext | null = null;
+
+/**
+ * Read-merge-write one BRIDGE-OWNED lock field behind the ownership gate.
+ *
+ * Gate (#1711 R1):
+ *   lock.pid !== process.pid                          -> reject (hard gate)
+ *   lock.instanceId present and !== local instanceId  -> reject
+ *   lock.instanceId absent/unparseable                -> accept — PIDs are unique
+ *     among live processes, so lock.pid naming this process already proves the
+ *     lock names us. Rejecting here too would freeze the healthy bridge's own
+ *     heartbeat on a partially corrupted lock and let the liveness path contain
+ *     a serving process (requirements R1).
+ *
+ * Rejection is warn-only and never retries: the watchdog owns recovery.
+ */
+export function updateOwnedBridgeLockField(key: string, value: unknown): boolean {
+  const p = join(abtarsHome(), "bridge.lock");
+  try {
+    const lock = JSON.parse(readFileSync(p, "utf-8")) as Record<string, unknown>;
+    if (lock.pid !== process.pid) {
+      logWarn("bridge_lock_transport", `owner-scoped write rejected (${key}): lock pid ${String(lock.pid)} != ${process.pid}`);
+      return false;
+    }
+    const lockInstanceId = typeof lock.instanceId === "string" ? lock.instanceId : null;
+    if (lockInstanceId !== null && ownerContext !== null && lockInstanceId !== ownerContext.instanceId) {
+      logWarn("bridge_lock_transport", `owner-scoped write rejected (${key}): lock instanceId is not this bridge`);
+      return false;
+    }
+    lock[key] = value;
+    atomicWriteSync(p, JSON.stringify(lock));
+    return true;
+  } catch (err) {
+    // Missing/corrupt/unwritable lock: tolerate without crashing the bridge or
+    // retrying in a loop (#1632 semantics preserved).
+    logAndSwallow("bridge_lock_transport", `updateOwnedBridgeLockField(${key}) on ${p}`, err);
+    return false;
+  }
+}
+
+/** Bridge-owned exit record written by the process exit handler in main.ts. */
+export function writeOwnedExitFields(lastExitCode: number, lastExitAt: number): boolean {
+  const p = join(abtarsHome(), "bridge.lock");
+  try {
+    const lock = JSON.parse(readFileSync(p, "utf-8")) as Record<string, unknown>;
+    if (lock.pid !== process.pid) {
+      logWarn("bridge_lock_transport", `exit-field write rejected: lock pid ${String(lock.pid)} != ${process.pid}`);
+      return false;
+    }
+    const lockInstanceId = typeof lock.instanceId === "string" ? lock.instanceId : null;
+    if (lockInstanceId !== null && ownerContext !== null && lockInstanceId !== ownerContext.instanceId) {
+      logWarn("bridge_lock_transport", "exit-field write rejected: lock instanceId is not this bridge");
+      return false;
+    }
+    lock.lastExitCode = lastExitCode;
+    lock.lastExitAt = lastExitAt;
+    atomicWriteSync(p, JSON.stringify(lock));
+    return true;
+  } catch (err) {
+    logAndSwallow("bridge_lock_transport", `writeOwnedExitFields on ${p}`, err);
+    return false;
+  }
+}
+
 /** Add an ACP child PID to bridge.lock tracking. */
 export function trackAcpPid(pid: number): void {
   const pids = readBridgeLockField<number[]>("acpPids") ?? [];
   pids.push(pid);
-  updateBridgeLockField("acpPids", pids);
+  updateOwnedBridgeLockField("acpPids", pids);
 }
 
 /** Read and clear stale ACP PIDs from bridge.lock. */
 export function readAndClearAcpPids(): number[] {
   const pids = readBridgeLockField<number[]>("acpPids") ?? [];
-  if (pids.length) updateBridgeLockField("acpPids", []);
+  if (pids.length) updateOwnedBridgeLockField("acpPids", []);
   return pids;
 }
 
@@ -54,9 +131,9 @@ export function readBridgeLockField<T = unknown>(key: string): T | null {
   } catch (err) { logAndSwallow("bridge_lock_transport", "readBridgeLockField", err); return null; }
 }
 
-/** Write restart reason to bridge.lock. */
+/** Write restart reason to bridge.lock (bridge-owned, owner-scoped per #1711 R1). */
 export function writeRestartReason(reason: string): void {
-  updateBridgeLockField("restartReason", `${localISO()} ${reason}`);
+  updateOwnedBridgeLockField("restartReason", `${localISO()} ${reason}`);
 }
 
 /** Read and clear restart reason from bridge.lock. */
@@ -78,9 +155,9 @@ export function readAndClearRestartRequested(): string | null {
   return req;
 }
 
-/** Update sleep status in bridge.lock. */
+/** Update sleep status in bridge.lock (bridge-owned, owner-scoped per #1711 R1). */
 export function writeSleepStatus(status: SleepStatus): void {
-  updateBridgeLockField("sleepStatus", status);
+  updateOwnedBridgeLockField("sleepStatus", status);
 }
 
 /** Initialize bridge.lock with full boot state. Single writer for initial creation. */
@@ -112,6 +189,10 @@ export function initBridgeLock(opts: { pid: number; startedAt: number; version: 
     // A bridge instance ID belongs to this process, not to the lock file. Never
     // carry the previous bridge's ID across a respawn.
     const instanceId = randomUUID();
+    // #1711 R1: record the process-local owner context BEFORE first write so
+    // every later owner-scoped write can compare against the identity this
+    // bridge published.
+    ownerContext = { pid: opts.pid, instanceId };
     atomicWriteSync(p, JSON.stringify({
       pid: opts.pid, watchdogPid: wdPid, watchdogStartIdentity: wdStartIdentity,
       startedAt: opts.startedAt, version: opts.version,
@@ -129,7 +210,8 @@ export function initBridgeLock(opts: { pid: number; startedAt: number; version: 
   return prev;
 }
 
-/** Update lastHeartbeat timestamp in bridge.lock (called every tick). */
+/** Update lastHeartbeat timestamp in bridge.lock (called every tick).
+ *  Owner-scoped per #1711 R1: a non-owner must not forge liveness evidence. */
 export function updateLastHeartbeat(): void {
-  updateBridgeLockField("lastHeartbeat", Date.now());
+  updateOwnedBridgeLockField("lastHeartbeat", Date.now());
 }

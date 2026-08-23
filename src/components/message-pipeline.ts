@@ -48,7 +48,7 @@ import type { ConversationBuffer } from "./conversation-buffer.js";
 import type { RunningJob } from "./tasks/task-queue.js";
 import type { InboundMessage, PlatformAdapter, DeliveryCorrelation } from "../types/platform.js";
 import { BOOT_GREETING_TOKEN } from "../types/platform.js";
-import { updateBridgeLockField } from "./transport/bridge-lock-transport.js";
+import { updateOwnedBridgeLockField } from "./transport/bridge-lock-transport.js";
 import { createMessageContext, runPipeline, voiceMiddleware, sessionSelectionMiddleware, commandMiddleware, pausedGuardMiddleware, busyGuardMiddleware, emergencyRouteMiddleware } from "./pipeline/index.js";
 import { codingRouteMiddleware } from "./pipeline/coding-route.js";
 import { releaseBusy } from "./pipeline/busy-guard.js";
@@ -806,7 +806,7 @@ export async function handleInboundMessage(
 
     const ctxAfter = transport.contextPercent;
     logInfo(TAG, `→ [${msg.platform}] Response delivered${ctxAfter >= 0 ? ` (ctx: ${ctxAfter}%)` : ""}`);
-    updateBridgeLockField("lastPromptAt", Date.now());
+    updateOwnedBridgeLockField("lastPromptAt", Date.now());
 
     // #938: Update session metrics
     effectiveSession.messageCount = (effectiveSession.messageCount ?? 0) + 1;

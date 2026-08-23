@@ -8,7 +8,7 @@ import type { ManagedSession } from "../spin-types.js";
 import { cleanResponse } from "../clean-response.js";
 import { logDebug, logInfo, logWarn } from "../logger.js";
 import { logAndSwallow } from "../log-and-swallow.js";
-import { updateBridgeLockField } from "../transport/bridge-lock-transport.js";
+import { updateOwnedBridgeLockField } from "../transport/bridge-lock-transport.js";
 
 const TAG = "response-mw";
 
@@ -110,7 +110,7 @@ export async function deliverResponse(ctx: DeliveryContext): Promise<DeliveryRes
 
   const ctxAfter = transport.contextPercent;
   logInfo(TAG, `→ [${msg.platform}] Response delivered${ctxAfter >= 0 ? ` (ctx: ${ctxAfter}%)` : ""}`);
-  updateBridgeLockField("lastPromptAt", Date.now());
+  updateOwnedBridgeLockField("lastPromptAt", Date.now());
 
   // ALWAYS increment metrics
   session.messageCount = (session.messageCount ?? 0) + 1;

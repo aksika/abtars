@@ -1,7 +1,7 @@
 import { HeartbeatSystem, setHeartbeatInstance } from "../components/heartbeat-system.js";
 import { classifyResume } from "../components/platform-detect.js";
 import {
-  writeRestartReason, readAndClearRestartRequested, updateBridgeLockField,
+  writeRestartReason, readAndClearRestartRequested, updateOwnedBridgeLockField,
 } from "../components/transport/bridge-lock-transport.js";
 import { loadUsers } from "../components/user-registry.js";
 import { logInfo, logWarn, logDebug } from "../components/logger.js";
@@ -12,7 +12,7 @@ export async function phaseHeartbeat(ctx: BootCtx): Promise<PhaseResult> {
   const { init: initSkillStats } = await import("../components/skill-stats.js");
   initSkillStats();
 
-  updateBridgeLockField("startedAt", ctx.startedAt);
+  updateOwnedBridgeLockField("startedAt", ctx.startedAt);
 
   const hbIntervalMs = Math.max(60, parseInt(readEnvWithDefault("HEARTBEAT_INTERVAL_SEC", "60", "heartbeat tick interval"), 10)) * 1000;
 

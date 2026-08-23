@@ -5,12 +5,13 @@ import { initEnv, _resetEnv } from "./components/env-schema.js";
 import { startBridge } from "./bridge-app.js";
 import { logInfo } from "./components/logger.js";
 import { resetAbmindCache } from "./utils/abmind-lazy.js";
+import { writeOwnedExitFields } from "./components/transport/bridge-lock-transport.js";
 
 initEnv();
 
 import { checkCircuitBreaker } from "./boot/circuit-breaker.js";
 
-import { readFileSync, writeFileSync } from "node:fs";
+import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { validateBridgeLock } from "./supervisor/identity.js";
 
@@ -44,12 +45,9 @@ process.on("exit", (code) => {
   const stack = new Error("exit trace").stack?.split("\n").slice(1, 6).join("\n") ?? "";
   console.error(`[EXIT] code=${code} at ${new Date().toISOString()}\n${stack}`);
   try {
-    const home = process.env["ABTARS_HOME"] ?? join(process.env["HOME"] ?? "/tmp", ".abtars");
-    const lockPath = join(home, "bridge.lock");
-    const lock = JSON.parse(readFileSync(lockPath, "utf-8"));
-    lock.lastExitCode = code;
-    lock.lastExitAt = Date.now();
-    writeFileSync(lockPath, JSON.stringify(lock));
+    // #1711 R1: exit fields are bridge-owned — written through the owner gate
+    // so a non-owner process can never forge them. Warn-only; never masks exit.
+    writeOwnedExitFields(code, Date.now());
   } catch { /* lock missing/corrupt — do not mask exit */ }
 });
 
