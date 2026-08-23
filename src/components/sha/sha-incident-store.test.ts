@@ -123,12 +123,28 @@ describe("admitEvent — create-or-attach (R4)", () => {
     expect(rows[0]?.episode).toBe(2);
   });
 
-  it("bounded diagnostic JSON insertion", () => {
-    const huge = JSON.stringify(makeTaskFailure("execution", "model_error", "executing", "x".repeat(20_000), "none"));
-    const result = admit({ diagnosticJson: huge });
-    expect(result.kind).not.toBe("duplicate_event");
-    const row = db.prepare("SELECT diagnostic_json FROM sha_incident_events WHERE event_key = 'task:daily-ai:run:r1'").get();
-    expect(String(row?.["diagnostic_json"]).length).toBeLessThanOrEqual(8192);
+  it("rejects over-bound diagnostic JSON instead of truncating (#1708)", () => {
+    const huge = JSON.stringify({ category: "execution", code: "model_error", phase: "executing", message: "x".repeat(9000), retryable: "none" });
+    expect(() => admit({ diagnosticJson: huge })).toThrow(/exceeds 8192 UTF-8 bytes/);
+    // Rejection is total: no incident, no event row.
+    expect(db.prepare("SELECT COUNT(*) AS n FROM sha_incidents").get()?.["n"]).toBe(0);
+    expect(db.prepare("SELECT COUNT(*) AS n FROM sha_incident_events").get()?.["n"]).toBe(0);
+  });
+
+  it("rejects syntactically invalid diagnostic JSON and multi-byte overruns (#1708)", () => {
+    expect(() => admit({ diagnosticJson: "{not json" })).toThrow(/not valid JSON/);
+    // A string under 8192 CHARS can still exceed 8192 UTF-8 bytes — rejected.
+    const multibyteOverrun = JSON.stringify({ message: "\u2603".repeat(4100) });
+    expect(Buffer.byteLength(multibyteOverrun, "utf-8")).toBeGreaterThan(8192);
+    expect(multibyteOverrun.length).toBeLessThan(8192);
+    expect(() => admit({ diagnosticJson: multibyteOverrun })).toThrow(/exceeds 8192 UTF-8 bytes/);
+    // Bounded multi-byte JSON is accepted verbatim — never re-encoded or cut.
+    const multibyteOk = JSON.stringify({ message: "\u2603 ok" });
+    const result = admit({ eventKey: "task:daily-ai:run:r2", diagnosticJson: multibyteOk });
+    expect(result.kind).toBe("created");
+    const row = db.prepare("SELECT diagnostic_json FROM sha_incident_events WHERE event_key = 'task:daily-ai:run:r2'").get();
+    expect(row?.["diagnostic_json"]).toBe(multibyteOk);
+    expect(() => JSON.parse(String(row?.["diagnostic_json"]))).not.toThrow();
   });
 });
 
@@ -259,6 +275,65 @@ describe("fault state cooldowns (R8)", () => {
     }, "autofix-known", "known-fix", 30, "2026-08-21T10:02:00.000Z");
     expect(blocked.kind).toBe("cooldown");
     expect(store.faultState("autofix-known", "known-fix")?.totalRuns).toBe(1);
+  });
+
+  it("admitEventWithCooldownInTx composes inside a caller transaction (#1708)", () => {
+    const anomalyParams = (eventKey: string, fingerprint: string) => ({
+      eventKey,
+      fingerprint,
+      workflowKind: "project" as const,
+      source: "log" as const,
+      sourceScope: "log-anomaly:abc",
+      mode: "investigation" as const,
+      diagnosticJson: '{"source":"logAnomaly"}',
+      occurredAt: Date.now(),
+    });
+
+    // Outer atomic provisioning transaction; the in-tx helper nests via
+    // savepoints and reserves cooldown only on create. (TaskDatabase's
+    // transaction() executes the body immediately and returns its result.)
+    const created = db.transaction(() =>
+      store.admitEventWithCooldownInTx(
+        anomalyParams("anomaly-e1", "fp-anomaly-1"),
+        "log-anomaly", "log-anomaly:abc", 60, "2026-08-21T10:00:00.000Z",
+      ),
+    );
+    expect(created).toMatchObject({ kind: "created" });
+    if (created.kind !== "created") return;
+    expect(store.faultState("log-anomaly", "log-anomaly:abc")?.totalRuns).toBe(1);
+
+    // Replay of the same event key inside another transaction: duplicate,
+    // no second cooldown reservation.
+    const replay = db.transaction(() => store.admitEventWithCooldownInTx(
+      anomalyParams("anomaly-e1", "fp-anomaly-1"),
+      "log-anomaly", "log-anomaly:abc", 60, "2026-08-21T10:01:00.000Z",
+    ));
+    expect(replay).toMatchObject({ kind: "duplicate_event" });
+    expect(store.faultState("log-anomaly", "log-anomaly:abc")?.totalRuns).toBe(1);
+
+    // A distinct event attaches to the ACTIVE episode without consuming the
+    // cooldown gate or reserving a new attempt.
+    const attached = db.transaction(() => store.admitEventWithCooldownInTx(
+      anomalyParams("anomaly-e2", "fp-anomaly-1"),
+      "log-anomaly", "log-anomaly:abc", 60, "2026-08-21T10:02:00.000Z",
+    ));
+    expect(attached).toMatchObject({ kind: "attached" });
+    expect(store.faultState("log-anomaly", "log-anomaly:abc")?.totalRuns).toBe(1);
+
+    // Terminalize, then a new episode inside cooldown is refused.
+    store.transition({
+      incidentId: created.incidentId,
+      expectedVersion: 1,
+      fromStates: ["provisioning"],
+      toState: "blocked",
+      reason: "test terminal",
+    });
+    const cooled = db.transaction(() => store.admitEventWithCooldownInTx(
+      anomalyParams("anomaly-e3", "fp-anomaly-2"),
+      "log-anomaly", "log-anomaly:abc", 60, "2026-08-21T10:30:00.000Z",
+    ));
+    expect(cooled.kind).toBe("cooldown");
+    if (cooled.kind === "cooldown") expect(cooled.remainingMs).toBeGreaterThan(0);
   });
 });
 

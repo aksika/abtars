@@ -3,15 +3,21 @@ import {
   classifyShaFailure,
   canonicalHash,
   canonicalJson,
+  logAnomalyEventKey,
+  logAnomalyFingerprint,
+  logAnomalyPathHash,
+  logAnomalySourceScope,
   logEventKey,
   logFingerprint,
   normalizeFailureMessage,
   scheduledEventKey,
   scheduledFingerprint,
+  selfHealModeRank,
+  validateLogAnomalyEvent,
   type ShaPolicyView,
 } from "./sha-classifier.js";
 import { makeTaskFailure } from "../tasks/task-failure.js";
-import type { LogFailureEvent, ScheduledFailureEvent } from "./sha-types.js";
+import type { LogAnomalyEvent, LogFailureEvent, ScheduledFailureEvent } from "./sha-types.js";
 
 const EMPTY_POLICY: ShaPolicyView = { fixes: [], logAdmissionAllowed: true };
 
@@ -184,5 +190,146 @@ describe("normalization and fingerprints (R3)", () => {
   it("canonical JSON is stable across key order", () => {
     expect(canonicalJson({ b: 1, a: [2, { d: 1, c: 2 }] })).toBe(canonicalJson({ a: [2, { c: 2, d: 1 }], b: 1 }));
     expect(canonicalHash("x")).toHaveLength(64);
+  });
+});
+
+// ── #1708: typed log-anomaly contract ────────────────────────────────────────
+
+function anomalyEvent(overrides: Partial<LogAnomalyEvent> = {}): LogAnomalyEvent {
+  const now = 1_700_000_000_000;
+  return {
+    source: "logAnomaly",
+    schemaVersion: 1,
+    anomalyKind: "growth_rate",
+    logPath: "/home/u/.abtars/logs/abtars.log",
+    inode: 42,
+    episodeStartedAt: now,
+    windowStartedAt: now + 60_000,
+    windowEndedAt: now + 120_000,
+    sampleCount: 12,
+    baselineBytesPerMinute: 1_000,
+    observedBytesPerMinute: 50_000,
+    ratio: 50,
+    evidence: "log growing 50x faster than baseline",
+    ...overrides,
+  };
+}
+
+describe("#1708 validateLogAnomalyEvent", () => {
+  it("accepts a production-shaped event", () => {
+    const r = validateLogAnomalyEvent(anomalyEvent());
+    expect(r.ok).toBe(true);
+  });
+
+  it("rejects wrong source/schema/kind and non-objects", () => {
+    expect(validateLogAnomalyEvent(null).ok).toBe(false);
+    expect(validateLogAnomalyEvent("x").ok).toBe(false);
+    expect(validateLogAnomalyEvent({}).ok).toBe(false);
+    expect(validateLogAnomalyEvent(anomalyEvent({ source: "log" as never })).ok).toBe(false);
+    expect(validateLogAnomalyEvent(anomalyEvent({ schemaVersion: 2 })).ok).toBe(false);
+    expect(validateLogAnomalyEvent(anomalyEvent({ anomalyKind: "rotation" as never })).ok).toBe(false);
+  });
+
+  it("rejects relative or non-normalized paths and over-bound paths", () => {
+    expect(validateLogAnomalyEvent(anomalyEvent({ logPath: "relative/log.log" })).ok).toBe(false);
+    expect(validateLogAnomalyEvent(anomalyEvent({ logPath: "/tmp/a/../b.log" })).ok).toBe(false);
+    expect(validateLogAnomalyEvent(anomalyEvent({ logPath: `/${"x".repeat(1024)}.log` })).ok).toBe(false);
+    expect(validateLogAnomalyEvent(anomalyEvent({ logPath: `/${"x".repeat(1000)}.log` })).ok).toBe(true);
+  });
+
+  it("rejects bad inodes, sample counts, timestamp ordering, rates, ratios, and oversized evidence", () => {
+    expect(validateLogAnomalyEvent(anomalyEvent({ inode: -1 })).ok).toBe(false);
+    expect(validateLogAnomalyEvent(anomalyEvent({ inode: 1.5 })).ok).toBe(false);
+    expect(validateLogAnomalyEvent(anomalyEvent({ sampleCount: 1 })).ok).toBe(false);
+    expect(validateLogAnomalyEvent(anomalyEvent({ windowStartedAt: 500, windowEndedAt: 400 })).ok).toBe(false);
+    expect(validateLogAnomalyEvent(anomalyEvent({ episodeStartedAt: 999, windowStartedAt: 1000, windowEndedAt: 2000 })).ok).toBe(true);
+    expect(validateLogAnomalyEvent(anomalyEvent({ baselineBytesPerMinute: 0 })).ok).toBe(false);
+    expect(validateLogAnomalyEvent(anomalyEvent({ observedBytesPerMinute: 10, ratio: 0.01 })).ok).toBe(false);
+    // ratio inconsistent with observed/baseline beyond relative 1e-6
+    expect(validateLogAnomalyEvent(anomalyEvent({ ratio: 49 })).ok).toBe(false);
+    expect(validateLogAnomalyEvent(anomalyEvent({ ratio: Number.NaN })).ok).toBe(false);
+    // windowEnd must be strictly greater than windowStart
+    expect(validateLogAnomalyEvent(anomalyEvent({ windowEndedAt: 1_700_000_060_000 })).ok).toBe(false);
+    expect(validateLogAnomalyEvent(anomalyEvent({ evidence: "y".repeat(2049) })).ok).toBe(false);
+    expect(validateLogAnomalyEvent(anomalyEvent({ evidence: "y".repeat(2048) })).ok).toBe(true);
+  });
+});
+
+describe("#1708 anomaly identity", () => {
+  it("fingerprint is stable across rotation (inode) and re-samples; keyed per episode", () => {
+    const base = anomalyEvent();
+    const rotated = anomalyEvent({
+      inode: 999,
+      episodeStartedAt: base.episodeStartedAt + 3_600_000,
+      windowStartedAt: base.windowStartedAt + 3_600_000,
+      windowEndedAt: base.windowEndedAt + 3_600_000,
+      observedBytesPerMinute: 90_000,
+      ratio: 90,
+      evidence: "different evidence",
+    });
+    expect(logAnomalyFingerprint(base)).toBe(logAnomalyFingerprint(rotated));
+    // Event keys differ per physical episode even when the fingerprint matches.
+    expect(logAnomalyEventKey(base)).not.toBe(logAnomalyEventKey(rotated));
+    // Same episode re-sample reuses the key (duplicate, not new admission).
+    expect(logAnomalyEventKey(base)).toBe(logAnomalyEventKey(anomalyEvent()));
+  });
+
+  it("distinct paths produce distinct fingerprints/scopes with full-hash scopes", () => {
+    const a = anomalyEvent();
+    const b = anomalyEvent({ logPath: "/home/u/.abtars/logs/other.log" });
+    expect(logAnomalyFingerprint(a)).not.toBe(logAnomalyFingerprint(b));
+    const scopeA = logAnomalySourceScope(a);
+    expect(scopeA).toBe(`log-anomaly:${logAnomalyPathHash(a)}`);
+    expect(logAnomalyPathHash(a)).toMatch(/^[0-9a-f]{64}$/);
+    expect(scopeA).not.toBe(logAnomalySourceScope(b));
+  });
+
+  it("event key format is log-anomaly:<pathHash>:<inode>:<episodeStartedAt>", () => {
+    const e = anomalyEvent();
+    expect(logAnomalyEventKey(e)).toBe(`log-anomaly:${logAnomalyPathHash(e)}:${e.inode}:${e.episodeStartedAt}`);
+  });
+});
+
+describe("#1708 anomaly classification gates", () => {
+  const gatePolicy: ShaPolicyView = {
+    fixes: [{ pattern: "growth", action: "suppress", cooldownMin: 5 }],
+    logAdmissionAllowed: true,
+    logAnomaly: { shaAllowed: true, minimumMode: "investigation", cooldownMinutes: 60 },
+  };
+
+  it("mode off suppresses before any policy read", () => {
+    const r = classifyShaFailure(anomalyEvent(), "off", gatePolicy);
+    expect(r).toMatchObject({ classification: "suppressed", reason: "mode off" });
+  });
+
+  it("shaAllowed=false suppresses; minimum mode is enforced by rank", () => {
+    const denied: ShaPolicyView = { ...gatePolicy, logAnomaly: { ...gatePolicy.logAnomaly!, shaAllowed: false } };
+    expect(classifyShaFailure(anomalyEvent(), "full", denied).classification).toBe("suppressed");
+
+    const needsFull: ShaPolicyView = { ...gatePolicy, logAnomaly: { ...gatePolicy.logAnomaly!, minimumMode: "full" } };
+    expect(classifyShaFailure(anomalyEvent(), "investigation", needsFull).classification).toBe("suppressed");
+    expect(classifyShaFailure(anomalyEvent(), "full", needsFull).classification).toBe("unknown_actionable");
+  });
+
+  it("an admitted anomaly bypasses fix rules and the external regex entirely", () => {
+    // Evidence contains both a fix-rule pattern ("growth") and an external
+    // network signature — neither may classify the typed event.
+    const e = anomalyEvent({ evidence: "connection refused while growth detected" });
+    const r = classifyShaFailure(e, "investigation", gatePolicy);
+    expect(r.classification).toBe("unknown_actionable");
+  });
+
+  it("missing policy gate defaults to suppression (fail-closed)", () => {
+    expect(classifyShaFailure(anomalyEvent(), "full", EMPTY_POLICY).classification).toBe("suppressed");
+  });
+
+  it("scheduled and log classification precedence is unchanged alongside the new source", () => {
+    expect(classifyShaFailure(scheduled(), "off", EMPTY_POLICY).reason).toContain("mode off");
+    expect(classifyShaFailure(logEvent(), "full", { fixes: [], logAdmissionAllowed: false }).reason).toContain("malformed policy");
+  });
+
+  it("mode rank orders off < investigation < full", () => {
+    expect(selfHealModeRank("off")).toBeLessThan(selfHealModeRank("investigation"));
+    expect(selfHealModeRank("investigation")).toBeLessThan(selfHealModeRank("full"));
   });
 });

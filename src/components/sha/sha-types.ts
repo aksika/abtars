@@ -50,7 +50,37 @@ export interface LogFailureEvent {
   readonly evidence: string;
 }
 
-export type ShaFailureSignal = ScheduledFailureEvent | LogFailureEvent;
+/**
+ * #1708: typed episode-level log growth-rate anomaly produced by the #1709
+ * detector. The producer is an untrusted internal boundary — the coordinator
+ * re-validates, re-redacts, and byte-bounds everything before persistence.
+ * One detector episode emits one stable identity; repeated samples reuse the
+ * event key and are duplicates, not new admissions.
+ */
+export interface LogAnomalyEvent {
+  readonly source: "logAnomaly";
+  readonly schemaVersion: 1;
+  readonly anomalyKind: "growth_rate";
+  /** Absolute, normalized active-log path (≤ 1024 UTF-8 bytes). */
+  readonly logPath: string;
+  /** Non-negative safe integer; physical identity only. */
+  readonly inode: number;
+  /** Unix-epoch milliseconds; episodeStartedAt <= windowStartedAt < windowEndedAt. */
+  readonly episodeStartedAt: number;
+  readonly windowStartedAt: number;
+  readonly windowEndedAt: number;
+  /** Safe integer >= 2. */
+  readonly sampleCount: number;
+  /** Finite bytes/minute > 0; observed >= baseline. */
+  readonly baselineBytesPerMinute: number;
+  readonly observedBytesPerMinute: number;
+  /** Finite >= 1 and consistent with observed/baseline within relative 1e-6. */
+  readonly ratio: number;
+  /** Bounded redacted evidence (≤ 2048 UTF-8 bytes); never a raw-log dump. */
+  readonly evidence: string;
+}
+
+export type ShaFailureSignal = ScheduledFailureEvent | LogFailureEvent | LogAnomalyEvent;
 
 export type ShaClassification =
   | "suppressed"
@@ -67,7 +97,7 @@ export interface ShaClassificationResult {
 }
 
 export type ShaAdmissionOutcome =
-  | { kind: "ignored"; reason: "off" | "system" | "credits" | "external" | "ambiguous" | "suppressed" }
+  | { kind: "ignored"; reason: "off" | "system" | "credits" | "external" | "ambiguous" | "suppressed" | "cooldown" }
   | { kind: "duplicate_event" }
   | { kind: "attached"; incidentId: number; rootCardId: number; occurrenceCount: number }
   | { kind: "project_created"; incidentId: number; rootCardId: number; mode: "investigation" | "full" }

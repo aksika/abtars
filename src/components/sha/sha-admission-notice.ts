@@ -9,6 +9,9 @@ import type { ShaAdmissionOutcome, ShaFailureSignal } from "./sha-types.js";
 export function shaAdmissionNotice(_signal: ShaFailureSignal, outcome: ShaAdmissionOutcome): string | null {
   switch (outcome.kind) {
     case "ignored":
+      // #1708: anomaly cooldown is a silent ignore — no second operator
+      // message for an episode that was already admitted or suppressed.
+      if (outcome.reason === "cooldown") return null;
       if (outcome.reason === "off") return "SHA: off — no self-healing action.";
       if (outcome.reason === "system") return "SHA: system-kind failure — outside SHA remediation authority (notified only).";
       if (outcome.reason === "credits") return "SHA: provider credits exhausted — not self-healable.";

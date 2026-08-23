@@ -9,7 +9,7 @@
  * commit. Guarded/off outcomes perform zero SHA store writes.
  */
 import { nerve } from "../nerve.js";
-import { logInfo, logWarn } from "../logger.js";
+import { logInfo, logWarn, redactSecrets } from "../logger.js";
 import type { TaskDatabase } from "../tasks/kanban-board.js";
 import { cascadeFail, kanbanEnqueue, kanbanFail, kanbanGetCard, kanbanGetChildren, requireTaskDatabase } from "../tasks/kanban-board.js";
 import { loadPiConfig } from "../pi-executor/config.js";
@@ -18,13 +18,13 @@ import { WorkerSupervisionService } from "../worker-supervision-service.js";
 import { WorkerSupervisionStore } from "../worker-supervision-store.js";
 import { ShaWorkspaceManager } from "./sha-workspace-manager.js";
 import { createContractId } from "../project-acceptance/project-contract.js";
-import { classifyShaFailure, scheduledEventKey, scheduledFingerprint, logEventKey, logFingerprint } from "./sha-classifier.js";
+import { classifyShaFailure, scheduledEventKey, scheduledFingerprint, logEventKey, logFingerprint, validateLogAnomalyEvent, logAnomalyEventKey, logAnomalyFingerprint, logAnomalySourceScope, MAX_EVIDENCE_BYTES, MAX_DIAGNOSTIC_JSON_BYTES } from "./sha-classifier.js";
 import type { ShaPolicyView } from "./sha-classifier.js";
 import { ShaIncidentStore } from "./sha-incident-store.js";
 import type { AdmitResult } from "./sha-incident-store.js";
 import { ShaKnownFixRunner } from "./sha-known-fix-runner.js";
 import type { FixRule } from "./sha-policy.js";
-import { loadMergedFixes, logAdmissionAllowed } from "./sha-policy.js";
+import { getEffectiveShaPolicy } from "./sha-policy.js";
 import {
   SHA_STAGE_CRITERIA,
   SHA_WORKSPACE_ALIAS,
@@ -69,6 +69,9 @@ export interface ShaIncidentCoordinatorDeps {
 
 const TAG = "sha-coordinator";
 
+/** #1708: durable cooldown policy key + scope prefix for anomaly admissions. */
+const ANOMALY_COOLDOWN_POLICY_KEY = "log-anomaly";
+
 export class ShaIncidentCoordinator {
   private readonly db: TaskDatabase;
   private readonly store: ShaIncidentStore;
@@ -91,7 +94,12 @@ export class ShaIncidentCoordinator {
     this.workspaceManager = deps.workspaceManager ?? new ShaWorkspaceManager();
     this.knownFixRunner = deps.knownFixRunner ?? new ShaKnownFixRunner(undefined, this.workspaceManager);
     this.modeProvider = deps.modeProvider;
-    this.policyView = deps.policyView ?? (() => ({ fixes: loadMergedFixes(), logAdmissionAllowed: logAdmissionAllowed() }));
+    // #1708: default view carries the effective source gates alongside fixes
+    // so classification and admission see one consistent snapshot.
+    this.policyView = deps.policyView ?? (() => {
+      const p = getEffectiveShaPolicy();
+      return { fixes: p.fixes, logAdmissionAllowed: p.logAdmissionAllowed, logAnomaly: p.logAnomaly };
+    });
     this.noticeSink = deps.noticeSink;
     this.aliasAvailability = deps.aliasAvailability ?? (() => ShaWorkspaceManagerAliasCheck());
   }
@@ -101,10 +109,19 @@ export class ShaIncidentCoordinator {
    * store access; unknown actionable faults create-or-attach the durable
    * incident, provision the complete blocked placeholder chain and root
    * contract, bind RCA, and — only after commit — fire the queued events.
+   * #1708: runtime mode and ONE effective policy snapshot are captured once
+   * per event and carried through classification, cooldown, and stage
+   * selection — a concurrent reload cannot mix snapshots inside one admission.
    */
   admit(signal: ShaFailureSignal): ShaAdmissionOutcome {
+    // Producer boundary: an invalid typed anomaly is a bounded no-write
+    // outcome before classification, policy, or store access.
+    if (signal.source === "logAnomaly" && !validateLogAnomalyEvent(signal).ok) {
+      return { kind: "ignored", reason: "ambiguous" };
+    }
     const mode = this.modeProvider();
-    const classification = classifyShaFailure(signal, mode, this.policyView());
+    const policy = this.policyView();
+    const classification = classifyShaFailure(signal, mode, policy);
 
     switch (classification.classification) {
       case "system":
@@ -125,7 +142,7 @@ export class ShaIncidentCoordinator {
         return this.admitKnownFix(signal, rule);
       }
       case "unknown_actionable":
-        return this.admitProject(signal, mode);
+        return this.admitProject(signal, mode, policy);
     }
   }
 
@@ -135,6 +152,25 @@ export class ShaIncidentCoordinator {
     return this.policyView().fixes.find((f) => f.pattern === pattern);
   }
 
+  /**
+   * #1708: UTF-8-safe truncation. Buffer subarray can split multi-byte
+   * sequences whose replacement decoding would re-encode LARGER than the
+   * cap, so trim trailing code units until the encoded form fits.
+   */
+  private static truncateUtf8Bytes(s: string, maxBytes: number): string {
+    if (Buffer.byteLength(s, "utf-8") <= maxBytes) return s;
+    let out = Buffer.from(s, "utf-8").subarray(0, maxBytes).toString("utf-8");
+    while (Buffer.byteLength(out, "utf-8") > maxBytes) {
+      out = out.slice(0, -1);
+    }
+    return out;
+  }
+
+  /**
+   * Bounded event identity for durable admission. Returns null when the
+   * caller must construct a smaller valid diagnostic (over-bound anomaly
+   * payload) — a suppressed no-write outcome, never a thrown partial failure.
+   */
   private eventIdentity(signal: ShaFailureSignal): {
     eventKey: string;
     fingerprint: string;
@@ -143,7 +179,7 @@ export class ShaIncidentCoordinator {
     taskKind?: TaskKind;
     diagnosticJson: string;
     occurredAt: number;
-  } {
+  } | null {
     if (signal.source === "scheduled") {
       return {
         eventKey: scheduledEventKey(signal),
@@ -153,6 +189,40 @@ export class ShaIncidentCoordinator {
         taskKind: signal.taskKind,
         diagnosticJson: JSON.stringify(signal.diagnostic),
         occurredAt: signal.occurredAt,
+      };
+    }
+    if (signal.source === "logAnomaly") {
+      // The producer is untrusted: re-apply secret redaction, then bound the
+      // redacted evidence to the UTF-8 evidence cap before serializing.
+      const redactedEvidence = ShaIncidentCoordinator.truncateUtf8Bytes(
+        redactSecrets(signal.evidence),
+        MAX_EVIDENCE_BYTES,
+      );
+      const diagnosticJson = JSON.stringify({
+        source: signal.source,
+        schemaVersion: signal.schemaVersion,
+        anomalyKind: signal.anomalyKind,
+        logPath: signal.logPath,
+        inode: signal.inode,
+        episodeStartedAt: signal.episodeStartedAt,
+        windowStartedAt: signal.windowStartedAt,
+        windowEndedAt: signal.windowEndedAt,
+        sampleCount: signal.sampleCount,
+        baselineBytesPerMinute: signal.baselineBytesPerMinute,
+        observedBytesPerMinute: signal.observedBytesPerMinute,
+        ratio: signal.ratio,
+        evidence: redactedEvidence,
+      });
+      if (Buffer.byteLength(diagnosticJson, "utf-8") > MAX_DIAGNOSTIC_JSON_BYTES) {
+        return null;
+      }
+      return {
+        eventKey: logAnomalyEventKey(signal),
+        fingerprint: logAnomalyFingerprint(signal),
+        source: "log",
+        sourceScope: logAnomalySourceScope(signal),
+        diagnosticJson,
+        occurredAt: signal.windowEndedAt,
       };
     }
     return {
@@ -173,6 +243,7 @@ export class ShaIncidentCoordinator {
       return { kind: "known_fix_recommended" };
     }
     const identity = this.eventIdentity(signal);
+    if (!identity) return { kind: "ignored", reason: "suppressed" };
     const admitted = this.store.admitEventWithCooldown({
       ...identity,
       workflowKind: "known_fix",
@@ -233,8 +304,13 @@ export class ShaIncidentCoordinator {
     return { kind: "known_fix_started", incidentId };
   }
 
-  /** #1688 R5/R6: unknown actionable — atomic project provisioning + RCA binding. */
-  private admitProject(signal: ShaFailureSignal, mode: SelfHealMode): ShaAdmissionOutcome {
+  /**
+   * #1688 R5/R6: unknown actionable — atomic project provisioning + RCA binding.
+   * #1708: anomaly admissions additionally reserve the effective cooldown
+   * inside the SAME provisioning transaction; a cooldown result is an ignored,
+   * notice-free outcome with no store chain or Kanban writes.
+   */
+  private admitProject(signal: ShaFailureSignal, mode: SelfHealMode, policy: ShaPolicyView): ShaAdmissionOutcome {
     if (mode === "off") return { kind: "ignored", reason: "off" };
     if (mode !== "investigation" && mode !== "full") return { kind: "ignored", reason: "off" };
 
@@ -243,18 +319,33 @@ export class ShaIncidentCoordinator {
     if (aliasError) return { kind: "blocked", reason: aliasError };
 
     const identity = this.eventIdentity(signal);
+    // Over-bound anomaly diagnostic — bounded no-write suppression.
+    if (!identity) return { kind: "ignored", reason: "suppressed" };
+    const cooldownMinutes = signal.source === "logAnomaly"
+      ? policy.logAnomaly?.cooldownMinutes
+      : undefined;
     const stages = stagesForMode(mode);
 
     // Phase 1: incident + root + full placeholder chain + root contract +
     // supervision in ONE transaction. No nerve events before commit.
     const provisioned = this.db.transaction((): {
-      admitted: AdmitResult;
+      admitted: AdmitResult | { kind: "cooldown"; remainingMs: number };
       rootCardId: number;
       rcaCardId: number;
       designCardId: number;
       solutionCardId: number | null;
     } => {
-      const admitted = this.store.admitEventInTx({ ...identity, workflowKind: "project", mode });
+      const admitted = cooldownMinutes !== undefined
+        ? this.store.admitEventWithCooldownInTx(
+            { ...identity, workflowKind: "project", mode },
+            ANOMALY_COOLDOWN_POLICY_KEY,
+            identity.sourceScope,
+            cooldownMinutes,
+          )
+        : this.store.admitEventInTx({ ...identity, workflowKind: "project", mode });
+      if (admitted.kind === "cooldown") {
+        return { admitted, rootCardId: 0, rcaCardId: 0, designCardId: 0, solutionCardId: null };
+      }
       if (admitted.kind !== "created") {
         return { admitted, rootCardId: 0, rcaCardId: 0, designCardId: 0, solutionCardId: null };
       }
@@ -299,6 +390,11 @@ export class ShaIncidentCoordinator {
       return { admitted, rootCardId, rcaCardId, designCardId, solutionCardId };
     });
 
+    if (provisioned.admitted.kind === "cooldown") {
+      // Effective cooldown active: ignored outcome, no notice, no Kanban
+      // writes, no second root card.
+      return { kind: "ignored", reason: "cooldown" };
+    }
     if (provisioned.admitted.kind === "duplicate_event") return { kind: "duplicate_event" };
     if (provisioned.admitted.kind === "attached") {
       return {

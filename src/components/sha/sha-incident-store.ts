@@ -223,25 +223,64 @@ CREATE TABLE IF NOT EXISTS sha_fault_state (
     diagnosticJson: string;
     occurredAt: number;
   }, policyKey: string, scope: string, cooldownMin: number, at = new Date().toISOString()): CooldownAdmitResult {
-    return this.db.transactionImmediate(() => {
-      // Check the durable event key before the active/terminal episode lookup.
-      // This keeps replay idempotent even after the original episode ended.
-      const existing = this.db.prepare(
-        "SELECT 1 AS present FROM sha_incident_events WHERE event_key = ?",
-      ).get(params.eventKey);
-      if (existing) return { kind: "duplicate_event" };
+    return this.db.transactionImmediate(() => this.admitEventWithCooldownInTx(params, policyKey, scope, cooldownMin, at));
+  }
 
-      if (this.activeByFingerprint(params.fingerprint)) {
-        return this.admitEventInTx(params);
-      }
+  /**
+   * #1708: in-transaction cooldown body for callers already inside the
+   * coordinator's atomic project-provisioning transaction (better-sqlite3
+   * nests it via savepoints). Event-key replay is checked BEFORE the
+   * active-episode/cooldown lookup; cooldown is reserved only when a NEW
+   * episode is actually created.
+   */
+  admitEventWithCooldownInTx(params: {
+    eventKey: string;
+    fingerprint: string;
+    workflowKind: ShaWorkflowKind;
+    source: ShaSourceKind;
+    sourceScope: string;
+    taskKind?: TaskKind;
+    mode: "investigation" | "full";
+    diagnosticJson: string;
+    occurredAt: number;
+  }, policyKey: string, scope: string, cooldownMin: number, at = new Date().toISOString()): CooldownAdmitResult {
+    // Check the durable event key before the active/terminal episode lookup.
+    // This keeps replay idempotent even after the original episode ended.
+    const existing = this.db.prepare(
+      "SELECT 1 AS present FROM sha_incident_events WHERE event_key = ?",
+    ).get(params.eventKey);
+    if (existing) return { kind: "duplicate_event" };
 
-      const remainingMs = this.cooldownRemainingInTx(policyKey, scope, cooldownMin, at);
-      if (remainingMs > 0) return { kind: "cooldown", remainingMs };
+    if (this.activeByFingerprint(params.fingerprint)) {
+      return this.admitEventInTx(params);
+    }
 
-      const admitted = this.admitEventInTx(params);
-      if (admitted.kind === "created") this.recordAttemptInTx(policyKey, scope, at);
-      return admitted;
-    });
+    const remainingMs = this.cooldownRemainingInTx(policyKey, scope, cooldownMin, at);
+    if (remainingMs > 0) return { kind: "cooldown", remainingMs };
+
+    const admitted = this.admitEventInTx(params);
+    if (admitted.kind === "created") this.recordAttemptInTx(policyKey, scope, at);
+    return admitted;
+  }
+
+  /**
+   * #1708: the store persists only already-validated diagnostic JSON.
+   * Character-based slicing could split UTF-8 sequences and produce invalid
+   * JSON, and could still exceed the byte cap after re-encoding — so instead
+   * of truncating, over-bound or invalid values are REJECTED before insert.
+   * Callers own constructing a smaller valid object; the coordinator maps a
+   * rejection to a bounded no-write outcome, never a thrown partial
+   * provisioning failure.
+   */
+  private static assertDiagnosticJson(json: string): void {
+    if (Buffer.byteLength(json, "utf-8") > MAX_DIAGNOSTIC_JSON_BYTES) {
+      throw new Error(`diagnostic JSON exceeds ${MAX_DIAGNOSTIC_JSON_BYTES} UTF-8 bytes`);
+    }
+    try {
+      JSON.parse(json);
+    } catch {
+      throw new Error("diagnostic JSON is not valid JSON");
+    }
   }
 
   admitEventInTx(params: {
@@ -257,7 +296,8 @@ CREATE TABLE IF NOT EXISTS sha_fault_state (
   }): AdmitResult {
     const now = new Date().toISOString();
     const occurred = new Date(params.occurredAt).toISOString();
-    const boundedJson = params.diagnosticJson.slice(0, MAX_DIAGNOSTIC_JSON_BYTES);
+    ShaIncidentStore.assertDiagnosticJson(params.diagnosticJson);
+    const boundedJson = params.diagnosticJson;
     const taskKind = params.taskKind ?? null;
 
     // Replays of a terminal episode still resolve to the original event and
