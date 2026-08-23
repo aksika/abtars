@@ -432,6 +432,28 @@ function normalizeRecordMessageResult(value: unknown): RecordMessageResult {
 
 // ── Interface ──────────────────────────────────────────────────────────────
 
+/** #1706: bounded reason codes for late memory composition. Closed union —
+ *  raw endpoint messages never enter diagnostics or status rendering. */
+export type MemoryCompositionFailureCode =
+  | "config_invalid"
+  | "package_missing"
+  | "endpoint_unavailable"
+  | "pin_mismatch"
+  | "authentication_failed"
+  | "negotiation_failed"
+  | "policy_rejected"
+  | "retry_exhausted";
+
+/** #1706: immutable snapshot of re-composition progress for a runtime whose
+ *  initial boot-time negotiation failed. */
+export interface MemoryCompositionDiagnostics {
+  state: "idle" | "retrying" | "upgraded" | "cancelled";
+  attempts: number;
+  lastAttemptAt?: number;
+  lastFailure?: MemoryCompositionFailureCode;
+  upgradedAt?: number;
+}
+
 export interface AbtarsMemoryRuntime {
   readonly state: RuntimeState;
   readonly capabilities: ReadonlySet<MemoryRuntimeCapability>;
@@ -471,6 +493,9 @@ export interface AbtarsMemoryRuntime {
   findSealedSecrets(input: FindSealedSecretsInput): Promise<SealedSecretRef[]>;
   /** #1660: local-only plaintext resolution, revision-checked. */
   resolveSealedSecret(input: ResolveSealedSecretInput): Promise<SealedSecretResolution>;
+  /** #1706: bounded late-composition diagnostics. Present only on
+   *  re-composable facades; ordinary disabled/client runtimes omit it. */
+  readonly compositionDiagnostics?: MemoryCompositionDiagnostics;
   close(): Promise<void>;
 }
 
