@@ -1,3 +1,5 @@
+import type { EffectiveOrcGuardrails } from "../sha/sha-policy.js";
+
 export type OrcRunState =
   | "scheduled"
   | "dispatching"
@@ -40,6 +42,35 @@ export const BRIDGE_STARTS_HOUR_LIMIT = 100;
 export const BRIDGE_STARTS_HOUR_WINDOW_MS = 3_600_000;
 export const BRIDGE_ROWS_5M_LIMIT = 50;
 export const BRIDGE_ROWS_5M_WINDOW_MS = 300_000;
+
+// ── #1708: effective guardrail defaults ───────────────────────────────────────
+//
+// The #1707 containment values grouped into one code-owned object. It is both
+// the shipped default AND the immutable hard ceiling for every policy-
+// resolvable count: sha-policy.json may lower a threshold but never raise it
+// above these values. Windows stay code-owned fixed safety windows and are
+// not configurable.
+
+export const CARD_FAILED_ATTEMPTS_WINDOW_MINUTES = CARD_FAILED_ATTEMPTS_WINDOW_MS / 60_000;
+export const CARD_NO_PROGRESS_WINDOW_MINUTES = CARD_NO_PROGRESS_WINDOW_MS / 60_000;
+
+export const DEFAULT_ORC_GUARDRAILS: EffectiveOrcGuardrails = {
+  sameCard: {
+    failedOrNoProgress: {
+      max: CARD_FAILED_ATTEMPTS_LIMIT,
+      windowMinutes: CARD_FAILED_ATTEMPTS_WINDOW_MINUTES,
+    },
+    startsWithWithoutProgress: {
+      max: CARD_NO_PROGRESS_STARTS_LIMIT,
+      windowMinutes: CARD_NO_PROGRESS_WINDOW_MINUTES,
+    },
+  },
+  bridge: {
+    starts5m: BRIDGE_STARTS_5M_LIMIT,
+    starts1h: BRIDGE_STARTS_HOUR_LIMIT,
+    newRunRows5m: BRIDGE_ROWS_5M_LIMIT,
+  },
+};
 
 /**
  * #1628: in-process fact published after every committed Orc ownership
