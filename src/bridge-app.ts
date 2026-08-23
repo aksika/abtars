@@ -94,6 +94,13 @@ export class Bridge {
       this.ctx._piCapDisposer?.();
     });
     await step("heartbeat", () => this.ctx.heartbeat?.stop());
+    // #1706: cancel and drain late memory re-composition BEFORE closing the
+    // memory runtime — a retry that succeeds mid-shutdown is disposed, never
+    // published, so no client can leak past facade close.
+    await step("memory-recomposition", async () => {
+      await this.ctx.memoryRecomposition?.cancel();
+      this.ctx.memoryRecomposition = null;
+    });
     await step("memory-tools", () => clearMemoryToolDependencies(this.ctx));
     await step("runtime", () => this.ctx.runtime.shutdown());
     await step("memory", async () => {
@@ -104,7 +111,14 @@ export class Bridge {
     // delivery synchronously before awaiting interrupt/process cleanup.
     await step("emergency", () => this.ctx.emergencyExecution?.shutdown());
     await step("transport", () => this.ctx.transport?.destroy());
-    await step("snapshot", () => { const { removeSnapshot } = require("./components/runtime-health-snapshot.js"); removeSnapshot(); });
+    await step("snapshot", () => {
+      // Best effort — a missing/unloadable snapshot module must never abort
+      // the remaining teardown steps (#1706).
+      try {
+        const { removeSnapshot } = require("./components/runtime-health-snapshot.js") as typeof import("./components/runtime-health-snapshot.js");
+        removeSnapshot();
+      } catch { /* best effort */ }
+    });
     this.ctx.sessionManager.clearAll();
     if (this.ctx.mcpDaemonStarted) {
       await step("mcp-daemon", () => { execFileSync("mcporter", ["daemon", "stop"], { stdio: "pipe" }); });
