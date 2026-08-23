@@ -28,6 +28,7 @@ import { getInstanceName } from "./soul-bundle.js";
 import { packagePaths, readManifest } from "../cli/deploy-lib-import.js";
 import { PI_COMPATIBILITY, formatPiPinWarning } from "../config/pi-compatibility.js";
 import type { ServiceState } from "./service-registry.js";
+import type { AbtarsMemoryRuntime, RuntimeState } from "./memory-runtime.js";
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
@@ -70,6 +71,14 @@ export interface RuntimeView {
   kanban: { active: number; total: number } | null;
   shaPolicyConfigured: boolean;
   skillsActive: number;
+  /** #1706: live memory truth from the bridge-owned runtime reference. Null
+   *  when the caller has no in-process runtime (CLI status). */
+  memory: {
+    state: RuntimeState;
+    composing: boolean;
+    attempts?: number;
+    lastFailure?: string;
+  } | null;
   soulBundle: { available: number; total: number } | null;
   a2a: { running: boolean; port: number | null };
   peersConfigured: number;
@@ -113,6 +122,9 @@ export interface BridgeStatusCtx {
   startedAt: number;
   bridgeLockPath: string;
   heartbeatIntervalMs: number;
+  /** #1706: the bridge-owned memory runtime (the stable facade when memory
+   *  is composing late). Optional for CLI callers. */
+  memoryRuntime?: Pick<AbtarsMemoryRuntime, "state" | "compositionDiagnostics">;
 }
 
 // ── Constants ────────────────────────────────────────────────────────────────
@@ -382,10 +394,20 @@ export function renderChatStatus(view: StatusView): string {
 
   // Soul
   lines.push("", "Soul:");
-  if (r.soulBundle) {
+  const mem = r.memory;
+  if (mem?.composing) {
+    // #1706: truthful composing state — never claim "abmind working" while
+    // late composition is still pending.
+    const last = mem.lastFailure !== undefined ? `, last=${mem.lastFailure}` : "";
+    lines.push(`  ~ memory: composing (attempts=${mem.attempts ?? 0}${last})`);
+  } else if (r.soulBundle) {
     const allPresent = r.soulBundle.available === r.soulBundle.total;
     lines.push(`  ${allPresent ? "✓" : "~"} memory: abmind working`);
     lines.push(`    soul bundle: ${r.soulBundle.available}/${r.soulBundle.total} available`);
+  } else if (mem?.state === "unavailable") {
+    lines.push("  ✗ memory: unavailable");
+  } else if (mem?.state === "disabled") {
+    lines.push("  - memory: disabled");
   } else {
     lines.push("  ✗ memory: none");
   }
@@ -708,6 +730,22 @@ async function collectRuntime(ctx: BridgeStatusCtx, warnings: string[]): Promise
     const v = process.env["AGENT_API_PORT"];
     return v ? parseInt(v, 10) : null;
   })();
+
+  // #1706: live memory truth from the bridge-owned runtime reference (the
+  // stable facade while composition is pending).
+  const memRt = ctx.memoryRuntime;
+  const memDiag = memRt?.compositionDiagnostics;
+  const memory: RuntimeView["memory"] = memRt ? {
+    state: memRt.state,
+    composing: !!memDiag && memDiag.state !== "upgraded",
+    ...(memDiag
+      ? {
+          attempts: memDiag.attempts,
+          ...(memDiag.lastFailure !== undefined ? { lastFailure: memDiag.lastFailure } : {}),
+        }
+      : {}),
+  } : null;
+
   const a2a: RuntimeView["a2a"] = {
     running: (() => {
       try {
@@ -780,28 +818,32 @@ async function collectRuntime(ctx: BridgeStatusCtx, warnings: string[]): Promise
     skillsActive = skills.filter(s => !s.skipped).length;
   } catch { /* skills cache may be unavailable in a partial boot; the count falls back to zero */ }
 
-  // Soul bundle
+  // Soul bundle — counted only against a LIVE ready runtime. A soul-bundle
+  // directory on disk must never imply "abmind working" while composition is
+  // pending (#1706).
   let soulBundle: RuntimeView["soulBundle"] = null;
   try {
-    const { getEnv } = await import("./env-schema.js");
-    const { abmindHome, abtarsHome, abtarsRoot } = await import("../paths.js");
-    const { describeSoulInputs } = await import("./soul-input-manifest.js");
-    const memoryProvider =
-      (getEnv() as { memory?: string }).memory ?? "abmind";
-    if (memoryProvider === "abmind" || memoryProvider === "auto") {
-      const coreDir = join(abmindHome(), "memory", "core");
-      if (existsSync(coreDir)) {
-        // #1439: shared manifest is the single source of truth for which
-        // abmind core inputs count toward the Soul bundle — do not
-        // duplicate the file list here.
-        const coreInputs = describeSoulInputs({
-          memoryMode: "available",
-          abtarsHome: abtarsHome(),
-          abtarsRoot: abtarsRoot(),
-          abmindHome: abmindHome(),
-        }).filter(i => i.id.startsWith("main.") && i.id !== "main.minimal-fallback");
-        const available = coreInputs.filter(i => existsSync(i.path)).length;
-        soulBundle = { available, total: coreInputs.length };
+    if (ctx.memoryRuntime?.state === "ready") {
+      const { getEnv } = await import("./env-schema.js");
+      const { abmindHome, abtarsHome, abtarsRoot } = await import("../paths.js");
+      const { describeSoulInputs } = await import("./soul-input-manifest.js");
+      const memoryProvider =
+        (getEnv() as { memory?: string }).memory ?? "abmind";
+      if (memoryProvider === "abmind" || memoryProvider === "auto") {
+        const coreDir = join(abmindHome(), "memory", "core");
+        if (existsSync(coreDir)) {
+          // #1439: shared manifest is the single source of truth for which
+          // abmind core inputs count toward the Soul bundle — do not
+          // duplicate the file list here.
+          const coreInputs = describeSoulInputs({
+            memoryMode: "available",
+            abtarsHome: abtarsHome(),
+            abtarsRoot: abtarsRoot(),
+            abmindHome: abmindHome(),
+          }).filter(i => i.id.startsWith("main.") && i.id !== "main.minimal-fallback");
+          const available = coreInputs.filter(i => existsSync(i.path)).length;
+          soulBundle = { available, total: coreInputs.length };
+        }
       }
     }
   } catch (err) {
@@ -882,6 +924,7 @@ async function collectRuntime(ctx: BridgeStatusCtx, warnings: string[]): Promise
     kanban,
     shaPolicyConfigured,
     skillsActive,
+    memory,
     soulBundle,
     a2a,
     peersConfigured,

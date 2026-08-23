@@ -65,6 +65,7 @@ function makeRuntimeView(overrides: Partial<RuntimeView> = {}): RuntimeView {
     kanban: { active: 0, total: 0 },
     shaPolicyConfigured: true,
     skillsActive: 5,
+    memory: null,
     soulBundle: { available: 4, total: 5 },
     a2a: { running: true, port: 7100 },
     peersConfigured: 0,
@@ -374,5 +375,71 @@ describe("systemctl timeout in collectDaemon", () => {
     // requires a spawn wrapper mock and lives in a future integration test.
     // This placeholder test documents the requirement.
     expect(true).toBe(true);
+  });
+});
+
+// ── #1706: truthful chat memory status ───────────────────────────────────────
+
+describe("#1706 renderChatStatus — live memory semantics", () => {
+  it("renders the composing state with attempts and last bounded code", () => {
+    const view = makeOperatorView({ runtime: makeRuntimeView({
+      memory: { state: "unavailable", composing: true, attempts: 3, lastFailure: "endpoint_unavailable" },
+      soulBundle: null,
+    }) });
+
+    const out = renderChatStatus(view);
+    expect(out).toContain("memory: composing (attempts=3, last=endpoint_unavailable)");
+    expect(out).not.toContain("abmind working");
+  });
+
+  it("a present soul-bundle directory cannot fake working while composing", () => {
+    const view = makeOperatorView({ runtime: makeRuntimeView({
+      memory: { state: "unavailable", composing: true, attempts: 1, lastFailure: "package_missing" },
+      soulBundle: { available: 4, total: 5 }, // files exist on disk — irrelevant
+    }) });
+
+    const out = renderChatStatus(view);
+    expect(out).toContain("memory: composing");
+    expect(out).not.toContain("abmind working");
+  });
+
+  it("transitions to working through the SAME runtime object after upgrade", () => {
+    const runtime = makeRuntimeView({
+      memory: { state: "unavailable", composing: true, attempts: 2, lastFailure: "negotiation_failed" },
+      soulBundle: null,
+    });
+    const view = makeOperatorView({ runtime });
+
+    const before = renderChatStatus(view);
+    expect(before).toContain("memory: composing (attempts=2, last=negotiation_failed)");
+
+    // Same object, same facade reference — only the live state changed.
+    runtime.memory = { state: "ready", composing: false };
+    runtime.soulBundle = { available: 5, total: 5 };
+
+    const after = renderChatStatus(view);
+    expect(after).toContain("memory: abmind working");
+    expect(after).toContain("soul bundle: 5/5 available");
+    expect(after).not.toContain("composing");
+  });
+
+  it("unavailable without active composition renders unavailable, not none", () => {
+    const view = makeOperatorView({ runtime: makeRuntimeView({
+      memory: { state: "unavailable", composing: false },
+      soulBundle: null,
+    }) });
+
+    const out = renderChatStatus(view);
+    expect(out).toContain("✗ memory: unavailable");
+  });
+
+  it("disabled memory renders disabled", () => {
+    const view = makeOperatorView({ runtime: makeRuntimeView({
+      memory: { state: "disabled", composing: false },
+      soulBundle: null,
+    }) });
+
+    const out = renderChatStatus(view);
+    expect(out).toContain("- memory: disabled");
   });
 });

@@ -65,6 +65,9 @@ export async function handleStatus(_text: string, ctx: CommandContext): Promise<
       startedAt: ctx.startedAt,
       bridgeLockPath: ctx.bridgeLockPath ?? "",
       heartbeatIntervalMs: Math.max(60, parseInt(process.env["HEARTBEAT_INTERVAL_SEC"] ?? "60", 10)) * 1000,
+      // #1706: the already-captured live runtime (stable facade while
+      // composing) drives truthful memory rendering.
+      memoryRuntime: ctx.memoryRuntime,
     });
     let text = renderChatStatus(view);
     // #1468: live emergency state from the service snapshot (not transport casts).
