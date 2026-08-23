@@ -30,6 +30,8 @@ export interface OrcStartPort {
 export interface OrcRootIdentity {
   source: string;
   sourcePeer: string | null;
+  /** #1707 Task 2: the scheduled occurrence runId when the root is task-sourced. */
+  sourceId?: string | null;
 }
 
 export interface OrcCoordinatorDeps {
@@ -232,7 +234,12 @@ export class OrcProjectCoordinator {
       return { kind: "conflict" as const, reason: "occurrence_terminal" as const };
     }
 
-    const result = this.store.claimIntent({ ...input, goal }, this.ownerPeer, this.ownerInstanceId);
+    // #1707 Task 2: bind the owning scheduled occurrence to the attempt so
+    // outcomes stay attributable per task run.
+    const taskRunId = input.taskRunId
+      ?? (input.cardSource === "task" ? this.getRootIdentity(input.projectCardId).sourceId ?? undefined : undefined);
+
+    const result = this.store.claimIntent({ ...input, taskRunId, goal }, this.ownerPeer, this.ownerInstanceId);
 
     // #1675: promote exactly the run this claim owns (or the existing run an
     // idempotent re-claim matches) and start it with the RUN ROW's persisted
@@ -362,7 +369,7 @@ export function classifyFailedRelease(
 function defaultRootIdentity(projectCardId: number): OrcRootIdentity {
   try {
     const card = kanbanGetCard(projectCardId);
-    return { source: card?.source ?? "agent", sourcePeer: card?.source_peer ?? null };
+    return { source: card?.source ?? "agent", sourcePeer: card?.source_peer ?? null, sourceId: card?.source_id ?? null };
   } catch {
     return { source: "agent", sourcePeer: null };
   }

@@ -108,8 +108,29 @@ export class OrcProjectRunStore {
         project_card_id       INTEGER PRIMARY KEY,
         next_generation       INTEGER NOT NULL
       );
+
+      CREATE TABLE IF NOT EXISTS orc_fuse_state (
+        scope                 TEXT PRIMARY KEY,
+        opened_at             TEXT,
+        trip_reason           TEXT,
+        generation            INTEGER NOT NULL DEFAULT 0,
+        cleared_at            TEXT
+      );
     `);
     this.migrateIntentCheck();
+    this.migrateTaskRunId();
+  }
+
+  /**
+   * #1707 Task 2: attribute each Orc attempt to its owning scheduled task
+   * occurrence. Nullable — only task-sourced roots carry it. SQLite cannot add
+   * a column conditionally, so this stays an idempotent ALTER.
+   */
+  private migrateTaskRunId(): void {
+    const columns = this.db.prepare(`PRAGMA table_info(orc_project_runs)`).all() as Array<{ name: string }>;
+    if (columns.some(c => c.name === "task_run_id")) return;
+    this.db.exec(`ALTER TABLE orc_project_runs ADD COLUMN task_run_id TEXT`);
+    this.db.exec(`CREATE INDEX IF NOT EXISTS idx_orc_runs_task_run ON orc_project_runs(project_card_id, task_run_id)`);
   }
 
   /**
@@ -244,11 +265,11 @@ export class OrcProjectRunStore {
         INSERT INTO orc_project_runs
           (id, intent_key, intent_kind, intent_ref, goal, project_card_id,
            project_generation, ownership_generation, owner_peer, owner_instance_id,
-           origin_kind, origin_peer, state, created_at, updated_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'scheduled', ?, ?)
+           origin_kind, origin_peer, task_run_id, state, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'scheduled', ?, ?)
       `).run(runId, intentKey, input.intentKind, input.intentRef ?? null, input.goal, input.projectCardId,
         projectGeneration, nextGen, ownerPeer, ownerInstanceId,
-        input.originKind, originPeer, now, now);
+        input.originKind, originPeer, input.taskRunId ?? null, now, now);
 
       const row = this.db.prepare(`SELECT * FROM orc_project_runs WHERE id = ?`).get(runId) as unknown as OrcProjectRunRow;
       return { kind: "claimed" as const, context: buildContextFromRow(row) };
@@ -398,8 +419,20 @@ export class OrcProjectRunStore {
         context.projectCardId, context.projectGeneration, context.intentKey, context.intentKind,
         context.intentRef ?? null, context.origin.kind, context.origin.peer ?? null, context.ownerPeer,
         context.sessionId ?? null, context.executionId ?? null);
+      if (result.changes > 0 && outcome === "completed") {
+        // #1707: durable progress clears the card's consecutive-failure streak.
+        this.recordCardProgress(context.projectCardId, now);
+      }
       return result.changes > 0;
     });
+  }
+
+  /** #1707: durable progress marker — resets the no-progress/failure windows for one card. */
+  private recordCardProgress(projectCardId: number, nowIso: string): void {
+    this.db.prepare(`
+      INSERT INTO orc_fuse_state (scope, cleared_at) VALUES (?, ?)
+      ON CONFLICT(scope) DO UPDATE SET cleared_at = excluded.cleared_at
+    `).run(`card:${projectCardId}`, nowIso);
   }
 
   supersede(runId: string, outcome: OrcRunOutcome): boolean {
@@ -438,10 +471,35 @@ export class OrcProjectRunStore {
     `).all(projectCardId) as unknown as OrcProjectRunRow[];
   }
 
+  // ── #1707 Task 2: attempt-outcome classification ───────────────────────────
+  //
+  // One vocabulary for release semantics, fuse counting, and /orc status.
+  // Derived from the durable row — never from event prose.
+
+  /**
+   * Classify a terminal attempt. A live row is "in_flight". Durable progress
+   * means the intent postcondition was satisfied (`completed`); anything else
+   * is failure or churn:
+   * - "failed":      provider/turn failure persisted with outcome='failed'.
+   * - "no_progress": released without ever binding a session (start churn,
+   *                  empty/no-progress releases — the #1707 storm shape).
+   * - "superseded":  housekeeping supersession (boot recovery, generation
+   *                  change) — observed, never counted as churn.
+   */
+  classifyAttemptOutcome(row: Pick<OrcProjectRunRow, "state" | "outcome" | "started_at">): "in_flight" | "progress" | "failed" | "no_progress" | "superseded" {
+    if (row.state !== "released" && row.state !== "superseded") return "in_flight";
+    if (row.state === "superseded") return "superseded";
+    if (row.outcome === "completed") return "progress";
+    if (row.outcome === "failed") return "failed";
+    if (row.started_at === null) return "no_progress";
+    // Released mid-turn (cancelled/stale) after a real start: no durable
+    // progress either way — churn, not a clean hand-off.
+    return "no_progress";
+  }
+
   // ── #1628: authoring attempt counts ──────────────────────────────────────────
   // Derived from immutable run rows, scoped to the project generation. No
   // mutable counter — concurrent wakes can never double-increment.
-
   /** Authoring turns that reached the dispatching→running bind for this generation. */
   countStartedAuthoringTurns(projectCardId: number, projectGeneration: number): number {
     const row = this.db.prepare(`

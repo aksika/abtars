@@ -151,6 +151,8 @@ export interface OrcProjectRunRow {
   owner_instance_id: string;
   origin_kind: OrcOriginKind;
   origin_peer: string | null;
+  /** #1707 Task 2: owning scheduled task occurrence (kanban source_id), when task-sourced. */
+  task_run_id: string | null;
   session_id: string | null;
   execution_id: string | null;
   state: OrcRunState;
@@ -175,6 +177,13 @@ export interface OrcClaimInput {
   intentRef?: string;
   /** #1675: the goal of the claiming turn. The first claimant's goal wins the run; later idempotent claims never replace it. */
   goal: string;
+  /**
+   * #1707 Task 2: the owning scheduled task occurrence (`kanban_board.source_id`),
+   * bound at claim time for scheduled roots. Durable attempt outcomes are
+   * attributable to one occurrence; a terminal attempt under a live occurrence
+   * requires an explicit operator reset before another automatic attempt.
+   */
+  taskRunId?: string;
   originKind: OrcOriginKind;
   originPeer?: string;
   sourcePeer: string | null;
