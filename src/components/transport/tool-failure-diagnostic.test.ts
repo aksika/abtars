@@ -458,3 +458,34 @@ describe("PiCoreToolExecutionError", () => {
     expect(err.diagnostic.exit_code).toBe(127);
   });
 });
+
+describe("#1716 cleanup_incomplete passthrough", () => {
+  it("preserves the flag into the typed diagnostic", () => {
+    const result = JSON.stringify({
+      stdout: "",
+      stderr: "",
+      exit_code: null,
+      timed_out: true,
+      aborted: false,
+      cleanup_incomplete: true,
+      command_fingerprint: fingerprintCommand("sleep infinity"),
+      command_preview: previewCommand("sleep infinity"),
+    });
+    const d = parseBashResultToDiagnostic(result, "exec-1716", "execute_bash");
+    expect(d?.reason).toBe("timeout");
+    expect(d?.cleanup_incomplete).toBe(true);
+  });
+
+  it("omits the field for clean completions", () => {
+    const result = JSON.stringify({
+      exit_code: 1,
+      timed_out: false,
+      aborted: false,
+      command_fingerprint: fingerprintCommand("exit 1"),
+      command_preview: previewCommand("exit 1"),
+    });
+    const d = parseBashResultToDiagnostic(result, "exec-1716b", "execute_bash");
+    expect(d?.reason).toBe("nonzero_exit");
+    expect(d?.cleanup_incomplete).toBeUndefined();
+  });
+});

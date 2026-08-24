@@ -130,3 +130,44 @@ describe("HostToolService secret_env execution", () => {
     expect(resolver).not.toHaveBeenCalled();
   });
 });
+
+describe("#1716 bounded settlement boundary", () => {
+  it("a hung command settles as a typed timeout diagnostic instead of wedging the turn", async () => {
+    const _reset = await import("./env-schema.js");
+    process.env["BASH_TOOL_TIMEOUT_SEC"] = "1";
+    _reset._resetEnv();
+    const { parseBashResultToDiagnostic } = await import("./transport/tool-failure-diagnostic.js");
+    const { service } = makeService();
+    const ctx = { userId: "u1", executionId: "e1-timeout" };
+    const start = Date.now();
+    const result = await service.runBash({ command: "sleep infinity" }, ctx);
+    const elapsed = Date.now() - start;
+    expect(elapsed).toBeLessThan(10_000);
+    const parsed = JSON.parse(result);
+    expect(parsed.timed_out).toBe(true);
+    const diagnostic = parseBashResultToDiagnostic(result, "e1-timeout", "execute_bash");
+    expect(diagnostic?.reason).toBe("timeout");
+    expect(diagnostic?.timed_out).toBe(true);
+    delete process.env["BASH_TOOL_TIMEOUT_SEC"];
+    _reset._resetEnv();
+  }, 20_000);
+
+  it("a successful command still yields no failure diagnostic", async () => {
+    const { parseBashResultToDiagnostic } = await import("./transport/tool-failure-diagnostic.js");
+    const { service } = makeService();
+    const result = await service.runBash({ command: "echo fine" }, { userId: "u1", executionId: "e1-ok" });
+    expect(JSON.parse(result).exit_code).toBe(0);
+    expect(parseBashResultToDiagnostic(result, "e1-ok", "execute_bash")).toBeNull();
+  });
+
+  it("a pre-aborted request spawns nothing and reports aborted", async () => {
+    const controller = new AbortController();
+    controller.abort();
+    const { service } = makeService();
+    const result = await service.runBash(
+      { command: "echo nope" },
+      { userId: "u1", executionId: "e1-abort", signal: controller.signal },
+    );
+    expect(JSON.parse(result).aborted).toBe(true);
+  });
+});

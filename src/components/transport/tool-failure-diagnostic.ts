@@ -82,6 +82,7 @@ export interface ToolFailureDiagnosticV1 {
   signal?: string;
   timed_out: boolean;
   aborted: boolean;
+  cleanup_incomplete?: boolean;
   stderr_excerpt?: string;
   stdout_excerpt?: string;
   safety_incident?: BehaviorIncidentType;
@@ -114,6 +115,7 @@ export interface BashResultV1 {
   signal?: string;
   timed_out: boolean;
   aborted: boolean;
+  cleanup_incomplete?: boolean;
   command_fingerprint: string;
   command_preview: string;
 }
@@ -205,6 +207,7 @@ export function parseBashResultToDiagnostic(
       signal,
       timed_out: timedOut,
       aborted,
+      ...(parsed.cleanup_incomplete === true ? { cleanup_incomplete: true } : {}),
       stderr_excerpt: stderr,
       stdout_excerpt: stdout,
       ...(syntaxHint ? { syntax_hint: syntaxHint } : {}),

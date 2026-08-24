@@ -17,11 +17,13 @@
  *   5. release local value references and return the scrubbed result.
  */
 
-import { execFile, execFileSync } from "node:child_process";
+import { execFileSync } from "node:child_process";
 import { logWarn } from "./logger.js";
 import { redactSecrets } from "./logger.js";
 import { checkCommand, classifyCommand } from "./guardrails.js";
 import { fingerprintCommand, previewCommand } from "./transport/tool-failure-diagnostic.js";
+import { runBashCommand } from "./bash-runner.js";
+import { getEnv } from "./env-schema.js";
 import type { ToolExecutionScope } from "./tasks/task-package.js";
 import type { ToolAuthorizationMode } from "./action-gate.js";
 import type { ActionGate } from "./action-gate.js";
@@ -31,7 +33,6 @@ export const SECRET_ENV_PREFIX = "ABTARS_SECRET_";
 const SECRET_ENV_MAX_ENTRIES = 16;
 const SECRET_ENV_MAX_BYTES = 64 * 1024;
 const SECRET_ENV_KEY_RE = /^ABTARS_SECRET_[A-Z0-9_]+$/;
-const BASH_TIMEOUT_MS = 300_000;
 const REDACTED_LITERAL = "[REDACTED]";
 
 export interface HostBashInput {
@@ -262,79 +263,30 @@ export class HostToolService {
     secretEnv: Array<{ name: string; value: string }>,
     literals: string[],
   ): Promise<string> {
-    // Check pre-aborted signal BEFORE spawning — a cancelled request must
-    // never execute side effects.
-    if (ctx.signal?.aborted) {
-      return Promise.resolve(JSON.stringify({
-        exit_code: null,
-        timed_out: false,
-        aborted: true,
-        stderr: "Execution cancelled before start",
-        command_fingerprint: fingerprintCommand(cmd),
-        command_preview: previewCommand(cmd),
-      }));
+    const childEnv: NodeJS.ProcessEnv = ctx.executionScope
+      ? { ...process.env, ...ctx.executionScope.env }
+      : { ...process.env };
+    for (const entry of secretEnv) {
+      childEnv[entry.name] = entry.value;
     }
 
-    return new Promise((resolve) => {
-      let timedOut = false;
-      let aborted = false;
-      let timeoutTimer: ReturnType<typeof setTimeout> | undefined;
-
-      const childEnv: NodeJS.ProcessEnv = ctx.executionScope
-        ? { ...process.env, ...ctx.executionScope.env }
-        : { ...process.env };
-      for (const entry of secretEnv) {
-        childEnv[entry.name] = entry.value;
+    return runBashCommand({
+      cmd,
+      bin: "bash",
+      args: ["-c", cmd],
+      cwd: ctx.executionScope?.cwd,
+      env: childEnv,
+      signal: ctx.signal,
+      timeoutMs: getEnv().bashToolTimeoutSec * 1000,
+    }).then((result) => {
+      const record: Record<string, unknown> = { ...result };
+      if (typeof record["stdout"] === "string") {
+        record["stdout"] = redactLiterals(record["stdout"], literals);
       }
-
-      const child = execFile("bash", ["-c", cmd], {
-        maxBuffer: 1024 * 1024,
-        cwd: ctx.executionScope?.cwd,
-        env: childEnv,
-      }, (err, stdout, stderr) => {
-        if (timeoutTimer) clearTimeout(timeoutTimer);
-
-        const result: Record<string, unknown> = {
-          command_fingerprint: fingerprintCommand(cmd),
-          command_preview: previewCommand(cmd),
-          timed_out: timedOut,
-          aborted,
-        };
-        // #1660: scrub exact literals from every decoded text field before
-        // serialization — JSON escaping would defeat string-level scrubbing.
-        if (stdout) result["stdout"] = redactLiterals(stdout.slice(0, 50_000), literals);
-        if (stderr) result["stderr"] = redactLiterals(stderr.slice(0, 10_000), literals);
-        if (err) {
-          const nodeErr = err as NodeJS.ErrnoException & { code?: number; signal?: string; killed?: boolean };
-          if (nodeErr.code !== undefined && typeof nodeErr.code === "number") {
-            result["exit_code"] = nodeErr.code;
-          } else {
-            result["exit_code"] = null;
-            if (typeof nodeErr.code === "string") result["process_error_code"] = nodeErr.code;
-          }
-          if (nodeErr.signal) result["signal"] = nodeErr.signal;
-        } else {
-          result["exit_code"] = 0;
-        }
-        resolve(JSON.stringify(result));
-      });
-
-      timeoutTimer = setTimeout(() => {
-        timedOut = true;
-        child.kill("SIGTERM");
-        setTimeout(() => { try { child.kill("SIGKILL"); } catch { /* already gone */ } }, 3000);
-      }, BASH_TIMEOUT_MS);
-
-      if (ctx.signal) {
-        const onAbort = (): void => {
-          if (timeoutTimer) clearTimeout(timeoutTimer);
-          aborted = true;
-          child.kill("SIGTERM");
-          setTimeout(() => { try { child.kill("SIGKILL"); } catch { /* already gone */ } }, 3000);
-        };
-        ctx.signal.addEventListener("abort", onAbort, { once: true });
-        child.on("exit", () => ctx.signal!.removeEventListener("abort", onAbort));
+      if (typeof record["stderr"] === "string") {
+        record["stderr"] = redactLiterals(record["stderr"], literals);
       }
+      return JSON.stringify(record);
     });
   }
 }

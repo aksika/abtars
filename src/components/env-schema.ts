@@ -52,6 +52,7 @@ const SCHEMA: readonly EnvVarDef[] = [
   { env: "WATCHDOG_TOOL_TIMEOUT_SEC", type: "int", default: "180", description: "Watchdog tool call timeout (seconds)" },
   { env: "WATCHDOG_SILENT_SEC", type: "int", default: "300", description: "Watchdog silent timeout (seconds)" },
   { env: "WATCHDOG_ENDLESS_SEC", type: "int", default: "600", description: "Watchdog endless loop timeout (seconds)" },
+  { env: "BASH_TOOL_TIMEOUT_SEC", type: "int", default: "120", description: "execute_bash hard cap (seconds)" },
 
   // ── Telegram ──
   { env: "TELEGRAM_BOT_TOKEN", type: "string", description: "Telegram bot token" },
@@ -165,6 +166,7 @@ export interface EnvConfig {
   watchdogToolTimeoutSec: number;
   watchdogSilentSec: number;
   watchdogEndlessSec: number;
+  bashToolTimeoutSec: number;
 
   // Telegram
   telegramBotToken: string | undefined;
@@ -241,6 +243,12 @@ export interface EnvConfig {
 function parseIntSafe(raw: string, varName: string): number {
   const n = parseInt(raw, 10);
   if (isNaN(n)) throw new Error(`Invalid ${varName}: "${raw}" — expected integer`);
+  return n;
+}
+
+function parseIntSafeBounded(raw: string, varName: string, min: number, max: number): number {
+  const n = parseIntSafe(raw, varName);
+  if (n < min || n > max) throw new Error(`Invalid ${varName}: "${raw}" — expected integer between ${min} and ${max}`);
   return n;
 }
 
@@ -326,6 +334,7 @@ export function initEnv(): Readonly<EnvConfig> {
     watchdogToolTimeoutSec: parseIntSafe(readOr("WATCHDOG_TOOL_TIMEOUT_SEC", "180"), "WATCHDOG_TOOL_TIMEOUT_SEC"),
     watchdogSilentSec: parseIntSafe(readOr("WATCHDOG_SILENT_SEC", "300"), "WATCHDOG_SILENT_SEC"),
     watchdogEndlessSec: parseIntSafe(readOr("WATCHDOG_ENDLESS_SEC", "600"), "WATCHDOG_ENDLESS_SEC"),
+    bashToolTimeoutSec: parseIntSafeBounded(readOr("BASH_TOOL_TIMEOUT_SEC", "120"), "BASH_TOOL_TIMEOUT_SEC", 1, 3600),
 
     telegramBotToken: read("TELEGRAM_BOT_TOKEN"),
     telegramTimeoutMs: parseIntSafe(readOr("TELEGRAM_TIMEOUT_SEC", "10"), "TELEGRAM_TIMEOUT_SEC") * 1000,

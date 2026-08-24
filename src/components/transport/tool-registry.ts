@@ -3,7 +3,8 @@
  * Phase 2: native tool schemas. Phase 3: in-process memory when available.
  */
 
-import { execFile, execFileSync } from "node:child_process";
+import { execFileSync } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import { appendFileSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
@@ -12,6 +13,8 @@ import { logAndSwallow } from "../log-and-swallow.js";
 import { checkTool, checkPath, auditDeny, type SandboxPolicy } from "../tool-sandbox.js";
 import { getMasterUserId } from "../master-user.js";
 import { isDefinitivePreDispatchFailure } from "../memory-runtime.js";
+import { getEnv } from "../env-schema.js";
+import { runBashCommand } from "../bash-runner.js";
 import type { ToolExecutionScope } from "../tasks/task-package.js";
 import type { OrcInvocationContextV2 } from "../orc-project/orc-project-contracts.js";
 import { formatRunReason } from "../orc-project/orc-project-contracts.js";
@@ -28,6 +31,43 @@ const AUDIT_PATH = join(AUDIT_DIR, "audit.jsonl");
 try { mkdirSync(AUDIT_DIR, { recursive: true }); } catch (err) { logAndSwallow(TAG, "mkdirSync audit dir", err); }
 function audit(entry: Record<string, unknown>): void {
   try { appendFileSync(AUDIT_PATH, JSON.stringify(entry) + "\n"); } catch (err) { logAndSwallow(TAG, "audit write", err); }
+}
+
+type BashAuditStatus = "ok" | "error" | "timeout" | "abort" | "cleanup_incomplete_timeout";
+
+interface CompletionClassification {
+  status: BashAuditStatus;
+  chars?: number;
+  exit_code?: number;
+  error?: string;
+  parse_warning?: boolean;
+}
+
+export function classifyBashCompletion(result: string | undefined, failed: boolean, err: unknown): CompletionClassification {
+  if (failed) {
+    return { status: "error", error: err instanceof Error ? err.message : String(err) };
+  }
+  const chars = typeof result === "string" ? result.length : 0;
+  let parsed: Record<string, unknown> | null = null;
+  try {
+    const candidate = JSON.parse(result ?? "") as unknown;
+    if (candidate && typeof candidate === "object" && !Array.isArray(candidate)) {
+      parsed = candidate as Record<string, unknown>;
+    }
+  } catch {
+    parsed = null;
+  }
+  if (!parsed) {
+    return { status: "ok", chars, parse_warning: true };
+  }
+  const cleanupIncomplete = parsed["cleanup_incomplete"] === true;
+  const timedOut = parsed["timed_out"] === true;
+  const aborted = parsed["aborted"] === true;
+  if (cleanupIncomplete) return { status: "cleanup_incomplete_timeout", chars };
+  if (timedOut) return { status: "timeout", chars };
+  if (aborted) return { status: "abort", chars };
+  const exitCode = typeof parsed["exit_code"] === "number" ? parsed["exit_code"] : undefined;
+  return { status: "ok", chars, ...(exitCode !== undefined ? { exit_code: exitCode } : {}) };
 }
 
 export interface ToolExecutionContext {
@@ -148,7 +188,6 @@ function optionalStringValue(value: unknown): string | undefined {
   return value === undefined || value === null ? undefined : stringValue(value);
 }
 
-const BASH_TIMEOUT_MS = 300_000;
 const CLI_TIMEOUT_MS = 60_000;
 const MEMORY_TOOL_ERROR_MAX = 512;
 
@@ -249,7 +288,11 @@ function isBridgeKillCommand(cmd: string): boolean {
   return false;
 }
 
-function runBash(cmd: string, timeout = BASH_TIMEOUT_MS, signal?: AbortSignal, executionScope?: ToolExecutionScope, authorizationMode?: import("../action-gate.js").ToolAuthorizationMode): Promise<string> {
+function defaultBashTimeoutMs(): number {
+  return getEnv().bashToolTimeoutSec * 1000;
+}
+
+function runBash(cmd: string, timeout = defaultBashTimeoutMs(), signal?: AbortSignal, executionScope?: ToolExecutionScope, authorizationMode?: import("../action-gate.js").ToolAuthorizationMode): Promise<string> {
   // Guardrails: command check
   const cmdBlock = checkCommand(cmd);
   if (cmdBlock) {
@@ -315,83 +358,27 @@ function executeBash(cmd: string, timeout: number, signal?: AbortSignal, executi
   const syntaxCheck = validateBashSyntax(cmd);
   if (!syntaxCheck.ok) return Promise.resolve(shellSyntaxErrorResult(cmd, syntaxCheck));
 
-  // Check pre-aborted signal BEFORE spawning — a cancelled request must
-  // never execute side effects (#1497 review).
-  if (signal?.aborted) {
-    return Promise.resolve(JSON.stringify({
-      exit_code: null,
-      timed_out: false,
-      aborted: true,
-      stderr: "Execution cancelled before start",
-      command_fingerprint: fingerprintCommand(cmd),
-      command_preview: previewCommand(cmd),
-    }));
+  // #906: Wrap in OS sandbox if seatbelt active and command needs sandboxing
+  let bin = "bash";
+  let args = ["-c", cmd];
+  if (_seatbeltActive && _seatbeltPolicy) {
+    const { shouldSandbox, wrapCommand } = require("../seatbelt/index.js") as typeof import("../seatbelt/index.js");
+    if (shouldSandbox(cmd)) {
+      const wrapped = wrapCommand(cmd, _seatbeltPolicy);
+      bin = wrapped.bin;
+      args = wrapped.args;
+    }
   }
 
-  return new Promise((resolve) => {
-    let bin = "bash";
-    let args = ["-c", cmd];
-    let timedOut = false;
-    let aborted = false;
-    let timeoutTimer: ReturnType<typeof setTimeout> | undefined;
-
-    // #906: Wrap in OS sandbox if seatbelt active and command needs sandboxing
-    if (_seatbeltActive && _seatbeltPolicy) {
-      const { shouldSandbox, wrapCommand } = require("../seatbelt/index.js") as typeof import("../seatbelt/index.js");
-      if (shouldSandbox(cmd)) {
-        const wrapped = wrapCommand(cmd, _seatbeltPolicy);
-        bin = wrapped.bin;
-        args = wrapped.args;
-      }
-    }
-
-    const child = execFile(bin, args, {
-      maxBuffer: 1024 * 1024,
-      cwd: executionScope?.cwd,
-      env: executionScope ? { ...process.env, ...executionScope.env } : undefined,
-    }, (err, stdout, stderr) => {
-      if (timeoutTimer) clearTimeout(timeoutTimer);
-
-      const result: Record<string, unknown> = {
-        command_fingerprint: fingerprintCommand(cmd),
-        command_preview: previewCommand(cmd),
-        timed_out: timedOut,
-        aborted,
-      };
-      if (stdout) result["stdout"] = stdout.slice(0, 50_000);
-      if (stderr) result["stderr"] = stderr.slice(0, 10_000);
-      if (err) {
-        const nodeErr = err as NodeJS.ErrnoException & { code?: number; signal?: string; killed?: boolean };
-        if (nodeErr.code !== undefined && typeof nodeErr.code === "number") {
-          result["exit_code"] = nodeErr.code;
-        } else {
-          result["exit_code"] = null;
-          if (typeof nodeErr.code === "string") result["process_error_code"] = nodeErr.code;
-        }
-        if (nodeErr.signal) result["signal"] = nodeErr.signal;
-      } else {
-        result["exit_code"] = 0;
-      }
-      resolve(JSON.stringify(result));
-    });
-
-    timeoutTimer = setTimeout(() => {
-      timedOut = true;
-      child.kill("SIGTERM");
-      setTimeout(() => { try { child.kill("SIGKILL"); } catch (err) { if ((err as NodeJS.ErrnoException).code === "ESRCH") return; logAndSwallow(TAG, `force-kill child after timeout`, err); } }, 3000);
-    }, timeout);
-
-    if (signal) {
-      const onAbort = (): void => {
-        if (timeoutTimer) clearTimeout(timeoutTimer);
-        aborted = true;
-        child.kill("SIGTERM");
-        setTimeout(() => { try { child.kill("SIGKILL"); } catch (err) { if ((err as NodeJS.ErrnoException).code === "ESRCH") return; logAndSwallow(TAG, `force-kill child after abort`, err); } }, 3000);
-      };
-      signal.addEventListener("abort", onAbort, { once: true });
-      child.on("exit", () => signal.removeEventListener("abort", onAbort));
-    }
-  });
+  return runBashCommand({
+    cmd,
+    bin,
+    args,
+    cwd: executionScope?.cwd,
+    env: executionScope ? { ...process.env, ...executionScope.env } : undefined,
+    signal,
+    timeoutMs: timeout,
+  }).then((result) => JSON.stringify(result));
 }
 
 let _actionGate: import("../action-gate.js").ActionGate | null = null;
@@ -476,7 +463,7 @@ const bashTool: ToolDefinition = {
       );
     }
     // Legacy fallback (tests/CLI without a wired service): no secret_env.
-    return runBash(command, BASH_TIMEOUT_MS, context?.signal, context?.executionScope, context?.authorizationMode);
+    return runBash(command, undefined, context?.signal, context?.executionScope, context?.authorizationMode);
   },
 };
 
@@ -1150,15 +1137,26 @@ export async function executeToolCall(name: string, args: Record<string, unknown
   if (name === "execute_bash" && typeof auditArgs === "string") {
     auditArgs = auditArgs.replace(/secret:[A-Za-z0-9_-]+/g, "[SEALED_HANDLE]");
   }
-  audit({ ts, tool: name, args: auditArgs, userId: context?.userId });
+  const callId = randomUUID();
+  audit({ ts, tool: name, call_id: callId, args: auditArgs, userId: context?.userId });
 
+  let result: string | undefined;
+  let failed = false;
+  let failure: unknown;
   try {
-    const result = await tool.execute(args, context);
-    audit({ ts, tool: name, status: "ok", chars: result.length });
+    result = await tool.execute(args, context);
     checkSkillRead(name, args);
     return result;
   } catch (err) {
-    audit({ ts, tool: name, status: "error", error: err instanceof Error ? err.message : String(err) });
+    failed = true;
+    failure = err;
     throw err;
+  } finally {
+    const cls = name === "execute_bash"
+      ? classifyBashCompletion(result, failed, failure)
+      : failed
+        ? { status: "error" as const, error: failure instanceof Error ? failure.message : String(failure) }
+        : { status: "ok" as const, chars: typeof result === "string" ? result.length : 0 };
+    audit({ ts, tool: name, call_id: callId, ...cls });
   }
 }
