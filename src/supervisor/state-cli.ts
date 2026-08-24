@@ -252,11 +252,16 @@ async function main(): Promise<void> {
       const startIdentity = process.argv[4];
       const authority = process.argv[5];
       const transition = (process.argv[6] ?? "stable") as TransitionState;
-      if (!Number.isInteger(pid) || pid <= 0 || !startIdentity || (authority !== "owner" && authority !== "liveness")) {
-        process.stderr.write("Usage: supervisor-state contain <pid> <startIdentity> <owner|liveness> [transition]\n");
+      const heartbeatAdvanced = process.argv[7] === "1";
+      if (
+        !Number.isInteger(pid) || pid <= 0 || !startIdentity ||
+        (authority !== "owner" && authority !== "liveness") ||
+        (process.argv[7] !== undefined && process.argv[7] !== "0" && process.argv[7] !== "1")
+      ) {
+        process.stderr.write("Usage: supervisor-state contain <pid> <startIdentity> <owner|liveness> [transition] [heartbeatAdvanced]\n");
         process.exit(Exit.Usage);
       }
-      const result = await containCandidate(home, pid, startIdentity, authority, transition);
+      const result = await containCandidate(home, pid, startIdentity, authority, transition, heartbeatAdvanced);
       const detail = result.outcome === "contained" ? result.via : result.why;
       process.stdout.write(`${result.outcome} ${detail}\n`);
       process.exit(Exit.Ok);

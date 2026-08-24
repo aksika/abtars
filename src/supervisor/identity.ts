@@ -98,6 +98,7 @@ function enumerateDarwin(target: string): ProcessEnumeration {
       encoding: "utf8",
       stdio: ["ignore", "pipe", "pipe"],
       maxBuffer: 32 * 1024 * 1024,
+      timeout: 1500,
     });
   } catch {
     return { complete: false, reason: "ps-failed" };
@@ -286,6 +287,7 @@ function macProcessField(pid: number, field: "lstart" | "command"): string | nul
     const output = execFileSync("ps", ["-p", String(pid), "-o", `${field}=`], {
       encoding: "utf8",
       stdio: ["ignore", "pipe", "pipe"],
+      timeout: 1500,
     });
     return output.trim() || null;
   } catch {
@@ -317,6 +319,17 @@ export function processStartIdentity(pid: number): string {
 export function isPidAlive(pid: number): boolean {
   try {
     process.kill(pid, 0);
+    if (process.platform !== "darwin") {
+      try {
+        const stat = readFileSync(`/proc/${pid}/stat`, "utf8");
+        const rp = stat.lastIndexOf(")");
+        // A zombie still accepts signal 0 until its parent reaps it, but it is
+        // no longer a live target for supervision or containment.
+        if (rp >= 0 && stat.slice(rp + 2, rp + 3) === "Z") return false;
+      } catch (err) {
+        if ((err as NodeJS.ErrnoException).code === "ENOENT") return false;
+      }
+    }
     return true;
   } catch (err) {
     return (err as NodeJS.ErrnoException).code === "EPERM";
@@ -354,9 +367,11 @@ export function validateBridgePid(
     if (!match) {
       return { status: "wrong-command", safeToSignal: false, safeToAdopt: false };
     }
-  } catch {
-    // /proc unavailable in a non-macOS container — trust the lock
-    return { status: "valid", safeToSignal: true, safeToAdopt: true };
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException).code;
+    return code === "ENOENT"
+      ? { status: "dead", safeToSignal: false, safeToAdopt: false }
+      : { status: "mismatch", safeToSignal: false, safeToAdopt: false };
   }
   return { status: "valid", safeToSignal: true, safeToAdopt: true };
 }

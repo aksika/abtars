@@ -200,6 +200,7 @@ export type ContainmentResult =
 
 interface Authorization {
   readonly ok: true;
+  readonly lastHeartbeat: number | null;
 }
 interface Rejection {
   readonly ok: false;
@@ -218,6 +219,8 @@ function authorizeOnce(
   pid: number,
   startIdentity: string,
   authority: ContainmentAuthority,
+  heartbeatAdvanced: boolean,
+  heartbeatBaseline: number | null = null,
 ): Authorization | Rejection {
   const processes = toRecords(home);
   if (processes === "enumeration-failed") return { ok: false, why: "enumeration-failed" };
@@ -232,7 +235,7 @@ function authorizeOnce(
     // must not have become the owner.
     if (!lock.lock.validatedOwner) return { ok: false, why: "no-validated-owner" };
     if (lock.lock.pid === pid) return { ok: false, why: "candidate-is-owner" };
-    return { ok: true };
+    return { ok: true, lastHeartbeat: lock.lock.lastHeartbeat };
   }
 
   // Liveness authority: all five R5 conditions re-checked now, conservatively
@@ -242,11 +245,14 @@ function authorizeOnce(
   if (!isLivenessContainmentEligible(lock.lock, {
     nowMs: Date.now(),
     staleMs: PRODUCTION_STALE_MS,
-    heartbeatAdvanced: false,
+    heartbeatAdvanced,
   })) {
     return { ok: false, why: "liveness-not-reconfirmed" };
   }
-  return { ok: true };
+  if (heartbeatBaseline !== null && lock.lock.lastHeartbeat !== heartbeatBaseline) {
+    return { ok: false, why: "heartbeat-advanced" };
+  }
+  return { ok: true, lastHeartbeat: lock.lock.lastHeartbeat };
 }
 
 /**
@@ -261,10 +267,11 @@ export async function containCandidate(
   startIdentity: string,
   authority: ContainmentAuthority,
   transition: TransitionState,
+  heartbeatAdvanced = false,
 ): Promise<ContainmentResult> {
   if (transition !== "stable") return { outcome: "unauthorized", why: "transition-fence-active" };
 
-  const first = authorizeOnce(home, pid, startIdentity, authority);
+  const first = authorizeOnce(home, pid, startIdentity, authority, heartbeatAdvanced);
   if (!first.ok) {
     return first.vanished ? { outcome: "vanished", why: first.why } : { outcome: "unauthorized", why: first.why };
   }
@@ -280,12 +287,39 @@ export async function containCandidate(
   const deadline = Date.now() + ESCALATION_GRACE_MS;
   while (Date.now() < deadline) {
     if (!isPidAlive(pid)) return { outcome: "contained", via: "SIGTERM" };
+    const duringGrace = authorizeOnce(
+      home,
+      pid,
+      startIdentity,
+      authority,
+      heartbeatAdvanced,
+      authority === "liveness" ? first.lastHeartbeat : null,
+    );
+    if (!duringGrace.ok) {
+      // SIGTERM was already authorized and delivered. A normal child can
+      // disappear from the exact argv enumeration before its parent observes
+      // the exit (notably while it is a zombie); no further signal is needed
+      // and this is successful graceful containment, not permission to SIGKILL.
+      if (duringGrace.vanished && duringGrace.why === "identity-or-argv-mismatch") {
+        return { outcome: "contained", via: "SIGTERM" };
+      }
+      return duringGrace.vanished
+        ? { outcome: "vanished", why: duringGrace.why }
+        : { outcome: "unauthorized", why: duringGrace.why };
+    }
     await new Promise((r) => setTimeout(r, 100));
   }
 
   // Full reauthorization before SIGKILL — same PID, same start identity, same
   // authority, current lock, no fence.
-  const second = authorizeOnce(home, pid, startIdentity, authority);
+  const second = authorizeOnce(
+    home,
+    pid,
+    startIdentity,
+    authority,
+    heartbeatAdvanced,
+    authority === "liveness" ? first.lastHeartbeat : null,
+  );
   if (!second.ok) {
     return second.vanished ? { outcome: "vanished", why: second.why } : { outcome: "unauthorized", why: second.why };
   }

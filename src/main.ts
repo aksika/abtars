@@ -49,7 +49,13 @@ try {
     }
     process.exit(1);
   }
-} catch { /* proceed */ }
+} catch (err) {
+  // The duplicate gate is an authorization boundary. An unexpected read or
+  // predicate failure is uncertainty, not permission to start beside a process.
+  const detail = err instanceof Error ? err.message : String(err);
+  console.error(`[FATAL] Duplicate gate failed closed: ${detail}`);
+  process.exit(1);
+}
 
 checkCircuitBreaker();
 

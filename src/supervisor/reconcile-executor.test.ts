@@ -152,6 +152,67 @@ describe("containCandidate final authorization (#1711 R6)", () => {
     }
   }, 10000);
 
+  it.runIf(!isDarwin)("refuses liveness containment when the caller reports heartbeat advancement", async () => {
+    const { home, spawnBridgeChild } = await register();
+    const frozen = await spawnBridgeChild();
+    try {
+      writeFileSync(join(home, "bridge.lock"), JSON.stringify({
+        pid: frozen.pid,
+        lastHeartbeat: Date.now() - 10 * 60 * 1000,
+      }));
+
+      const result = await containCandidate(
+        home,
+        frozen.pid!,
+        processStartIdentity(frozen.pid!),
+        "liveness",
+        "stable",
+        true,
+      );
+
+      expect(result).toMatchObject({ outcome: "unauthorized", why: "liveness-not-reconfirmed" });
+      expect(frozen.exitCode).toBeNull();
+    } finally {
+      frozen.kill("SIGKILL");
+      await waitDead(frozen);
+    }
+  }, 10000);
+
+  it.runIf(!isDarwin)("abandons escalation if heartbeat advances during the SIGTERM grace window", async () => {
+    const { home, target, spawnBridgeChild } = await register();
+    writeFileSync(target, 'process.on("SIGTERM", () => {}); setInterval(() => {}, 10_000);\n');
+    const frozen = await spawnBridgeChild();
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    const baseline = Date.now() - 10 * 60 * 1000;
+    const heartbeatMutation = setTimeout(() => {
+      writeFileSync(join(home, "bridge.lock"), JSON.stringify({
+        pid: frozen.pid,
+        lastHeartbeat: baseline + 1,
+      }));
+    }, 200);
+    try {
+      writeFileSync(join(home, "bridge.lock"), JSON.stringify({
+        pid: frozen.pid,
+        lastHeartbeat: baseline,
+      }));
+
+      const result = await containCandidate(
+        home,
+        frozen.pid!,
+        processStartIdentity(frozen.pid!),
+        "liveness",
+        "stable",
+      );
+
+      expect(result).toMatchObject({ outcome: "unauthorized", why: "heartbeat-advanced" });
+      expect(frozen.exitCode).toBeNull();
+    } finally {
+      clearTimeout(heartbeatMutation);
+      frozen.kill("SIGKILL");
+      await waitDead(frozen);
+    }
+  }, 10000);
+
   it.runIf(!isDarwin)("contains a frozen-heartbeat unowned process after reconfirmation (B11)", async () => {
     const { home, spawnBridgeChild } = await register();
     const frozen = await spawnBridgeChild();

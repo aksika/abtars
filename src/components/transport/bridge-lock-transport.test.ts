@@ -20,7 +20,7 @@ import { mkdtempSync, rmSync, writeFileSync, readFileSync, existsSync, utimesSyn
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 
-import { initBridgeLock, updateLastHeartbeat, updateBridgeLockField, readBridgeLockField, updateOwnedBridgeLockField, writeOwnedExitFields, writeRestartRequested } from "./bridge-lock-transport.js";
+import { initBridgeLock, updateLastHeartbeat, updateBridgeLockField, readBridgeLockField, updateOwnedBridgeLockField, writeOwnedExitFields, writeRestartRequested, readAndClearRestartReason } from "./bridge-lock-transport.js";
 
 const STALE_SECONDS = 120; // past the 30s orphan threshold in atomic-write.ts
 
@@ -153,6 +153,23 @@ describe("owner-scoped lock writes (#1711 R1)", () => {
     expect(updateOwnedBridgeLockField("sleepStatus", "sleeping")).toBe(false);
 
     expect(readBridgeLockField<string>("sleepStatus")).toBeNull();
+  });
+
+  it("accepts an owner write when instanceId is present but unparseable", () => {
+    initBridgeLock({ pid: process.pid, startedAt: Date.now(), version: "test", argv: [] });
+    const lock = readLock();
+    lock.instanceId = "   ";
+    plantLock(lock);
+
+    expect(updateOwnedBridgeLockField("lastHeartbeat", 1234)).toBe(true);
+    expect(readBridgeLockField<number>("lastHeartbeat")).toBe(1234);
+  });
+
+  it("does not let a non-owner clear restartReason", () => {
+    plantLock({ pid: process.pid + 12345, instanceId: "other", restartReason: "bridge-owned reason" });
+
+    expect(readAndClearRestartReason()).toBe("bridge-owned reason");
+    expect(readBridgeLockField<string>("restartReason")).toBe("bridge-owned reason");
   });
 
   it("accepts the owner's write when the lock lost instanceId but still names this pid (B2 interaction)", () => {

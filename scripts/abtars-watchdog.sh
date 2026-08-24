@@ -6,6 +6,10 @@ AB="${ABTARS_HOME:-$HOME/.abtars}"
 # #1711 R2: identity is a literal argv comparison, so a trailing separator here
 # would create a second identity class (never contained, never spawned beside).
 while [[ "$AB" == */ && "$AB" != "/" ]]; do AB="${AB%/}"; done
+if [[ "$AB" != /* ]]; then
+  echo "FATAL: ABTARS_HOME must be absolute: $AB" >&2
+  exit 1
+fi
 LOCK="$AB/bridge.lock"
 STALE=300        # heartbeat staleness threshold (seconds)
 POLL=60          # documented poll cadence
@@ -53,6 +57,31 @@ clear_ownership_episode() {
 # Read numeric lastHeartbeat from bridge.lock (R2.2: read-only, never mutates).
 read_heartbeat() {
   grep -o '"lastHeartbeat":[0-9]*' "$LOCK" 2>/dev/null | grep -o '[0-9]*'
+}
+
+# Track heartbeat advancement for the CURRENT deep-stale candidate window.
+# A process may have heartbeated normally for days before its lock becomes
+# unprovable; that earlier history must not permanently suppress the narrow
+# R5 liveness escape. Once a deep-stale window starts, any later value change
+# reopens the window and remains a veto until the next reset.
+observe_liveness_heartbeat() {
+  local hb now_ms changed=0
+  hb="$(read_heartbeat)"
+  [[ "$hb" =~ ^[0-9]+$ ]] || return 0
+  if [[ "$LAST_HB_PREV" =~ ^[0-9]+$ && "$hb" != "$LAST_HB_PREV" ]]; then
+    HB_ADVANCED=1
+    LIVENESS_WINDOW_STARTED=0
+    changed=1
+  fi
+  if (( changed == 0 && LIVENESS_WINDOW_STARTED == 0 )); then
+    now_ms=$(( $(date +%s) * 1000 ))
+    if (( now_ms - hb > 2 * STALE * 1000 )); then
+      HB_ADVANCED=0
+      LIVENESS_WINDOW_STARTED=1
+    fi
+  fi
+  LAST_HB_PREV="$hb"
+  LAST_OBSERVED_HB="$hb"
 }
 
 if [[ "${ABTARS_WATCHDOG_SOURCE_ONLY:-0}" != "1" ]]; then
@@ -337,7 +366,7 @@ handle_reconciliation_line() {
         cpid="${tok%%:*}"
         cid="${tok#*:}"
         logw "Containment decision ($auth) for extra PID=$cpid"
-        cres="$(svc contain "$cpid" "$cid" "$auth" "$TRANSITION_FENCE" 2>/dev/null || echo "failed invoke")"
+        cres="$(svc contain "$cpid" "$cid" "$auth" "$TRANSITION_FENCE" "${HB_ADVANCED:-0}" 2>/dev/null || echo "failed invoke")"
         logw "Containment result: $cres"
         RECON_TOKEN=""
         RECON_COUNT=0
@@ -429,6 +458,7 @@ spawn_bridge() {
   RECON_COUNT=0
   HB_ADVANCED=0
   LAST_HB_PREV=""
+  LIVENESS_WINDOW_STARTED=0
 }
 
 # Adopt one valid existing bridge, otherwise hold until a complete enumeration
@@ -486,6 +516,7 @@ TRANSITION_FENCE="stable"
 FENCE_AT=0
 LAST_HB_PREV=""
 HB_ADVANCED=0
+LIVENESS_WINDOW_STARTED=0
 EXCLUDE_PID=""
 EXCLUDE_IDENTITY=""
 # #1719 planned-fence refusal state (in-memory only, watchdog lifetime — a
@@ -530,9 +561,20 @@ while true; do
     # The shell forwards its fence state and frozen-heartbeat window evidence;
     # the boundary classifies, maintains the episode marker, and may nominate
     # a containment candidate. The shell only counts opaque tokens.
-    _recon_line="$(svc reconcile "$TRANSITION_FENCE" "${LAST_HB_PREV:--}" "$HB_ADVANCED" 2>/dev/null || true)"
-    if [[ -n "$_recon_line" ]]; then
-      handle_reconciliation_line "$_recon_line"
+    #
+    # (#1719 R4.1) While an abandoned-transition episode is open the boundary
+    # is NOT invoked: both channels share the one durable episode marker, and
+    # the boundary clears it on every clean decision — which would silently
+    # erase the operator-visible transition report one tick after it was
+    # written. Supervision stays fully live here (validated sole owner,
+    # stale-heartbeat containment remains shell-side); escalation authority
+    # for the predecessor stays with #1711's reconciliation executor.
+    observe_liveness_heartbeat
+    if [[ "${TRANSITION_FAILED_OPEN:-0}" != "1" ]]; then
+      _recon_line="$(svc reconcile "$TRANSITION_FENCE" "${LAST_HB_PREV:--}" "$HB_ADVANCED" 2>/dev/null || true)"
+      if [[ -n "$_recon_line" ]]; then
+        handle_reconciliation_line "$_recon_line"
+      fi
     fi
 
     # Bridge alive and still the validated process? Never trust a cached PID:
@@ -552,6 +594,7 @@ while true; do
             TRANSITION_FENCE="stable"
             HB_ADVANCED=0
             LAST_HB_PREV=""
+            LIVENESS_WINDOW_STARTED=0
             # Fence end clears any unconsumed replacement exclusion (R3/R7)
             # and closes the refusal budget (#1719 R4).
             EXCLUDE_PID=""
@@ -588,17 +631,7 @@ except Exception:
           DEATH_REASON="process-gone:exit=$EXIT_CODE"
           break
         fi
-        # Update observed heartbeat for resume-baseline tracking and the R5
-        # frozen-heartbeat window evidence.
         clear_ownership_episode
-        _fresh_hb=$(read_heartbeat)
-        if [[ -n "$_fresh_hb" ]]; then
-          if [[ -n "$LAST_HB_PREV" && "$_fresh_hb" -gt "$LAST_HB_PREV" ]]; then
-            HB_ADVANCED=1
-          fi
-          LAST_HB_PREV="$_fresh_hb"
-          [[ -n "$_fresh_hb" ]] && LAST_OBSERVED_HB="$_fresh_hb"
-        fi
         ;;
       transient)
         # Exhausted transient validation attempts: fall back to cached PID liveness.

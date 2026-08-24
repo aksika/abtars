@@ -29,6 +29,11 @@ interface LockOwnerContext { readonly pid: number; readonly instanceId: string }
 
 let ownerContext: LockOwnerContext | null = null;
 
+function readableLockInstanceId(lock: Record<string, unknown>): string | null {
+  const instanceId = lock.instanceId;
+  return typeof instanceId === "string" && instanceId.trim().length > 0 ? instanceId : null;
+}
+
 /**
  * Read-merge-write one BRIDGE-OWNED lock field behind the ownership gate.
  *
@@ -51,8 +56,8 @@ export function updateOwnedBridgeLockField(key: string, value: unknown): boolean
       logWarn("bridge_lock_transport", `owner-scoped write rejected (${key}): lock pid ${String(lock.pid)} != ${process.pid}`);
       return false;
     }
-    const lockInstanceId = typeof lock.instanceId === "string" ? lock.instanceId : null;
-    if (lockInstanceId !== null && ownerContext !== null && lockInstanceId !== ownerContext.instanceId) {
+    const lockInstanceId = readableLockInstanceId(lock);
+    if (lockInstanceId !== null && (ownerContext === null || lockInstanceId !== ownerContext.instanceId)) {
       logWarn("bridge_lock_transport", `owner-scoped write rejected (${key}): lock instanceId is not this bridge`);
       return false;
     }
@@ -76,8 +81,8 @@ export function writeOwnedExitFields(lastExitCode: number, lastExitAt: number): 
       logWarn("bridge_lock_transport", `exit-field write rejected: lock pid ${String(lock.pid)} != ${process.pid}`);
       return false;
     }
-    const lockInstanceId = typeof lock.instanceId === "string" ? lock.instanceId : null;
-    if (lockInstanceId !== null && ownerContext !== null && lockInstanceId !== ownerContext.instanceId) {
+    const lockInstanceId = readableLockInstanceId(lock);
+    if (lockInstanceId !== null && (ownerContext === null || lockInstanceId !== ownerContext.instanceId)) {
       logWarn("bridge_lock_transport", "exit-field write rejected: lock instanceId is not this bridge");
       return false;
     }
@@ -139,7 +144,7 @@ export function writeRestartReason(reason: string): void {
 /** Read and clear restart reason from bridge.lock. */
 export function readAndClearRestartReason(): string | null {
   const reason = readBridgeLockField<string>("restartReason");
-  if (reason) updateBridgeLockField("restartReason", null);
+  if (reason) updateOwnedBridgeLockField("restartReason", null);
   return reason;
 }
 
