@@ -20,6 +20,8 @@ import { fingerprintCommand, previewCommand } from "./transport/tool-failure-dia
 
 export const STDOUT_CAP_CHARS = 50_000;
 export const STDERR_CAP_CHARS = 10_000;
+/** Preserve the old execFile maxBuffer safety boundary per output stream. */
+export const MAX_BUFFER_BYTES = 1024 * 1024;
 export const KILL_GRACE_MS = 3_000;
 
 export interface BashRunnerRequest {
@@ -46,26 +48,29 @@ export interface BashRunnerResult {
   stderr?: string;
 }
 
-type TerminalReason = "exit" | "timeout" | "abort";
+type TerminalReason = "exit" | "timeout" | "abort" | "max_buffer";
 
 interface CaptureBuffer {
   text: string;
   truncated: boolean;
   cap: number;
+  observedBytes: number;
 }
 
 function makeCapture(cap: number): CaptureBuffer {
-  return { text: "", truncated: false, cap };
+  return { text: "", truncated: false, cap, observedBytes: 0 };
 }
 
-function appendCapture(buf: CaptureBuffer, chunk: string): void {
-  if (buf.truncated) return;
+function appendCapture(buf: CaptureBuffer, chunk: string): boolean {
+  buf.observedBytes += Buffer.byteLength(chunk, "utf8");
+  if (buf.truncated) return buf.observedBytes > MAX_BUFFER_BYTES;
   if (buf.text.length + chunk.length >= buf.cap) {
     buf.text += chunk.slice(0, Math.max(0, buf.cap - buf.text.length));
     buf.truncated = true;
-    return;
+    return buf.observedBytes > MAX_BUFFER_BYTES;
   }
   buf.text += chunk;
+  return buf.observedBytes > MAX_BUFFER_BYTES;
 }
 
 export function runBashCommand(req: BashRunnerRequest): Promise<BashRunnerResult> {
@@ -145,7 +150,10 @@ export function runBashCommand(req: BashRunnerRequest): Promise<BashRunnerResult
         aborted: terminal === "abort",
         exit_code: exitCode,
       };
-      if (spawnErrorCode !== undefined) {
+      if (terminal === "max_buffer") {
+        result.process_error_code = "ERR_CHILD_PROCESS_STDIO_MAXBUFFER";
+        result.exit_code = null;
+      } else if (spawnErrorCode !== undefined) {
         result.process_error_code = spawnErrorCode;
         result.exit_code = null;
       } else if (exitSignal !== undefined) {
@@ -153,7 +161,7 @@ export function runBashCommand(req: BashRunnerRequest): Promise<BashRunnerResult
       }
       if (stdoutBuf.text.length > 0) result.stdout = stdoutBuf.text;
       if (stderrBuf.text.length > 0) result.stderr = stderrBuf.text;
-      if ((result.timed_out || result.aborted) && !(exitSeen && streamsClosed())) {
+      if ((result.timed_out || result.aborted || terminal === "max_buffer") && !(exitSeen && streamsClosed())) {
         result.cleanup_incomplete = true;
       }
       return result;
@@ -162,9 +170,6 @@ export function runBashCommand(req: BashRunnerRequest): Promise<BashRunnerResult
     function detach(): void {
       clearTimeout(capTimer);
       clearTimeout(graceTimer);
-      child.removeAllListeners();
-      child.stdout?.removeAllListeners();
-      child.stderr?.removeAllListeners();
       req.signal?.removeEventListener("abort", onAbort);
     }
 
@@ -175,7 +180,7 @@ export function runBashCommand(req: BashRunnerRequest): Promise<BashRunnerResult
       resolve(buildResult());
     }
 
-    function beginContainment(reason: "timeout" | "abort"): void {
+    function beginContainment(reason: "timeout" | "abort" | "max_buffer"): void {
       if (settled || terminal !== null) return;
       terminal = reason;
       killGroup("SIGTERM");
@@ -203,8 +208,12 @@ export function runBashCommand(req: BashRunnerRequest): Promise<BashRunnerResult
 
     child.stdout!.setEncoding("utf8");
     child.stderr!.setEncoding("utf8");
-    child.stdout!.on("data", (chunk: string) => appendCapture(stdoutBuf, chunk));
-    child.stderr!.on("data", (chunk: string) => appendCapture(stderrBuf, chunk));
+    child.stdout!.on("data", (chunk: string) => {
+      if (!settled && appendCapture(stdoutBuf, chunk)) beginContainment("max_buffer");
+    });
+    child.stderr!.on("data", (chunk: string) => {
+      if (!settled && appendCapture(stderrBuf, chunk)) beginContainment("max_buffer");
+    });
     child.stdout!.on("close", onMaybeComplete);
     child.stderr!.on("close", onMaybeComplete);
 

@@ -247,8 +247,13 @@ function parseIntSafe(raw: string, varName: string): number {
 }
 
 function parseIntSafeBounded(raw: string, varName: string, min: number, max: number): number {
-  const n = parseIntSafe(raw, varName);
-  if (n < min || n > max) throw new Error(`Invalid ${varName}: "${raw}" — expected integer between ${min} and ${max}`);
+  if (!/^[+-]?\d+$/.test(raw)) {
+    throw new Error(`Invalid ${varName}: "${raw}" — expected integer between ${min} and ${max}`);
+  }
+  const n = Number(raw);
+  if (!Number.isSafeInteger(n) || n < min || n > max) {
+    throw new Error(`Invalid ${varName}: "${raw}" — expected integer between ${min} and ${max}`);
+  }
   return n;
 }
 

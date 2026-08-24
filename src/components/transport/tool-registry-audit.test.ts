@@ -94,6 +94,20 @@ describe("#1716 classifyBashCompletion mapping table", async () => {
     ).toBe("cleanup_incomplete_timeout");
   });
 
+  it("maps spawn errors to error status", () => {
+    expect(classifyBashCompletion('{"process_error_code":"ENOENT","exit_code":null}', false, undefined)).toMatchObject({
+      status: "error",
+      process_error_code: "ENOENT",
+    });
+  });
+
+  it("maps structured execution errors to error status", () => {
+    expect(classifyBashCompletion('{"error":"execution_failed","exit_code":null}', false, undefined)).toMatchObject({
+      status: "error",
+      error: "execution_failed",
+    });
+  });
+
   it("maps aborted results to abort", () => {
     expect(classifyBashCompletion('{"aborted":true,"exit_code":null}', false, undefined)?.status).toBe("abort");
   });

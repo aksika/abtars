@@ -133,6 +133,22 @@ describe("runBashCommand", () => {
     expect(result.stderr?.length).toBe(STDERR_CAP_CHARS);
   });
 
+  it("retains the old maxBuffer termination for output floods", async () => {
+    const start = Date.now();
+    const result = await runBashCommand({
+      cmd: "yes output-flood",
+      bin: "bash",
+      args: ["-c", "yes output-flood"],
+      timeoutMs: 10_000,
+      graceMs: FAST_GRACE,
+    });
+    const elapsed = Date.now() - start;
+    expect(result.process_error_code).toBe("ERR_CHILD_PROCESS_STDIO_MAXBUFFER");
+    expect(result.timed_out).toBe(false);
+    expect(result.stdout?.length).toBe(STDOUT_CAP_CHARS);
+    expect(elapsed).toBeLessThan(3000);
+  });
+
   it("rejects an invalid timeout configuration", async () => {
     await expect(
       runBashCommand({ cmd: "echo x", bin: "bash", args: ["-c", "echo x"], timeoutMs: 0 }),

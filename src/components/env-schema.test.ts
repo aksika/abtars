@@ -6,7 +6,7 @@ describe("env-schema", () => {
 
   beforeEach(() => {
     _resetEnv();
-    for (const k of ["SELFHEAL_MODE", "CTX_WARN_PCT", "ACTIVE_MEMORY"]) {
+    for (const k of ["SELFHEAL_MODE", "CTX_WARN_PCT", "ACTIVE_MEMORY", "BASH_TOOL_TIMEOUT_SEC"]) {
       saved[k] = process.env[k];
       delete process.env[k];
     }
@@ -84,7 +84,7 @@ describe("env-schema", () => {
       expect(() => initEnv()).toThrow("Invalid BASH_TOOL_TIMEOUT_SEC");
     });
 
-    it.each(["0", "-5", "3601"])("throws on out-of-range value %s", (value) => {
+    it.each(["0", "-5", "3601", "45.5", "1junk"])("throws on invalid value %s", (value) => {
       process.env["BASH_TOOL_TIMEOUT_SEC"] = value;
       expect(() => initEnv()).toThrow(/expected integer between 1 and 3600/);
     });

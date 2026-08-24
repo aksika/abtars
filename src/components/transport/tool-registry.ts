@@ -39,13 +39,19 @@ interface CompletionClassification {
   status: BashAuditStatus;
   chars?: number;
   exit_code?: number;
+  process_error_code?: string;
   error?: string;
   parse_warning?: boolean;
 }
 
+function boundedAuditText(value: unknown): string {
+  const raw = value instanceof Error ? value.message : String(value);
+  return redactSecrets(raw).slice(0, 512);
+}
+
 export function classifyBashCompletion(result: string | undefined, failed: boolean, err: unknown): CompletionClassification {
   if (failed) {
-    return { status: "error", error: err instanceof Error ? err.message : String(err) };
+    return { status: "error", error: boundedAuditText(err) };
   }
   const chars = typeof result === "string" ? result.length : 0;
   let parsed: Record<string, unknown> | null = null;
@@ -63,9 +69,13 @@ export function classifyBashCompletion(result: string | undefined, failed: boole
   const cleanupIncomplete = parsed["cleanup_incomplete"] === true;
   const timedOut = parsed["timed_out"] === true;
   const aborted = parsed["aborted"] === true;
+  const processErrorCode = typeof parsed["process_error_code"] === "string" ? parsed["process_error_code"] : undefined;
+  const structuredError = typeof parsed["error"] === "string" ? parsed["error"] : undefined;
   if (cleanupIncomplete) return { status: "cleanup_incomplete_timeout", chars };
   if (timedOut) return { status: "timeout", chars };
   if (aborted) return { status: "abort", chars };
+  if (processErrorCode) return { status: "error", chars, process_error_code: processErrorCode, error: processErrorCode };
+  if (structuredError) return { status: "error", chars, error: boundedAuditText(structuredError) };
   const exitCode = typeof parsed["exit_code"] === "number" ? parsed["exit_code"] : undefined;
   return { status: "ok", chars, ...(exitCode !== undefined ? { exit_code: exitCode } : {}) };
 }
