@@ -426,22 +426,37 @@ svc() {
     printf "%s" "$out"
   fi
 }
-spawn_bridge() { SPAWNED=$((SPAWNED+1)); }
+spawn_bridge() { echo x >> "$GATE_SPAWNS"; }
 poll_state() { :; }
 POLL_INTERVAL=0
-spawn_if_proven_empty >/dev/null 2>&1
-echo "spawned=$SPAWNED"
+# Bounded probe: if the gate still has not authorized a spawn after several
+# slices, report held (a real watchdog would keep holding — fail-closed).
+spawn_if_proven_empty >/dev/null 2>&1 &
+GATE_PID=$!
+for _ in $(seq 1 400); do
+  kill -0 "$GATE_PID" 2>/dev/null || break
+  sleep 0.01
+done
+if kill -0 "$GATE_PID" 2>/dev/null; then
+  kill -9 "$GATE_PID" 2>/dev/null
+  wait "$GATE_PID" 2>/dev/null
+  STATE="held"
+else
+  STATE="done"
+fi
+echo "$STATE spawned=$(wc -l < "${GATE_SPAWNS:-/dev/null}" 2>/dev/null || echo 0)"
 RUNNER_EOF
 
 gate_run() {
   : > "$GATE_LOG"
-  rm -f "$GATE_HOME/.gate-counter"
+  rm -f "$GATE_HOME/.gate-counter" "$GATE_HOME/.gate-spawns"
   WD_SH_PATH="$WD_SH" ABTARS_WATCHDOG_SOURCE_ONLY=1 ABTARS_HOME="$GATE_HOME" \
-    GATE_SEQ="$1" GATE_COUNTER="$GATE_HOME/.gate-counter" bash "$GATE_RUNNER" 2>/dev/null
+    GATE_SEQ="$1" GATE_COUNTER="$GATE_HOME/.gate-counter" GATE_SPAWNS="$GATE_HOME/.gate-spawns" \
+    bash "$GATE_RUNNER" 2>/dev/null
 }
 
 RESULT=$(gate_run "empty")
-if [[ "$RESULT" != "spawned=1"* ]] || [[ -s "$GATE_LOG" ]]; then
+if [[ "$RESULT" != "done spawned=1"* ]]; then
   echo "FAIL: gate must spawn silently on complete empty proof — got: $RESULT log=$(cat "$GATE_LOG")"
   exit 1
 fi
@@ -450,7 +465,7 @@ echo "OK: gate spawns on a complete empty enumeration"
 RESULT=$(gate_run "occupied 2;occupied 2;empty")
 SPAWN_COUNT=$(echo "$RESULT" | grep -o "spawned=[0-9]*" | cut -d= -f2)
 WITHHELD_LINES=$(grep -c "Spawn withheld" "$GATE_LOG")
-if [[ "$SPAWN_COUNT" != "1" || "$WITHHELD_LINES" != "1" ]]; then
+if [[ "$RESULT" != "done spawned=1"* || "$WITHHELD_LINES" != "1" ]]; then
   echo "FAIL: gate must withhold while occupied, spawn once after empty, log ONCE — got: $RESULT lines=$WITHHELD_LINES"
   exit 1
 fi
@@ -459,19 +474,23 @@ echo "OK: gate withholds spawn on occupied snapshot until proof turns empty (one
 RESULT=$(gate_run "inconclusive;inconclusive;empty")
 SPAWN_COUNT=$(echo "$RESULT" | grep -o "spawned=[0-9]*" | cut -d= -f2)
 INCONCLUSIVE_LINES=$(grep -c "enumeration inconclusive" "$GATE_LOG")
-if [[ "$SPAWN_COUNT" != "1" || "$INCONCLUSIVE_LINES" != "1" ]]; then
+if [[ "$RESULT" != "done spawned=1"* || "$INCONCLUSIVE_LINES" != "1" ]]; then
   echo "FAIL: gate must hold fail-closed on inconclusive enumeration without repeating logs — got: $RESULT lines=$INCONCLUSIVE_LINES"
   exit 1
 fi
 echo "OK: gate holds fail-closed on inconclusive enumeration (one event line)"
 
 RESULT=$(gate_run "")
-SPAWN_COUNT=$(echo "$RESULT" | grep -o "spawned=[0-9]*" | cut -d= -f2)
-if [[ "$SPAWN_COUNT" != "1" ]]; then
-  echo "FAIL: boundary invocation failure must behave as inconclusive (hold, then proceed) — got: $RESULT"
+if [[ "$RESULT" != "held spawned=0"* ]]; then
+  echo "FAIL: boundary invocation failure must hold fail-closed without spawning — got: $RESULT"
   exit 1
 fi
-echo "OK: boundary invocation failure is treated as inconclusive"
+HELD_INCONCLUSIVE_LINES=$(grep -c "enumeration inconclusive" "$GATE_LOG")
+if [[ "$HELD_INCONCLUSIVE_LINES" != "1" ]]; then
+  echo "FAIL: indefinite hold must log the inconclusive state exactly once — got $HELD_INCONCLUSIVE_LINES lines"
+  exit 1
+fi
+echo "OK: boundary invocation failure holds fail-closed (never spawns, one event line)"
 
 # R4: validate-bridge consumer tolerates trailing metadata.
 if grep -q '\-z "\$vextra"' "$WD_SH"; then
@@ -479,6 +498,76 @@ if grep -q '\-z "\$vextra"' "$WD_SH"; then
   exit 1
 fi
 echo "OK: read_bridge_identity tolerates declared trailing fields"
+
+# ── #1711 Phase 2: reconciliation token handling (source-only harness) ───
+RECON_HOME="$(mktemp -d)"
+mkdir -p "$RECON_HOME/logs"
+
+RECON_RUNNER="$RECON_HOME/recon-runner.sh"
+cat > "$RECON_RUNNER" <<'RUNNER_EOF'
+#!/usr/bin/env bash
+set -u
+source "$WD_SH_PATH"
+svc() {
+  if [[ "$1" == "contain" ]]; then
+    local n
+    n="$(cat "$RECON_COUNTER" 2>/dev/null || echo 0)"
+    echo $((n+1)) > "$RECON_COUNTER"
+  fi
+}
+RECON_TOKEN=""
+RECON_COUNT=0
+TRANSITION_FENCE="stable"
+handle_reconciliation_line "decision=extra-candidate token=200:6000 authority=owner" >/dev/null
+handle_reconciliation_line "decision=extra-candidate token=200:6000 authority=owner" >/dev/null
+C1="$(cat "$RECON_COUNTER" 2>/dev/null || echo 0)"
+handle_reconciliation_line "decision=contain-extra token=200:6000 authority=liveness" >/dev/null
+C3="$(cat "$RECON_COUNTER" 2>/dev/null || echo 0)"
+echo "calls3=$C3 first_two=$C1"
+RUNNER_EOF
+
+RESULT=$(WD_SH_PATH="$WD_SH" ABTARS_WATCHDOG_SOURCE_ONLY=1 ABTARS_HOME="$RECON_HOME" \
+  RECON_COUNTER="$RECON_HOME/.recon-counter" bash "$RECON_RUNNER")
+if [[ "$RESULT" != "calls3=1 first_two=0"* ]]; then
+  echo "FAIL: containment must fire exactly on the third identical nomination — got: $RESULT"
+  exit 1
+fi
+echo "OK: reconciliation handler contains only after three consecutive nominations"
+
+cat > "$RECON_RUNNER" <<'RUNNER_EOF2'
+#!/usr/bin/env bash
+set -u
+source "$WD_SH_PATH"
+svc() { [[ "$1" == "contain" ]] && echo x > "$RECON_COUNTER"; }
+RECON_TOKEN=""
+RECON_COUNT=0
+TRANSITION_FENCE="stable"
+# A fence decision must reset candidacy, never count toward containment.
+handle_reconciliation_line "decision=planned-transition token=- authority=-" >/dev/null
+handle_reconciliation_line "decision=extra-candidate token=300:7000 authority=liveness" >/dev/null
+handle_reconciliation_line "decision=planned-transition token=- authority=-" >/dev/null
+handle_reconciliation_line "decision=extra-candidate token=300:7000 authority=liveness" >/dev/null
+handle_reconciliation_line "decision=extra-candidate token=300:7000 authority=liveness" >/dev/null
+echo "fenced_calls=$(cat "$RECON_COUNTER" 2>/dev/null || echo 0)"
+RUNNER_EOF2
+
+rm -f "$RECON_HOME/.recon-counter"
+RESULT=$(WD_SH_PATH="$WD_SH" ABTARS_WATCHDOG_SOURCE_ONLY=1 ABTARS_HOME="$RECON_HOME" \
+  RECON_COUNTER="$RECON_HOME/.recon-counter" bash "$RECON_RUNNER")
+if [[ "$RESULT" != "fenced_calls=0"* ]]; then
+  echo "FAIL: fence interruptions must reset candidate observation windows — got: $RESULT"
+  exit 1
+fi
+echo "OK: fence resets the candidate observation window"
+
+rm -rf "$RECON_HOME"
+
+# Phase 2 anti-regrowth guard must pass on the current shell.
+if ! node "$SCRIPT_DIR/check-watchdog-shape.mjs" >/dev/null; then
+  echo "FAIL: watchdog shape guard failed (#1711 Phase 2)"
+  exit 1
+fi
+echo "OK: watchdog shape guard passes"
 
 rm -rf "$GATE_HOME"
 

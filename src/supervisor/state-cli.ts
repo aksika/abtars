@@ -15,7 +15,7 @@ import {
   setOwnershipEpisode,
   clearOwnershipEpisode,
 } from "./state.js";
-import { validateBridgeLock, signalValidatedBridge, processStartIdentity, exactBridgeProcesses } from "./identity.js";
+import { validateBridgeLock, signalValidatedBridge, processStartIdentity, potentialHomeBridgeProcesses } from "./identity.js";
 import { atomicWriteSync } from "../components/atomic-write.js";
 import { runReconciliationTick, containCandidate } from "./reconcile-executor.js";
 import type { TransitionState } from "./reconcile.js";
@@ -183,7 +183,7 @@ async function main(): Promise<void> {
       // Zero-process proof before any spawn (#1711 R3). Shell-friendly output:
       // "empty" | "occupied <n>" | "inconclusive". Only "empty" authorizes the
       // existing spawn path; anything else must hold.
-      const exact = exactBridgeProcesses(home);
+      const exact = potentialHomeBridgeProcesses(home);
       if (exact === null) {
         process.stdout.write("inconclusive\n");
         process.exit(Exit.Ok);

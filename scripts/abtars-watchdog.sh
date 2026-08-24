@@ -125,6 +125,10 @@ apply_command() {
       logw "Planned bridge restart: command=$type"
       PID=""
       PLANNED_RESTART=1
+      # Raise the transition fence (#1711 R7): observation-only through
+      # termination, activation, overlap, and post-spawn ownership settling.
+      TRANSITION_FENCE="planned-restart"
+      FENCE_AT=$(date +%s)
       return 0
       ;;
     *)
@@ -240,6 +244,62 @@ spawn_if_proven_empty() {
   done
 }
 
+# ── Typed reconciliation integration (#1711 Phase 2) ─────────────────────
+# Shell state (in-memory, watchdog lifetime):
+#   RECON_TOKEN / RECON_COUNT — consecutive identical boundary nominations
+#   TRANSITION_FENCE / FENCE_AT — planned-transition protection (R7)
+#   LAST_HB_PREV / HB_ADVANCED — frozen-heartbeat observation window (R5)
+#
+# The shell only compares opaque tokens and counts; it never parses process
+# records or chooses targets. Containment runs through svc contain, which
+# revalidates everything fresh.
+handle_reconciliation_line() {
+  local line="$1" dec tok auth
+  dec="${line%% *}"
+  line="${line#* }"
+  tok="${line%% *}"
+  line="${line#* }"
+  auth="${line#authority=}"
+  dec="${dec#decision=}"
+  tok="${tok#token=}"
+
+  case "$dec" in
+    extra-candidate|contain-extra)
+      if [[ "$tok" == "$RECON_TOKEN" ]]; then
+        RECON_COUNT=$((RECON_COUNT+1))
+      else
+        RECON_TOKEN="$tok"
+        RECON_COUNT=1
+      fi
+      if (( RECON_COUNT >= 3 )); then
+        local cpid cid cres
+        cpid="${tok%%:*}"
+        cid="${tok#*:}"
+        logw "Containment decision ($auth) for extra PID=$cpid"
+        cres="$(svc contain "$cpid" "$cid" "$auth" "$TRANSITION_FENCE" 2>/dev/null || echo "failed invoke")"
+        logw "Containment result: $cres"
+        RECON_TOKEN=""
+        RECON_COUNT=0
+      fi
+      ;;
+    ownership-inconclusive)
+      # Marker persisted by the boundary; one event line on entry (R8).
+      log_event "recon-inconclusive:${tok}" "Reconciliation: ownership inconclusive (${auth}) — holding supervision"
+      RECON_TOKEN=""
+      RECON_COUNT=0
+      ;;
+    enumeration-failed)
+      log_event "recon-enumfail" "Reconciliation: process enumeration failed — holding fail-closed"
+      RECON_TOKEN=""
+      RECON_COUNT=0
+      ;;
+    clean|none|owner-missing|planned-transition)
+      RECON_TOKEN=""
+      RECON_COUNT=0
+      ;;
+  esac
+}
+
 if [[ "${ABTARS_WATCHDOG_SOURCE_ONLY:-0}" == "1" ]]; then
   return 0 2>/dev/null || exit 0
 fi
@@ -253,6 +313,11 @@ spawn_bridge() {
   disown $PID   # #1050: survive watchdog SIGTERM/HUP — bridge must not die with us
   SPAWNED_AT=$(date +%s)
   PLANNED_RESTART=0
+  # New child = fresh observation windows (#1711 R5/R6/R7).
+  RECON_TOKEN=""
+  RECON_COUNT=0
+  HB_ADVANCED=0
+  LAST_HB_PREV=""
 }
 
 # Adopt one valid existing bridge, otherwise hold until a complete enumeration
@@ -291,6 +356,12 @@ START_REASON="watchdog-respawn"
 LAST_OBSERVED_HB=""
 OWNERSHIP_EPISODE_OPEN=0
 LAST_EVENT_KEY=""
+RECON_TOKEN=""
+RECON_COUNT=0
+TRANSITION_FENCE="stable"
+FENCE_AT=0
+LAST_HB_PREV=""
+HB_ADVANCED=0
 adopt_or_spawn
 LAST_OBSERVED_HB="$(read_heartbeat)"
 
@@ -320,6 +391,15 @@ while true; do
       continue
     fi
 
+    # Typed reconciliation boundary (#1711 Phase 2): one invocation per tick.
+    # The shell forwards its fence state and frozen-heartbeat window evidence;
+    # the boundary classifies, maintains the episode marker, and may nominate
+    # a containment candidate. The shell only counts opaque tokens.
+    _recon_line="$(svc reconcile "$TRANSITION_FENCE" "${LAST_HB_PREV:--}" "$HB_ADVANCED" 2>/dev/null || true)"
+    if [[ -n "$_recon_line" ]]; then
+      handle_reconciliation_line "$_recon_line"
+    fi
+
     # Bridge alive and still the validated process? Never trust a cached PID:
     # PID reuse must be classified before any signal is sent. Bounded retry
     # for transient results (empty output, corrupt) — see design #1499.
@@ -329,6 +409,16 @@ while true; do
     fi
     case "$_vstatus" in
       valid)
+        # Post-transition ownership settling (#1711 R7): the first validated
+        # observation of the current PID clears the fence; a hard cap prevents
+        # a permanent fence if settling never confirms.
+        if [[ "$TRANSITION_FENCE" != "stable" ]]; then
+          if [[ "$_vpid" == "$PID" ]] || (( $(date +%s) - FENCE_AT > 300 )); then
+            TRANSITION_FENCE="stable"
+            HB_ADVANCED=0
+            LAST_HB_PREV=""
+          fi
+        fi
         if [[ "$_vpid" != "$PID" ]]; then
           # Validated PID mismatch — existing terminal behavior.
           clear_ownership_episode
@@ -350,10 +440,17 @@ except Exception:
           DEATH_REASON="process-gone:exit=$EXIT_CODE"
           break
         fi
-        # Update observed heartbeat for resume-baseline tracking.
+        # Update observed heartbeat for resume-baseline tracking and the R5
+        # frozen-heartbeat window evidence.
         clear_ownership_episode
         _fresh_hb=$(read_heartbeat)
-        [[ -n "$_fresh_hb" ]] && LAST_OBSERVED_HB="$_fresh_hb"
+        if [[ -n "$_fresh_hb" ]]; then
+          if [[ -n "$LAST_HB_PREV" && "$_fresh_hb" -gt "$LAST_HB_PREV" ]]; then
+            HB_ADVANCED=1
+          fi
+          LAST_HB_PREV="$_fresh_hb"
+          [[ -n "$_fresh_hb" ]] && LAST_OBSERVED_HB="$_fresh_hb"
+        fi
         ;;
       transient)
         # Exhausted transient validation attempts: fall back to cached PID liveness.

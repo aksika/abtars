@@ -145,6 +145,35 @@ export function exactBridgeProcesses(home: string): readonly BridgeProcess[] | n
   return result.complete ? result.processes.filter((p) => p.exactTarget) : null;
 }
 
+/**
+ * Spawn-proof predicate (#1711 R2/R3). Broader than the containment predicate
+ * BY DESIGN: a process whose argv COULD be this home's bridge — an absolute
+ * spelling inside this home, or a relative `app/bundle/abtars.js` spelling
+ * whose home cannot be attributed — blocks spawning but is never contained,
+ * adopted, or signalled. Killing stays narrow (exactTarget); refusing to
+ * create a duplicate is the cheap, fail-closed direction.
+ */
+export function couldBeSameHomeBridge(home: string, argv: readonly string[]): boolean {
+  const target = spawnTarget(home);
+  const base = home.replace(/\/+$/, "");
+  for (const arg of argv) {
+    if (arg === target) return true;
+    if (arg.startsWith(`${base}/`) && arg.endsWith("/app/bundle/abtars.js")) return true;
+    if (arg === "app/bundle/abtars.js") return true;
+  }
+  return false;
+}
+
+/**
+ * Processes that could plausibly be this home's bridge under ANY spelling, or
+ * null when the snapshot is incomplete. Used ONLY for the zero-spawn proof.
+ */
+export function potentialHomeBridgeProcesses(home: string): readonly BridgeProcess[] | null {
+  const result = enumerateBridgeProcesses(home);
+  if (!result.complete) return null;
+  return result.processes.filter((p) => couldBeSameHomeBridge(home, p.argv));
+}
+
 function macProcessField(pid: number, field: "lstart" | "command"): string | null {
   try {
     const output = execFileSync("ps", ["-p", String(pid), "-o", `${field}=`], {
