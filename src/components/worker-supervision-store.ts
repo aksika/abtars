@@ -19,6 +19,11 @@ import {
 
 export type { ExecutorKind } from "./worker-executor-identity.js";
 
+/** #1720 — hard cap for late-completion settlement grace. */
+const MAX_COMPLETION_GRACE_MS = 5_000;
+/** #1720 — grace fallback when the attempt's contract carries no usable duration. */
+const FALLBACK_COMPLETION_GRACE_MS = 1_000;
+
 export type AttemptLifecycle =
   | "pending"
   | "claimed"
@@ -1160,6 +1165,25 @@ export class WorkerSupervisionStore {
 
   /** Public terminal-settlement wrapper — opens one transaction around the
    * canonical body. */
+  /** #1720 — Bounded tolerance for completions that reach settlement just
+   * past their hard deadline. Workers pace to the announced budget, so
+   * genuine completions cluster at the boundary; event-loop jitter must not
+   * discard paid-for evidence. Proportional to the lane's own contract
+   * budget and capped; falls back small when no usable duration exists. */
+  private completionGraceMs(attempt: AttemptRow): number {
+    try {
+      const row = this.getContract(attempt.contract_id);
+      const parsed = row ? JSON.parse(row.contract_json) as { limits?: { max_duration_ms?: unknown } } | null : null;
+      const duration = parsed?.limits?.max_duration_ms;
+      if (typeof duration !== "number" || !Number.isFinite(duration) || !Number.isInteger(duration) || duration <= 0) {
+        return FALLBACK_COMPLETION_GRACE_MS;
+      }
+      return Math.min(duration * 0.01, MAX_COMPLETION_GRACE_MS);
+    } catch {
+      return FALLBACK_COMPLETION_GRACE_MS;
+    }
+  }
+
   terminalSettlement(input: {
     attemptId: string;
     expectedGeneration: number;
@@ -1238,8 +1262,13 @@ export class WorkerSupervisionStore {
     let effectiveState = input.desiredState;
     const now = input.now ?? Date.now();
 
-    if (input.desiredState === "completed") {
-      if (attempt.hard_deadline_at && now >= new Date(attempt.hard_deadline_at).getTime()) {
+    if (input.desiredState === "completed" && attempt.hard_deadline_at) {
+      // #1720: a completion that reaches settlement just past its hard
+      // deadline is real, evidenced work; discard it only beyond a bounded
+      // grace window. Without an envelope there is no grace at any lateness.
+      const latenessMs = now - new Date(attempt.hard_deadline_at).getTime();
+      const withinGrace = input.envelope !== undefined && latenessMs <= this.completionGraceMs(attempt);
+      if (latenessMs >= 0 && !withinGrace) {
         effectiveState = "timed_out";
       }
     }

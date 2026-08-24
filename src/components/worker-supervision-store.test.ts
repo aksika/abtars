@@ -655,6 +655,105 @@ describe("WorkerSupervisionStore", () => {
       }
     });
 
+    // ── #1720: bounded completion grace window ──────────────────────────────
+
+    describe("#1720 completion grace window", () => {
+      const DEADLINE_ISO = "2026-08-24T07:32:36.749Z";
+      const DEADLINE_MS = Date.parse(DEADLINE_ISO);
+
+      let graceSeq = 0;
+
+      function graceAttempt(s: InstanceType<typeof Store>, limits: WorkerAcceptanceContractV1["limits"]): { aid: string; cid: string } {
+        graceSeq += 1;
+        const nowIso = "2026-08-24T07:00:00.000Z";
+        const cid = `c_grace_${graceSeq}`;
+        const aid = `a_grace_${graceSeq}`;
+        const digest = `d_grace_${graceSeq}`;
+        s.db.prepare(`INSERT OR IGNORE INTO kanban_board (id, title, source, status, type, created_at, updated_at) VALUES (?, ?, ?, ?, 'O', ?, ?)`).run(9199, "proj", "t", "running", nowIso, nowIso);
+        s.db.prepare(`INSERT OR IGNORE INTO kanban_board (id, title, source, status, type, parent_id, created_at, updated_at) VALUES (?, ?, ?, 'queued', 'W', ?, ?, ?)`).run(9199 + graceSeq, "lane", "t", 9199, nowIso, nowIso);
+        s.insertContract({ schema_version: 1, id: cid, digest, goal: "test", criteria: [], expected_artifacts: [], verification_commands: [], required_capabilities: [], limits, provenance: { root_card_id: 9199, card_id: 9199 + graceSeq, authored_by: "test", created_at: nowIso } }, 9199 + graceSeq);
+        s.insertAttempt({ id: aid, card_id: 9199 + graceSeq, contract_id: cid, ordinal: 1, executor_kind: "agent", executor_id: "spin-local", status: "pending", started_at: nowIso });
+        s.lifecycleTransition(aid, ["pending"], "running");
+        s.db.prepare("UPDATE worker_attempts SET hard_deadline_at = ? WHERE id = ?").run(DEADLINE_ISO, aid);
+        return { aid, cid };
+      }
+
+      function envelopeFor(aid: string, cid: string): WorkerResultEnvelopeV1 {
+        return { ...TEST_ENVELOPE, attempt: { ...TEST_ENVELOPE.attempt, id: aid, contract_id: cid } };
+      }
+
+      function settleLate(s: InstanceType<typeof Store>, aid: string, latenessMs: number, envelope?: WorkerResultEnvelopeV1) {
+        return s.terminalSettlement({
+          attemptId: aid, expectedGeneration: 1, desiredState: "completed",
+          stableReason: "worker_completed", envelope, now: DEADLINE_MS + latenessMs,
+        });
+      }
+
+      it("accepts an evidenced completion 14ms past the deadline (#1720 incident shape)", () => {
+        const s = new Store();
+        const { aid, cid } = graceAttempt(s, { max_duration_ms: 120_000 });
+        const result = settleLate(s, aid, 14, envelopeFor(aid, cid));
+        expect(result.kind).toBe("settled");
+        if (result.kind === "settled") expect(result.lifecycle).toBe("completed");
+        const row = s.getAttempt(aid)!;
+        expect(row.lifecycle).toBe("completed");
+        expect(row.cancel_reason).toBe("worker_completed");
+        expect(s.getResultByAttempt(aid)!.envelope.outcome).toBe("completed");
+      });
+
+      it("rejects at deadline+1201ms for a 120s lane — proportional boundary, not flat", () => {
+        const s = new Store();
+        const { aid, cid } = graceAttempt(s, { max_duration_ms: 120_000 });
+        const result = settleLate(s, aid, 1_201, envelopeFor(aid, cid));
+        expect(result.kind).toBe("settled");
+        if (result.kind === "settled") expect(result.lifecycle).toBe("timed_out");
+        expect(s.getAttempt(aid)!.cancel_reason).toBe("late_completion_timed_out: worker_completed");
+        expect(s.getResultByAttempt(aid)).toBeDefined();
+      });
+
+      it("caps grace at 5000ms for a 600s lane (deadline+5001ms rejects)", () => {
+        const s = new Store();
+        const { aid, cid } = graceAttempt(s, { max_duration_ms: 600_000 });
+        const result = settleLate(s, aid, 5_001, envelopeFor(aid, cid));
+        expect(result.kind).toBe("settled");
+        if (result.kind === "settled") expect(result.lifecycle).toBe("timed_out");
+        expect(s.getAttempt(aid)!.cancel_reason).toBe("late_completion_timed_out: worker_completed");
+      });
+
+      it("gives no grace without an envelope, even 14ms late", () => {
+        const s = new Store();
+        const { aid } = graceAttempt(s, { max_duration_ms: 120_000 });
+        const result = settleLate(s, aid, 14);
+        expect(result.kind).toBe("settled");
+        if (result.kind === "settled") expect(result.lifecycle).toBe("timed_out");
+        expect(s.getAttempt(aid)!.cancel_reason).toBe("late_completion_timed_out: worker_completed");
+        expect(s.getResultByAttempt(aid)!.envelope.outcome).toBe("timed_out");
+      });
+
+      it("falls back to 1000ms when the attempt's contract carries no usable duration", () => {
+        const variants: Array<{ name: string; limits: WorkerAcceptanceContractV1["limits"]; corruptJson?: boolean }> = [
+          { name: "missing limits", limits: {} },
+          { name: "invalid duration", limits: { max_duration_ms: -5 } },
+          { name: "malformed JSON", limits: {}, corruptJson: true },
+        ];
+        for (const v of variants) {
+          const sOk = new Store();
+          const ok = graceAttempt(sOk, v.limits);
+          if (v.corruptJson) sOk.db.prepare("UPDATE worker_contracts SET contract_json = '{broken' WHERE id = ?").run(ok.cid);
+          const accepted = settleLate(sOk, ok.aid, 1_000, envelopeFor(ok.aid, ok.cid));
+          expect(accepted.kind).toBe("settled");
+          if (accepted.kind === "settled") expect(accepted.lifecycle).toBe("completed");
+
+          const sLate = new Store();
+          const late = graceAttempt(sLate, v.limits);
+          if (v.corruptJson) sLate.db.prepare("UPDATE worker_contracts SET contract_json = '{broken' WHERE id = ?").run(late.cid);
+          const rejected = settleLate(sLate, late.aid, 1_001, envelopeFor(late.aid, late.cid));
+          expect(rejected.kind).toBe("settled");
+          if (rejected.kind === "settled") expect(rejected.lifecycle).toBe("timed_out");
+        }
+      });
+    });
+
     it("replays identical terminal state", () => {
       const s = new Store();
       const aid = setupAttempt(s, "pending");
