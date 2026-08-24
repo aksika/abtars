@@ -9,6 +9,7 @@
  *   npm run test:watchdog-acceptance -- --only A6           # one scenario
  *   npm run test:watchdog-acceptance -- --require-all-green # epic gate
  */
+import { execFileSync } from "node:child_process";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -17,8 +18,14 @@ import { SuiteBuilder, PROFILE_NAMES } from "./build.ts";
 import { ScenarioFailure, World, TIMELINE_CAP, LOG_TAIL_LINES, setDoctorBundle } from "./world.ts";
 import { PRESERVED_SCENARIOS } from "./scenarios/preserved.ts";
 import { DEFICIENCY_SCENARIOS } from "./scenarios/deficiencies.ts";
-import type { ExpectationManifest, ScoreboardRow, ScenarioDefinition, TimelineEntry } from "./contracts.ts";
-import { classifyOutcome, decideExit, validateManifest } from "./scoreboard.ts";
+import type { ExpectationManifest, ManifestExpectation, ScoreboardRow, ScenarioDefinition, TimelineEntry } from "./contracts.ts";
+import {
+  classifyOutcome,
+  decideExit,
+  sourceCommitProblem,
+  validateManifest,
+  type ManifestHistory,
+} from "./scoreboard.ts";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = resolve(__dirname, "..", "..");
@@ -57,10 +64,46 @@ function parseArgs(argv: readonly string[]): CliOptions {
 
 class UsageError extends Error {}
 
+const EXPECTED_JSON_REL = "scripts/watchdog-acceptance/expected.json";
+
 function loadManifest(): ExpectationManifest {
-  const raw = JSON.parse(readFileSync(join(__dirname, "expected.json"), "utf-8")) as ExpectationManifest;
-  raw.sourceCommit = null; // filled per run from build evidence
-  return raw;
+  return JSON.parse(readFileSync(join(__dirname, "expected.json"), "utf-8")) as ExpectationManifest;
+}
+
+/**
+ * First committed expectation per scenario id (R8.2 born-green detection):
+ * walk expected.json's history oldest-first and record the first expectation
+ * each id ever carried. Best effort — outside git the history is empty.
+ */
+function manifestHistory(): ManifestHistory {
+  const firstSeen = new Map<string, ManifestExpectation["expect"]>();
+  let commits: string[];
+  try {
+    const out = execFileSync("git", ["log", "--format=%H", "--", EXPECTED_JSON_REL], {
+      cwd: REPO_ROOT,
+      encoding: "utf-8",
+    });
+    commits = out.split("\n").map((l) => l.trim()).filter(Boolean).reverse();
+  } catch {
+    return firstSeen;
+  }
+  for (const c of commits) {
+    let raw: string;
+    try {
+      raw = execFileSync("git", ["show", `${c}:${EXPECTED_JSON_REL}`], { cwd: REPO_ROOT, encoding: "utf-8" });
+    } catch {
+      continue; // file absent in that commit
+    }
+    try {
+      const parsed = JSON.parse(raw) as { scenarios?: Record<string, { expect?: string }> };
+      for (const [id, e] of Object.entries(parsed.scenarios ?? {})) {
+        if (!firstSeen.has(id) && typeof e?.expect === "string") {
+          firstSeen.set(id, e.expect as ManifestExpectation["expect"]);
+        }
+      }
+    } catch { /* skip unparseable historical blob */ }
+  }
+  return firstSeen;
 }
 
 // ── Global safety net ────────────────────────────────────────────────────────
@@ -217,7 +260,7 @@ async function main(): Promise<number> {
   }
 
   const manifest = loadManifest();
-  const problems = validateManifest(manifest, ALL_SCENARIOS.map((s) => s.id));
+  const problems = validateManifest(manifest, ALL_SCENARIOS.map((s) => s.id), manifestHistory());
   if (problems.length > 0) {
     for (const p of problems) process.stderr.write(`manifest problem [${p.id}]: ${p.problem}\n`);
     return 2;
@@ -230,6 +273,12 @@ async function main(): Promise<number> {
       );
       return 2;
     }
+    // R8.1: release-gating against unattributable expectations is not evidence.
+    const commitProblem = sourceCommitProblem(manifest);
+    if (commitProblem) {
+      process.stderr.write(`--require-all-green: ${commitProblem}\n`);
+      return 2;
+    }
   }
 
   const artifactsRoot = join(__dirname, ".artifacts");
@@ -240,6 +289,14 @@ async function main(): Promise<number> {
 
   // The doctor bundle crosses the B5 boundary; inject it once.
   setDoctorBundle(builder.bundleDoctorCli());
+
+  // R8.1: a baseline run is only useful when its measurement point is known.
+  if (opts.baseline) {
+    process.stdout.write(`[baseline] measured at commit ${builder.sourceCommit}\n`);
+    process.stdout.write(
+      "[baseline] record this commit in expected.json sourceCommit when committing revised expectations\n",
+    );
+  }
 
   const rows: ScoreboardRow[] = [];
   const evidence: Array<ScenarioRunResult & { expect: unknown }> = [];

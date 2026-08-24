@@ -1,5 +1,5 @@
 /**
- * Scoreboard semantics (#1712 R8): manifest validation and outcome
+ * Scoreboard semantics (#1712 R8, R8.1, R8.2): manifest validation and outcome
  * classification. Pure module so runner self-tests can exercise it without
  * spawning anything.
  */
@@ -12,8 +12,11 @@ import type {
   Verdict,
 } from "./contracts.ts";
 
-/** The only scenario permitted to carry baseline-advisory today. */
-const ADVISORY_ALLOWLIST: ReadonlySet<string> = new Set(["A8"]);
+/**
+ * First committed expectation per scenario id, oldest first. An absent id has
+ * no committed history (first appearance is the current manifest).
+ */
+export type ManifestHistory = ReadonlyMap<ScenarioId, ManifestExpectation["expect"]>;
 
 export interface ManifestProblem {
   readonly id: string;
@@ -23,6 +26,7 @@ export interface ManifestProblem {
 export function validateManifest(
   manifest: ExpectationManifest,
   scenarioIds: readonly string[],
+  history: ManifestHistory = new Map(),
 ): ManifestProblem[] {
   const problems: ManifestProblem[] = [];
   const seen = new Set<ScenarioId>();
@@ -34,7 +38,7 @@ export function validateManifest(
       problems.push({ id, problem: "missing manifest entry" });
       continue;
     }
-    const p = validateEntry(id, entry);
+    const p = validateEntry(id, entry, history);
     if (p) problems.push({ id, problem: p });
   }
   for (const id of Object.keys(manifest.scenarios)) {
@@ -43,20 +47,54 @@ export function validateManifest(
   return problems;
 }
 
-function validateEntry(id: string, entry: ManifestExpectation): string | null {
+function validateEntry(id: string, entry: ManifestExpectation, history: ManifestHistory): string | null {
   switch (entry.expect) {
-    case "pass":
-      return null;
+    case "pass": {
+      // Born-green rule (R8.2): a defect-linked scenario (carries an owner)
+      // that appears for the first time already marked pass has never recorded
+      // a red baseline and must not count as evidence. Preserved-behavior
+      // scenarios without an owner cover no fix and are exempt.
+      if (!entry.owner) return null;
+      const firstSeen = history.get(id);
+      if (firstSeen !== undefined && firstSeen !== "pass") return null; // red state was committed first
+      if (entry.redBaseline?.commit && entry.redBaseline?.evidence) return null; // measured red against pre-fix commit
+      if (firstSeen === "pass") {
+        return (
+          "defect-linked scenario born green: its first committed expectation was already pass, " +
+          "so no red baseline exists. Record a red run against the pre-fix commit and attach " +
+          "redBaseline {commit, evidence}, or — only if the defect branch is structurally " +
+          "unreachable in CI — convert to baseline-advisory naming the platform limit and the " +
+          "host-smoke item that proves it"
+        );
+      }
+      return (
+        "defect-linked scenario born green: first appearance as pass records no red baseline. " +
+        "Land it known-fail measured against the pre-fix commit and flip it in the fix commit, " +
+        "attach redBaseline {commit, evidence} for a red run already measured, or — only if the " +
+        "defect branch is structurally unreachable in CI — use baseline-advisory naming the " +
+        "platform limit and host-smoke item"
+      );
+    }
     case "known-fail":
       if (!entry.owner || !entry.reason) return "known-fail entries require owner and reason";
       return null;
     case "baseline-advisory":
-      if (!ADVISORY_ALLOWLIST.has(id)) return `baseline-advisory is not permitted for ${id}`;
-      if (!entry.reason) return "baseline-advisory entries require reason";
+      // No longer restricted to A8 (R8.2): any assertion this suite
+      // structurally cannot fail may be advisory, but must say why and name
+      // the host-smoke item that covers it.
+      if (!entry.reason) return "baseline-advisory entries require a reason naming the platform limit and the host-smoke item";
       return null;
     default:
       return `unknown expectation ${String((entry as { expect?: string }).expect)}`;
   }
+}
+
+/** R8.1: release-gating against unattributable expectations is not evidence. */
+export function sourceCommitProblem(manifest: ExpectationManifest): string | null {
+  if (!manifest.sourceCommit) {
+    return "expected.json sourceCommit is null: record the commit the expectations were measured at (--baseline prints it). Release-gating against unattributable expectations is not evidence.";
+  }
+  return null;
 }
 
 /**
@@ -103,7 +141,7 @@ export function decideExit(input: RunExitPolicyInput): ExitDecision {
       case "ok-known-fail":
         break;
       case "advisory":
-        // Visible but non-gating (A8's current SIGSTOP simulation).
+        // Visible but non-gating (structurally unprovable in CI; host smoke owns proof).
         break;
       case "unexpected-fail":
         reasons.push(`${row.id}: expected pass, observed ${row.outcomeStatus}`);

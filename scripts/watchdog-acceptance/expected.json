@@ -1,5 +1,5 @@
 {
-  "sourceCommit": null,
+  "sourceCommit": "bf7c3c42c7f4269555c2a7556e283ce6e9574017",
   "scenarios": {
     "A1": { "expect": "pass" },
     "A2": { "expect": "pass" },
@@ -37,7 +37,7 @@
     "B10": { "expect": "known-fail", "owner": "#1711 P4", "reason": "strict extra-field rejection degrades supervision to permanent defer" },
     "B11": { "expect": "known-fail", "owner": "#1711 P7", "reason": "corrupt lock plus frozen readable heartbeat defers before stale handling" },
     "B12": { "expect": "known-fail", "owner": "#1711 P2", "reason": "no literal-argv identity reconciliation across an update fence" },
-    "B13": { "expect": "pass", "owner": "#1711 R2.1", "reason": "legacy relative-spelled process blocks loudly via three-step attribution; macOS lsof branch is host-smoke" },
+    "B13": { "expect": "pass", "owner": "#1711 R2.1", "reason": "red baseline recorded: FAIL at pre-fix 73052528 (silent block — no PID/argv/reason, doctor blind), see baseline/b13-red-baseline.md; 9f724956 flipped it to pass. This pass covers ONLY the CI-provable loud-reporting assertion; the macOS relative-argv attribution branch is NOT covered (CI-invisible, /proc/<pid>/cwd always answers on Linux) and stays a hard host-smoke precondition for macOS deployment", "redBaseline": { "commit": "730525282fb324477e1e48ff832dd7a0571fa333", "evidence": "baseline/b13-red-baseline.md" } },
     "B14": { "expect": "known-fail", "owner": "#1719", "reason": "boot-gate refusal during a planned fence is recorded as an unplanned death; attempts unbounded and transition not reported" }
   }
 }

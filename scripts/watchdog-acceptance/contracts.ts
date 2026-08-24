@@ -86,8 +86,20 @@ export type ScenarioOutcome =
   | { status: "fail"; durationMs: number; failure: AssertionFailureInfo; timeline: TimelineEntry[] }
   | { status: "inconclusive"; durationMs: number; failure: AssertionFailureInfo; timeline: TimelineEntry[] };
 
+/**
+ * Evidence that a defect-covered scenario was measured RED against the
+ * pre-fix commit before its entry was set to `pass` (R8.2). Without it a
+ * first-appearance `pass` on an owned scenario is born green and is rejected.
+ */
+export interface RedBaselineEvidence {
+  /** The pre-fix commit the red run was measured against. */
+  readonly commit: string;
+  /** Path (relative to this directory) of the committed red-run evidence. */
+  readonly evidence: string;
+}
+
 export type ManifestExpectation =
-  | { expect: "pass" }
+  | { expect: "pass"; owner?: string; reason?: string; redBaseline?: RedBaselineEvidence }
   | { expect: "known-fail"; owner: string; reason: string }
   | { expect: "baseline-advisory"; reason: string };
 

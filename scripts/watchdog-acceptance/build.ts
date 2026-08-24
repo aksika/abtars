@@ -288,4 +288,9 @@ export class SuiteBuilder {
   evidenceJson(): string {
     return JSON.stringify(this.evidence, null, 2);
   }
+
+  /** The repository commit the artifacts were built from (R8.1). */
+  get sourceCommit(): string {
+    return this.evidence.commit;
+  }
 }

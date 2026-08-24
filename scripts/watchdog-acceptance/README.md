@@ -34,9 +34,24 @@ nothing.
 - `known-fail` — with owning ticket + reason; must keep FAILING its final-form
   assertion until the production defect is fixed. The commit that fixes the
   defect flips the entry to `pass`.
-- `baseline-advisory` — temporarily non-gating but visibly non-green; today
-  only A8 (its suspend simulation is a SIGSTOP gap; wall clock does not freeze).
-  Real macOS suspend/darkwake remains host-smoke territory.
+- `baseline-advisory` — temporarily non-gating but visibly non-green. Not
+  restricted to A8: any assertion this suite structurally cannot fail on the
+  CI platform may be advisory, but its reason must name the platform limit and
+  the host-smoke item that actually proves it (R8.2).
+
+**Born-green rule (R8.2):** a defect-linked scenario (one carrying an `owner`)
+must never appear for the first time already marked `pass`. Either land it
+`known-fail`, measure it red against the pre-fix commit, and flip it to `pass`
+in the fix commit, or attach a `redBaseline {commit, evidence}` pointer to a
+red run already measured (see `baseline/b13-red-baseline.md`). Only if the
+defect branch is structurally unreachable in CI is `baseline-advisory` the
+correct state. The runner enforces this via git history of `expected.json`.
+
+**`sourceCommit` discipline (R8.1):** `--baseline` prints the commit it
+measured at; whoever commits revised expectations records that commit in
+`expected.json` → `sourceCommit`. A null `sourceCommit` is a hard failure
+under `--require-all-green`: release-gating against unattributable
+expectations is not evidence.
 
 Baseline mode never writes expectations automatically. Corrections to
 `expected.json` require proving the scenario still expresses final-form desired
@@ -72,8 +87,11 @@ require it:
 
 Automated Phase 0 does NOT cover: real launchd/systemd restoration after
 watchdog death, deliberately unloaded-service reporting, real macOS
-suspend/darkwake, macOS process-start parsing, or uncompressed stale/resume
-timing. Those remain explicit host-smoke steps owned by the epic plan.
+suspend/darkwake, macOS process-start parsing, macOS relative-argv attribution
+(R2.1/B13 — `/proc/<pid>/cwd` always answers on Linux, so the suite cannot
+exercise that branch; proving it on the real host is a HARD precondition for
+any macOS deployment), or uncompressed stale/resume timing. Those remain
+explicit host-smoke steps owned by the epic plan.
 
 ## Layout
 

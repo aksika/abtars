@@ -1,18 +1,21 @@
 /**
  * Focused harness self-tests: scoreboard and runner-mode semantics (#1712
- * Task 8). Pure classification — no processes spawned.
+ * Task 8, R8/R8.1/R8.2). Pure classification — no processes spawned.
  */
 import { describe, expect, it } from "vitest";
 import type { ExpectationManifest, ScoreboardRow } from "./contracts.ts";
-import { classifyOutcome, decideExit, validateManifest } from "./scoreboard.ts";
+import { classifyOutcome, decideExit, sourceCommitProblem, validateManifest } from "./scoreboard.ts";
 
-const ALL_IDS = [...Array.from({ length: 23 }, (_, i) => `A${i + 1}`), ...Array.from({ length: 12 }, (_, i) => `B${i + 1}`)];
+const ALL_IDS = [
+  ...Array.from({ length: 24 }, (_, i) => `A${i + 1}`),
+  ...Array.from({ length: 14 }, (_, i) => `B${i + 1}`),
+];
 
 function validManifest(): ExpectationManifest {
   const scenarios: ExpectationManifest["scenarios"] = {};
   for (const id of ALL_IDS) scenarios[id] = { expect: "pass" };
-  scenarios["A8"] = { expect: "baseline-advisory", reason: "SIGSTOP suspend simulation" };
-  for (let i = 1; i <= 12; i++) scenarios[`B${i}`] = { expect: "known-fail", owner: "#1711", reason: "test" };
+  scenarios["A8"] = { expect: "baseline-advisory", reason: "SIGSTOP suspend simulation; host smoke owns real suspend" };
+  for (let i = 1; i <= 14; i++) scenarios[`B${i}`] = { expect: "known-fail", owner: "#1711", reason: "test" };
   return { sourceCommit: null, scenarios };
 }
 
@@ -40,10 +43,88 @@ describe("manifest validation", () => {
     expect(validateManifest(m, ALL_IDS).some((p) => p.id === "B3")).toBe(true);
   });
 
-  it("permits baseline-advisory only for A8", () => {
+  it("permits baseline-advisory for any scenario carrying a reason (R8.2)", () => {
     const m = validManifest();
-    (m.scenarios as Record<string, unknown>)["A5"] = { expect: "baseline-advisory", reason: "nope" };
+    (m.scenarios as Record<string, unknown>)["A5"] = {
+      expect: "baseline-advisory",
+      reason: "defect branch unreachable on Linux CI; host-smoke item X proves it",
+    };
+    expect(validateManifest(m, ALL_IDS)).toHaveLength(0);
+  });
+
+  it("requires a reason on baseline-advisory entries", () => {
+    const m = validManifest();
+    (m.scenarios as Record<string, unknown>)["A5"] = { expect: "baseline-advisory" };
     expect(validateManifest(m, ALL_IDS).some((p) => p.id === "A5")).toBe(true);
+  });
+});
+
+describe("born-green rule (R8.2)", () => {
+  it("rejects a defect-linked scenario whose first committed expectation was already pass", () => {
+    const m = validManifest();
+    m.scenarios["B13"] = { expect: "pass", owner: "#1711 R2.1", reason: "implemented" };
+    const problems = validateManifest(m, ALL_IDS, new Map());
+    const p = problems.find((x) => x.id === "B13");
+    expect(p).toBeDefined();
+    expect(p!.problem).toContain("born green");
+  });
+
+  it("still rejects a born-green pass even if the reason claims structural unreachability", () => {
+    const m = validManifest();
+    m.scenarios["B13"] = {
+      expect: "pass",
+      owner: "#1711 R2.1",
+      reason: "defect branch structurally unreachable in CI",
+    };
+    const p = validateManifest(m, ALL_IDS, new Map()).find((x) => x.id === "B13");
+    expect(p).toBeDefined();
+    expect(p!.problem).toContain("baseline-advisory");
+  });
+
+  it("accepts a defect-linked pass flipped after a committed non-pass state", () => {
+    const m = validManifest();
+    m.scenarios["B14"] = { expect: "pass", owner: "#1719", reason: "fixed" };
+    const history = new Map([["B14", "known-fail" as const]]);
+    expect(validateManifest(m, ALL_IDS, history).some((p) => p.id === "B14")).toBe(false);
+  });
+
+  it("accepts a defect-linked pass carrying redBaseline evidence", () => {
+    const m = validManifest();
+    m.scenarios["B13"] = {
+      expect: "pass",
+      owner: "#1711 R2.1",
+      reason: "red baseline recorded",
+      redBaseline: { commit: "730525282fb324477e1e48ff832dd7a0571fa333", evidence: "baseline/b13-red-baseline.md" },
+    };
+    expect(validateManifest(m, ALL_IDS, new Map()).some((p) => p.id === "B13")).toBe(false);
+  });
+
+  it("rejects an incomplete redBaseline evidence pointer", () => {
+    const m = validManifest();
+    m.scenarios["B13"] = {
+      expect: "pass",
+      owner: "#1711 R2.1",
+      reason: "r",
+      redBaseline: { commit: "", evidence: "" },
+    };
+    expect(validateManifest(m, ALL_IDS, new Map()).some((p) => p.id === "B13")).toBe(true);
+  });
+
+  it("does not apply to preserved scenarios without an owner", () => {
+    const m = validManifest(); // every A id is a first-time pass without owner
+    expect(validateManifest(m, ALL_IDS, new Map())).toHaveLength(0);
+  });
+});
+
+describe("sourceCommit requirement (R8.1)", () => {
+  it("flags a null sourceCommit", () => {
+    expect(sourceCommitProblem(validManifest())).toMatch(/null/);
+  });
+
+  it("accepts a recorded sourceCommit", () => {
+    const m = validManifest();
+    m.sourceCommit = "bf7c3c42c7f4269555c2a7556e283ce6e9574017";
+    expect(sourceCommitProblem(m)).toBeNull();
   });
 });
 
