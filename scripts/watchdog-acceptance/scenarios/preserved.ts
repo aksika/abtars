@@ -480,17 +480,30 @@ const A20 = A("A20", "Planned-restart fence never signals harness-owned transien
   const transient = await w.plantBridge(home, { mode: "transient" });
   const seq = publishCommand(w, home, "restart", "acceptance-a20-fence");
   w.resumeWatchdog(home);
-  const transientOk: boolean[] = [];
+
+  // #1711's final spawn proof excludes only the freshly-authorized predecessor.
+  // The harness-owned exact-target transient is a separate blocker, so the
+  // proof must veto the replacement while it remains alive. This is distinct
+  // from #1717's original regression (the terminated predecessor itself
+  // withholding the replacement), which A9 covers directly.
+  await waitForLogMarker(w, home, "Spawn withheld: occupied 1", 15000);
+  const transientOk = await sampleDuring(w, 1000, () => bridgeAliveWithIdentity(w, home, transient));
+  w.expect(
+    transientOk.length > 0 && transientOk.every(Boolean),
+    "harness-owned transient must remain alive while the fence vetoes the duplicate spawn",
+  );
+
+  // Harness cleanup is deliberately explicit: the watchdog must not signal an
+  // unowned process during the fence. Once the extra blocker is gone, the
+  // existing #1711 planned-replacement proof can complete the command.
+  w.registry.signal(transient, "SIGKILL");
+  w.registry.reapExited();
+
   await w.expectEventually(30000, "fence completes: restart applied", () => {
-    transientOk.push(bridgeAliveWithIdentity(w, home, transient));
     const l = w.lock(home);
     const st = w.supervisorState(home);
     return !!l && Number(l.pid) !== oldPid && st?.acknowledgedCommandSeq === seq && bridgeAliveWithIdentity(w, home, Number(l.pid));
   });
-  w.expect(transientOk.every(Boolean), "harness-owned transient must never be signalled during the planned-restart fence");
-  // Current baseline has no containment: the harness removes its own transient.
-  w.registry.signal(transient, "SIGKILL");
-  w.registry.reapExited();
   const newPid = Number(w.lock(home)?.pid);
   await w.expectEventually(10000, "exactly one owned bridge remains", () =>
     JSON.stringify(w.listLiveBridgesByHome(home)) === JSON.stringify([newPid]),
