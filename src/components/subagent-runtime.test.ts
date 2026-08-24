@@ -136,6 +136,28 @@ describe("SubagentRuntime", () => {
     expect(result.taskId).toMatch(/^[0-9a-f]{8}$/);
   });
 
+  it("keeps the default spawn alive past 10 minutes", async () => {
+    vi.useFakeTimers();
+    let release!: (result: string) => void;
+    mockSendPrompt.mockImplementationOnce(() => new Promise<string>((resolve) => { release = resolve; }));
+    const onComplete = vi.fn();
+
+    try {
+      await runtime.spawn("browsie", "slow", { onComplete });
+      for (let i = 0; i < 10 && !mockSendPrompt.mock.calls.length; i++) await Promise.resolve();
+      expect(mockSendPrompt).toHaveBeenCalled();
+
+      await vi.advanceTimersByTimeAsync(10 * 60_000 + 1);
+      release("response text");
+      await vi.advanceTimersByTimeAsync(0);
+
+      expect(onComplete).toHaveBeenCalledWith(expect.any(String), "response text");
+    } finally {
+      await runtime.shutdown();
+      vi.useRealTimers();
+    }
+  });
+
   it("spawn() calls onComplete with result", async () => {
     const onComplete = vi.fn();
     await runtime.spawn("browsie", "task", { onComplete });

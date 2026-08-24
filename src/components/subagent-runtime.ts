@@ -80,7 +80,7 @@ const DEFAULT_SESSION: Record<AgentName, "fresh" | "reuse"> = {
   task: "fresh",
 };
 
-const DEFAULT_SPAWN_TIMEOUT_MS = 600_000; // 10 min
+const DEFAULT_SPAWN_TIMEOUT_MS = 15 * 60_000; // 15 min
 
 export class SubagentRuntime {
   private readonly cache = new Map<string, CachedAgent>();
