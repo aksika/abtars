@@ -87,10 +87,18 @@ timing. Those remain explicit host-smoke steps owned by the epic plan.
 | `fixture-bridge.ts` | Bundled controllable bridge protocol actor |
 | `proc-observers.ts` | /proc / ps observation adapters |
 | `scoreboard.ts` | Manifest validation + verdict classification |
-| `scenarios/preserved.ts` | A1-A22 |
-| `scenarios/deficiencies.ts` | B1-B10 |
+| `scenarios/preserved.ts` | A1-A24 |
+| `scenarios/deficiencies.ts` | B1-B14 |
 | `expected.json` | Reviewed expectation manifest (hand-maintained) |
 | `baseline/` | Committed baseline evidence (see discipline below) |
+
+## Fixture fidelity note (#1719)
+
+The `refuse-duplicate` fixture mode mirrors ONLY the production duplicate-gate
+boundary: validate the current lock owner before `initBridgeLock`, exit
+non-zero, never write a fresh `instanceId`. It does not reproduce the full
+boot graph — assertions must keep inferring ownership from `bridge.lock`
+identity fields and process evidence, never from the fixture's internals.
 
 ## Baseline update discipline
 

@@ -188,6 +188,11 @@ async function main(): Promise<void> {
       // pass exactly one recorded terminated-owner identity
       // (`prove-empty <pid> <startIdentity>`); that identity alone is
       // disregarded. Any other process or an incomplete snapshot still vetoes.
+      //
+      // R2.1 (v5): when relative-spelled processes cannot be attributed to any
+      // home, one `blocked-unattributable <pid> <startIdentity> <reason>
+      // <argv...>` line is appended per process so the watchdog logs them
+      // loudly — a silent freeze is a spec violation (B13).
       const excludePid = Number(process.argv[3]);
       const excludeIdentity = process.argv[4];
       const hasExclude =
@@ -201,6 +206,9 @@ async function main(): Promise<void> {
         process.stdout.write("empty\n");
       } else {
         process.stdout.write(`occupied ${proof.count}\n`);
+      }
+      for (const u of proof.unattributable) {
+        process.stdout.write(`blocked-unattributable ${u.pid} ${u.startIdentity} ${u.reason} ${u.argv.join(" ")}\n`);
       }
       process.exit(Exit.Ok);
     }

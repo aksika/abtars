@@ -7,7 +7,13 @@
  */
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { validateBridgeLock, enumerateBridgeProcesses, isPidAlive, potentialHomeBridgeProcesses } from "./identity.js";
+import {
+  validateBridgeLock,
+  enumerateBridgeProcesses,
+  isPidAlive,
+  potentialHomeBridgeProcesses,
+  type UnattributableProcess,
+} from "./identity.js";
 import {
   decideReconciliation,
   isLivenessContainmentEligible,
@@ -43,9 +49,9 @@ export function readValidatedOwner(home: string): { readonly pid: number; readon
 }
 
 export type SpawnProof =
-  | { readonly result: "empty" }
-  | { readonly result: "occupied"; readonly count: number }
-  | { readonly result: "inconclusive" };
+  | { readonly result: "empty"; readonly unattributable: readonly UnattributableProcess[] }
+  | { readonly result: "occupied"; readonly count: number; readonly unattributable: readonly UnattributableProcess[] }
+  | { readonly result: "inconclusive"; readonly unattributable: readonly UnattributableProcess[] };
 
 /**
  * Zero-process proof before spawn (#1711 R3). Blocking set is the BROADER
@@ -58,18 +64,22 @@ export type SpawnProof =
  * PID/start identity may be disregarded. Every other process — exact,
  * identity-inconclusive, or unknown — and any incomplete snapshot still
  * vetoes. Stop and handoff never pass an exclusion.
+ *
+ * R2.1 (v5): unattributable relative-spelled processes are carried in the
+ * proof (PID, argv, reason) so the caller can surface them loudly — they are
+ * never a silent freeze.
  */
 export function evaluateSpawnProof(
   home: string,
   exclude: { readonly pid: number; readonly startIdentity: string } | null,
 ): SpawnProof {
-  const potentials = potentialHomeBridgeProcesses(home);
-  if (potentials === null) return { result: "inconclusive" };
-  const blockers = potentials.filter(
+  const scope = potentialHomeBridgeProcesses(home);
+  if (!scope.complete) return { result: "inconclusive", unattributable: [] };
+  const blockers = scope.blockers.filter(
     (p) => !(exclude !== null && p.pid === exclude.pid && p.startIdentity === exclude.startIdentity),
   );
-  if (blockers.length === 0) return { result: "empty" };
-  return { result: "occupied", count: blockers.length };
+  if (blockers.length === 0) return { result: "empty", unattributable: scope.unattributable };
+  return { result: "occupied", count: blockers.length, unattributable: scope.unattributable };
 }
 
 /**

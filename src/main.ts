@@ -13,14 +13,16 @@ import { checkCircuitBreaker } from "./boot/circuit-breaker.js";
 
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { validateBridgeLock, enumerateBridgeProcesses } from "./supervisor/identity.js";
+import { validateBridgeLock, potentialHomeBridgeProcesses } from "./supervisor/identity.js";
 
 // Duplicate-bridge gate runs BEFORE the circuit breaker: a duplicate bridge
 // must exit without touching rollback counters or release links (R6).
 // #1711 R3: boot follows the same zero-process rule as the watchdog — only a
-// complete enumeration proving zero OTHER exact same-home processes authorizes
-// this boot to proceed. A live process behind a corrupt lock is caught here
-// even when its own lock no longer validates.
+// complete enumeration proving zero OTHER could-be-same-home processes
+// authorizes this boot to proceed. A live process behind a corrupt lock is
+// caught here even when its own lock no longer validates.
+// #1711 R2.1: unattributable relative-spelled processes block loudly — the PID
+// list is printed before exiting; a silent freeze is a spec violation (B13).
 try {
   const home = process.env["ABTARS_HOME"] ?? join(process.env["HOME"] ?? "/tmp", ".abtars");
   const lockPath = join(home, "bridge.lock");
@@ -31,14 +33,20 @@ try {
     console.error(`[FATAL] Another bridge running (PID ${lock.pid}) — exiting`);
     process.exit(1);
   }
-  const enumeration = enumerateBridgeProcesses(home);
-  if (!enumeration.complete) {
-    console.error(`[FATAL] Duplicate gate: process enumeration failed (${enumeration.reason}) — refusing to start`);
+  const scope = potentialHomeBridgeProcesses(home);
+  if (!scope.complete) {
+    console.error(`[FATAL] Duplicate gate: process enumeration failed (${scope.reason}) — refusing to start`);
     process.exit(1);
   }
-  const exactOthers = enumeration.processes.filter((p) => p.exactTarget && p.pid !== process.pid);
-  if (exactOthers.length > 0) {
-    console.error(`[FATAL] Another bridge running (PID ${exactOthers[0]!.pid}, unvalidated lock) — exiting`);
+  const others = scope.blockers.filter((p) => p.pid !== process.pid);
+  if (others.length > 0) {
+    const detail = others.map((p) => `PID ${p.pid} (${p.argv.join(" ")})`).join("; ");
+    console.error(`[FATAL] Another bridge process present — refusing to start: ${detail}`);
+    for (const u of scope.unattributable) {
+      console.error(
+        `[FATAL] blocked-unattributable PID ${u.pid} (${u.argv.join(" ")}): ${u.reason} — this process predates the canonical spawn target; restart or terminate it to restore supervision`,
+      );
+    }
     process.exit(1);
   }
 } catch { /* proceed */ }

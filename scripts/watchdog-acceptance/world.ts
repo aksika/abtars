@@ -241,6 +241,25 @@ exit "$rc"`;
     return pid;
   }
 
+  /**
+   * Plant a LEGACY RELATIVE-spelled fixture (#1711 R2.1): argv
+   * `app/bundle/abtars.js` resolved against `cwd` instead of the canonical
+   * absolute target. Used by B13 to exercise the three-step attribution order
+   * (lock first, then cwd, then unattributable) for the spawn-proof scope.
+   */
+  async plantRelativeBridge(home: string, mode: FixtureMode, cwd: string): Promise<number> {
+    const pid = await this.registry.spawn({
+      cmd: process.execPath,
+      args: ["app/bundle/abtars.js"],
+      role: "fixture",
+      home,
+      cwd,
+      env: { ABTARS_HOME: home, ABTARS_FIXTURE_DIRECT: JSON.stringify(mode) },
+    });
+    this.timeline("bridge-planted-relative", `home=${basename(home)} cwd=${cwd} pid=${pid} mode=${mode.mode}`);
+    return pid;
+  }
+
   /** Graceful individual SIGTERM to the real watchdog process; returns its recorded exit code. */
   async stopWatchdogGracefully(home: string, timeoutMs = 8000): Promise<number> {
     const handles = [...this.watchdogsFor(home)];

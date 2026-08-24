@@ -126,6 +126,29 @@ export async function stripLockOwnership(
 }
 
 /**
+ * #1711 R2.1 (B13): remove ONLY `instanceId` from the lock while preserving
+ * pid/startIdentity — the exact corruption shape that keeps lock-first
+ * attribution working (pid + matching start identity) while making adoption
+ * impossible (validateBridgeLock requires instanceId). The fixture is frozen
+ * (SIGSTOP) around the mutation so an in-flight heartbeat read-merge-write
+ * cannot restore the pre-strip snapshot.
+ */
+export async function stripLockInstanceId(
+  w: WorldApi,
+  home: string,
+  fixturePid: number,
+): Promise<void> {
+  w.signalBridgeProcess(home, fixturePid, "SIGSTOP");
+  await w.sleep(250); // let any in-flight beat land before we mutate
+  const lock = w.lock(home);
+  if (!lock) throw new Error(`stripLockInstanceId: no lock at ${home}`);
+  const stripped = { ...lock };
+  delete stripped.instanceId;
+  w.writeLock(home, stripped);
+  w.signalBridgeProcess(home, fixturePid, "SIGCONT");
+}
+
+/**
  * Drive one crash cycle: command the LIVE bridge to self-exit with `code`
  * after `delayMs`, then wait for a validated replacement.
  */

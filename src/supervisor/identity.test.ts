@@ -6,6 +6,16 @@ import { fileURLToPath } from "node:url";
 
 const execFileSyncMock = vi.hoisted(() => vi.fn());
 vi.mock("node:child_process", () => ({ execFileSync: execFileSyncMock }));
+// Partial fs mock: readlinkSync stays a delegating spy so the R2.1
+// cwd-unreadable arm is testable on Linux (the macOS lsof branch is exercised
+// through the child_process mock above).
+vi.mock("node:fs", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("node:fs")>();
+  return {
+    ...actual,
+    readlinkSync: vi.fn((p: Parameters<typeof actual.readlinkSync>[0]) => actual.readlinkSync(p)),
+  };
+});
 
 import {
   processStartIdentity,
@@ -14,8 +24,10 @@ import {
   validateBridgeLock,
   spawnTarget,
   enumerateBridgeProcesses,
+  potentialHomeBridgeProcesses,
   type BridgeProcess,
 } from "./identity.js";
+import { readlinkSync } from "node:fs";
 
 const SELF_PID = process.pid;
 const SELF_IDENTITY = processStartIdentity(SELF_PID);
@@ -313,6 +325,166 @@ describe("enumerateBridgeProcesses on Linux /proc (#1711 R2)", () => {
       }
     } finally {
       rmSync(home, { recursive: true, force: true });
+    }
+  }, 15000);
+});
+
+describe("potentialHomeBridgeProcesses — R2.1 legacy relative-argv attribution (#1711 v5)", () => {
+  const isDarwin = process.platform === "darwin";
+
+  async function spawnRelativeChild(cwd: string): Promise<{ pid: number }> {
+    const { spawn } = await vi.importActual<typeof import("node:child_process")>("node:child_process");
+    return new Promise((resolve, reject) => {
+      const child = spawn(process.execPath, ["app/bundle/abtars.js"], { stdio: "ignore", cwd });
+      child.on("spawn", () => resolve({ pid: child.pid! }));
+      child.on("error", reject);
+    });
+  }
+
+  function seedHome(dir: string): void {
+    mkdirSync(join(dir, "app", "bundle"), { recursive: true });
+    writeFileSync(join(dir, "app", "bundle", "abtars.js"), 'setInterval(() => {}, 10_000);\n');
+  }
+
+  it.runIf(!isDarwin)("lock-first: a lock-named relative process is THIS home's bridge even when cwd points elsewhere", async () => {
+    const homeA = mkdtempSync(join(tmpdir(), "abtars-attrib-a-"));
+    const homeB = mkdtempSync(join(tmpdir(), "abtars-attrib-b-"));
+    seedHome(homeA);
+    seedHome(homeB);
+    const rel = await spawnRelativeChild(homeB); // cwd = homeB
+    try {
+      // homeA's bridge.lock names this PID with a matching start identity.
+      writeFileSync(join(homeA, "bridge.lock"), JSON.stringify({
+        pid: rel.pid,
+        startIdentity: processStartIdentity(rel.pid),
+        instanceId: "abc",
+      }));
+
+      const scopeA = potentialHomeBridgeProcesses(homeA);
+      expect(scopeA.complete).toBe(true);
+      if (scopeA.complete) {
+        expect(scopeA.blockers.some((p) => p.pid === rel.pid)).toBe(true);
+        expect(scopeA.unattributable).toEqual([]);
+      }
+    } finally {
+      await (async () => {
+        try { process.kill(rel.pid, "SIGKILL"); } catch { /* already gone */ }
+      })();
+      rmSync(homeA, { recursive: true, force: true });
+      rmSync(homeB, { recursive: true, force: true });
+    }
+  }, 15000);
+
+  it.runIf(!isDarwin)("cwd attribution: a relative process whose cwd is this home blocks; one in another home does not", async () => {
+    const homeA = mkdtempSync(join(tmpdir(), "abtars-attrib-c-"));
+    const homeB = mkdtempSync(join(tmpdir(), "abtars-attrib-d-"));
+    seedHome(homeA);
+    seedHome(homeB);
+    const inHome = await spawnRelativeChild(homeA);
+    const foreign = await spawnRelativeChild(homeB);
+    try {
+      const scope = potentialHomeBridgeProcesses(homeA);
+      expect(scope.complete).toBe(true);
+      if (scope.complete) {
+        expect(scope.blockers.some((p) => p.pid === inHome.pid)).toBe(true);
+        expect(scope.blockers.some((p) => p.pid === foreign.pid)).toBe(false);
+        expect(scope.unattributable).toEqual([]);
+      }
+    } finally {
+      for (const p of [inHome.pid, foreign.pid]) {
+        try { process.kill(p, "SIGKILL"); } catch { /* already gone */ }
+      }
+      rmSync(homeA, { recursive: true, force: true });
+      rmSync(homeB, { recursive: true, force: true });
+    }
+  }, 15000);
+
+  it.runIf(!isDarwin)("an unreadable cwd yields a LOUD unattributable blocker with pid, argv, and reason (B13)", async () => {
+    const homeA = mkdtempSync(join(tmpdir(), "abtars-attrib-e-"));
+    seedHome(homeA);
+    const rel = await spawnRelativeChild(homeA);
+    try {
+      const readlinkMock = vi.mocked(readlinkSync);
+      readlinkMock.mockImplementationOnce(() => {
+        const err = new Error("EACCES") as NodeJS.ErrnoException;
+        err.code = "EACCES";
+        throw err;
+      });
+
+      const scope = potentialHomeBridgeProcesses(homeA);
+      expect(scope.complete).toBe(true);
+      if (scope.complete) {
+        expect(scope.blockers.some((p) => p.pid === rel.pid)).toBe(true);
+        const u = scope.unattributable.find((x) => x.pid === rel.pid);
+        expect(u).toBeDefined();
+        expect(u!.argv).toContain("app/bundle/abtars.js");
+        expect(u!.reason).toContain("cwd-unreadable");
+        expect(u!.startIdentity).toBe(processStartIdentity(rel.pid));
+      }
+    } finally {
+      try { process.kill(rel.pid, "SIGKILL"); } catch { /* already gone */ }
+      rmSync(homeA, { recursive: true, force: true });
+    }
+  }, 15000);
+
+  it("macOS: an lsof failure yields unattributable — never a crash and never a silent pass (B13)", async () => {
+    const originalPlatform = process.platform;
+    Object.defineProperty(process, "platform", { value: "darwin", configurable: true, writable: true });
+    const homeA = mkdtempSync(join(tmpdir(), "abtars-attrib-mac-"));
+    seedHome(homeA);
+    const rel = await spawnRelativeChild(homeA);
+    try {
+      execFileSyncMock.mockImplementation((cmd: string) => {
+        if (cmd === "ps") {
+          const lstart = "Mon Aug 24 01:02:03 2026";
+          return `${rel.pid} ${lstart} ${process.execPath} app/bundle/abtars.js\n`;
+        }
+        throw new Error("lsof unavailable");
+      });
+
+      const scope = potentialHomeBridgeProcesses(homeA);
+      expect(scope.complete).toBe(true);
+      if (scope.complete) {
+        const u = scope.unattributable.find((x) => x.pid === rel.pid);
+        expect(u).toBeDefined();
+        expect(u!.reason).toContain("cwd-unreadable");
+        expect(scope.blockers.some((p) => p.pid === rel.pid)).toBe(true);
+      }
+    } finally {
+      Object.defineProperty(process, "platform", { value: originalPlatform, configurable: true, writable: true });
+      execFileSyncMock.mockReset();
+      try { process.kill(rel.pid, "SIGKILL"); } catch { /* already gone */ }
+      rmSync(homeA, { recursive: true, force: true });
+    }
+  }, 15000);
+
+  it("macOS: a readable lsof cwd inside this home attributes the relative process (B13)", async () => {
+    const originalPlatform = process.platform;
+    Object.defineProperty(process, "platform", { value: "darwin", configurable: true, writable: true });
+    const homeA = mkdtempSync(join(tmpdir(), "abtars-attrib-mac2-"));
+    seedHome(homeA);
+    const rel = await spawnRelativeChild(homeA);
+    try {
+      execFileSyncMock.mockImplementation((cmd: string, args: string[]) => {
+        if (cmd === "ps") {
+          const lstart = "Mon Aug 24 01:02:03 2026";
+          return `${rel.pid} ${lstart} ${process.execPath} app/bundle/abtars.js\n`;
+        }
+        expect(args).toEqual(["-a", "-p", String(rel.pid), "-d", "cwd", "-Fn"]);
+        return `p${rel.pid}\nfcwd\nn${homeA}\n`;
+      });
+
+      const scope = potentialHomeBridgeProcesses(homeA);
+      expect(scope.complete).toBe(true);
+      if (scope.complete) {
+        expect(scope.blockers.some((p) => p.pid === rel.pid)).toBe(true);
+        expect(scope.unattributable).toEqual([]);
+      }
+    } finally {
+      Object.defineProperty(process, "platform", { value: originalPlatform, configurable: true, writable: true });
+      execFileSyncMock.mockReset();
+      try { process.kill(rel.pid, "SIGKILL"); } catch { /* already gone */ }
+      rmSync(homeA, { recursive: true, force: true });
     }
   }, 15000);
 });

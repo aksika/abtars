@@ -1,12 +1,14 @@
 /**
- * Known-deficiency scenarios B1-B12 (#1712 Phase 0, draft-v2 contract).
+ * Known-deficiency scenarios B1-B14 (#1712 Phase 0/1 contract, extended by
+ * #1719: 24 A + 14 B).
  *
  * Each scenario asserts the FINAL desired behavior described by
  * `abproject/docs/plans/1712-draft-e2e-acceptance-scenarios.md` §4 (v2,
  * aligned with watchdog draft v4). On today's baseline every one of them is
  * expected to fail for its declared reason — a setup or harness failure is
  * NOT an acceptable known-fail. The manifest records the owning #1711
- * problem for each.
+ * problem for each (B14 is owned by #1719 and passes once the planned-fence
+ * refusal classifier is implemented).
  */
 import { join } from "node:path";
 import { getProfileValues } from "../build.ts";
@@ -14,8 +16,11 @@ import { ScenarioFailure } from "../world.ts";
 import type { ScenarioDefinition, WorldApi } from "../contracts.ts";
 import {
   bridgeAliveWithIdentity,
+  commandLiveExit,
+  lockLooksOwned,
   parseDeathEvents,
   sampleDuring,
+  stripLockInstanceId,
   stripLockOwnership,
   waitForOwnedBridge,
 } from "./helpers.ts";
@@ -451,6 +456,188 @@ const B12 = B("B12", "Old-release survivor remains in scope after an update fenc
   }
 });
 
+/**
+ * B13 (#1711 R2.1 attribution / v5): a legacy relative-spelled process
+ * (`app/bundle/abtars.js`) must block the spawn LOUDLY — never a silent
+ * supervision freeze. The harness runs on Linux, where `/proc/<pid>/cwd`
+ * essentially always answers, so the TRUE `unattributable` arm (cwd unreadable)
+ * is structurally CI-invisible here; it is unit-tested with a mocked
+ * readlink/lsof and gated by the macOS host-smoke precondition. What the
+ * harness DOES prove end-to-end:
+ *   1. lock-first attribution: a relative process named by bridge.lock (pid +
+ *      matching start identity, instanceId stripped so adoption is skipped)
+ *      is THIS home's bridge without any cwd read — the spawn is withheld and
+ *      the watchdog log names the cause;
+ *   2. loudness: the block is logged, the watchdog keeps running, doctor
+ *      reports the blocker by PID — never a healthy claim and never silence;
+ *   3. other-home precision: a relative process whose cwd is ANOTHER home does
+ *      NOT block this home's watchdog from spawning its own bridge.
+ *
+ * Baseline: no attribution exists, so the duplicate or a silent indefinite
+ * hold is the failure mode this scenario guards.
+ */
+const B13 = B("B13", "Legacy relative-spelled process blocks loudly, never silently", "lifecycle", async (w) => {
+  const home = w.homeA();
+  const otherHome = w.homeB();
+
+  // Case 1 — other-home precision: a relative fixture living in homeB must not
+  // block homeA's watchdog. The watchdog spawns exactly one bridge for homeA.
+  const foreign = await w.plantRelativeBridge(otherHome, { mode: "no-lock" }, otherHome);
+  await w.startWatchdog(home);
+  await waitForOwnedBridge(w, home, 25000);
+  const homeABridge = Number(w.lock(home)?.pid);
+  w.expect(Number.isFinite(homeABridge) && homeABridge > 0 && homeABridge !== foreign,
+    "B13 final-form failure: homeA watchdog did not spawn its own bridge beside a relative process in another home");
+  w.expect(bridgeAliveWithIdentity(w, otherHome, foreign),
+    "B13 final-form failure: the foreign relative process must never be signalled or adopted");
+  await w.stopWatchdogGracefully(home);
+  w.signalBridgeProcess(home, homeABridge, "SIGKILL");
+  await w.expectEventually(10000, "homeA bridge reaped after scenario cleanup", () =>
+    !bridgeAliveWithIdentity(w, home, homeABridge),
+  );
+
+  // Case 2 — lock-first attribution + loud block: a relative process in THIS
+  // home owns a lock whose pid/startIdentity match but whose instanceId was
+  // stripped (corrupt for adoption). The lock alone must attribute it to this
+  // home; the spawn must be withheld with a named cause.
+  //
+  // The fixture is STALE-shaped: it writes the lock exactly once at startup and
+  // never heartbeats again, so no in-flight read-merge-write can restore the
+  // stripped instanceId (a live heartbeat fixture races the strip and flips
+  // the lock back to adoptable). The freeze-strip below is then deterministic.
+  const relLock = await w.plantRelativeBridge(home, { mode: "stale" }, home);
+  // Wait for THIS fixture's lock specifically: the case-1 bridge's stale lock
+  // (dead, possibly a zombie) still sits in the home and would otherwise match
+  // a generic owned-lock wait, making the strip hit the wrong lock.
+  await w.until(`relative fixture ${relLock} owns the lock`, 15000, () => {
+    const l = w.lock(home);
+    if (l === null || Number(l.pid) !== relLock) return false;
+    const snap = w.procSnapshot(relLock);
+    return snap !== null && snap.state !== "Z";
+  });
+  await stripLockInstanceId(w, home, relLock);
+
+  await w.startWatchdog(home);
+  await waitForLogMarker(w, home, "Spawn withheld", 25000);
+  w.expect(bridgeAliveWithIdentity(w, home, relLock),
+    "B13 final-form failure: the blocked relative process must be left untouched (observe, never signal)");
+  await w.sleep(5000);
+  const live = w.listLiveBridgesByHome(home);
+  w.expect(live.length === 1 && live[0] === relLock,
+    `B13 final-form failure: watchdog duplicated the live relative bridge (${live.join(",")})`);
+  w.expect(w.watchdogPidOf(home) !== null,
+    "B13 final-form failure: the watchdog must keep running (a silent freeze is a defect)");
+
+  // Case 3 — doctor surfaces the blocker by PID: never a healthy claim.
+  const diag = w.runDoctor(["doctor", "--json"], { ABTARS_HOME: home });
+  const parsed = JSON.parse(diag.stdout) as { layers?: Record<string, Array<{ name?: string; detail?: string; status?: string }>> };
+  const bridgeProbe = Object.values(parsed.layers ?? {}).flat().find((p) => p.name === "bridge");
+  w.expect(bridgeProbe !== undefined, "doctor --json must include a bridge probe");
+  const detail = bridgeProbe?.detail ?? "";
+  w.expect(
+    bridgeProbe?.status === "warning" && detail.includes(String(relLock)),
+    `B13 final-form failure: doctor does not report the relative blocker by PID (status=${bridgeProbe?.status} detail="${detail}")`,
+  );
+});
+
+/**
+ * B14 (#1719): a boot-gate refusal during a planned transition fence is a
+ * PLANNED outcome, not an unplanned bridge death. The predecessor ignores
+ * SIGTERM and keeps serving; each authorized replacement hits the production
+ * duplicate gate and exits without ever writing its own instanceId. Final
+ * form: refusals emit no death accounting (no "Bridge died", restartCount /
+ * recentDeaths / backoffAttempt untouched), attempts are bounded at three per
+ * fence, exactly one stable transition-failed episode names the predecessor
+ * PID, the validated predecessor is ADOPTED as the monitored bridge (its PID
+ * stays the lock owner and is never re-detected as process-gone), and the
+ * abandoned transition is visible through doctor//status — while a later
+ * release still lets a final replacement settle and clears the diagnostic
+ * latch (no permanent hidden hold).
+ *
+ * Baseline: the refusal IS recorded as process-gone, so the very first
+ * final-form assertion fails.
+ */
+const B14 = B("B14", "Boot-gate refusal during a fence is not a death; bounded and adopted", "lifecycle", async (w) => {
+  const home = w.homeA();
+  const pred = await w.plantBridge(home, { mode: "ignore-term" });
+  await waitForOwnedBridge(w, home, 15000);
+  await w.startWatchdog(home);
+  await waitForLogMarker(w, home, `Adopted existing bridge PID=${pred}`, 20000);
+
+  // Schedule THREE replacement modes: each spawned child mirrors the
+  // duplicate gate, validates the still-alive owner, and exits 1 without
+  // writing an instanceId.
+  const firstGeneration = w.claimNextGeneration(home);
+  w.setControl(home, {
+    nextSpawns: [0, 1, 2].map((n) => ({ generation: firstGeneration + n, mode: "refuse-duplicate" as const })),
+  });
+  const pub = w.supervisorCli(home, ["publish-command", "restart", "acceptance-b14"]);
+  w.expect(pub.code === 0, `publish-command restart failed: ${pub.stderr}`);
+
+  const refusalAttempts = () =>
+    w.fixtureRegistryEntries(home).filter((e) => e.mode === "refuse-duplicate").length;
+  const logLines = () => w.watchdogLogLines(home, 200);
+
+  // Bound reached: three attempts, one transition-failed episode naming the
+  // predecessor PID, adoption of the predecessor as the monitored bridge.
+  await w.expectEventually(60000, "three refusal attempts exhausted the budget with one transition-failed episode", () => {
+    const lines = logLines();
+    return (
+      refusalAttempts() === 3 &&
+      lines.some((l) => l.includes("Transition failed:") && l.includes(`PID=${pred}`)) &&
+      lines.filter((l) => l.includes(`Adopted existing bridge PID=${pred}`)).length >= 2
+    );
+  });
+
+  // No unplanned accounting anywhere: the refusals never become deaths.
+  const deaths = parseDeathEvents(logLines());
+  w.expect(deaths.length === 0, `planned refusals must not produce death events (found ${JSON.stringify(deaths)})`);
+  const st = w.supervisorState(home);
+  const recentDeaths = (st?.recentDeaths as readonly unknown[] | undefined) ?? [];
+  w.expect(recentDeaths.length === 0, `recentDeaths must stay empty under pure refusals (got ${JSON.stringify(st?.recentDeaths)})`);
+  w.expect(Number(st?.restartCount) === 0, `restartCount must stay 0 under pure refusals (got ${String(st?.restartCount)})`);
+  w.expect(Number(st?.backoffAttempt) === 0, `backoffAttempt must stay 0 under pure refusals (got ${String(st?.backoffAttempt)})`);
+
+  // Terminal state (R4.1): the predecessor is adopted — it remains the lock
+  // owner, keeps serving, and is NOT re-detected as process-gone on
+  // subsequent ticks. Exactly one transition-failed line (no repetition).
+  await w.sleep(3000);
+  w.expect(Number(w.lock(home)?.pid) === pred, `the validated predecessor must be the monitored bridge after exhaustion (lock pid=${String(w.lock(home)?.pid)})`);
+  w.expect(bridgeAliveWithIdentity(w, home, pred), "the adopted predecessor must still be alive");
+  w.expect(
+    logLines().filter((l) => l.includes("Transition failed:")).length === 1,
+    "transition-failed is transition-level logging: unchanged state must not repeat it",
+  );
+
+  // The abandoned transition must be reported through doctor//status with the
+  // predecessor PID — a healthy bridge plus a failed transition is not a
+  // healthy transition (no hidden health claim).
+  const diag = w.runDoctor(["doctor", "--json"], { ABTARS_HOME: home });
+  const parsed = JSON.parse(diag.stdout) as { layers?: Record<string, Array<{ name?: string; detail?: string; status?: string }>> };
+  const watchdogProbe = Object.values(parsed.layers ?? {}).flat().find((p) => p.name === "watchdog");
+  w.expect(
+    watchdogProbe?.status === "warning" && (watchdogProbe?.detail ?? "").includes(String(pred)) &&
+      (watchdogProbe?.detail ?? "").includes("transition-failed"),
+    `abandoned transition must be visible in doctor//status (status=${watchdogProbe?.status} detail="${watchdogProbe?.detail}")`,
+  );
+
+  // Release the predecessor: a final replacement can now start and settle,
+  // which also proves post-fence deaths still count normally and the
+  // diagnostic latch clears without leaving a permanent hold.
+  commandLiveExit(w, home, { code: 7, delayMs: 50 });
+  await w.expectEventually(45000, "final replacement settles after the predecessor is released", () => {
+    const l = w.lock(home);
+    return !!l && Number(l.pid) !== pred && !bridgeAliveWithIdentity(w, home, pred) &&
+      lockLooksOwned(l) && bridgeAliveWithIdentity(w, home, Number(l.pid));
+  });
+  await w.expectEventually(45000, "diagnostic latch cleared once a different owner settles", () => {
+    const d = w.runDoctor(["doctor", "--json"], { ABTARS_HOME: home });
+    const parsed2 = JSON.parse(d.stdout) as { layers?: Record<string, Array<{ name?: string; status?: string }>> };
+    const probe2 = Object.values(parsed2.layers ?? {}).flat().find((p) => p.name === "watchdog");
+    return probe2?.status === "ok";
+  });
+});
+
 export const DEFICIENCY_SCENARIOS: readonly ScenarioDefinition[] = [
-  B1, B2, B3, B4, B5, B6, B7, B8, B9, B10, B11, B12,
+  B1, B2, B3, B4, B5, B6, B7, B8, B9, B10, B11, B12, B13, B14,
 ];

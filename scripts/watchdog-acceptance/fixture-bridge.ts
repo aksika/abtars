@@ -123,6 +123,29 @@ async function main(): Promise<void> {
   }
 
   const ownsLock = !["no-lock", "non-owner", "transient"].includes(mode.mode);
+  // #1719 B14: mirror the production duplicate-gate boundary ONLY — validate
+  // the current lock owner BEFORE initBridgeLock and exit non-zero without
+  // ever writing a fresh instanceId (the refusing child is not the owner and
+  // production registers its exit handler after the gate arms, so it cannot
+  // self-report either). When no live owner holds the lock, fall through and
+  // initialize normally, exactly like the production gate's clean path.
+  if (mode.mode === "refuse-duplicate") {
+    try {
+      const existing = JSON.parse(readFileSync(join(home, "bridge.lock"), "utf-8")) as { pid?: unknown };
+      const ownerPid = typeof existing.pid === "number" ? existing.pid : 0;
+      if (ownerPid > 0 && ownerPid !== process.pid) {
+        let alive = false;
+        try {
+          process.kill(ownerPid, 0);
+          alive = true;
+        } catch { /* owner gone — gate would proceed */ }
+        if (alive) {
+          process.stderr.write(`[FATAL] Another bridge running (PID ${ownerPid}) — exiting\n`);
+          process.exit(1);
+        }
+      }
+    } catch { /* no/unreadable lock — proceed like the production catch-through */ }
+  }
   if (ownsLock) {
     initBridgeLock({
       pid: process.pid,

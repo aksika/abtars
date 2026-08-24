@@ -266,14 +266,43 @@ async function probeBridge(): Promise<ProbeResult> {
   // #1711 R2/B5: doctor uses the SAME literal identity predicate and
   // enumeration as reconciliation — never a substring pgrep. Read-only: this
   // probe observes, it never signals or repairs.
-  const { enumerateBridgeProcesses } = await import("../../supervisor/identity.js");
-  const enumeration = enumerateBridgeProcesses(home);
-  if (!enumeration.complete) {
-    return { name: "bridge", status: "warning", evidence: "runtime", detail: `process enumeration failed (${enumeration.reason})`, ms: 0 };
+  // #1711 R2.1: unattributable relative-spelled processes are reported by name
+  // with recovery text — a silent supervision freeze is a spec violation (B13).
+  const { potentialHomeBridgeProcesses } = await import("../../supervisor/identity.js");
+  const scope = potentialHomeBridgeProcesses(home);
+  if (!scope.complete) {
+    return { name: "bridge", status: "warning", evidence: "runtime", detail: `process enumeration failed (${scope.reason})`, ms: 0 };
   }
-  const exact = enumeration.processes.filter((p) => p.exactTarget);
+  if (scope.unattributable.length > 0) {
+    const detail = scope.unattributable.map((u) => `PID ${u.pid} (${u.argv.join(" ")})`).join("; ");
+    return {
+      name: "bridge",
+      status: "warning",
+      evidence: "runtime",
+      detail: `blocked-unattributable: ${detail}`,
+      remediation: "This process predates the canonical spawn target and cannot be attributed to a home; restart or terminate it to restore supervision",
+      ms: 0,
+    };
+  }
+  const exact = scope.blockers.filter((p) => p.exactTarget);
   const pids = exact.map((p) => p.pid).slice(0, 5).join(",");
-  if (exact.length === 0) return { name: "bridge", status: "skipped", evidence: "runtime", detail: "no bridge running", ms: 0 };
+  if (exact.length === 0) {
+    // A legacy/relative-spelled same-home process (or an absolute spelling
+    // inside this home) is a spawn blocker: report it by PID — never represent
+    // the blocked state as healthy supervision (invariant 10).
+    if (scope.blockers.length > 0) {
+      const detail = scope.blockers.map((p) => `PID ${p.pid} (${p.argv.join(" ")})`).join("; ");
+      return {
+        name: "bridge",
+        status: "warning",
+        evidence: "runtime",
+        detail: `blocked-bridge-processes: ${detail}`,
+        remediation: "A same-home bridge process is already present; restart or terminate it before starting another",
+        ms: 0,
+      };
+    }
+    return { name: "bridge", status: "skipped", evidence: "runtime", detail: "no bridge running", ms: 0 };
+  }
   if (exact.length === 1) return { name: "bridge", status: "ok", evidence: "runtime", detail: `pid:${exact[0]!.pid}`, ms: 0 };
   return { name: "bridge", status: "failed", evidence: "runtime", detail: `${exact.length} bridges: ${pids}`, remediation: "Run abtars restart", ms: 0 };
 }

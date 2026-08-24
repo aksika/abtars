@@ -27,7 +27,8 @@ export type FixtureModeName =
   | "non-owner"
   | "ignore-term"
   | "stale-ignore-term"
-  | "transient";
+  | "transient"
+  | "refuse-duplicate";
 
 export interface FixtureMode {
   readonly mode: FixtureModeName;
@@ -136,6 +137,13 @@ export interface WorldApi {
 
   startWatchdog(home: string, extraEnv?: Record<string, string>): Promise<number>;
   plantBridge(home: string, mode: FixtureMode): Promise<number>;
+  /**
+   * Plant a LEGACY RELATIVE-spelled fixture (#1711 R2.1): argv
+   * `app/bundle/abtars.js` resolved against `cwd` instead of the canonical
+   * absolute target. Exercises the three-step attribution order (lock first,
+   * then cwd, then unattributable) for the spawn-proof scope.
+   */
+  plantRelativeBridge(home: string, mode: FixtureMode, cwd: string): Promise<number>;
   stopWatchdogGracefully(home: string, timeoutMs?: number): Promise<number>;
   watchdogExitCodeWhenAvailable(home: string): Promise<string | null>;
   pauseWatchdog(home: string): void;

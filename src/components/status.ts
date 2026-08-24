@@ -168,6 +168,23 @@ export async function getStatus(ctx?: BridgeStatusCtx): Promise<StatusView> {
     logAndSwallow("status", "pi", err);
   }
 
+  // #1711 R2.1: unattributable relative-spelled processes block supervision and
+  // must be visible on every status surface with operator recovery text — a
+  // silent freeze is a spec violation (B13).
+  try {
+    const { potentialHomeBridgeProcesses } = await import("../supervisor/identity.js");
+    const scope = potentialHomeBridgeProcesses(home);
+    if (scope.complete && scope.unattributable.length > 0) {
+      for (const u of scope.unattributable) {
+        warnings.push(
+          `blocked-unattributable PID ${u.pid} (${u.argv.join(" ")}): ${u.reason} — this process predates the canonical spawn target and cannot be attributed to a home; restart or terminate it to restore supervision`,
+        );
+      }
+    }
+  } catch (err) {
+    logAndSwallow("status", "spawn-scope", err);
+  }
+
   // Rollback count
   let rollbackAvailable = 0;
   try {

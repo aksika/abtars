@@ -130,12 +130,27 @@ apply_command() {
         EXCLUDE_PID=""
         EXCLUDE_IDENTITY=""
       fi
+      # #1719 R1: retain a SEPARATE copy of the predecessor identity for the
+      # refusal classifier. The EXCLUDE_* pair above is one-shot (consumed by
+      # the spawn proof); classification must use this retained copy, never a
+      # later lock snapshot. Empty when validation failed = no predecessor
+      # evidence, so the classifier stays fail-closed for that fence.
+      FENCE_PRED_PID="$EXCLUDE_PID"
+      FENCE_PRED_IDENTITY="$EXCLUDE_IDENTITY"
+      FENCE_TYPE="$type"
+      REFUSAL_COUNT=0
       svc signal-bridge SIGTERM 2>/dev/null || true
       svc reset-restart-count "command:$type" 2>/dev/null
       svc ack-command "$seq" 2>/dev/null
       logw "Planned bridge restart: command=$type"
       PID=""
       PLANNED_RESTART=1
+      # A new planned command supersedes any abandoned-transition report from
+      # a previous fence (#1719 R4.1): the operator has acted.
+      if [[ "${TRANSITION_FAILED_OPEN:-0}" == "1" ]]; then
+        svc clear-ownership-episode 2>/dev/null || true
+        TRANSITION_FAILED_OPEN=0
+      fi
       # Raise the transition fence (#1711 R7): observation-only through
       # termination, activation, overlap, and post-spawn ownership settling.
       TRANSITION_FENCE="planned-restart"
@@ -230,19 +245,29 @@ wait_for_resume_heartbeat() {
 # disregarded so the replacement is not withheld by the dying owner; the
 # exclusion is one-shot and cleared on veto, failed attempt, or fence end.
 # Stop and handoff never set it. Unchanged state logs once.
+# R2.1 (v5): `blocked-unattributable` lines carry relative-spelled processes no
+# home could claim — they block the spawn and are logged LOUDLY (one event line
+# per change of the blocking set, PID list included); a silent freeze is a
+# spec violation (B13).
 spawn_if_proven_empty() {
-  local proof state=""
+  local proof state="" blocked=""
   while true; do
     if [[ -n "${EXCLUDE_PID:-}" && -n "${EXCLUDE_IDENTITY:-}" ]]; then
       proof="$(svc prove-empty "$EXCLUDE_PID" "$EXCLUDE_IDENTITY" 2>/dev/null || echo inconclusive)"
     else
       proof="$(svc prove-empty 2>/dev/null || echo inconclusive)"
     fi
+    blocked="$(printf '%s\n' "$proof" | grep '^blocked-unattributable ' || true)"
     case "$proof" in
       empty)
         # One-shot consumption: the exception authorizes exactly this attempt.
         EXCLUDE_PID=""
         EXCLUDE_IDENTITY=""
+        # #1719 R1: snapshot bridge.lock's instanceId immediately before the
+        # authorized spawn. The refusing child never reaches initBridgeLock,
+        # so an UNCHANGED value after its exit proves it never took ownership;
+        # a fresh value proves a genuine owner-generation failure (A24).
+        PRES_SPAWN_INSTANCE="$(read_instance_field)"
         spawn_bridge
         return 0
         ;;
@@ -250,14 +275,19 @@ spawn_if_proven_empty() {
         # Any other/unknown process or an incomplete snapshot vetoes the
         # replacement: the exception dies with the attempt (R3).
         if [[ -n "${EXCLUDE_PID:-}" ]]; then
-          logw "Planned-replacement exclusion vetoed ($proof) — ordinary zero-process proof applies"
+          logw "Planned-replacement exclusion vetoed (${proof%%$'\n'*}) — ordinary zero-process proof applies"
           EXCLUDE_PID=""
           EXCLUDE_IDENTITY=""
+        fi
+        # R2.1 loud block: unattributable relative-spelled processes carry
+        # PID + argv + reason; one event line per change of the blocking set.
+        if [[ -n "$blocked" ]]; then
+          log_event "blocked:$blocked" "Spawn withheld: $blocked — cannot be attributed to any home; restart or terminate these processes to restore supervision"
         fi
         case "$proof" in
           occupied*)
             if [[ "$state" != "occupied" ]]; then
-              logw "Spawn withheld: ${proof} exact same-home process(es) — refusing to create a duplicate"
+              logw "Spawn withheld: ${proof%%$'\n'*} exact same-home process(es) — refusing to create a duplicate"
             fi
             state="occupied"
             ;;
@@ -331,6 +361,56 @@ handle_reconciliation_line() {
   esac
 }
 
+# ── Planned-fence refusal classification (#1719) ────────────────────────────
+# A replacement that dies at the production duplicate gate while the recorded
+# predecessor still holds the lock is a PLANNED outcome, not an unplanned
+# death: recording it inflates restartCount/backoff and four such suicides trip
+# circuit-breaker MAX_DEATHS — an auto-rollback of a healthy release.
+
+# Raw instanceId field read; identical input → identical output. An absent or
+# unparseable value reads as empty, which IS the sentinel (R1): unchanged-missing
+# stays distinguishable from a fresh child identity. Read-only (R2.2).
+read_instance_field() {
+  grep -o '"instanceId":"[^"]*"' "$LOCK" 2>/dev/null | head -n 1
+}
+
+# Three-part predicate (requirements R2 / design failure matrix). Ordered so
+# any missing or uncertain piece of evidence falls through to ordinary-death:
+#   stable fence                     -> ordinary death accounting
+#   predecessor gone/reused/mismatch -> ordinary death accounting
+#   child wrote its own instanceId   -> genuine in-fence crash accounting
+# The exit code is intentionally absent from this predicate: main.ts registers
+# its exit handler AFTER the duplicate-gate arms, so a refusal never writes
+# lastExitCode and process-gone:exit=unknown carries no signal.
+classify_planned_refusal() {
+  [[ "$TRANSITION_FENCE" != "stable" ]] || return 1
+  [[ -n "$FENCE_PRED_PID" && -n "$FENCE_PRED_IDENTITY" ]] || return 1
+  local rstatus rpid ridentity
+  read -r rstatus rpid ridentity <<< "$(svc owner-identity 2>/dev/null)"
+  # Identity-aware fresh probe only — never kill -0, never a cached lock read.
+  [[ "$rstatus" == "valid" && "$rpid" == "$FENCE_PRED_PID" && "$ridentity" == "$FENCE_PRED_IDENTITY" ]] || return 1
+  [[ "$(read_instance_field)" == "$PRES_SPAWN_INSTANCE" ]] || return 1
+  return 0
+}
+
+# Re-enter the existing planned replacement authorization for a bounded retry
+# (#1719 design: the retry must NOT resurrect the consumed exclusion without a
+# fresh one). Same pattern as apply_command's authorization point: a fresh
+# owner-identity probe that still matches the retained fence predecessor
+# re-arms the one-shot exclusion; anything else leaves it empty and the
+# ordinary zero-process proof decides.
+refresh_replacement_authorization() {
+  local rstatus rpid ridentity
+  read -r rstatus rpid ridentity <<< "$(svc owner-identity 2>/dev/null)"
+  if [[ "$rstatus" == "valid" && "$rpid" == "$FENCE_PRED_PID" && "$ridentity" == "$FENCE_PRED_IDENTITY" ]]; then
+    EXCLUDE_PID="$rpid"
+    EXCLUDE_IDENTITY="$ridentity"
+  else
+    EXCLUDE_PID=""
+    EXCLUDE_IDENTITY=""
+  fi
+}
+
 if [[ "${ABTARS_WATCHDOG_SOURCE_ONLY:-0}" == "1" ]]; then
   return 0 2>/dev/null || exit 0
 fi
@@ -354,8 +434,22 @@ spawn_bridge() {
 # Adopt one valid existing bridge, otherwise hold until a complete enumeration
 # proves zero same-home processes, then spawn exactly one (R6.4 + #1711 R3).
 adopt_or_spawn() {
+  if adopt_validated_bridge; then
+    return 0
+  fi
+  logw "Adoption skipped (${_adopt_status:-none}) — requiring zero-process proof before spawn"
+  PID=""
+  spawn_if_proven_empty
+}
+
+# #1719: adoption half of adopt_or_spawn, extracted so fence-budget exhaustion
+# can adopt the validated predecessor through the SAME existing path (no new
+# mechanism, no new boot grace per R6.6). Returns 1 when no valid bridge can
+# be adopted.
+adopt_validated_bridge() {
   local vstatus vpid vstarted
   read -r vstatus vpid vstarted <<< "$(svc validate-bridge 2>/dev/null)"
+  _adopt_status="$vstatus"
   if [[ "$vstatus" == "valid" && -n "$vpid" && "$vpid" != "0" ]]; then
     PID="$vpid"
     # Adoption grants no new boot grace (R6.6): use the bridge's recorded
@@ -367,12 +461,11 @@ adopt_or_spawn() {
     fi
     PLANNED_RESTART=0
     logw "Adopted existing bridge PID=$PID (startedAt=$SPAWNED_AT)"
-  else
-    logw "Adoption skipped (${vstatus:-none}) — requiring zero-process proof before spawn"
-    PID=""
-    spawn_if_proven_empty
+    return 0
   fi
+  return 1
 }
+
 
 # ── Startup ──────────────────────────────────────────────────────────────
 migrate_supervisor_state
@@ -395,6 +488,15 @@ LAST_HB_PREV=""
 HB_ADVANCED=0
 EXCLUDE_PID=""
 EXCLUDE_IDENTITY=""
+# #1719 planned-fence refusal state (in-memory only, watchdog lifetime — a
+# restarted watchdog starts with a stable fence and NO predecessor evidence,
+# so it can never become an unbounded retry escape).
+FENCE_PRED_PID=""
+FENCE_PRED_IDENTITY=""
+FENCE_TYPE=""
+REFUSAL_COUNT=0
+TRANSITION_FAILED_OPEN=0
+PRES_SPAWN_INSTANCE=""
 adopt_or_spawn
 LAST_OBSERVED_HB="$(read_heartbeat)"
 
@@ -450,10 +552,20 @@ while true; do
             TRANSITION_FENCE="stable"
             HB_ADVANCED=0
             LAST_HB_PREV=""
-            # Fence end clears any unconsumed replacement exclusion (R3/R7).
+            # Fence end clears any unconsumed replacement exclusion (R3/R7)
+            # and closes the refusal budget (#1719 R4).
             EXCLUDE_PID=""
             EXCLUDE_IDENTITY=""
+            REFUSAL_COUNT=0
           fi
+        fi
+        # #1719 R4.1: an abandoned-transition report is only for the recorded
+        # predecessor. The moment a DIFFERENT validated owner is observed — a
+        # late replacement after containment, or any completed transition —
+        # the diagnostic latch clears; no permanent hidden hold may remain.
+        if [[ "${TRANSITION_FAILED_OPEN:-0}" == "1" && "$_vpid" != "$FENCE_PRED_PID" ]]; then
+          svc clear-ownership-episode 2>/dev/null || true
+          TRANSITION_FAILED_OPEN=0
         fi
         if [[ "$_vpid" != "$PID" ]]; then
           # Validated PID mismatch — existing terminal behavior.
@@ -584,7 +696,43 @@ except Exception:
     continue
   fi
 
+  # ── Planned-fence refusal classification (#1719 R2/R4) ──────────────────
+  # Runs AFTER a process-gone outcome and BEFORE any unplanned accounting.
+  # Only process-gone is eligible: a stale-heartbeat kill is a deliberate
+  # containment signal and always follows ordinary accounting (A6 untouched).
+  # Positive classification requires ALL evidence; anything missing or
+  # uncertain falls through to the ordinary death path below.
+  if [[ "$DEATH_REASON" == process-gone:* ]] && classify_planned_refusal; then
+    REFUSAL_COUNT=$((REFUSAL_COUNT + 1))
+    if (( REFUSAL_COUNT < 3 )); then
+      logw "Planned boot-gate refusal ${REFUSAL_COUNT}/3 during command=${FENCE_TYPE:-unknown} (predecessor PID=$FENCE_PRED_PID alive, lock identity unchanged) — retrying authorized replacement"
+      # Bounded retry through the EXISTING authorization + zero-process proof;
+      # never spawn_bridge directly, never a resurrected exclusion (invariant 7).
+      refresh_replacement_authorization
+      spawn_if_proven_empty
+      continue
+    fi
+    # Budget exhausted (R4/R4.1): exactly ONE stable transition-failed episode
+    # naming the predecessor PID, the abandoned transition surfaced durably
+    # through doctor//status (ownership-episode marker; never a health claim),
+    # and ADOPTION of the validated predecessor via the existing adoption
+    # path — without adoption the loop would keep re-detecting the dead child
+    # PID against the predecessor's valid lock, forever.
+    log_event "transition-failed:$FENCE_PRED_PID" "Transition failed: command=${FENCE_TYPE:-unknown} predecessor PID=$FENCE_PRED_PID survived $REFUSAL_COUNT replacement attempts — adopting predecessor; requested transition is abandoned"
+    svc set-ownership-episode "transition-failed:${FENCE_TYPE:-unknown} predecessor-pid=${FENCE_PRED_PID}" 2>/dev/null || true
+    TRANSITION_FAILED_OPEN=1
+    REFUSAL_COUNT=0
+    if ! adopt_validated_bridge; then
+      # Predecessor unprovable inside the classification window: fall back to
+      # the ordinary fail-closed proof path (never a direct spawn).
+      spawn_if_proven_empty
+    fi
+    continue
+  fi
+
   # Unplanned death: record + healthy accounting + bounded backoff.
+  # (#1719) An ordinary outcome also breaks the consecutive-refusal sequence.
+  REFUSAL_COUNT=0
   logw "Bridge died: $DEATH_REASON (PID=$PID)"
   svc record-death "$DEATH_REASON" 2>/dev/null
   svc record-healthy 2>/dev/null

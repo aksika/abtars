@@ -89,7 +89,34 @@ afterEach(() => {
   delete process.env["ABTARS_HOME"];
 });
 
-describe("doctor probeBridge (#1261)", () => {
+describe("doctor probeBridge (#1261/#1711 R2)", () => {
+  const children: Array<import("node:child_process").ChildProcess> = [];
+
+  async function spawnBridgeChild(): Promise<number> {
+    const { spawn } = await import("node:child_process");
+    mkdirSync(join(tmpDir, "app", "bundle"), { recursive: true });
+    writeFileSync(join(tmpDir, "app", "bundle", "abtars.js"), 'setInterval(() => {}, 10_000);\n');
+    return new Promise((resolve, reject) => {
+      const child = spawn(process.execPath, [join(tmpDir, "app", "bundle", "abtars.js")], {
+        stdio: "ignore",
+        cwd: tmpDir,
+      });
+      children.push(child);
+      child.on("spawn", () => resolve(child.pid!));
+      child.on("error", reject);
+    });
+  }
+
+  async function killAll(): Promise<void> {
+    for (const c of children.splice(0)) {
+      try { c.kill("SIGKILL"); } catch { /* gone */ }
+      await new Promise<void>((resolve) => {
+        if (c.exitCode !== null || c.signalCode !== null) return resolve();
+        c.once("exit", () => resolve());
+      });
+    }
+  }
+
   it("reports skipped when no bridge is running", async () => {
     pgrepRef.current = "";
     const { runAllProbes } = await import("./doctor-probes.js");
@@ -101,23 +128,32 @@ describe("doctor probeBridge (#1261)", () => {
   });
 
   it("reports ok when exactly one bridge is running", async () => {
-    pgrepRef.current = "12345\n";
-    const { runAllProbes } = await import("./doctor-probes.js");
-    const result = await runAllProbes();
-    const probe = result.layers.body.flat().find((r) => r.name === "bridge");
-    expect(probe?.status).toBe("ok");
-    expect(probe?.detail).toBe("pid:12345");
+    const pid = await spawnBridgeChild();
+    try {
+      const { runAllProbes } = await import("./doctor-probes.js");
+      const result = await runAllProbes();
+      const probe = result.layers.body.flat().find((r) => r.name === "bridge");
+      expect(probe?.status).toBe("ok");
+      expect(probe?.detail).toBe(`pid:${pid}`);
+    } finally {
+      await killAll();
+    }
   });
 
   it("reports failed when multiple bridges are running (orphan detected)", async () => {
-    pgrepRef.current = "12345\n67890\n";
-    const { runAllProbes } = await import("./doctor-probes.js");
-    const result = await runAllProbes();
-    const probe = result.layers.body.flat().find((r) => r.name === "bridge");
-    expect(probe?.status).toBe("failed");
-    expect(probe?.detail).toContain("2 bridges");
-    expect(probe?.detail).toContain("12345");
-    expect(probe?.detail).toContain("67890");
+    const pidA = await spawnBridgeChild();
+    const pidB = await spawnBridgeChild();
+    try {
+      const { runAllProbes } = await import("./doctor-probes.js");
+      const result = await runAllProbes();
+      const probe = result.layers.body.flat().find((r) => r.name === "bridge");
+      expect(probe?.status).toBe("failed");
+      expect(probe?.detail).toContain("2 bridges");
+      expect(probe?.detail).toContain(String(pidA));
+      expect(probe?.detail).toContain(String(pidB));
+    } finally {
+      await killAll();
+    }
   });
 });
 

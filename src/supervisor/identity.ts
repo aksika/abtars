@@ -1,6 +1,6 @@
 import { readFileSync, readdirSync, readlinkSync } from "node:fs";
 import { execFileSync } from "node:child_process";
-import { isAbsolute } from "node:path";
+import { isAbsolute, join } from "node:path";
 
 export type ValidationResult =
   | { readonly status: "valid"; readonly safeToSignal: true; readonly safeToAdopt: true }
@@ -152,41 +152,133 @@ export function exactBridgeProcesses(home: string): readonly BridgeProcess[] | n
  * (exactTarget); refusing to create a duplicate is the cheap, fail-closed
  * direction.
  *
- * Attribution rules:
+ * Attribution rules (#1711 R2.1, v5 — folded from the deleted #1718):
  * - exact canonical literal          -> always blocks;
  * - absolute spelling inside home    -> always blocks;
- * - relative `app/bundle/abtars.js`  -> blocked ONLY when the process cwd
- *   places it inside this home (R2 permits cwd as EVIDENCE; it never
- *   authorizes adoption/containment/exemption, only spawn-blocking scope).
- *   An unreadable cwd cannot be cleared and therefore still blocks.
+ * - relative `app/bundle/abtars.js`  -> attributed in this order, stopping at
+ *   the first that answers:
+ *     1. the lock: this home's bridge.lock names that PID with a matching
+ *        start identity — authoritative and free (no cwd needed);
+ *     2. cwd, where readable: Linux `/proc/<pid>/cwd`; macOS best-effort
+ *        `lsof -a -p <pid> -d cwd -Fn` via execFile, never through a shell,
+ *        with a short timeout, relative candidates only;
+ *     3. otherwise `unattributable`.
+ *   `this-home` and `unattributable` block the spawn; `other-home` does not.
+ *   An unattributable process is NEVER a silent freeze: its PID, argv, and
+ *   reason travel in the enumeration result, doctor//status surface it with
+ *   operator recovery text, the watchdog logs one event line when the blocking
+ *   set changes, and main.ts prints the PID list before its gate exits.
+ *
+ * cwd is evidence-only and mutable via chdir: it may pull a process INTO scope
+ * for the spawn proof, but it never authorizes a signal.
  */
-export function potentialHomeBridgeProcesses(home: string): readonly BridgeProcess[] | null {
-  const result = enumerateBridgeProcesses(home);
-  if (!result.complete) return null;
-  const base = home.replace(/\/+$/, "");
-  const target = `${base}/app/bundle/abtars.js`;
-  return result.processes.filter((p) =>
-    p.argv.some((arg) => {
-      if (arg === target) return true;
-      if (arg.startsWith(`${base}/`) && arg.endsWith("/app/bundle/abtars.js")) return true;
-      if (arg === "app/bundle/abtars.js") {
-        const cwd = processCwd(p.pid);
-        if (cwd === null) return true; // cannot attribute -> fail closed
-        return cwd === base || cwd.startsWith(`${base}/`);
-      }
-      return false;
-    })
-  );
+export interface UnattributableProcess {
+  readonly pid: number;
+  readonly startIdentity: string;
+  readonly argv: readonly string[];
+  readonly reason: string;
 }
 
-/** Read a process cwd as ATTRIBUTION EVIDENCE ONLY (#1711 R2). Linux only. */
+export type SpawnScope =
+  | { readonly complete: false; readonly reason: string }
+  | {
+      readonly complete: true;
+      /** Every process whose argv COULD be this home's bridge — blocks the spawn. */
+      readonly blockers: readonly BridgeProcess[];
+      /** Relative-spelled processes whose home could not be attributed — blocks, loudly. */
+      readonly unattributable: readonly UnattributableProcess[];
+    };
+
+type RelativeAttribution =
+  | { readonly kind: "this-home"; readonly via: "lock" | "cwd" }
+  | { readonly kind: "other-home"; readonly via: "cwd" }
+  | { readonly kind: "unattributable"; readonly reason: string };
+
+/**
+ * Three-step attribution for a relative-spelled candidate (#1711 R2.1).
+ * Lock first (authoritative and free), then cwd (Linux /proc, macOS best-effort
+ * lsof), then unattributable. A relative process attributed to THIS home is a
+ * spawn blocker; one attributed elsewhere is not; one that cannot be attributed
+ * is a LOUD blocker.
+ */
+function attributeRelativeProcess(home: string, base: string, p: BridgeProcess): RelativeAttribution {
+  const lockPath = join(home, "bridge.lock");
+  try {
+    const lock = JSON.parse(readFileSync(lockPath, "utf-8")) as Record<string, unknown>;
+    if (lock.pid === p.pid && lock.startIdentity === p.startIdentity) {
+      return { kind: "this-home", via: "lock" };
+    }
+  } catch { /* missing/corrupt lock — fall through to cwd */ }
+
+  const cwd = processCwd(p.pid);
+  if (cwd !== null) {
+    const normalized = cwd.replace(/\/+$/, "");
+    if (normalized === base || normalized.startsWith(`${base}/`)) {
+      return { kind: "this-home", via: "cwd" };
+    }
+    return { kind: "other-home", via: "cwd" };
+  }
+  return { kind: "unattributable", reason: `cwd-unreadable (${process.platform})` };
+}
+
+/**
+ * Read a process cwd as ATTRIBUTION EVIDENCE ONLY (#1711 R2/R2.1). Linux reads
+ * /proc; macOS uses `lsof -a -p <pid> -d cwd -Fn` via execFile — no shell, short
+ * timeout, relative candidates only so the cost stays off the common path. A
+ * null result means the cwd is unreadable on this platform: the caller treats
+ * that as `unattributable`, never as a silent pass.
+ */
 function processCwd(pid: number): string | null {
+  if (process.platform === "darwin") {
+    try {
+      const output = execFileSync("lsof", ["-a", "-p", String(pid), "-d", "cwd", "-Fn"], {
+        encoding: "utf8",
+        stdio: ["ignore", "pipe", "pipe"],
+        timeout: 1500,
+      });
+      // lsof -Fn emits one `n<path>` record per fd; the cwd is the single
+      // `ncwd`-style record. Take the first `n` line as the path.
+      const match = output.match(/\nn([^\n]*)/);
+      if (match === null || match[1] === undefined || match[1] === "") return null;
+      return match[1];
+    } catch {
+      return null; // lsof absent or timed out -> unattributable, never a crash
+    }
+  }
   try {
     const dest = readlinkSync(`/proc/${pid}/cwd`);
     return dest;
   } catch {
     return null;
   }
+}
+
+export function potentialHomeBridgeProcesses(home: string): SpawnScope {
+  const result = enumerateBridgeProcesses(home);
+  if (!result.complete) return { complete: false, reason: result.reason };
+  const base = home.replace(/\/+$/, "");
+  const target = `${base}/app/bundle/abtars.js`;
+  const blockers: BridgeProcess[] = [];
+  const unattributable: UnattributableProcess[] = [];
+  for (const p of result.processes) {
+    let blocked = false;
+    for (const arg of p.argv) {
+      if (arg === target) { blocked = true; break; }
+      if (arg.startsWith(`${base}/`) && arg.endsWith("/app/bundle/abtars.js")) { blocked = true; break; }
+      if (arg === "app/bundle/abtars.js") {
+        const attribution = attributeRelativeProcess(home, base, p);
+        if (attribution.kind === "this-home") { blocked = true; break; }
+        if (attribution.kind === "unattributable") {
+          blocked = true;
+          unattributable.push({ pid: p.pid, startIdentity: p.startIdentity, argv: p.argv, reason: attribution.reason });
+          break;
+        }
+        // other-home: not this home's bridge — no block.
+      }
+    }
+    if (blocked) blockers.push(p);
+  }
+  return { complete: true, blockers, unattributable };
 }
 
 function macProcessField(pid: number, field: "lstart" | "command"): string | null {

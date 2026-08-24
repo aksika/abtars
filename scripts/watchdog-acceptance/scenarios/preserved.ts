@@ -1,5 +1,6 @@
 /**
- * Preserved and forward-safety scenarios A1-A22 (#1712 Phase 0).
+ * Preserved and forward-safety scenarios A1-A24 (#1712 Phase 0; A24 added by
+ * #1719 as the in-fence genuine-crash counterweight).
  *
  * Each scenario asserts only externally observable outcomes (R1/R7): process
  * liveness/identity, bridge.lock fields, supervisor.state, bounded watchdog.log
@@ -569,7 +570,40 @@ const A23 = A("A23", "Sole survivor after unclean watchdog death is adopted", "l
   w.expect(samples.length > 0 && samples.every(Boolean), "survivor must remain the sole validated owner after restoration");
 });
 
+/**
+ * A24 (#1719 counterweight): a replacement that boots past initBridgeLock —
+ * writing a FRESH instanceId — and then exits non-zero during the planned
+ * transition fence is a genuine owner-generation failure. It must stay fully
+ * accountable: logged, recorded, backoff effective. This blocks any future
+ * regression to the invalid rule "fence active means suppress every death"
+ * (the failure-matrix asymmetry).
+ */
+const A24 = A("A24", "In-fence crash after a fresh instanceId remains a recorded death", "lifecycle", async (w) => {
+  const home = w.homeA();
+  const { pid: oldPid } = await startHealthyBridgeUnderWatchdog(w, home);
+  // The REPLACEMENT takes this scheduled mode: initialize ownership (fresh
+  // instanceId) and exit non-zero ~150ms later — inside the fence window.
+  w.setControl(home, {
+    nextSpawns: [{ generation: w.claimNextGeneration(home), mode: "exit", exitCode: 3, delayMs: 150 }],
+  });
+  publishCommand(w, home, "restart", "acceptance-a24");
+  await w.expectEventually(30000, "replacement crash recorded with its own fresh exit code", () => {
+    const events = parseDeathEvents(w.watchdogLogLines(home, 80));
+    return events.some((e) => e.reason.endsWith("exit=3") && e.pid !== String(oldPid));
+  });
+  const st = w.supervisorState(home);
+  w.expect(Array.isArray(st?.recentDeaths) && st.recentDeaths.length >= 1,
+    "the in-fence crash must appear in supervisor death accounting");
+  w.expect(Number(st?.restartCount) >= 1, `restartCount must increment for an accountable death (got ${String(st?.restartCount)})`);
+  w.expect(Number(st?.backoffAttempt) >= 1, `backoff must remain effective for an accountable death (got ${String(st?.backoffAttempt)})`);
+  // A settled healthy replacement follows the accounted crash.
+  await w.expectEventually(30000, "settled healthy replacement after the accounted crash", () => {
+    const l = w.lock(home);
+    return !!l && Number(l.pid) !== oldPid && bridgeAliveWithIdentity(w, home, Number(l.pid));
+  });
+});
+
 export const PRESERVED_SCENARIOS: readonly ScenarioDefinition[] = [
   A1, A2, A3, A4, A5, A6, A7, A8, A9, A10, A11, A12,
-  A13, A14, A15, A16, A17, A18, A19, A20, A21, A22, A23,
+  A13, A14, A15, A16, A17, A18, A19, A20, A21, A22, A23, A24,
 ];

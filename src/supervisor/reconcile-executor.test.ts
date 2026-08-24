@@ -18,6 +18,7 @@ interface Home {
   home: string;
   target: string;
   spawnBridgeChild: () => Promise<ChildProcess>;
+  spawnRelativeBridgeChild: (cwd: string) => Promise<ChildProcess>;
 }
 
 async function makeHome(): Promise<Home> {
@@ -34,7 +35,16 @@ async function makeHome(): Promise<Home> {
       child.on("error", reject);
     });
   }
-  return { home, target, spawnBridgeChild };
+
+  async function spawnRelativeBridgeChild(cwd: string): Promise<ChildProcess> {
+    return new Promise((resolve, reject) => {
+      // Legacy relative spelling (pre-canonical launcher): "app/bundle/abtars.js".
+      const child = spawn(process.execPath, ["app/bundle/abtars.js"], { stdio: "ignore", cwd });
+      child.on("spawn", () => resolve(child));
+      child.on("error", reject);
+    });
+  }
+  return { home, target, spawnBridgeChild, spawnRelativeBridgeChild };
 }
 
 const homes: Home[] = [];
@@ -166,16 +176,16 @@ describe("containCandidate final authorization (#1711 R6)", () => {
 describe("evaluateSpawnProof — zero-process proof and the planned-replacement exception (#1711 R3, A9/A20)", () => {
   it.runIf(!isDarwin)("is inconclusive for an unusable home", async () => {
     const proof = evaluateSpawnProof("relative/home", null);
-    expect(proof).toEqual({ result: "inconclusive" });
+    expect(proof).toEqual({ result: "inconclusive", unattributable: [] });
   });
 
   it.runIf(!isDarwin)("counts exact same-home children as occupying", async () => {
     const { home, spawnBridgeChild } = await register();
     const a = await spawnBridgeChild();
     try {
-      expect(evaluateSpawnProof(home, null)).toEqual({ result: "occupied", count: 1 });
+      expect(evaluateSpawnProof(home, null)).toEqual({ result: "occupied", count: 1, unattributable: [] });
       expect(evaluateSpawnProof(home, { pid: a.pid!, startIdentity: processStartIdentity(a.pid!) }))
-        .toEqual({ result: "empty" }); // only the recorded owner remains
+        .toEqual({ result: "empty", unattributable: [] }); // only the recorded owner remains
     } finally {
       a.kill("SIGKILL");
       await waitDead(a);
@@ -188,7 +198,7 @@ describe("evaluateSpawnProof — zero-process proof and the planned-replacement 
     try {
       // Same PID, different start identity: no exclusion exists.
       expect(evaluateSpawnProof(home, { pid: a.pid!, startIdentity: `${a.pid}:1` }))
-        .toEqual({ result: "occupied", count: 1 });
+        .toEqual({ result: "occupied", count: 1, unattributable: [] });
     } finally {
       a.kill("SIGKILL");
       await waitDead(a);
@@ -202,7 +212,7 @@ describe("evaluateSpawnProof — zero-process proof and the planned-replacement 
     try {
       const exclude = { pid: owner.pid!, startIdentity: processStartIdentity(owner.pid!) };
       const proof = evaluateSpawnProof(home, exclude);
-      expect(proof).toEqual({ result: "occupied", count: 1 }); // the extra still vetoes
+      expect(proof).toEqual({ result: "occupied", count: 1, unattributable: [] }); // the extra still vetoes
     } finally {
       owner.kill("SIGKILL");
       extra.kill("SIGKILL");
@@ -212,8 +222,36 @@ describe("evaluateSpawnProof — zero-process proof and the planned-replacement 
 
   it.runIf(!isDarwin)("empty home proves empty with and without an exclusion", async () => {
     const { home } = await register();
-    expect(evaluateSpawnProof(home, null)).toEqual({ result: "empty" });
-    expect(evaluateSpawnProof(home, { pid: 999999, startIdentity: "999999:9" })).toEqual({ result: "empty" });
+    expect(evaluateSpawnProof(home, null)).toEqual({ result: "empty", unattributable: [] });
+    expect(evaluateSpawnProof(home, { pid: 999999, startIdentity: "999999:9" })).toEqual({ result: "empty", unattributable: [] });
+  }, 10000);
+
+  it.runIf(!isDarwin)("a relative-spelled process in THIS home blocks via cwd (R2.1)", async () => {
+    const { home, spawnRelativeBridgeChild } = await register();
+    const rel = await spawnRelativeBridgeChild(home);
+    try {
+      const proof = evaluateSpawnProof(home, null);
+      expect(proof).toEqual({ result: "occupied", count: 1, unattributable: [] });
+    } finally {
+      rel.kill("SIGKILL");
+      await waitDead(rel);
+    }
+  }, 10000);
+
+  it.runIf(!isDarwin)("a relative-spelled process in ANOTHER home does not block (R2.1 other-home)", async () => {
+    const { home, spawnRelativeBridgeChild } = await register();
+    const otherHome = mkdtempSync(join(tmpdir(), "abtars-other-"));
+    mkdirSync(join(otherHome, "app", "bundle"), { recursive: true });
+    writeFileSync(join(otherHome, "app", "bundle", "abtars.js"), 'setInterval(() => {}, 10_000);\n');
+    const rel = await spawnRelativeBridgeChild(otherHome);
+    try {
+      const proof = evaluateSpawnProof(home, null);
+      expect(proof).toEqual({ result: "empty", unattributable: [] });
+    } finally {
+      rel.kill("SIGKILL");
+      await waitDead(rel);
+      rmSync(otherHome, { recursive: true, force: true });
+    }
   }, 10000);
 });
 

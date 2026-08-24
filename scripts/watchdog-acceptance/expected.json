@@ -24,6 +24,7 @@
     "A21": { "expect": "pass" },
     "A22": { "expect": "pass" },
     "A23": { "expect": "pass" },
+    "A24": { "expect": "pass" },
     "B1": { "expect": "known-fail", "owner": "#1711 P7", "reason": "corrupt status defers forever; no ownership-inconclusive episode is recorded" },
     "B2": { "expect": "known-fail", "owner": "#1711 P3", "reason": "adopt_or_spawn duplicates on a corrupt lock beside a live bridge" },
     "B3": { "expect": "known-fail", "owner": "#1711 P1", "reason": "non-owner heartbeat writes mask the wedged owner's staleness" },
@@ -35,6 +36,8 @@
     "B9": { "expect": "known-fail", "owner": "#1711 P7", "reason": "defer branch repeats an unchanged state once per poll, indefinitely" },
     "B10": { "expect": "known-fail", "owner": "#1711 P4", "reason": "strict extra-field rejection degrades supervision to permanent defer" },
     "B11": { "expect": "known-fail", "owner": "#1711 P7", "reason": "corrupt lock plus frozen readable heartbeat defers before stale handling" },
-    "B12": { "expect": "known-fail", "owner": "#1711 P2", "reason": "no literal-argv identity reconciliation across an update fence" }
+    "B12": { "expect": "known-fail", "owner": "#1711 P2", "reason": "no literal-argv identity reconciliation across an update fence" },
+    "B13": { "expect": "pass", "owner": "#1711 R2.1", "reason": "legacy relative-spelled process blocks loudly via three-step attribution; macOS lsof branch is host-smoke" },
+    "B14": { "expect": "known-fail", "owner": "#1719", "reason": "boot-gate refusal during a planned fence is recorded as an unplanned death; attempts unbounded and transition not reported" }
   }
 }

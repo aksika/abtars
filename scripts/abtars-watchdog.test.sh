@@ -420,7 +420,7 @@ svc() {
     local n seqs out
     n="$(cat "$GATE_COUNTER" 2>/dev/null || echo 0)"
     echo $((n+1)) > "$GATE_COUNTER"
-    IFS=';' read -ra seqs <<< "$GATE_SEQ"
+    IFS=';' read -ra seqs -d '' < <(printf '%s' "$GATE_SEQ")
     out="${seqs[$n]:-}"
     [[ -z "$out" ]] && out="inconclusive"
     printf "%s" "$out"
@@ -491,6 +491,23 @@ if [[ "$HELD_INCONCLUSIVE_LINES" != "1" ]]; then
   exit 1
 fi
 echo "OK: boundary invocation failure holds fail-closed (never spawns, one event line)"
+
+# R2.1 (v5): blocked-unattributable relative-spelled processes are logged
+# LOUDLY — PID list + operator recovery text, one event line per change of the
+# blocking set — and still block the spawn (B13). A silent freeze is a defect.
+RESULT=$(gate_run "occupied 1
+blocked-unattributable 4242 4242:777 cwd-unreadable(linux) app/bundle/abtars.js;empty")
+SPAWN_COUNT=$(echo "$RESULT" | grep -o "spawned=[0-9]*" | cut -d= -f2)
+BLOCKED_LINES=$(grep -c "blocked-unattributable" "$GATE_LOG")
+if [[ "$RESULT" != "done spawned=1"* || "$BLOCKED_LINES" != "1" ]]; then
+  echo "FAIL: gate must withhold loudly on blocked-unattributable, then spawn after empty — got: $RESULT lines=$BLOCKED_LINES"
+  exit 1
+fi
+if ! grep -q "restart or terminate these processes to restore supervision" "$GATE_LOG"; then
+  echo "FAIL: blocked-unattributable log must carry operator recovery text"
+  exit 1
+fi
+echo "OK: gate logs unattributable blockers loudly (PID list, one event line) then spawns after empty"
 
 # R4: validate-bridge consumer tolerates trailing metadata.
 if grep -q '\-z "\$vextra"' "$WD_SH"; then
@@ -664,6 +681,120 @@ fi
 echo "OK: occupied/inconclusive proofs veto and clear the replacement exclusion (one event line)"
 
 rm -rf "$EXCL_HOME"
+
+# ── #1719: planned-fence boot-gate refusal classification ──────────────────
+# Truth-table coverage of classify_planned_refusal (requirements R2 / design
+# failure matrix): every missing/uncertain evidence row must fall through to
+# ordinary-death (exit 1); only the exact three-part match classifies as a
+# planned refusal (exit 0).
+
+CLASS_HOME=$(mktemp -d /tmp/watchdog-1719.XXXXXX)
+mkdir -p "$CLASS_HOME/logs"
+trap 'rm -rf "$CLASS_HOME"' EXIT
+
+# Rows 1-7 share a compact runner: FENCE/PID/IDENT/BEFORE/AFTER/OWNER_OUT.
+class_case() {
+  WD_SH_PATH="$WD_SH" ABTARS_WATCHDOG_SOURCE_ONLY=1 ABTARS_HOME="$CLASS_HOME" \
+  FENCE="$1" PPID_E="$2" PIDENT_E="$3" BEFORE_RAW="$4" AFTER_RAW="$5" OWNER_OUT="$6" \
+  bash -c '
+    set -u
+    source "$WD_SH_PATH"
+    svc() { if [[ "$1" == "owner-identity" ]]; then printf "%s" "$OWNER_OUT"; fi; }
+    TRANSITION_FENCE="$FENCE"
+    FENCE_PRED_PID="$PPID_E"; FENCE_PRED_IDENTITY="$PIDENT_E"
+    if [[ -n "$BEFORE_RAW" ]]; then
+      printf "{\"instanceId\":\"%s\",\"pid\": 9999,\"lastHeartbeat\": 1}\n" "$BEFORE_RAW" > "$LOCK"
+    else
+      printf "{\"pid\": 9999,\"lastHeartbeat\": 1}\n" > "$LOCK"
+    fi
+    # Snapshot EXACTLY as production does (spawn_if_proven_empty empty branch).
+    PRES_SPAWN_INSTANCE="$(read_instance_field)"
+    if [[ -n "$AFTER_RAW" ]]; then
+      printf "{\"instanceId\":\"%s\",\"pid\": 9999,\"lastHeartbeat\": 1}\n" "$AFTER_RAW" > "$LOCK"
+    elif [[ -z "$BEFORE_RAW" ]]; then
+      : # lock already lacks the field; leave as-is
+    else
+      printf "{\"pid\": 9999,\"lastHeartbeat\": 1}\n" > "$LOCK"
+    fi
+    if classify_planned_refusal; then echo planned-refusal; else echo ordinary-death; fi
+  '
+}
+
+R=$(class_case stable 1234 "1234:55" "inst-a" "inst-a" "valid 1234 1234:55")
+[[ "$R" == "ordinary-death" ]] || { echo "FAIL #1719 row1: stable fence must stay ordinary — got $R"; exit 1; }
+echo "OK: stable-fence death stays ordinary death accounting (#1719 row 1)"
+R=$(class_case planned-restart "" "" "inst-a" "inst-a" "valid 1234 1234:55")
+[[ "$R" == "ordinary-death" ]] || { echo "FAIL #1719 row2a: no retained predecessor evidence must stay ordinary — got $R"; exit 1; }
+R=$(class_case planned-restart 1234 "1234:55" "inst-a" "inst-a" "invalid 0 -")
+[[ "$R" == "ordinary-death" ]] || { echo "FAIL #1719 row2b: dead/unprovable predecessor must stay ordinary — got $R"; exit 1; }
+R=$(class_case planned-restart 1234 "1234:55" "inst-a" "inst-a" "valid 777 777:11")
+[[ "$R" == "ordinary-death" ]] || { echo "FAIL #1719 row2c: mismatched live process must stay ordinary — got $R"; exit 1; }
+R=$(class_case planned-restart 1234 "1234:55" "inst-a" "inst-a" "valid 1234 9999:1")
+[[ "$R" == "ordinary-death" ]] || { echo "FAIL #1719 row2d: reused start identity must stay ordinary — got $R"; exit 1; }
+R=$(class_case planned-restart 1234 "1234:55" "inst-a" "fresh-child-id" "valid 1234 1234:55")
+[[ "$R" == "ordinary-death" ]] || { echo "FAIL #1719 row3: fresh child instanceId (genuine crash, A24 shape) must stay ordinary — got $R"; exit 1; }
+R=$(class_case planned-restart 1234 "1234:55" "inst-a" "inst-a" "valid 1234 1234:55")
+[[ "$R" == "planned-refusal" ]] || { echo "FAIL #1719 row4: exact predecessor + unchanged instanceId must classify planned-refusal — got $R"; exit 1; }
+R=$(class_case planned-restart 1234 "1234:55" "" "" "valid 1234 1234:55")
+[[ "$R" == "planned-refusal" ]] || { echo "FAIL #1719 row5: unchanged MISSING instanceId sentinel must classify planned-refusal — got $R"; exit 1; }
+R=$(class_case planned-restart 1234 "1234:55" "" "fresh-child-id" "valid 1234 1234:55")
+[[ "$R" == "ordinary-death" ]] || { echo "FAIL #1719 row6: fresh identity over missing sentinel must stay ordinary — got $R"; exit 1; }
+R=$(class_case planned-restart 1234 "1234:55" "inst-a" "" "valid 1234 1234:55")
+[[ "$R" == "ordinary-death" ]] || { echo "FAIL #1719 row7: vanished instanceId is changed evidence — got $R"; exit 1; }
+echo "OK: refusal classifier truth table verified (#1719 rows 1-7)"
+
+# refresh_replacement_authorization: fresh matching probe re-arms the one-shot
+# exclusion; anything else leaves it empty (fail-closed).
+REFRESH_OUT=$(WD_SH_PATH="$WD_SH" ABTARS_WATCHDOG_SOURCE_ONLY=1 ABTARS_HOME="$CLASS_HOME" \
+bash -c '
+  set -u
+  source "$WD_SH_PATH"
+  svc() { if [[ "$1" == "owner-identity" ]]; then printf "%s" "$OWNER_OUT"; fi; }
+  FENCE_PRED_PID=1234; FENCE_PRED_IDENTITY="1234:55"
+  EXCLUDE_PID=; EXCLUDE_IDENTITY=
+  OWNER_OUT="valid 1234 1234:55"
+  refresh_replacement_authorization
+  R1="pid=$EXCLUDE_PID ident=$EXCLUDE_IDENTITY"
+  EXCLUDE_PID=; EXCLUDE_IDENTITY=
+  OWNER_OUT="invalid 0 -"
+  refresh_replacement_authorization
+  R2="pid=$EXCLUDE_PID ident=$EXCLUDE_IDENTITY"
+  EXCLUDE_PID=999; EXCLUDE_IDENTITY="stale"
+  OWNER_OUT="valid 777 777:2"
+  refresh_replacement_authorization
+  R3="pid=$EXCLUDE_PID ident=$EXCLUDE_IDENTITY"
+  echo "$R1|$R2|$R3"
+')
+[[ "$REFRESH_OUT" == "pid=1234 ident=1234:55|pid= ident=|pid= ident=" ]] || {
+  echo "FAIL #1719: authorization refresh must re-arm only on an exact fresh match — got $REFRESH_OUT"
+  exit 1
+}
+echo "OK: retry authorization re-arms the exclusion only on a fresh exact predecessor match"
+
+# Pre-spawn snapshot wiring: the authorized-spawn branch captures the CURRENT
+# instanceId before calling spawn_bridge.
+SNAP_OUT=$(WD_SH_PATH="$WD_SH" ABTARS_WATCHDOG_SOURCE_ONLY=1 ABTARS_HOME="$CLASS_HOME" \
+bash -c '
+  set -u
+  source "$WD_SH_PATH"
+  printf "{\"instanceId\":\"snap-check\",\"pid\": 9999,\"lastHeartbeat\": 1}\n" > "$LOCK"
+  svc() { if [[ "$1" == "prove-empty" ]]; then printf "%s" "empty"; fi; }
+  spawn_bridge() { :; }
+  poll_state() { :; }
+  POLL_INTERVAL=0
+  EXCLUDE_PID=; EXCLUDE_IDENTITY=
+  PRES_SPAWN_INSTANCE=unset
+  spawn_if_proven_empty >/dev/null 2>&1
+  echo "snapshot=$PRES_SPAWN_INSTANCE"
+')
+[[ "$SNAP_OUT" == "snapshot=\"instanceId\":\"snap-check\"" ]] || {
+  echo "FAIL #1719: authorized spawn must snapshot bridge.lock instanceId first — got $SNAP_OUT"
+  exit 1
+}
+echo "OK: authorized replacement snapshots the pre-spawn instanceId (#1719 R1)"
+
+rm -rf "$CLASS_HOME"
+trap - EXIT
 
 rm -rf "$GATE_HOME"
 
