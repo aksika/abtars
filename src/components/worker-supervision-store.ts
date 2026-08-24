@@ -1163,8 +1163,6 @@ export class WorkerSupervisionStore {
 
   // ── #1510: Single terminal settlement primitive ─────────────────────────
 
-  /** Public terminal-settlement wrapper — opens one transaction around the
-   * canonical body. */
   /** #1720 — Bounded tolerance for completions that reach settlement just
    * past their hard deadline. Workers pace to the announced budget, so
    * genuine completions cluster at the boundary; event-loop jitter must not
@@ -1184,6 +1182,8 @@ export class WorkerSupervisionStore {
     }
   }
 
+  /** Public terminal-settlement wrapper — opens one transaction around the
+   * canonical body. */
   terminalSettlement(input: {
     attemptId: string;
     expectedGeneration: number;
