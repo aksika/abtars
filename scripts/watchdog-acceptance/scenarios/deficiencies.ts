@@ -71,7 +71,11 @@ const B1 = B("B1", "Corrupt lock reaches a bounded, recorded ownership decision"
   const { pid: owner } = await startHealthyBridgeUnderWatchdog(w, home);
   await stripLockOwnership(w, home, owner);
   try {
-    await w.expectEventually(15000, "bounded recorded ownership decision (episode or arbitration)", () => {
+    // The decision must arrive through the per-tick reconcile boundary, whose
+    // svc invocations slow sharply on a loaded host (observed >15s mid-suite
+    // while <2s focused). 30s keeps the contract falsifiable — a genuine
+    // permanent defer still expires — without a load-induced false red.
+    await w.expectEventually(30000, "bounded recorded ownership decision (episode or arbitration)", () => {
       // Final form: the durable episode marker (target implementation), or a
       // concrete arbitration outcome. Neither exists today.
       const st = w.supervisorState(home);

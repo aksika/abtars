@@ -246,7 +246,10 @@ const A9 = A("A9", "Restart command acknowledged, applied, restart state reset",
   const seq = publishCommand(w, home, "restart", "acceptance-a9");
   // Correction (#1712 draft review #3): acknowledgement proves the command was
   // APPLIED — it does not require the old process to have exited first.
-  await w.expectEventually(25000, "restart acknowledged and a replacement bridge is running", () => {
+  // 45s (not 25s): a loaded host stretches TERM-exit and the zero-process
+  // proof well past 25s (observed mid-suite); a genuinely broken restart
+  // still fails the same assertion, only later.
+  await w.expectEventually(45000, "restart acknowledged and a replacement bridge is running", () => {
     const l = w.lock(home);
     const st = w.supervisorState(home);
     return !!l && Number(l.pid) !== oldPid && st?.acknowledgedCommandSeq === seq &&
@@ -298,7 +301,9 @@ const A12 = A("A12", "Unknown command acked and dropped; later valid command app
   w.expect(Number(w.lock(home)?.pid) === pid, "unknown command must not touch the running bridge");
 
   const seqRestart = publishCommand(w, home, "restart", "acceptance-a12-restart");
-  await w.expectEventually(25000, "legitimate restart published afterwards is applied", () => {
+  // 45s: a planned-restart completion on a loaded host can outstretch 25s
+  // (TERM-exit + zero-process proof + boot); a broken apply still fails.
+  await w.expectEventually(45000, "legitimate restart published afterwards is applied", () => {
     const l = w.lock(home);
     const st = w.supervisorState(home);
     return !!l && Number(l.pid) !== pid && st?.acknowledgedCommandSeq === seqRestart && bridgeAliveWithIdentity(w, home, Number(l.pid));
@@ -433,7 +438,8 @@ const A18 = A("A18", "Watchdog never invokes doctor or service management (canar
   const owned = await waitForOwnedBridge(w, home, 20000);
   const pid = Number(owned.pid);
   const seq = publishCommand(w, home, "restart", "acceptance-a18");
-  await w.expectEventually(25000, "planned restart applied under canary PATH", () => {
+  // 45s: same loaded-host restart-completion headroom as A9/A12.
+  await w.expectEventually(45000, "planned restart applied under canary PATH", () => {
     const l = w.lock(home);
     const st = w.supervisorState(home);
     return !!l && Number(l.pid) !== pid && st?.acknowledgedCommandSeq === seq;
