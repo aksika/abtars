@@ -43,7 +43,7 @@ export async function handleOrc(text: string, ctx: CommandContext): Promise<bool
       await ctx.reply([
         "Orc fuse limits (effective policy):",
         `  card: ${g.sameCard.failedOrNoProgress.max} failed attempts/${g.sameCard.failedOrNoProgress.windowMinutes}m`,
-        `  card: ${g.sameCard.startsWithWithoutProgress.max} no-progress starts/${g.sameCard.startsWithWithoutProgress.windowMinutes}m`,
+        `  card: ${g.sameCard.startsWithoutProgress.max} no-progress starts/${g.sameCard.startsWithoutProgress.windowMinutes}m`,
         `  bridge: ${g.bridge.starts5m} starts/5m`,
         `  bridge: ${g.bridge.starts1h} starts/1h`,
         `  bridge: ${g.bridge.newRunRows5m} new run rows/5m`,

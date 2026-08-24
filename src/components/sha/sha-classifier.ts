@@ -305,7 +305,7 @@ function classifyScheduled(event: ScheduledFailureEvent, policy: ShaPolicyView):
  */
 function classifyLogAnomaly(_event: LogAnomalyEvent, mode: SelfHealMode, policy: ShaPolicyView): ShaClassificationResult {
   const gate = policy.logAnomaly;
-  if (!gate || !gate.shaAllowed) {
+  if (!policy.logAdmissionAllowed || !gate || !gate.shaAllowed) {
     return { classification: "suppressed", reason: "anomaly SHA admission disabled by policy" };
   }
   if (selfHealModeRank(mode) < selfHealModeRank(gate.minimumMode)) {

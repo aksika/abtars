@@ -137,19 +137,19 @@ export class ShaIncidentCoordinator {
           ? { kind: "ignored", reason: "off" }
           : { kind: "ignored", reason: "suppressed" };
       case "known_fix": {
-        const rule = this.matchingRule(signal, classification.reason);
+        const rule = this.matchingRule(signal, classification.reason, policy);
         if (!rule) return { kind: "ignored", reason: "suppressed" };
-        return this.admitKnownFix(signal, rule);
+        return this.admitKnownFix(signal, rule, mode);
       }
       case "unknown_actionable":
         return this.admitProject(signal, mode, policy);
     }
   }
 
-  private matchingRule(_signal: ShaFailureSignal, reason: string): FixRule | undefined {
+  private matchingRule(_signal: ShaFailureSignal, reason: string, policy: ShaPolicyView): FixRule | undefined {
     const pattern = /"([^"]+)"/.exec(reason)?.[1];
     if (!pattern) return undefined;
-    return this.policyView().fixes.find((f) => f.pattern === pattern);
+    return policy.fixes.find((f) => f.pattern === pattern);
   }
 
   /**
@@ -164,6 +164,24 @@ export class ShaIncidentCoordinator {
       out = out.slice(0, -1);
     }
     return out;
+  }
+
+  /** Serialize only valid, UTF-8-bounded diagnostic JSON for durable insert. */
+  private static boundedDiagnosticJson(value: unknown): string | null {
+    let json: string | undefined;
+    try {
+      json = JSON.stringify(value);
+    } catch {
+      return null;
+    }
+    if (json === undefined) return null;
+    if (Buffer.byteLength(json, "utf-8") > MAX_DIAGNOSTIC_JSON_BYTES) return null;
+    try {
+      JSON.parse(json);
+    } catch {
+      return null;
+    }
+    return json;
   }
 
   /**
@@ -181,13 +199,15 @@ export class ShaIncidentCoordinator {
     occurredAt: number;
   } | null {
     if (signal.source === "scheduled") {
+      const diagnosticJson = ShaIncidentCoordinator.boundedDiagnosticJson(signal.diagnostic);
+      if (!diagnosticJson) return null;
       return {
         eventKey: scheduledEventKey(signal),
         fingerprint: scheduledFingerprint(signal),
         source: "scheduled",
         sourceScope: signal.entryId,
         taskKind: signal.taskKind,
-        diagnosticJson: JSON.stringify(signal.diagnostic),
+        diagnosticJson,
         occurredAt: signal.occurredAt,
       };
     }
@@ -198,7 +218,7 @@ export class ShaIncidentCoordinator {
         redactSecrets(signal.evidence),
         MAX_EVIDENCE_BYTES,
       );
-      const diagnosticJson = JSON.stringify({
+      const diagnosticJson = ShaIncidentCoordinator.boundedDiagnosticJson({
         source: signal.source,
         schemaVersion: signal.schemaVersion,
         anomalyKind: signal.anomalyKind,
@@ -213,9 +233,7 @@ export class ShaIncidentCoordinator {
         ratio: signal.ratio,
         evidence: redactedEvidence,
       });
-      if (Buffer.byteLength(diagnosticJson, "utf-8") > MAX_DIAGNOSTIC_JSON_BYTES) {
-        return null;
-      }
+      if (!diagnosticJson) return null;
       return {
         eventKey: logAnomalyEventKey(signal),
         fingerprint: logAnomalyFingerprint(signal),
@@ -225,19 +243,20 @@ export class ShaIncidentCoordinator {
         occurredAt: signal.windowEndedAt,
       };
     }
+    const diagnosticJson = ShaIncidentCoordinator.boundedDiagnosticJson({ message: redactSecrets(signal.normalizedMessage) });
+    if (!diagnosticJson) return null;
     return {
       eventKey: logEventKey(signal),
       fingerprint: logFingerprint(signal),
       source: "log",
       sourceScope: `${signal.component}:${signal.tag}`,
-      diagnosticJson: JSON.stringify({ message: signal.normalizedMessage }),
+      diagnosticJson,
       occurredAt: signal.occurredAt,
     };
   }
 
   /** #1688 R8: known-fix lifecycle — durable admission, then bounded execution. */
-  private admitKnownFix(signal: ShaFailureSignal, rule: FixRule): ShaAdmissionOutcome {
-    const mode = this.modeProvider();
+  private admitKnownFix(signal: ShaFailureSignal, rule: FixRule, mode: SelfHealMode): ShaAdmissionOutcome {
     if (mode === "off") return { kind: "ignored", reason: "off" };
     if (mode === "investigation" || !ShaKnownFixRunner.executableRule(rule)) {
       return { kind: "known_fix_recommended" };

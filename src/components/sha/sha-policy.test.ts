@@ -157,7 +157,7 @@ describe("#1708 effective guardrails — valid v2", () => {
     const p = getEffectiveShaPolicy();
     expect(p.logAdmissionAllowed).toBe(true);
     expect(p.orc.sameCard.failedOrNoProgress).toEqual({ max: 3, windowMinutes: 10 });
-    expect(p.orc.sameCard.startsWithWithoutProgress).toEqual({ max: 5, windowMinutes: 5 });
+    expect(p.orc.sameCard.startsWithoutProgress).toEqual({ max: 5, windowMinutes: 5 });
     expect(p.orc.bridge).toEqual({ starts5m: 25, starts1h: 100, newRunRows5m: 50 });
     expect(p.logAnomaly).toEqual({ notifyMain: true, shaAllowed: true, minimumMode: "investigation", cooldownMinutes: 60 });
     expect(policyDiagnostics()).toEqual({ coreStatus: "valid-v2", selfStatus: "missing", fallbackFields: [] });
@@ -173,7 +173,7 @@ describe("#1708 effective guardrails — valid v2", () => {
     } });
     const orc = getEffectiveOrcGuardrails();
     expect(orc.sameCard.failedOrNoProgress.max).toBe(1);
-    expect(orc.sameCard.startsWithWithoutProgress.max).toBe(5); // clamped to ceiling
+    expect(orc.sameCard.startsWithoutProgress.max).toBe(5); // clamped to ceiling
     expect(orc.bridge.starts5m).toBe(1);
     expect(orc.bridge.starts1h).toBe(100); // clamped
     expect(orc.bridge.newRunRows5m).toBe(7);
@@ -232,7 +232,7 @@ describe("#1708 effective guardrails — fallback matrix", () => {
     expect(loadMergedFixes()).toEqual([]);
     expect(logAdmissionAllowed()).toBe(false);
     expect(getEffectiveShaPolicy().orc.sameCard.failedOrNoProgress.max).toBe(3);
-    expect(getEffectiveShaPolicy().logAnomaly.shaAllowed).toBe(true); // defaults are inert without admission
+    expect(getEffectiveShaPolicy().logAnomaly.shaAllowed).toBe(false);
   });
 
   it("missing core file fails closed with bounded diagnostics", () => {
@@ -241,6 +241,27 @@ describe("#1708 effective guardrails — fallback matrix", () => {
     expect(p.logAdmissionAllowed).toBe(false);
     expect(p.fixes).toEqual([]);
     expect(p.orc.sameCard.failedOrNoProgress.max).toBe(3);
+    expect(p.logAnomaly.shaAllowed).toBe(false);
+  });
+
+  it("does not expose mutable nested guardrail state", () => {
+    writePolicy("sha-policy.json", {
+      schemaVersion: 2,
+      fixes: [{ pattern: "immutable rule", command: ["echo", "safe"], verifyCommand: ["true"], cooldownMin: 1 }],
+      guardrails: V2_GUARDRAILS,
+    });
+    const p = getEffectiveShaPolicy();
+    expect(Object.isFrozen(p)).toBe(true);
+    expect(Object.isFrozen(p.fixes)).toBe(true);
+    expect(Object.isFrozen(p.fixes[0])).toBe(true);
+    expect(Object.isFrozen(p.fixes[0]?.command)).toBe(true);
+    expect(Object.isFrozen(p.fixes[0]?.verifyCommand)).toBe(true);
+    expect(Object.isFrozen(p.orc)).toBe(true);
+    expect(Object.isFrozen(p.orc.sameCard)).toBe(true);
+    expect(Object.isFrozen(p.orc.sameCard.failedOrNoProgress)).toBe(true);
+    expect(Object.isFrozen(p.orc.sameCard.startsWithoutProgress)).toBe(true);
+    expect(Object.isFrozen(p.orc.bridge)).toBe(true);
+    expect(Object.isFrozen(p.logAnomaly)).toBe(true);
   });
 
   it("syntactically invalid JSON fails closed and emits one bounded diagnostic per load", () => {
@@ -269,7 +290,7 @@ describe("#1708 effective guardrails — fallback matrix", () => {
     } });
     const p = getEffectiveShaPolicy();
     expect(p.orc.sameCard.failedOrNoProgress.max).toBe(3);
-    expect(p.orc.sameCard.startsWithWithoutProgress.max).toBe(2);
+    expect(p.orc.sameCard.startsWithoutProgress.max).toBe(2);
     expect(p.orc.bridge.starts5m).toBe(10);
     expect(p.orc.bridge.newRunRows5m).toBe(50);
     expect(p.logAnomaly.notifyMain).toBe(true);
@@ -293,7 +314,7 @@ describe("#1708 effective guardrails — fallback matrix", () => {
     } });
     const orc = getEffectiveOrcGuardrails();
     expect(orc.sameCard.failedOrNoProgress.max).toBe(3);
-    expect(orc.sameCard.startsWithWithoutProgress.max).toBe(5);
+    expect(orc.sameCard.startsWithoutProgress.max).toBe(5);
     expect(orc.bridge.starts5m).toBe(25);
     expect(orc.bridge.starts1h).toBe(100);
     expect(orc.bridge.newRunRows5m).toBe(50);

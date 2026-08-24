@@ -227,7 +227,7 @@ export async function handleHealing(text: string, ctx: CommandContext): Promise<
         ? "Guardrail fallbacks: none"
         : `Guardrail fallbacks (${fallbacks.length}): ${fallbacks.slice(0, 5).join(", ")}${fallbacks.length > 5 ? ", ..." : ""}`,
       `Orc limits: card failed/no-progress ${snapshot.orc.sameCard.failedOrNoProgress.max}/${snapshot.orc.sameCard.failedOrNoProgress.windowMinutes}m`
-        + `, no-progress starts ${snapshot.orc.sameCard.startsWithWithoutProgress.max}/${snapshot.orc.sameCard.startsWithWithoutProgress.windowMinutes}m`,
+        + `, no-progress starts ${snapshot.orc.sameCard.startsWithoutProgress.max}/${snapshot.orc.sameCard.startsWithoutProgress.windowMinutes}m`,
       `Orc bridge: ${snapshot.orc.bridge.starts5m}/5m, ${snapshot.orc.bridge.starts1h}/1h, ${snapshot.orc.bridge.newRunRows5m} rows/5m`,
       `Log anomaly: notifyMain=${snapshot.logAnomaly.notifyMain ? "on" : "off"}`
         + ` shaAllowed=${snapshot.logAnomaly.shaAllowed ? "on" : "off"}`

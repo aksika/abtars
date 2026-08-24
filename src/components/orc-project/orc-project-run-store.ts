@@ -594,7 +594,7 @@ export class OrcProjectRunStore {
          AND ownership_generation > ?
          AND unixepoch(created_at) >= ?
     `).get(input.projectCardId, clearedGen, churnFrom) as { n: number };
-    if (noProgressStarts.n >= guardrails.sameCard.startsWithWithoutProgress.max) {
+    if (noProgressStarts.n >= guardrails.sameCard.startsWithoutProgress.max) {
       return this.openFuse(scope, `no_progress_starts:${noProgressStarts.n}`);
     }
 

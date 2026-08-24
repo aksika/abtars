@@ -54,23 +54,23 @@ export const BRIDGE_ROWS_5M_WINDOW_MS = 300_000;
 export const CARD_FAILED_ATTEMPTS_WINDOW_MINUTES = CARD_FAILED_ATTEMPTS_WINDOW_MS / 60_000;
 export const CARD_NO_PROGRESS_WINDOW_MINUTES = CARD_NO_PROGRESS_WINDOW_MS / 60_000;
 
-export const DEFAULT_ORC_GUARDRAILS: EffectiveOrcGuardrails = {
-  sameCard: {
-    failedOrNoProgress: {
+export const DEFAULT_ORC_GUARDRAILS: EffectiveOrcGuardrails = Object.freeze({
+  sameCard: Object.freeze({
+    failedOrNoProgress: Object.freeze({
       max: CARD_FAILED_ATTEMPTS_LIMIT,
       windowMinutes: CARD_FAILED_ATTEMPTS_WINDOW_MINUTES,
-    },
-    startsWithWithoutProgress: {
+    }),
+    startsWithoutProgress: Object.freeze({
       max: CARD_NO_PROGRESS_STARTS_LIMIT,
       windowMinutes: CARD_NO_PROGRESS_WINDOW_MINUTES,
-    },
-  },
-  bridge: {
+    }),
+  }),
+  bridge: Object.freeze({
     starts5m: BRIDGE_STARTS_5M_LIMIT,
     starts1h: BRIDGE_STARTS_HOUR_LIMIT,
     newRunRows5m: BRIDGE_ROWS_5M_LIMIT,
-  },
-};
+  }),
+});
 
 /**
  * #1628: in-process fact published after every committed Orc ownership

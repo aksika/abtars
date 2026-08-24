@@ -57,7 +57,7 @@ export type ShaMinimumMode = "investigation" | "full";
 export interface EffectiveOrcGuardrails {
   readonly sameCard: {
     readonly failedOrNoProgress: { readonly max: number; readonly windowMinutes: number };
-    readonly startsWithWithoutProgress: { readonly max: number; readonly windowMinutes: number };
+    readonly startsWithoutProgress: { readonly max: number; readonly windowMinutes: number };
   };
   readonly bridge: {
     readonly starts5m: number;
@@ -103,12 +103,38 @@ export interface PolicyDiagnostics {
 
 export const ANOMALY_COOLDOWN_MIN_FLOOR = 60;
 export const ANOMALY_COOLDOWN_MAX_MINUTES = 1440;
-export const DEFAULT_LOG_ANOMALY_POLICY: EffectiveLogAnomalyPolicy = {
+export const DEFAULT_LOG_ANOMALY_POLICY: EffectiveLogAnomalyPolicy = Object.freeze({
   notifyMain: true,
   shaAllowed: true,
   minimumMode: "investigation",
   cooldownMinutes: ANOMALY_COOLDOWN_MIN_FLOOR,
-};
+});
+const DISABLED_LOG_ANOMALY_POLICY: EffectiveLogAnomalyPolicy = Object.freeze({
+  ...DEFAULT_LOG_ANOMALY_POLICY,
+  shaAllowed: false,
+});
+
+function freezeOrcGuardrails(value: EffectiveOrcGuardrails): EffectiveOrcGuardrails {
+  return Object.freeze({
+    sameCard: Object.freeze({
+      failedOrNoProgress: Object.freeze({ ...value.sameCard.failedOrNoProgress }),
+      startsWithoutProgress: Object.freeze({ ...value.sameCard.startsWithoutProgress }),
+    }),
+    bridge: Object.freeze({ ...value.bridge }),
+  });
+}
+
+function freezeLogAnomalyPolicy(value: EffectiveLogAnomalyPolicy): EffectiveLogAnomalyPolicy {
+  return Object.freeze({ ...value });
+}
+
+function freezeFixRule(value: FixRule): FixRule {
+  return Object.freeze({
+    ...value,
+    ...(value.command ? { command: Object.freeze(value.command.slice()) } : {}),
+    ...(value.verifyCommand ? { verifyCommand: Object.freeze(value.verifyCommand.slice()) } : {}),
+  }) as FixRule;
+}
 
 // ── fix-rule validation (#1688, unchanged) ───────────────────────────────────
 
@@ -236,9 +262,9 @@ function resolveOrcGuardrails(rawOrc: unknown, ctx: LeafCtx): EffectiveOrcGuardr
         max: resolveCountLeaf(failed?.["max"], "guardrails.orc.sameCard.failedOrNoProgress.max", d.sameCard.failedOrNoProgress.max, ctx),
         windowMinutes: d.sameCard.failedOrNoProgress.windowMinutes,
       },
-      startsWithWithoutProgress: {
-        max: resolveCountLeaf(starts?.["max"], "guardrails.orc.sameCard.startsWithoutProgress.max", d.sameCard.startsWithWithoutProgress.max, ctx),
-        windowMinutes: d.sameCard.startsWithWithoutProgress.windowMinutes,
+      startsWithoutProgress: {
+        max: resolveCountLeaf(starts?.["max"], "guardrails.orc.sameCard.startsWithoutProgress.max", d.sameCard.startsWithoutProgress.max, ctx),
+        windowMinutes: d.sameCard.startsWithoutProgress.windowMinutes,
       },
     },
     bridge: {
@@ -321,6 +347,7 @@ function resolveAll(): ResolvedSnapshot {
     case "missing":
     case "invalid-json": {
       coreStatus = core.status;
+      logAnomaly = DISABLED_LOG_ANOMALY_POLICY;
       break;
     }
     case "ok": {
@@ -345,6 +372,7 @@ function resolveAll(): ResolvedSnapshot {
         }
       } else {
         coreStatus = "unsupported-schema";
+        logAnomaly = DISABLED_LOG_ANOMALY_POLICY;
       }
       break;
     }
@@ -377,10 +405,10 @@ function resolveAll(): ResolvedSnapshot {
   }
 
   const snapshot: EffectiveShaPolicy = Object.freeze({
-    fixes: Object.freeze(fixes.slice()),
+    fixes: Object.freeze(fixes.map(freezeFixRule)),
     logAdmissionAllowed,
-    orc,
-    logAnomaly,
+    orc: freezeOrcGuardrails(orc),
+    logAnomaly: freezeLogAnomalyPolicy(logAnomaly),
   });
   return {
     snapshot,

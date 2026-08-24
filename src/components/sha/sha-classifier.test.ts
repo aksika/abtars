@@ -323,6 +323,17 @@ describe("#1708 anomaly classification gates", () => {
     expect(classifyShaFailure(anomalyEvent(), "full", EMPTY_POLICY).classification).toBe("suppressed");
   });
 
+  it("invalid core policy cannot admit an anomaly through default source settings", () => {
+    const invalidCoreView: ShaPolicyView = {
+      ...gatePolicy,
+      logAdmissionAllowed: false,
+    };
+    expect(classifyShaFailure(anomalyEvent(), "full", invalidCoreView)).toMatchObject({
+      classification: "suppressed",
+      reason: "anomaly SHA admission disabled by policy",
+    });
+  });
+
   it("scheduled and log classification precedence is unchanged alongside the new source", () => {
     expect(classifyShaFailure(scheduled(), "off", EMPTY_POLICY).reason).toContain("mode off");
     expect(classifyShaFailure(logEvent(), "full", { fixes: [], logAdmissionAllowed: false }).reason).toContain("malformed policy");

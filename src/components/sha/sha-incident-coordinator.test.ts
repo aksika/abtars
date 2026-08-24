@@ -72,6 +72,7 @@ function agentEvent(runId = "run-1", overrides: Partial<ScheduledFailureEvent> =
 
 function makeCoordinator(overrides: {
   mode?: "off" | "investigation" | "full";
+  modeProvider?: () => "off" | "investigation" | "full";
   aliasAvailability?: () => string | null;
   policyFixes?: import("./sha-policy.js").FixRule[];
   store?: ShaIncidentStore;
@@ -79,7 +80,7 @@ function makeCoordinator(overrides: {
   return new ShaIncidentCoordinator({
     db,
     store: overrides.store,
-    modeProvider: () => overrides.mode ?? "full",
+    modeProvider: overrides.modeProvider ?? (() => overrides.mode ?? "full"),
     aliasAvailability: overrides.aliasAvailability,
     policyView: () => ({ fixes: overrides.policyFixes ?? [], logAdmissionAllowed: true }),
     noticeSink: { send: vi.fn() },
@@ -110,6 +111,29 @@ describe("guarded outcomes perform zero store writes", () => {
 });
 
 describe("unknown actionable project admission (R5)", () => {
+  it("turns an over-bound scheduled diagnostic into a no-write outcome", () => {
+    const base = makeTaskFailure("execution", "model_error", "executing", "boom", "none");
+    const oversized = agentEvent("oversized", {
+      diagnostic: {
+        ...base,
+        context: {
+          lanes: Array.from({ length: 8 }, (_, i) => ({
+            cardId: i + 1,
+            contractId: "c".repeat(1_000),
+            attemptId: "a".repeat(1_000),
+            lifecycle: "executing",
+            criteria: [],
+            missingEvidence: [],
+          })),
+        },
+      },
+    });
+    const outcome = makeCoordinator().admit(oversized);
+    expect(outcome).toMatchObject({ kind: "ignored", reason: "suppressed" });
+    expect(Number(db.prepare("SELECT COUNT(*) AS n FROM sha_incidents").get()?.["n"])).toBe(0);
+    expect(Number(db.prepare("SELECT COUNT(*) AS n FROM kanban_board").get()?.["n"])).toBe(0);
+  });
+
   it("full mode creates one root, complete blocked placeholder chain, contract, and binds RCA", () => {
     const nerveFire = vi.spyOn(nerve, "fire");
     const outcome = makeCoordinator().admit(agentEvent());
@@ -216,6 +240,19 @@ describe("known-fix admission (R8)", () => {
     expect(outcome.kind).toBe("known_fix_recommended");
     const events = db.prepare("SELECT COUNT(*) AS n FROM sha_incident_events").get();
     expect(Number(events?.["n"])).toBe(0);
+  });
+
+  it("uses the mode captured at classification for known-fix admission", () => {
+    let calls = 0;
+    const outcome = makeCoordinator({
+      policyFixes: [verifiedRule],
+      modeProvider: () => {
+        calls += 1;
+        return calls === 1 ? "investigation" : "full";
+      },
+    }).admit(agentEvent("k-captured", { diagnostic: makeTaskFailure("execution", "model_error", "executing", "please rebuild me now", "none") }));
+    expect(outcome.kind).toBe("known_fix_recommended");
+    expect(calls).toBe(1);
   });
 
   it("full mode admits a durable known_fix episode and starts bounded execution", async () => {
