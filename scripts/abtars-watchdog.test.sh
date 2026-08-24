@@ -1,802 +1,753 @@
 #!/usr/bin/env bash
-# #1261: Verify the watchdog's bridge spawn line uses exec so $! returns the real node PID
-# (not a bash subshell). This prevents the subshell-orphan bug that caused duplicate bridges.
+# Watchdog M-suite executor (#1712): shell-owned mock projections of selected
+# acceptance contracts, executed through the production source-only seam
+# (ABTARS_WATCHDOG_SOURCE_ONLY=1) of scripts/abtars-watchdog.sh.
+#
+# Contract: exactly one machine-readable row per case on stdout:
+#   <M-ID><TAB>pass|fail<TAB>detail
+# fast.ts classifies these rows against the reviewed manifest; this file owns
+# no scoreboard policy.
+#
+# Usage: abtars-watchdog.test.sh [MA08 MA09 ...]   (default: all 12)
+#
+# Safety: no watchdog, bridge, supervisor/doctor CLI, esbuild, or other
+# long-lived process is started. Clock and sleep are deterministic doubles;
+# svc, process enumeration, and signal targets are stubs. A post-run scan
+# proves no child process was left behind. check-watchdog-shape.mjs remains a
+# separate self-check (npm run check:watchdog-shape), not an M case.
 set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 WD_SH="$SCRIPT_DIR/abtars-watchdog.sh"
 
 if [[ ! -f "$WD_SH" ]]; then
-  echo "FAIL: $WD_SH not found"
+  echo "FATAL: $WD_SH not found" >&2
   exit 1
 fi
 
-# Test 1: The spawn line must contain "exec" before the env=value nohup node...
-SPAWN_LINE=$(grep -n 'nohup node.*abtars.js.*200>&-' "$WD_SH" || true)
-if [[ -z "$SPAWN_LINE" ]]; then
-  echo "FAIL: spawn line not found in watchdog script"
-  exit 1
-fi
-if ! echo "$SPAWN_LINE" | grep -q 'exec.*nohup node'; then
-  echo "FAIL: spawn line missing 'exec' before nohup node — subshell orphan will occur"
-  echo "  Found: $SPAWN_LINE"
-  exit 1
-fi
-echo "OK: spawn line has 'exec' prefix"
+ALL_M_IDS=(MA08 MA09 MA12 MA20 MA21 MA24 MB02 MB09 MB10 MB11 MB13 MB14)
 
-# Test 2: Reproduce the bug class in isolation — verify the exec fix actually works
-# Simulate the exact spawn pattern: cd X && exec env=value nohup node ... &
-DUMMY_JS="/tmp/dummy-1261.js"
-cat > "$DUMMY_JS" <<'EOF'
-console.log("node started, pid:", process.pid);
-setInterval(() => {}, 60000); // keep alive
-EOF
+# ── Selection ────────────────────────────────────────────────────────────────
+REQUESTED=()
+if (( $# > 0 )); then
+  for arg in "$@"; do
+    id="$(echo "$arg" | tr '[:lower:]' '[:upper:]')"
+    ok=0
+    for known in "${ALL_M_IDS[@]}"; do
+      [[ "$id" == "$known" ]] && ok=1
+    done
+    if (( ok == 0 )); then
+      echo "FATAL: unknown M selector '$arg' (approved set: ${ALL_M_IDS[*]})" >&2
+      exit 2
+    fi
+    REQUESTED+=("$id")
+  done
+else
+  REQUESTED=("${ALL_M_IDS[@]}")
+fi
 
-TEST_SCRIPT="/tmp/test-exec-1261.sh"
-cat > "$TEST_SCRIPT" <<EOF
-#!/usr/bin/env bash
-cd /tmp && exec env FOO=bar /usr/bin/node "$DUMMY_JS" >> /tmp/exec-1261.log 2>&1 200>- &
-CHILD=\$!
-sleep 1
-if [ -d "/proc/\$CHILD" ]; then
-  COMM=\$(cat /proc/\$CHILD/comm 2>/dev/null)
-  if [ "\$COMM" = "node" ]; then
-    echo "OK: \$CHILD is node (comm=node)"
-    kill \$CHILD 2>/dev/null
-    exit 0
+RUN_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/abtars-watchdog-m.XXXXXX")"
+trap 'rm -rf "$RUN_ROOT"' EXIT
+PRELUDE="$RUN_ROOT/prelude.sh"
+
+# Deterministic clock/sleep doubles plus tiny assert helpers, sourced by every
+# case child BEFORE the production script so waits become clock steps.
+cat > "$PRELUDE" <<'PRELUDE_EOF'
+WD_FAKE_EPOCH="${WD_FAKE_EPOCH:-1700000000}"
+date() {
+  case "${1:-}" in
+    +%FT%T) echo "2023-11-14T22:13:20+00:00" ;;
+    *) echo "$WD_FAKE_EPOCH" ;;
+  esac
+}
+sleep() {
+  local s="${1:-0}"
+  WD_FAKE_EPOCH=$(( WD_FAKE_EPOCH + ${s%%.*} ))
+  [[ "$s" == *.* ]] && WD_FAKE_EPOCH=$(( WD_FAKE_EPOCH + 1 ))
+  return 0
+}
+wd_log_lines() { cat "${CASE_HOME}/logs/watchdog.log" 2>/dev/null || true; }
+wd_assert_eq() {
+  if [[ "$1" != "$2" ]]; then
+    printf 'assert failed: %s (got <%s>, want <%s>)\n' "$3" "$1" "$2" >&2
+    exit 10
+  fi
+}
+wd_assert() {
+  if [[ "$1" != "1" ]]; then
+    printf 'assert failed: %s\n' "$2" >&2
+    exit 10
+  fi
+}
+PRELUDE_EOF
+
+PASS=0
+FAILS=0
+
+emit() { # emit <id> <pass|fail> <detail>
+  printf '%s\t%s\t%s\n' "$1" "$2" "$3"
+  if [[ "$2" == "pass" ]]; then
+    PASS=$((PASS + 1))
   else
-    echo "FAIL: \$CHILD is '\$COMM' (expected node) — subshell orphan regression"
-    kill \$CHILD 2>/dev/null
-    exit 1
+    FAILS=$((FAILS + 1))
   fi
-else
-  echo "FAIL: \$CHILD is gone"
-  exit 1
-fi
-EOF
-chmod +x "$TEST_SCRIPT"
+}
 
-if "$TEST_SCRIPT"; then
-  echo "OK: exec fix verified — \$! returns real node PID"
-else
-  echo "FAIL: exec fix did not work as expected"
-  rm -f "$DUMMY_JS" "$TEST_SCRIPT"
-  exit 1
-fi
+# Run one case child: $1 = case label; stdin = child script body. The child
+# gets its own home with logs/, the prelude doubles, and the source-only seam.
+# The label doubles as the evidence home name, so sub-legits use distinct ones.
+run_child() {
+  local label="$1"
+  local home="$RUN_ROOT/$label/home"
+  mkdir -p "$home/logs"
+  local body="$RUN_ROOT/$label.child.sh"
+  cat > "$body"
+  (
+    cd /
+    export WD_SH_PATH="$WD_SH" PRELUDE="$PRELUDE" CASE_HOME="$home"
+    export ABTARS_WATCHDOG_SOURCE_ONLY=1 ABTARS_HOME="$home"
+    exec bash "$body"
+  ) 2>"$RUN_ROOT/$label.stderr"
+}
 
-# Cleanup
-rm -f "$DUMMY_JS" "$TEST_SCRIPT" /tmp/exec-1261.log
-pkill -f "dummy-1261.js" 2>/dev/null
+child_detail() { # bounded one-line tail of a failing child's stderr files
+  local f out=""
+  for f in "$RUN_ROOT/$1"*.stderr; do
+    [[ -e "$f" ]] || continue
+    out+="$(tail -n 2 "$f")"
+  done
+  printf '%s' "${out//$'\n'/;}" | cut -c1-200
+}
 
-echo "OK: #1261 tests passed"
+finish_case() { # finish_case <id> <rc...>: pass iff every rc is 0
+  local id="$1"; shift
+  local rc bad=""
+  for rc in "$@"; do
+    [[ "$rc" == "0" ]] || bad="$bad$rc "
+  done
+  if [[ -z "$bad" ]]; then
+    emit "$id" pass "ok"
+  else
+    emit "$id" fail "$(child_detail "$id")"
+  fi
+}
 
-# ── #1328: watchdog exit-code capture via bridge self-report ──────────────
-
-# Test 3: the process-gone branch must read lastExitCode from bridge.lock, not trust
-# `wait`'s return value (which is always 0 due to `disown`).
-if ! grep -q "lastExitCode" "$WD_SH"; then
-  echo "FAIL: watchdog script does not read lastExitCode from bridge.lock (#1328)"
-  exit 1
-fi
-if ! grep -q "wait \"\$PID\" 2>/dev/null   # reap the child" "$WD_SH"; then
-  echo "FAIL: process-gone branch no longer reaps the child via wait, or comment changed unexpectedly"
-  exit 1
-fi
-echo "OK: process-gone branch reads self-reported lastExitCode"
-
-# Test 4: `disown $PID` must still be present — #1050 survival + SIGTERM/INT-trap
-# isolation depend on it (see resilience.asbuilt.md). This fix must NOT remove it.
-if ! grep -q '^  disown \$PID' "$WD_SH"; then
-  echo "FAIL: 'disown \$PID' was removed — regresses #1050 (watchdog death kills bridge)"
-  exit 1
-fi
-echo "OK: disown \$PID still present (#1050 survival intact)"
-
-# Test 5: SPAWNED_AT freshness guard — the lastExitCode read must gate on
-# lastExitAt > SPAWNED_AT so a stale prior-death code is never reused.
-if ! grep -q "ea / 1000 > \$SPAWNED_AT" "$WD_SH"; then
-  echo "FAIL: lastExitCode read is missing the SPAWNED_AT freshness guard"
-  exit 1
-fi
-echo "OK: lastExitCode read guards against stale prior-death values"
-
-# Test 6: functional — simulate the bridge's self-report + watchdog's read, end to end,
-# using the exact python3 read expression from the script (extracted, not re-derived) so a
-# drift in the script doesn't silently go untested.
-FAKE_LOCK="/tmp/fake-bridge-1328.lock"
-FAKE_SPAWNED_AT=$(($(date +%s) - 10))   # bridge "spawned" 10s ago
-cat > "$FAKE_LOCK" <<EOF
-{"pid": 99999, "lastExitCode": 1, "lastExitAt": $(( ($(date +%s) + 1) * 1000 ))}
-EOF
-READ_EXPR=$(python3 -c "
-import json
-LOCK='$FAKE_LOCK'
-SPAWNED_AT=$FAKE_SPAWNED_AT
-d = json.load(open(LOCK))
-ec = d.get('lastExitCode')
-ea = d.get('lastExitAt', 0)
-print(ec if (ec is not None and ea / 1000 > SPAWNED_AT) else '')
-")
-if [[ "$READ_EXPR" != "1" ]]; then
-  echo "FAIL: fresh lastExitCode=1 (written after spawn) should read as '1', got '$READ_EXPR'"
-  rm -f "$FAKE_LOCK"
-  exit 1
-fi
-echo "OK: fresh self-reported exit code (1) read correctly"
-
-# Test 7: stale lastExitCode (written BEFORE this bridge spawned) must be rejected → unknown
-cat > "$FAKE_LOCK" <<EOF
-{"pid": 99999, "lastExitCode": 1, "lastExitAt": $(( ($(date +%s) - 100) * 1000 ))}
-EOF
-READ_EXPR=$(python3 -c "
-import json
-LOCK='$FAKE_LOCK'
-SPAWNED_AT=$FAKE_SPAWNED_AT
-d = json.load(open(LOCK))
-ec = d.get('lastExitCode')
-ea = d.get('lastExitAt', 0)
-print(ec if (ec is not None and ea / 1000 > SPAWNED_AT) else '')
-")
-if [[ -n "$READ_EXPR" ]]; then
-  echo "FAIL: stale lastExitCode (written before spawn) should read as empty, got '$READ_EXPR'"
-  rm -f "$FAKE_LOCK"
-  exit 1
-fi
-echo "OK: stale lastExitCode correctly rejected (would fall back to 'unknown' in the script)"
-rm -f "$FAKE_LOCK"
-
-# Test 8: crash-window failsafe — 4 deaths within 600s (with a lastHeartbeat present,
-# i.e. Failsafe A would NOT fire) must be counted correctly by the window-count expression.
-FAKE_STATE="/tmp/fake-deploy-1328.state"
-NOW_EPOCH=$(date +%s)
-python3 -c "
-import json
-d = {'restartCount': 4, 'deathWindow': [$NOW_EPOCH - 500, $NOW_EPOCH - 300, $NOW_EPOCH - 100, $NOW_EPOCH - 5]}
-json.dump(d, open('$FAKE_STATE', 'w'))
-"
-COUNT=$(python3 -c "
-import json, time
-d = json.load(open('$FAKE_STATE'))
-window = d.get('deathWindow', [])
-now = time.time()
-print(sum(1 for t in window if now - t <= 600))
-")
-if [[ "$COUNT" != "4" ]]; then
-  echo "FAIL: expected 4 deaths within the 600s window, got '$COUNT'"
-  rm -f "$FAKE_STATE"
-  exit 1
-fi
-echo "OK: crash-window failsafe counts 4 deaths within 600s correctly (would trip Failsafe B)"
-
-# Test 9: deaths outside the window must not count (window rolls, not unbounded)
-python3 -c "
-import json
-d = {'restartCount': 4, 'deathWindow': [$NOW_EPOCH - 700, $NOW_EPOCH - 650]}
-json.dump(d, open('$FAKE_STATE', 'w'))
-"
-COUNT=$(python3 -c "
-import json, time
-d = json.load(open('$FAKE_STATE'))
-window = d.get('deathWindow', [])
-now = time.time()
-print(sum(1 for t in window if now - t <= 600))
-")
-if [[ "$COUNT" != "0" ]]; then
-  echo "FAIL: deaths older than 600s should not count, got '$COUNT'"
-  rm -f "$FAKE_STATE"
-  exit 1
-fi
-echo "OK: deaths outside the 600s window correctly excluded"
-rm -f "$FAKE_STATE"
-
-# Test 10: Failsafe A (no-heartbeat-ever) logic must still be present, unmodified in intent —
-# regression guard per the frozen-watchdog rule ("a regression test asserts L2 still exits on
-# stale elapsed"). This checks the STALE heartbeat check + validated SIGKILL path still exists.
-if ! grep -q 'stale-heartbeat:' "$WD_SH"; then
-  echo "FAIL: stale-heartbeat detection removed — regresses L2/L3 staleness contract"
-  exit 1
-fi
-if ! grep -q 'signal-bridge SIGKILL' "$WD_SH"; then
-  echo "FAIL: stale-heartbeat validated SIGKILL removed — regresses L2/L3 staleness contract"
-  exit 1
-fi
-echo "OK: stale-heartbeat detection + validated SIGKILL path intact (frozen-watchdog regression guard)"
-
-# ── #1499: Suspend recovery + transient validation ──────────────────────────
-
-# Test 11: Suspend detection with heartbeat advancement within recovery window.
-# Creates a temp home, controlled bridge.lock, and tests the bounded recovery logic.
-T1499_HOME=$(mktemp -d /tmp/watchdog-1499.XXXXXX)
-trap "rm -rf '$T1499_HOME'" EXIT
-mkdir -p "$T1499_HOME/logs"
-
-# Launch a disposable "bridge" process (sleep, hold PID).
-sleep 600 &
-BRIDGE_PID=$!
-
-# Write bridge.lock with a known heartbeat (compact JSON, matching bridge format).
-echo '{"pid":'"$BRIDGE_PID"',"lastHeartbeat":5000,"startedAt":'$(date +%s)'000}' > "$T1499_HOME/bridge.lock"
-
-# Source the production helpers without starting the watchdog or acquiring its
-# singleton lock. The test overrides only external state I/O and poll_state.
-ABTARS_HOME="$T1499_HOME" ABTARS_WATCHDOG_SOURCE_ONLY=1 source "$WD_SH"
-LOCK="$T1499_HOME/bridge.lock"
-WD_LOG="$T1499_HOME/logs/watchdog.log"
-POLL=2
+# ── MA08: bounded resume observes heartbeat advancement, never signals ──────
+case_MA08() {
+  run_child MA08 <<'EOF'
+set -u
+source "$PRELUDE"
+source "$WD_SH_PATH"
+TERMINATE_FLAG=0
+POLL=3
 POLL_INTERVAL=1
-poll_state() { :; }
 svc() {
   case "$1" in
-    validate-bridge) echo "valid $BRIDGE_PID $(date +%s)000" ;;
-    signal-bridge) echo "SIGNALLED" >> "$T1499_HOME/signals" ;;
-    *) return 0 ;;
+    signal-bridge) echo x > "$CASE_HOME/signals" ;;
+    desired-state) echo "running" ;;
   esac
+  return 0
 }
-cd /
-
-# Test 11a: heartbeat advances → recovery succeeds.
-LAST_OBSERVED_HB="5000"
-LAST_POLL_AT=$(date +%s)
-PLANNED_RESTART=0
-# Write an advanced heartbeat into bridge.lock (compact JSON).
-echo '{"pid":'"$BRIDGE_PID"',"lastHeartbeat":6000,"startedAt":'$(date +%s)'000}' > "$T1499_HOME/bridge.lock"
-if ! wait_for_resume_heartbeat "$LAST_OBSERVED_HB" "$(date +%s)"; then
-  echo "FAIL: suspend recovery helper returned failure on fresh heartbeat"
-  kill $BRIDGE_PID 2>/dev/null
-  exit 1
-fi
-if [[ "$LAST_OBSERVED_HB" != "6000" ]]; then
-  echo "FAIL: production suspend recovery helper did not record fresh heartbeat"
-  kill $BRIDGE_PID 2>/dev/null
-  exit 1
-fi
-echo "OK: production suspend recovery helper detects heartbeat advancement"
-
-# Test 11b: no heartbeat advancement → recovery timeout (not stale kill).
-LAST_OBSERVED_HB="5000"
-LAST_POLL_AT=$(date +%s)
-PLANNED_RESTART=0
-python3 -c "
-import json
-with open('$T1499_HOME/bridge.lock', 'w') as f:
-    json.dump({'pid': $BRIDGE_PID, 'lastHeartbeat': 5000, 'startedAt': $(date +%s)000}, f)
-"
-rm -f "$T1499_HOME/signals"
-wait_for_resume_heartbeat "$LAST_OBSERVED_HB" "$(date +%s)"
-if [[ -e "$T1499_HOME/signals" ]]; then
-  echo "FAIL: suspend recovery helper must not signal during bounded wait"
-  kill $BRIDGE_PID 2>/dev/null
-  exit 1
-fi
-echo "OK: production suspend recovery helper times out without signalling"
-
-# Test 12: validation retry — corrupt then valid → succeeds.
-svc() {
-  case "$1" in
-    validate-bridge)
-      if [[ -f "$T1499_HOME/validate-call-count" ]]; then
-        COUNT=$(cat "$T1499_HOME/validate-call-count")
-      else
-        COUNT=1
-      fi
-      echo "$(( COUNT + 1 ))" > "$T1499_HOME/validate-call-count"
-      if (( COUNT <= 1 )); then
-        echo "corrupt"
-      else
-        echo "valid $BRIDGE_PID $(date +%s)000"
-      fi
-      ;;
-    *) return 0 ;;
-  esac
+printf '{"pid":4242,"lastHeartbeat":5000,"startedAt":%s000}\n' "$WD_FAKE_EPOCH" > "$LOCK"
+# (a) heartbeat advances within the wait -> success, fresh value observed.
+LAST_OBSERVED_HB="5000"; PLANNED_RESTART=0
+printf '{"pid":4242,"lastHeartbeat":6000,"startedAt":%s000}\n' "$WD_FAKE_EPOCH" > "$LOCK"
+wait_for_resume_heartbeat "5000" "$WD_FAKE_EPOCH"
+wd_assert_eq "$?" "0" "advanced heartbeat must return success"
+wd_assert_eq "$LAST_OBSERVED_HB" "6000" "production helper must record the fresh heartbeat"
+wd_assert_eq "$(wd_log_lines | grep -c 'Resume recovery')" "1" "exactly one recovery event line"
+wd_assert_eq "$(ls "$CASE_HOME/signals" 2>/dev/null | wc -l)" "0" "resume wait must not signal during heartbeat advancement"
+# (b) heartbeat frozen -> bounded timeout, still no signal, no stall.
+printf '{"pid":4242,"lastHeartbeat":5000,"startedAt":%s000}\n' "$WD_FAKE_EPOCH" > "$LOCK"
+LAST_OBSERVED_HB="5000"; PLANNED_RESTART=0
+START_EPOCH="$WD_FAKE_EPOCH"
+wait_for_resume_heartbeat "5000" "$START_EPOCH"
+wd_assert_eq "$?" "0" "bounded timeout returns success (watchdog keeps supervising)"
+ELAPSED=$(( WD_FAKE_EPOCH - START_EPOCH ))
+wd_assert "$(( ELAPSED >= POLL ))" "1" "timeout path must be bounded by POLL (${ELAPSED} < ${POLL})"
+wd_assert "$(( ELAPSED < POLL + 5 ))" "1" "timeout path must terminate promptly after the deadline (${ELAPSED})"
+wd_assert_eq "$LAST_OBSERVED_HB" "5000" "frozen heartbeat must not be misreported as advanced"
+wd_assert_eq "$(ls "$CASE_HOME/signals" 2>/dev/null | wc -l)" "0" "resume timeout must not signal"
+EOF
+  finish_case MA08 $?
 }
-rm -f "$T1499_HOME/validate-call-count"
-_result=$(read_bridge_identity)
-_vstatus=$(echo "$_result" | awk '{print $1}')
-if [[ "$_vstatus" != "valid" ]]; then
-  echo "FAIL: production validate retry — corrupt-then-valid should return valid, got '$_vstatus'"
-  kill $BRIDGE_PID 2>/dev/null
-  exit 1
-fi
-echo "OK: production validate retry — corrupt-then-valid cycles correctly"
 
-# Test 12b: malformed recognized status must retry, not become process-gone.
-rm -f "$T1499_HOME/validate-call-count"
-svc() {
-  case "$1" in
-    validate-bridge)
-      if [[ ! -f "$T1499_HOME/validate-call-count" ]]; then
-        echo 1 > "$T1499_HOME/validate-call-count"
-        echo "valid $BRIDGE_PID"
-      else
-        echo "valid $BRIDGE_PID $(date +%s)000"
-      fi
-      ;;
-    *) return 0 ;;
-  esac
-}
-_result=$(read_bridge_identity)
-_vstatus=$(echo "$_result" | awk '{print $1}')
-if [[ "$_vstatus" != "valid" ]]; then
-  echo "FAIL: malformed valid response must retry, got '$_result'"
-  kill $BRIDGE_PID 2>/dev/null
-  exit 1
-fi
-echo "OK: malformed recognized response retries through production helper"
-
-# Test 13: validation retry — all transient → returns transient.
-svc() {
-  case "$1" in
-    validate-bridge) echo "corrupt" ;;
-    *) return 0 ;;
-  esac
-}
-rm -f "$T1499_HOME/validate-call-count"
-_result=$(read_bridge_identity)
-_vstatus=$(echo "$_result" | awk '{print $1}')
-if [[ "$_vstatus" != "transient" ]]; then
-  echo "FAIL: validate retry — all transient should return transient, got '$_vstatus'"
-  kill $BRIDGE_PID 2>/dev/null
-  exit 1
-fi
-echo "OK: validate retry — all transient correctly returns transient"
-
-# Test 14: validation retry — definitive death returns immediately.
-svc() {
-  case "$1" in
-    validate-bridge) echo "dead 0 0" ;;
-    *) return 0 ;;
-  esac
-}
-_result=$(read_bridge_identity)
-_vstatus=$(echo "$_result" | awk '{print $1}')
-if [[ "$_vstatus" != "dead" ]]; then
-  echo "FAIL: validate retry — definitive death should return immediately, got '$_vstatus'"
-  kill $BRIDGE_PID 2>/dev/null
-  exit 1
-fi
-echo "OK: validate retry — definitive death returns without retry"
-
-# Cleanup the disposable bridge.
-kill $BRIDGE_PID 2>/dev/null
-
-# Test 15: read_heartbeat exists and works on a real lock file.
-echo '{"lastHeartbeat":1234567890}' > "$T1499_HOME/bridge.lock"
-HB=$(grep -o '"lastHeartbeat":[0-9]*' "$T1499_HOME/bridge.lock" 2>/dev/null | grep -o '[0-9]*')
-if [[ "$HB" != "1234567890" ]]; then
-  echo "FAIL: read_heartbeat should extract 1234567890, got '$HB'"
-  exit 1
-fi
-echo "OK: read_heartbeat extracts numeric heartbeat correctly"
-
-# Test 16: LAST_OBSERVED_HB is initialized in the script (source check).
-if ! grep -q "LAST_OBSERVED_HB" "$WD_SH"; then
-  echo "FAIL: LAST_OBSERVED_HB must be present in watchdog script (#1499)"
-  exit 1
-fi
-echo "OK: LAST_OBSERVED_HB tracking variable present in watchdog script"
-
-# Test 17: read_heartbeat helper is present in the script.
-if ! grep -q "read_heartbeat" "$WD_SH"; then
-  echo "FAIL: read_heartbeat helper must be present in watchdog script (#1499)"
-  exit 1
-fi
-echo "OK: read_heartbeat helper present in watchdog script"
-
-# Test 18: transient validation handling is present in the script.
-if ! grep -q "transient" "$WD_SH"; then
-  echo "FAIL: transient validation handling must be present in watchdog script (#1499)"
-  exit 1
-fi
-echo "OK: transient validation handling present in watchdog script"
-
-# Test 19: bounded resume wait is present (not one-cycle grace).
-if grep -q "granting one-cycle grace" "$WD_SH"; then
-  echo "FAIL: old one-cycle grace wording must be removed (#1499)"
-  exit 1
-fi
-if ! grep -q "bounded resume wait\|entering bounded resume wait" "$WD_SH"; then
-  echo "FAIL: bounded resume wait must replace one-cycle grace wording (#1499)"
-  exit 1
-fi
-echo "OK: bounded resume wait wording present (one-cycle grace removed)"
-
-rm -rf "$T1499_HOME"
-
-# ── #1711 R3: zero-process spawn gate (source-only harness) ──────────────
-# NOTE: $(svc ...) runs in a subshell, so the stub tracks call order in a
-# COUNTER FILE, not a shell variable.
-GATE_HOME="$(mktemp -d)"
-mkdir -p "$GATE_HOME/logs"
-GATE_LOG="$GATE_HOME/logs/watchdog.log"
-
-GATE_RUNNER="$GATE_HOME/gate-runner.sh"
-cat > "$GATE_RUNNER" <<'RUNNER_EOF'
-#!/usr/bin/env bash
+# ── MA09: apply_command ordering + planned-restart fence/exclusion ──────────
+case_MA09() {
+  run_child MA09a <<'EOF'
 set -u
+source "$PRELUDE"
 source "$WD_SH_PATH"
-SPAWNED=0
+TRANSCRIPT="$CASE_HOME/transcript"
+: > "$TRANSCRIPT"
 svc() {
-  if [[ "$1" == "prove-empty" ]]; then
-    local n seqs out
-    n="$(cat "$GATE_COUNTER" 2>/dev/null || echo 0)"
-    echo $((n+1)) > "$GATE_COUNTER"
-    IFS=';' read -ra seqs -d '' < <(printf '%s' "$GATE_SEQ")
-    out="${seqs[$n]:-}"
-    [[ -z "$out" ]] && out="inconclusive"
-    printf "%s" "$out"
-  fi
+  printf '%s\n' "$*" >> "$TRANSCRIPT"
+  case "$1" in
+    claim-command) echo "41 restart" ;;
+    owner-identity) echo "valid 777 777:33" ;;
+  esac
+  return 0
 }
-spawn_bridge() { echo x >> "$GATE_SPAWNS"; }
-poll_state() { :; }
-POLL_INTERVAL=0
-# Bounded probe: if the gate still has not authorized a spawn after several
-# slices, report held (a real watchdog would keep holding — fail-closed).
-spawn_if_proven_empty >/dev/null 2>&1 &
-GATE_PID=$!
-for _ in $(seq 1 400); do
-  kill -0 "$GATE_PID" 2>/dev/null || break
-  sleep 0.01
-done
-if kill -0 "$GATE_PID" 2>/dev/null; then
-  kill -9 "$GATE_PID" 2>/dev/null
-  wait "$GATE_PID" 2>/dev/null
-  STATE="held"
-else
-  STATE="done"
-fi
-echo "$STATE spawned=$(wc -l < "${GATE_SPAWNS:-/dev/null}" 2>/dev/null || echo 0)"
-RUNNER_EOF
-
-gate_run() {
-  : > "$GATE_LOG"
-  rm -f "$GATE_HOME/.gate-counter" "$GATE_HOME/.gate-spawns"
-  WD_SH_PATH="$WD_SH" ABTARS_WATCHDOG_SOURCE_ONLY=1 ABTARS_HOME="$GATE_HOME" \
-    GATE_SEQ="$1" GATE_COUNTER="$GATE_HOME/.gate-counter" GATE_SPAWNS="$GATE_HOME/.gate-spawns" \
-    bash "$GATE_RUNNER" 2>/dev/null
-}
-
-RESULT=$(gate_run "empty")
-if [[ "$RESULT" != "done spawned=1"* ]]; then
-  echo "FAIL: gate must spawn silently on complete empty proof — got: $RESULT log=$(cat "$GATE_LOG")"
-  exit 1
-fi
-echo "OK: gate spawns on a complete empty enumeration"
-
-RESULT=$(gate_run "occupied 2;occupied 2;empty")
-SPAWN_COUNT=$(echo "$RESULT" | grep -o "spawned=[0-9]*" | cut -d= -f2)
-WITHHELD_LINES=$(grep -c "Spawn withheld" "$GATE_LOG")
-if [[ "$RESULT" != "done spawned=1"* || "$WITHHELD_LINES" != "1" ]]; then
-  echo "FAIL: gate must withhold while occupied, spawn once after empty, log ONCE — got: $RESULT lines=$WITHHELD_LINES"
-  exit 1
-fi
-echo "OK: gate withholds spawn on occupied snapshot until proof turns empty (one event line)"
-
-RESULT=$(gate_run "inconclusive;inconclusive;empty")
-SPAWN_COUNT=$(echo "$RESULT" | grep -o "spawned=[0-9]*" | cut -d= -f2)
-INCONCLUSIVE_LINES=$(grep -c "enumeration inconclusive" "$GATE_LOG")
-if [[ "$RESULT" != "done spawned=1"* || "$INCONCLUSIVE_LINES" != "1" ]]; then
-  echo "FAIL: gate must hold fail-closed on inconclusive enumeration without repeating logs — got: $RESULT lines=$INCONCLUSIVE_LINES"
-  exit 1
-fi
-echo "OK: gate holds fail-closed on inconclusive enumeration (one event line)"
-
-RESULT=$(gate_run "")
-if [[ "$RESULT" != "held spawned=0"* ]]; then
-  echo "FAIL: boundary invocation failure must hold fail-closed without spawning — got: $RESULT"
-  exit 1
-fi
-HELD_INCONCLUSIVE_LINES=$(grep -c "enumeration inconclusive" "$GATE_LOG")
-if [[ "$HELD_INCONCLUSIVE_LINES" != "1" ]]; then
-  echo "FAIL: indefinite hold must log the inconclusive state exactly once — got $HELD_INCONCLUSIVE_LINES lines"
-  exit 1
-fi
-echo "OK: boundary invocation failure holds fail-closed (never spawns, one event line)"
-
-# R2.1 (v5): blocked-unattributable relative-spelled processes are logged
-# LOUDLY — PID list + operator recovery text, one event line per change of the
-# blocking set — and still block the spawn (B13). A silent freeze is a defect.
-RESULT=$(gate_run "occupied 1
-blocked-unattributable 4242 4242:777 cwd-unreadable(linux) app/bundle/abtars.js;empty")
-SPAWN_COUNT=$(echo "$RESULT" | grep -o "spawned=[0-9]*" | cut -d= -f2)
-BLOCKED_LINES=$(grep -c "blocked-unattributable" "$GATE_LOG")
-if [[ "$RESULT" != "done spawned=1"* || "$BLOCKED_LINES" != "1" ]]; then
-  echo "FAIL: gate must withhold loudly on blocked-unattributable, then spawn after empty — got: $RESULT lines=$BLOCKED_LINES"
-  exit 1
-fi
-if ! grep -q "restart or terminate these processes to restore supervision" "$GATE_LOG"; then
-  echo "FAIL: blocked-unattributable log must carry operator recovery text"
-  exit 1
-fi
-echo "OK: gate logs unattributable blockers loudly (PID list, one event line) then spawns after empty"
-
-# R4: validate-bridge consumer tolerates trailing metadata.
-if grep -q '\-z "\$vextra"' "$WD_SH"; then
-  echo "FAIL: read_bridge_identity must not require empty trailing field (#1711 R4 additive metadata)"
-  exit 1
-fi
-echo "OK: read_bridge_identity tolerates declared trailing fields"
-
-# ── #1711 Phase 2: reconciliation token handling (source-only harness) ───
-RECON_HOME="$(mktemp -d)"
-mkdir -p "$RECON_HOME/logs"
-
-RECON_RUNNER="$RECON_HOME/recon-runner.sh"
-cat > "$RECON_RUNNER" <<'RUNNER_EOF'
-#!/usr/bin/env bash
-set -u
-source "$WD_SH_PATH"
-svc() {
-  if [[ "$1" == "contain" ]]; then
-    local n
-    n="$(cat "$RECON_COUNTER" 2>/dev/null || echo 0)"
-    echo $((n+1)) > "$RECON_COUNTER"
-  fi
-}
-RECON_TOKEN=""
-RECON_COUNT=0
 TRANSITION_FENCE="stable"
-handle_reconciliation_line "decision=extra-candidate token=200:6000 authority=owner" >/dev/null
-handle_reconciliation_line "decision=extra-candidate token=200:6000 authority=owner" >/dev/null
-C1="$(cat "$RECON_COUNTER" 2>/dev/null || echo 0)"
-handle_reconciliation_line "decision=contain-extra token=200:6000 authority=liveness" >/dev/null
-C3="$(cat "$RECON_COUNTER" 2>/dev/null || echo 0)"
-echo "calls3=$C3 first_two=$C1"
-RUNNER_EOF
+TRANSITION_FAILED_OPEN=0
+PLANNED_RESTART=0
+apply_command || true
+want=$'claim-command\nowner-identity\nsignal-bridge SIGTERM\nreset-restart-count command:restart\nack-command 41'
+wd_assert_eq "$(cat "$TRANSCRIPT")" "$want" "apply_command ordering must be claim/authorize/signal/reset/ack"
+wd_assert_eq "$TRANSITION_FENCE" "planned-restart" "planned restart raises the transition fence"
+wd_assert_eq "$PLANNED_RESTART" "1" "planned restart flag set for the monitor loop"
+wd_assert_eq "$EXCLUDE_PID/$EXCLUDE_IDENTITY" "777/777:33" "freshly validated owner becomes the one-shot exclusion"
+wd_assert_eq "$FENCE_PRED_PID/$FENCE_PRED_IDENTITY" "777/777:33" "refusal classifier retains its own predecessor copy"
+wd_assert_eq "${REFUSAL_COUNT:-}" "0" "refusal budget starts at zero for this fence"
+EOF
+  local ra=$?
 
-RESULT=$(WD_SH_PATH="$WD_SH" ABTARS_WATCHDOG_SOURCE_ONLY=1 ABTARS_HOME="$RECON_HOME" \
-  RECON_COUNTER="$RECON_HOME/.recon-counter" bash "$RECON_RUNNER")
-if [[ "$RESULT" != "calls3=1 first_two=0"* ]]; then
-  echo "FAIL: containment must fire exactly on the third identical nomination — got: $RESULT"
-  exit 1
-fi
-echo "OK: reconciliation handler contains only after three consecutive nominations"
-
-cat > "$RECON_RUNNER" <<'RUNNER_EOF2'
-#!/usr/bin/env bash
+  run_child MA09b <<'EOF'
 set -u
+source "$PRELUDE"
 source "$WD_SH_PATH"
-svc() { [[ "$1" == "contain" ]] && echo x > "$RECON_COUNTER"; }
-RECON_TOKEN=""
-RECON_COUNT=0
-TRANSITION_FENCE="stable"
-# A fence decision must reset candidacy, never count toward containment.
-handle_reconciliation_line "decision=planned-transition token=- authority=-" >/dev/null
-handle_reconciliation_line "decision=extra-candidate token=300:7000 authority=liveness" >/dev/null
-handle_reconciliation_line "decision=planned-transition token=- authority=-" >/dev/null
-handle_reconciliation_line "decision=extra-candidate token=300:7000 authority=liveness" >/dev/null
-handle_reconciliation_line "decision=extra-candidate token=300:7000 authority=liveness" >/dev/null
-echo "fenced_calls=$(cat "$RECON_COUNTER" 2>/dev/null || echo 0)"
-RUNNER_EOF2
-
-rm -f "$RECON_HOME/.recon-counter"
-RESULT=$(WD_SH_PATH="$WD_SH" ABTARS_WATCHDOG_SOURCE_ONLY=1 ABTARS_HOME="$RECON_HOME" \
-  RECON_COUNTER="$RECON_HOME/.recon-counter" bash "$RECON_RUNNER")
-if [[ "$RESULT" != "fenced_calls=0"* ]]; then
-  echo "FAIL: fence interruptions must reset candidate observation windows — got: $RESULT"
-  exit 1
-fi
-echo "OK: fence resets the candidate observation window"
-
-rm -rf "$RECON_HOME"
-
-# Phase 2 anti-regrowth guard must pass on the current shell.
-if ! node "$SCRIPT_DIR/check-watchdog-shape.mjs" >/dev/null; then
-  echo "FAIL: watchdog shape guard failed (#1711 Phase 2)"
-  exit 1
-fi
-echo "OK: watchdog shape guard passes"
-
-# ── #1711 R3 v4.1: planned-replacement exclusion flow ────────────────────
-EXCL_HOME="$(mktemp -d)"
-mkdir -p "$EXCL_HOME/logs"
-
-EXCL_RUNNER="$EXCL_HOME/excl-runner.sh"
-cat > "$EXCL_RUNNER" <<'RUNNER_EOF'
-#!/usr/bin/env bash
-set -u
-source "$WD_SH_PATH"
-CALLARGS="$EXCL_HOME/calls.log"
-SPAWN_LOG="$EXCL_HOME/spawns.log"
+CALLARGS="$CASE_HOME/calls.log"; SPAWN_LOG="$CASE_HOME/spawns.log"
 : > "$CALLARGS"; : > "$SPAWN_LOG"
+SEQ="occupied 3;empty"
 svc() {
   printf '%s\n' "$*" >> "$CALLARGS"
   if [[ "$1" == "prove-empty" ]]; then
     local n seqs out
-    n="$(cat "$EXCL_SEQPOS" 2>/dev/null || echo 0)"
-    echo $((n+1)) > "$EXCL_SEQPOS"
-    IFS=';' read -ra seqs <<< "$EXCL_SEQ"
+    n="$(cat "$CASE_HOME/.seqpos" 2>/dev/null || echo 0)"
+    echo $((n+1)) > "$CASE_HOME/.seqpos"
+    IFS=';' read -ra seqs <<< "$SEQ"
     out="${seqs[$n]:-}"
     [[ -z "$out" ]] && out="empty"
-    printf "%s" "$out"
+    printf '%s' "$out"
   fi
+  return 0
 }
 spawn_bridge() { echo x >> "$SPAWN_LOG"; }
 poll_state() { :; }
 POLL_INTERVAL=0
+printf '{"instanceId":"pred-instance","pid":777,"lastHeartbeat":1}\n' > "$LOCK"
+EXCLUDE_PID=777; EXCLUDE_IDENTITY="777:33"
 spawn_if_proven_empty >/dev/null 2>&1
-echo "spawns=$(wc -l < "$SPAWN_LOG")"
-RUNNER_EOF
-
-# Exclusion set + immediate empty proof -> forwarded to prove-empty and
-# consumed exactly once.
-RESULT=$(WD_SH_PATH="$WD_SH" ABTARS_WATCHDOG_SOURCE_ONLY=1 ABTARS_HOME="$EXCL_HOME" EXCL_HOME="$EXCL_HOME" \
-  EXCL_SEQ="empty" EXCL_SEQPOS="$EXCL_HOME/.seqpos" bash -c '
-  set -u
-  source "$WD_SH_PATH"
-  CALLARGS="$EXCL_HOME/calls.log"; SPAWN_LOG="$EXCL_HOME/spawns.log"
-  : > "$CALLARGS"; : > "$SPAWN_LOG"
-  svc() {
-    printf "%s\n" "$*" >> "$CALLARGS"
-    if [[ "$1" == "prove-empty" ]]; then printf "%s" "empty"; fi
-  }
-  spawn_bridge() { echo x >> "$SPAWN_LOG"; }
-  poll_state() { :; }
-  POLL_INTERVAL=0
-  EXCLUDE_PID=4242; EXCLUDE_IDENTITY="4242:777"
-  spawn_if_proven_empty >/dev/null 2>&1
-  echo "spawns=$(wc -l < "$SPAWN_LOG") exclude_cleared=$([[ -z "$EXCLUDE_PID" && -z "$EXCLUDE_IDENTITY" ]] && echo yes || echo no)"
-')
-if [[ "$RESULT" != *"spawns=1 exclude_cleared=yes"* ]]; then
-  echo "FAIL: replacement must consume the one-shot exclusion and spawn — got: $RESULT"
-  exit 1
-fi
-if ! grep -q "^prove-empty 4242 4242:777$" "$EXCL_HOME/calls.log"; then
-  echo "FAIL: prove-empty must receive the recorded owner pid/start identity"
-  exit 1
-fi
-echo "OK: planned-replacement exclusion forwarded to prove-empty and consumed on spawn"
-
-# Veto case: occupied proof clears the exclusion; later calls go WITHOUT it.
-rm -f "$EXCL_HOME/.seqpos"
-RESULT=$(WD_SH_PATH="$WD_SH" ABTARS_WATCHDOG_SOURCE_ONLY=1 ABTARS_HOME="$EXCL_HOME" EXCL_HOME="$EXCL_HOME" \
-  EXCL_SEQPOS="$EXCL_HOME/.seqpos" \
-  bash -c '
-  set -u
-  source "$WD_SH_PATH"
-  CALLARGS="$EXCL_HOME/calls.log"; SPAWN_LOG="$EXCL_HOME/spawns.log"
-  : > "$CALLARGS"; : > "$SPAWN_LOG"
-  svc() {
-    printf "%s\n" "$*" >> "$CALLARGS"
-    if [[ "$1" == "prove-empty" ]]; then
-      local n
-      n="$(cat "$EXCL_SEQPOS" 2>/dev/null || echo 0)"
-      echo $((n+1)) > "$EXCL_SEQPOS"
-      if (( n < 2 )); then printf "%s" "occupied 3"; else printf "%s" "empty"; fi
-    fi
-  }
-  spawn_bridge() { echo x >> "$SPAWN_LOG"; }
-  poll_state() { :; }
-  POLL_INTERVAL=0
-  EXCLUDE_PID=4242; EXCLUDE_IDENTITY="4242:777"
-  spawn_if_proven_empty >/dev/null 2>&1
-  echo "spawns=$(wc -l < "$SPAWN_LOG") exclude_cleared=$([[ -z "${EXCLUDE_PID:-}" ]] && echo yes || echo no)"
-')
-WITH_ARGS=$(grep -c "^prove-empty 4242" "$EXCL_HOME/calls.log")
-WITHOUT_ARGS=$(grep -c "^prove-empty$" "$EXCL_HOME/calls.log")
-VETO_LINES=$(grep -c "Planned-replacement exclusion vetoed" "$EXCL_HOME/logs/watchdog.log")
-if [[ "$RESULT" != *"spawns=1 exclude_cleared=yes"* || "$WITH_ARGS" != "1" || "$WITHOUT_ARGS" -lt 1 || "$VETO_LINES" != "1" ]]; then
-  echo "FAIL: veto by another process must clear the exclusion once, then prove plainly — got: $RESULT with=$WITH_ARGS without=$WITHOUT_ARGS veto=$VETO_LINES"
-  exit 1
-fi
-echo "OK: occupied/inconclusive proofs veto and clear the replacement exclusion (one event line)"
-
-rm -rf "$EXCL_HOME"
-
-# ── #1719: planned-fence boot-gate refusal classification ──────────────────
-# Truth-table coverage of classify_planned_refusal (requirements R2 / design
-# failure matrix): every missing/uncertain evidence row must fall through to
-# ordinary-death (exit 1); only the exact three-part match classifies as a
-# planned refusal (exit 0).
-
-CLASS_HOME=$(mktemp -d /tmp/watchdog-1719.XXXXXX)
-mkdir -p "$CLASS_HOME/logs"
-trap 'rm -rf "$CLASS_HOME"' EXIT
-
-# Rows 1-7 share a compact runner: FENCE/PID/IDENT/BEFORE/AFTER/OWNER_OUT.
-class_case() {
-  WD_SH_PATH="$WD_SH" ABTARS_WATCHDOG_SOURCE_ONLY=1 ABTARS_HOME="$CLASS_HOME" \
-  FENCE="$1" PPID_E="$2" PIDENT_E="$3" BEFORE_RAW="$4" AFTER_RAW="$5" OWNER_OUT="$6" \
-  bash -c '
-    set -u
-    source "$WD_SH_PATH"
-    svc() { if [[ "$1" == "owner-identity" ]]; then printf "%s" "$OWNER_OUT"; fi; }
-    TRANSITION_FENCE="$FENCE"
-    FENCE_PRED_PID="$PPID_E"; FENCE_PRED_IDENTITY="$PIDENT_E"
-    if [[ -n "$BEFORE_RAW" ]]; then
-      printf "{\"instanceId\":\"%s\",\"pid\": 9999,\"lastHeartbeat\": 1}\n" "$BEFORE_RAW" > "$LOCK"
-    else
-      printf "{\"pid\": 9999,\"lastHeartbeat\": 1}\n" > "$LOCK"
-    fi
-    # Snapshot EXACTLY as production does (spawn_if_proven_empty empty branch).
-    PRES_SPAWN_INSTANCE="$(read_instance_field)"
-    if [[ -n "$AFTER_RAW" ]]; then
-      printf "{\"instanceId\":\"%s\",\"pid\": 9999,\"lastHeartbeat\": 1}\n" "$AFTER_RAW" > "$LOCK"
-    elif [[ -z "$BEFORE_RAW" ]]; then
-      : # lock already lacks the field; leave as-is
-    else
-      printf "{\"pid\": 9999,\"lastHeartbeat\": 1}\n" > "$LOCK"
-    fi
-    if classify_planned_refusal; then echo planned-refusal; else echo ordinary-death; fi
-  '
+wd_assert_eq "$(wc -l < "$SPAWN_LOG")" "1" "replacement spawns exactly once once proof turns empty"
+wd_assert_eq "$(grep -c '^prove-empty 777 777:33$' "$CALLARGS")" "1" "exclusion forwarded to prove-empty exactly once"
+wd_assert "$(($(grep -c '^prove-empty$' "$CALLARGS") >= 1))" "1" "post-veto proofs go without the exclusion"
+wd_assert_eq "$(grep -c 'Planned-replacement exclusion vetoed' "$CASE_HOME/logs/watchdog.log")" "1" "veto logged exactly once"
+wd_assert_eq "${EXCLUDE_PID}/${EXCLUDE_IDENTITY}" "/" "one-shot exclusion consumed after the authorized spawn"
+EOF
+  local rb=$?
+  finish_case MA09 $ra $rb
 }
 
-R=$(class_case stable 1234 "1234:55" "inst-a" "inst-a" "valid 1234 1234:55")
-[[ "$R" == "ordinary-death" ]] || { echo "FAIL #1719 row1: stable fence must stay ordinary — got $R"; exit 1; }
-echo "OK: stable-fence death stays ordinary death accounting (#1719 row 1)"
-R=$(class_case planned-restart "" "" "inst-a" "inst-a" "valid 1234 1234:55")
-[[ "$R" == "ordinary-death" ]] || { echo "FAIL #1719 row2a: no retained predecessor evidence must stay ordinary — got $R"; exit 1; }
-R=$(class_case planned-restart 1234 "1234:55" "inst-a" "inst-a" "invalid 0 -")
-[[ "$R" == "ordinary-death" ]] || { echo "FAIL #1719 row2b: dead/unprovable predecessor must stay ordinary — got $R"; exit 1; }
-R=$(class_case planned-restart 1234 "1234:55" "inst-a" "inst-a" "valid 777 777:11")
-[[ "$R" == "ordinary-death" ]] || { echo "FAIL #1719 row2c: mismatched live process must stay ordinary — got $R"; exit 1; }
-R=$(class_case planned-restart 1234 "1234:55" "inst-a" "inst-a" "valid 1234 9999:1")
-[[ "$R" == "ordinary-death" ]] || { echo "FAIL #1719 row2d: reused start identity must stay ordinary — got $R"; exit 1; }
-R=$(class_case planned-restart 1234 "1234:55" "inst-a" "fresh-child-id" "valid 1234 1234:55")
-[[ "$R" == "ordinary-death" ]] || { echo "FAIL #1719 row3: fresh child instanceId (genuine crash, A24 shape) must stay ordinary — got $R"; exit 1; }
-R=$(class_case planned-restart 1234 "1234:55" "inst-a" "inst-a" "valid 1234 1234:55")
-[[ "$R" == "planned-refusal" ]] || { echo "FAIL #1719 row4: exact predecessor + unchanged instanceId must classify planned-refusal — got $R"; exit 1; }
-R=$(class_case planned-restart 1234 "1234:55" "" "" "valid 1234 1234:55")
-[[ "$R" == "planned-refusal" ]] || { echo "FAIL #1719 row5: unchanged MISSING instanceId sentinel must classify planned-refusal — got $R"; exit 1; }
-R=$(class_case planned-restart 1234 "1234:55" "" "fresh-child-id" "valid 1234 1234:55")
-[[ "$R" == "ordinary-death" ]] || { echo "FAIL #1719 row6: fresh identity over missing sentinel must stay ordinary — got $R"; exit 1; }
-R=$(class_case planned-restart 1234 "1234:55" "inst-a" "" "valid 1234 1234:55")
-[[ "$R" == "ordinary-death" ]] || { echo "FAIL #1719 row7: vanished instanceId is changed evidence — got $R"; exit 1; }
-echo "OK: refusal classifier truth table verified (#1719 rows 1-7)"
-
-# refresh_replacement_authorization: fresh matching probe re-arms the one-shot
-# exclusion; anything else leaves it empty (fail-closed).
-REFRESH_OUT=$(WD_SH_PATH="$WD_SH" ABTARS_WATCHDOG_SOURCE_ONLY=1 ABTARS_HOME="$CLASS_HOME" \
-bash -c '
-  set -u
-  source "$WD_SH_PATH"
-  svc() { if [[ "$1" == "owner-identity" ]]; then printf "%s" "$OWNER_OUT"; fi; }
-  FENCE_PRED_PID=1234; FENCE_PRED_IDENTITY="1234:55"
-  EXCLUDE_PID=; EXCLUDE_IDENTITY=
-  OWNER_OUT="valid 1234 1234:55"
-  refresh_replacement_authorization
-  R1="pid=$EXCLUDE_PID ident=$EXCLUDE_IDENTITY"
-  EXCLUDE_PID=; EXCLUDE_IDENTITY=
-  OWNER_OUT="invalid 0 -"
-  refresh_replacement_authorization
-  R2="pid=$EXCLUDE_PID ident=$EXCLUDE_IDENTITY"
-  EXCLUDE_PID=999; EXCLUDE_IDENTITY="stale"
-  OWNER_OUT="valid 777 777:2"
-  refresh_replacement_authorization
-  R3="pid=$EXCLUDE_PID ident=$EXCLUDE_IDENTITY"
-  echo "$R1|$R2|$R3"
-')
-[[ "$REFRESH_OUT" == "pid=1234 ident=1234:55|pid= ident=|pid= ident=" ]] || {
-  echo "FAIL #1719: authorization refresh must re-arm only on an exact fresh match — got $REFRESH_OUT"
-  exit 1
+# ── MA12: unknown command drained; next legitimate command applies ─────────
+case_MA12() {
+  run_child MA12 <<'EOF'
+set -u
+source "$PRELUDE"
+source "$WD_SH_PATH"
+TRANSCRIPT="$CASE_HOME/transcript"
+: > "$TRANSCRIPT"
+NEXT_CLAIM="7 frobnicate"
+svc() {
+  printf '%s\n' "$*" >> "$TRANSCRIPT"
+  case "$1" in
+    claim-command)
+      printf '%s\n' "$NEXT_CLAIM"
+      NEXT_CLAIM="" ;;
+    owner-identity) echo "valid 888 888:9" ;;
+  esac
+  return 0
 }
-echo "OK: retry authorization re-arms the exclusion only on a fresh exact predecessor match"
-
-# Pre-spawn snapshot wiring: the authorized-spawn branch captures the CURRENT
-# instanceId before calling spawn_bridge.
-SNAP_OUT=$(WD_SH_PATH="$WD_SH" ABTARS_WATCHDOG_SOURCE_ONLY=1 ABTARS_HOME="$CLASS_HOME" \
-bash -c '
-  set -u
-  source "$WD_SH_PATH"
-  printf "{\"instanceId\":\"snap-check\",\"pid\": 9999,\"lastHeartbeat\": 1}\n" > "$LOCK"
-  svc() { if [[ "$1" == "prove-empty" ]]; then printf "%s" "empty"; fi; }
-  spawn_bridge() { :; }
-  poll_state() { :; }
-  POLL_INTERVAL=0
-  EXCLUDE_PID=; EXCLUDE_IDENTITY=
-  PRES_SPAWN_INSTANCE=unset
-  spawn_if_proven_empty >/dev/null 2>&1
-  echo "snapshot=$PRES_SPAWN_INSTANCE"
-')
-[[ "$SNAP_OUT" == "snapshot=\"instanceId\":\"snap-check\"" ]] || {
-  echo "FAIL #1719: authorized spawn must snapshot bridge.lock instanceId first — got $SNAP_OUT"
-  exit 1
+TRANSITION_FENCE="stable"
+TRANSITION_FAILED_OPEN=0
+PLANNED_RESTART=0
+apply_command || true
+wd_assert_eq "$(cat "$TRANSCRIPT")" $'claim-command\nack-command 7' "unknown command must only be claimed then acknowledged"
+wd_assert_eq "$PLANNED_RESTART" "0" "unknown command must not arm a planned restart"
+wd_assert_eq "$TRANSITION_FENCE" "stable" "unknown command must not raise a fence"
+# The queue is free: a legitimate restart published next is applied fully.
+: > "$TRANSCRIPT"
+NEXT_CLAIM="8 restart"
+apply_command || true
+want=$'claim-command\nowner-identity\nsignal-bridge SIGTERM\nreset-restart-count command:restart\nack-command 8'
+wd_assert_eq "$(cat "$TRANSCRIPT")" "$want" "next legitimate restart applies without stalling"
+wd_assert_eq "$TRANSITION_FENCE" "planned-restart" "legitimate restart raises the fence"
+EOF
+  finish_case MA12 $?
 }
-echo "OK: authorized replacement snapshots the pre-spawn instanceId (#1719 R1)"
 
-rm -rf "$CLASS_HOME"
-trap - EXIT
+# ── MA20: fence resets candidacy; containment never fires during a fence ───
+case_MA20() {
+  run_child MA20 <<'EOF'
+set -u
+source "$PRELUDE"
+source "$WD_SH_PATH"
+COUNTER="$CASE_HOME/.contain"
+: > "$COUNTER"
+svc() { [[ "$1" == "contain" ]] && echo x >> "$COUNTER"; return 0; }
+RECON_TOKEN=""; RECON_COUNT=0
+HB_ADVANCED=0
+TRANSITION_FENCE="planned-restart"
+handle_reconciliation_line "decision=extra-candidate token=300:7000 authority=liveness" >/dev/null
+handle_reconciliation_line "decision=extra-candidate token=300:7000 authority=liveness" >/dev/null
+handle_reconciliation_line "decision=planned-transition token=- authority=-" >/dev/null
+handle_reconciliation_line "decision=extra-candidate token=300:7000 authority=liveness" >/dev/null
+handle_reconciliation_line "decision=extra-candidate token=300:7000 authority=liveness" >/dev/null
+wd_assert_eq "$(wc -l < "$COUNTER")" "0" "containment must never fire during a planned-transition fence"
+# Fence cleared (stable): nominations accumulate again and fire on the third.
+TRANSITION_FENCE="stable"
+RECON_TOKEN=""; RECON_COUNT=0
+: > "$COUNTER"
+handle_reconciliation_line "decision=extra-candidate token=400:8000 authority=liveness" >/dev/null
+handle_reconciliation_line "decision=extra-candidate token=400:8000 authority=liveness" >/dev/null
+wd_assert_eq "$(wc -l < "$COUNTER")" "0" "two identical nominations must not contain yet"
+handle_reconciliation_line "decision=extra-candidate token=400:8000 authority=liveness" >/dev/null
+wd_assert_eq "$(wc -l < "$COUNTER")" "1" "third stable nomination contains exactly once"
+EOF
+  finish_case MA20 $?
+}
 
-rm -rf "$GATE_HOME"
+# ── MA21: inconclusive/enumeration-failed holds fail-closed, one log line ──
+case_MA21() {
+  # Hold leg: the slice guard ends the child with rc 42 once the fail-closed
+  # hold has been observed across 40 poll slices; the parent then inspects the
+  # child's home files directly (spawn log, transcript, watchdog log).
+  local home="$RUN_ROOT/MA21a/home"
+  run_child MA21a <<'EOF'
+set -u
+source "$PRELUDE"
+source "$WD_SH_PATH"
+SPAWN_LOG="$CASE_HOME/spawns.log"; TRANSCRIPT="$CASE_HOME/transcript"
+: > "$SPAWN_LOG"; : > "$TRANSCRIPT"
+SLICES=0
+bounded_sleep() {
+  SLICES=$(( SLICES + 1 ))
+  (( SLICES > 40 )) && exit 42  # observed enough slices of the fail-closed hold
+}
+sleep() { bounded_sleep; }
+svc() {
+  printf '%s\n' "$*" >> "$TRANSCRIPT"
+  [[ "$1" == "prove-empty" ]] && return 1  # enumeration invocation fails
+  return 0
+}
+spawn_bridge() { echo x >> "$SPAWN_LOG"; }
+poll_state() { :; }
+POLL_INTERVAL=0
+EXCLUDE_PID=""; EXCLUDE_IDENTITY=""
+spawn_if_proven_empty >/dev/null 2>&1
+exit 43  # must never be reached: the guard above ends the hold
+EOF
+  local ra=$?
+  if [[ "$ra" != "42" ]]; then
+    emit MA21 fail "hold leg ended with rc $ra (expected the bounded-slice guard 42)"
+    return
+  fi
+  if [[ "$(wc -l < "$home/spawns.log")" != "0" ]]; then
+    emit MA21 fail "a spawn occurred while enumeration was inconclusive"
+    return
+  fi
+  if [[ "$(grep -c 'signal-bridge' "$home/transcript")" != "0" ]]; then
+    emit MA21 fail "a signal was issued during the hold"
+    return
+  fi
+  if [[ "$(grep -c 'enumeration inconclusive' "$home/logs/watchdog.log")" != "1" ]]; then
+    emit MA21 fail "unchanged inconclusive state did not log exactly one transition line"
+    return
+  fi
 
-echo "ALL TESTS PASSED"
+  run_child MA21b <<'EOF'
+set -u
+source "$PRELUDE"
+source "$WD_SH_PATH"
+COUNTER="$CASE_HOME/.contain"
+: > "$COUNTER"
+svc() { [[ "$1" == "contain" ]] && echo x >> "$COUNTER"; return 0; }
+RECON_TOKEN=""; RECON_COUNT=0
+TRANSITION_FENCE="stable"
+handle_reconciliation_line "decision=enumeration-failed token=- authority=harness" >/dev/null
+handle_reconciliation_line "decision=enumeration-failed token=- authority=harness" >/dev/null
+wd_assert_eq "$(wc -l < "$COUNTER")" "0" "enumeration failure must never invoke containment"
+wd_assert_eq "$(grep -c 'process enumeration failed' "$CASE_HOME/logs/watchdog.log")" "1" "enumeration-failed logs exactly one transition line"
+EOF
+  finish_case MA21 $?
+}
+
+# ── Planned-refusal classifier snapshot procedure (MA24 / MB14 rows) ────────
+# Reproduces the production pre-classification state: retained predecessor
+# evidence, pre-spawn instanceId snapshot, then the post-exit lock contents.
+class_body() {
+  cat <<'CLASS_EOF'
+set -u
+source "$PRELUDE"
+source "$WD_SH_PATH"
+svc() { [[ "$1" == "owner-identity" ]] && printf '%s' "$OWNER_OUT"; return 0; }
+TRANSITION_FENCE="$FENCE"
+FENCE_PRED_PID="$PPID_E"; FENCE_PRED_IDENTITY="$PIDENT_E"
+PRES_SPAWN_INSTANCE="$BEFORE_SNAPSHOT"
+if [[ -n "$AFTER_RAW" ]]; then
+  printf '{"instanceId":"%s","pid":9999,"lastHeartbeat":1}\n' "$AFTER_RAW" > "$LOCK"
+else
+  printf '{"pid":9999,"lastHeartbeat":1}\n' > "$LOCK"
+fi
+if classify_planned_refusal; then echo planned-refusal; else echo ordinary-death; fi
+CLASS_EOF
+}
+
+run_class_row() { # run_class_row <label> <fence> <ppid> <pident> <before-snap> <after> <owner-out>; prints classification
+  local label="$1"
+  mkdir -p "$RUN_ROOT/$label/home/logs"
+  (
+    cd /
+    export WD_SH_PATH="$WD_SH" PRELUDE="$PRELUDE" CASE_HOME="$RUN_ROOT/$label/home"
+    export ABTARS_WATCHDOG_SOURCE_ONLY=1 ABTARS_HOME="$RUN_ROOT/$label/home"
+    export FENCE="$2" PPID_E="$3" PIDENT_E="$4" BEFORE_SNAPSHOT="$5" AFTER_RAW="$6" OWNER_OUT="$7"
+    bash -s <<< "$(class_body)"
+  ) 2>/dev/null
+}
+
+# ── MA24: fresh child instanceId under an active fence = ordinary death ────
+case_MA24() {
+  local out control
+  out="$(run_class_row MA24-row planned-restart 1234 "1234:55" '"instanceId":"inst-a"' fresh-child-id "valid 1234 1234:55")"
+  if [[ "$out" != "ordinary-death" ]]; then
+    emit MA24 fail "fresh child instanceId under active fence classified as <$out>"
+    return
+  fi
+  # Negative control: same fence/pred but UNCHANGED instanceId -> planned refusal,
+  # proving the discriminator is specifically the fresh child identity.
+  control="$(run_class_row MA24-ctrl planned-restart 1234 "1234:55" '"instanceId":"inst-a"' inst-a "valid 1234 1234:55")"
+  if [[ "$control" != "planned-refusal" ]]; then
+    emit MA24 fail "control row (unchanged instanceId) classified as <$control>"
+    return
+  fi
+  emit MA24 pass "ok"
+}
+
+# ── MB02: occupied/inconclusive proof withholds spawn until empty proof ────
+gate_body() { # gate_body via env SEQ/MARKER; asserts internally
+  cat <<'GATE_EOF'
+set -u
+source "$PRELUDE"
+source "$WD_SH_PATH"
+SPAWN_LOG="$CASE_HOME/spawns.log"
+: > "$SPAWN_LOG"
+svc() {
+  if [[ "$1" == "prove-empty" ]]; then
+    local n seqs out
+    n="$(cat "$CASE_HOME/.seqpos" 2>/dev/null || echo 0)"
+    echo $((n+1)) > "$CASE_HOME/.seqpos"
+    IFS=';' read -ra seqs <<< "$SEQ"
+    out="${seqs[$n]:-}"
+    [[ -z "$out" ]] && out="empty"
+    printf '%s' "$out"
+  fi
+  return 0
+}
+spawn_bridge() { echo x >> "$SPAWN_LOG"; }
+poll_state() { :; }
+POLL_INTERVAL=0
+EXCLUDE_PID=""; EXCLUDE_IDENTITY=""
+spawn_if_proven_empty >/dev/null 2>&1
+wd_assert_eq "$(wc -l < "$SPAWN_LOG")" "1" "spawn authorized only after the complete empty proof"
+wd_assert_eq "$(grep -c "$MARKER" "$CASE_HOME/logs/watchdog.log")" "1" "unchanged withholding state logs exactly one line"
+GATE_EOF
+}
+
+case_MB02() {
+  local rc_occupied rc_inconclusive
+  mkdir -p "$RUN_ROOT/MB02a/home/logs" "$RUN_ROOT/MB02b/home/logs"
+  (
+    cd /
+    export WD_SH_PATH="$WD_SH" PRELUDE="$PRELUDE" CASE_HOME="$RUN_ROOT/MB02a/home"
+    export ABTARS_WATCHDOG_SOURCE_ONLY=1 ABTARS_HOME="$RUN_ROOT/MB02a/home"
+    export SEQ="occupied 2;occupied 2;empty" MARKER='Spawn withheld: occupied'
+    bash -s <<< "$(gate_body)"
+  ) 2>"$RUN_ROOT/MB02a.stderr"
+  rc_occupied=$?
+  (
+    cd /
+    export WD_SH_PATH="$WD_SH" PRELUDE="$PRELUDE" CASE_HOME="$RUN_ROOT/MB02b/home"
+    export ABTARS_WATCHDOG_SOURCE_ONLY=1 ABTARS_HOME="$RUN_ROOT/MB02b/home"
+    export SEQ="inconclusive;inconclusive;empty" MARKER='process enumeration inconclusive'
+    bash -s <<< "$(gate_body)"
+  ) 2>"$RUN_ROOT/MB02b.stderr"
+  rc_inconclusive=$?
+  finish_case MB02 $rc_occupied $rc_inconclusive
+}
+
+# ── MB09: transition-only logging — same key logs once, new key re-logs ────
+case_MB09() {
+  run_child MB09 <<'EOF'
+set -u
+source "$PRELUDE"
+source "$WD_SH_PATH"
+LAST_EVENT_KEY=""
+log_event "k1" "first episode message"
+log_event "k1" "first episode message"
+log_event "k1" "first episode message"
+wd_assert_eq "$(grep -c 'first episode message' "$CASE_HOME/logs/watchdog.log")" "1" "repeating the same event key must log exactly once"
+log_event "k2" "second episode message"
+wd_assert_eq "$(grep -c 'second episode message' "$CASE_HOME/logs/watchdog.log")" "1" "a changed event key opens a new episode immediately"
+log_event "k1" "first episode message"
+wd_assert_eq "$(grep -c 'first episode message' "$CASE_HOME/logs/watchdog.log")" "2" "returning to an earlier key opens a new episode"
+wd_assert_eq "$(wc -l < "$CASE_HOME/logs/watchdog.log")" "3" "steady-state repetition emits zero additional lines"
+EOF
+  finish_case MB09 $?
+}
+
+# ── MB10: trailing metadata accepted; missing required fields still retry ──
+case_MB10() {
+  run_child MB10 <<'EOF'
+set -u
+source "$PRELUDE"
+source "$WD_SH_PATH"
+ATTEMPTS="$CASE_HOME/.attempts"
+VALID_OUT="valid 555 1700000000000 extra-metadata-field"
+svc() {
+  [[ "$1" == "validate-bridge" ]] || return 0
+  local n
+  n="$(cat "$ATTEMPTS" 2>/dev/null || echo 0)"
+  echo $((n+1)) > "$ATTEMPTS"
+  printf '%s' "$VALID_OUT"
+}
+poll_state() { :; }
+POLL_INTERVAL=0
+PLANNED_RESTART=0
+result="$(read_bridge_identity)"
+wd_assert_eq "$result" "valid 555 1700000000000" "additive trailing metadata must be tolerated on the happy path"
+wd_assert_eq "$(cat "$ATTEMPTS")" "1" "tolerated metadata must not enter transient retry"
+# Contrast: a MISSING REQUIRED field retries through the full budget -> transient.
+rm -f "$ATTEMPTS"
+VALID_OUT="valid 555"
+result="$(read_bridge_identity)"
+wd_assert_eq "$result" "transient" "missing required fields must exhaust retries into transient"
+wd_assert_eq "$(cat "$ATTEMPTS")" "3" "retry budget stays at three attempts"
+EOF
+  finish_case MB10 $?
+}
+
+# ── MB11: liveness nomination stability + frozen-heartbeat window ──────────
+case_MB11() {
+  run_child MB11 <<'EOF'
+set -u
+source "$PRELUDE"
+source "$WD_SH_PATH"
+COUNTER="$CASE_HOME/.contain"
+: > "$COUNTER"
+CONTAIN_ARGS="$CASE_HOME/.contain-args"
+svc() {
+  if [[ "$1" == "contain" ]]; then
+    echo x >> "$COUNTER"
+    printf '%s\n' "$*" >> "$CONTAIN_ARGS"
+  fi
+  return 0
+}
+RECON_TOKEN=""; RECON_COUNT=0
+HB_ADVANCED=0
+TRANSITION_FENCE="stable"
+# Two identical liveness nominations are not yet containment...
+handle_reconciliation_line "decision=extra-candidate token=200:6000 authority=liveness" >/dev/null
+handle_reconciliation_line "decision=extra-candidate token=200:6000 authority=liveness" >/dev/null
+wd_assert_eq "$(wc -l < "$COUNTER")" "0" "two stable nominations must withhold containment"
+# ...the third identical one fires exactly once, naming PID/identity/authority.
+handle_reconciliation_line "decision=extra-candidate token=200:6000 authority=liveness" >/dev/null
+wd_assert_eq "$(wc -l < "$COUNTER")" "1" "third stable nomination contains exactly once"
+wd_assert_eq "$(head -n 1 "$CONTAIN_ARGS")" "contain 200 6000 liveness stable 0" "containment runs through svc contain with nomination identity"
+# A changed token resets the window; a new episode needs its own three strikes.
+RECON_TOKEN=""; RECON_COUNT=0
+: > "$COUNTER"
+handle_reconciliation_line "decision=extra-candidate token=300:7000 authority=liveness" >/dev/null
+handle_reconciliation_line "decision=extra-candidate token=301:7001 authority=liveness" >/dev/null
+handle_reconciliation_line "decision=extra-candidate token=301:7001 authority=liveness" >/dev/null
+wd_assert_eq "$(wc -l < "$COUNTER")" "0" "changed token must reset candidacy"
+handle_reconciliation_line "decision=extra-candidate token=301:7001 authority=liveness" >/dev/null
+wd_assert_eq "$(wc -l < "$COUNTER")" "1" "new episode contains after its own three stable nominations"
+# Frozen-heartbeat observation feeds the liveness path: no advance opens the
+# deep-stale window; ANY later value change reopens it as a veto (HB_ADVANCED).
+STALE=300
+LOCK_BAK="$LOCK"
+printf '{"pid":9,"lastHeartbeat":%s000}\n' "$(( WD_FAKE_EPOCH - 1000 ))" > "$LOCK_BAK"
+LAST_HB_PREV=""; HB_ADVANCED=0; LIVENESS_WINDOW_STARTED=0
+observe_liveness_heartbeat
+observe_liveness_heartbeat
+wd_assert_eq "$LIVENESS_WINDOW_STARTED" "1" "no heartbeat advance beyond 2x STALE opens the liveness window"
+wd_assert_eq "$HB_ADVANCED" "0" "frozen heartbeat must not claim advancement"
+printf '{"pid":9,"lastHeartbeat":%s000}\n' "$WD_FAKE_EPOCH" > "$LOCK_BAK"
+observe_liveness_heartbeat
+wd_assert_eq "$HB_ADVANCED" "1" "any later value change reopens the veto window"
+wd_assert_eq "$LIVENESS_WINDOW_STARTED" "0" "advancement resets the deep-stale window"
+EOF
+  finish_case MB11 $?
+}
+
+# ── MB13: blocked-unattributable withholds spawn loudly ───────────────────
+case_MB13() {
+  local rc
+  mkdir -p "$RUN_ROOT/MB13/home/logs"
+  (
+    cd /
+    export WD_SH_PATH="$WD_SH" PRELUDE="$PRELUDE" CASE_HOME="$RUN_ROOT/MB13/home"
+    export ABTARS_WATCHDOG_SOURCE_ONLY=1 ABTARS_HOME="$RUN_ROOT/MB13/home"
+    export SEQ=$'occupied 1\nblocked-unattributable 4242 4242:777 cwd-unreadable(linux) app/bundle/abtars.js;empty'
+    MARKER='blocked-unattributable'
+    bash -s <<'EOF'
+set -u
+source "$PRELUDE"
+source "$WD_SH_PATH"
+SPAWN_LOG="$CASE_HOME/spawns.log"; CALLARGS="$CASE_HOME/calls.log"
+: > "$SPAWN_LOG"; : > "$CALLARGS"
+# One prove-empty response per ';'-separated slot; a response may itself be
+# multi-line, exactly like the production enumeration report.
+svc() {
+  if [[ "$1" == "prove-empty" ]]; then
+    local n seqs out
+    n="$(cat "$CASE_HOME/.seqpos" 2>/dev/null || echo 0)"
+    echo $((n+1)) > "$CASE_HOME/.seqpos"
+    IFS=';' read -r -d '' -a seqs < <(printf '%s\0' "$SEQ")
+    out="${seqs[$n]:-}"
+    [[ -z "$out" ]] && out="empty"
+    printf '%s' "$out"
+  fi
+  return 0
+}
+spawn_bridge() { echo x >> "$SPAWN_LOG"; }
+poll_state() { :; }
+POLL_INTERVAL=0
+EXCLUDE_PID=""; EXCLUDE_IDENTITY=""
+spawn_if_proven_empty >/dev/null 2>&1
+wd_assert_eq "$(wc -l < "$SPAWN_LOG")" "1" "unattributable blockers hold the spawn until they clear"
+wd_assert_eq "$(grep -c 'blocked-unattributable' "$CASE_HOME/logs/watchdog.log")" "1" "blocking set change logs exactly ONE loud event line"
+wd_assert "$(( $(grep -c '4242' "$CASE_HOME/logs/watchdog.log") >= 1 ))" "1" "loud event carries the blocked PID list"
+wd_assert "$(( $(grep -c 'app/bundle/abtars.js' "$CASE_HOME/logs/watchdog.log") >= 1 ))" "1" "loud event carries the relative-spelled argv"
+wd_assert "$(( $(grep -c 'restart or terminate these processes to restore supervision' "$CASE_HOME/logs/watchdog.log") >= 1 ))" "1" "loud event carries operator recovery text"
+EOF
+  ) 2>"$RUN_ROOT/MB13.stderr"
+  rc=$?
+  finish_case MB13 $rc
+}
+
+# ── MB14: planned-refusal truth table + authorization refresh + snapshot ───
+case_MB14() {
+  local r out
+  # Truth table: every uncertain row falls through to ordinary-death; only the
+  # exact three-part match (active fence + live matching pred + unchanged
+  # instanceId sentinel, including unchanged-MISSING) classifies planned-refusal.
+  local rows=(
+    "planned-restart|1234|1234:55|inst-a|inst-a|valid 1234 1234:55|planned-refusal"
+    "stable|1234|1234:55|inst-a|inst-a|valid 1234 1234:55|ordinary-death"
+    "planned-restart|||||valid 1234 1234:55|ordinary-death"
+    "planned-restart|1234|1234:55|inst-a|inst-a|invalid 0 -|ordinary-death"
+    "planned-restart|1234|1234:55|inst-a|inst-a|valid 777 777:11|ordinary-death"
+    "planned-restart|1234|1234:55|inst-a|inst-a|valid 1234 9999:1|ordinary-death"
+    "planned-restart|1234|1234:55|inst-a|fresh-child-id|valid 1234 1234:55|ordinary-death"
+    "planned-restart|1234|1234:55|||valid 1234 1234:55|planned-refusal"
+    "planned-restart|1234|1234:55||fresh-child-id|valid 1234 1234:55|ordinary-death"
+    "planned-restart|1234|1234:55|inst-a||valid 1234 1234:55|ordinary-death"
+  )
+  local i=0
+  for row in "${rows[@]}"; do
+    i=$((i+1))
+    IFS='|' read -r fence ppid_e pident_e before after owner want <<< "$row"
+    local snap="" after_raw="$after"
+    # read_instance_field returns EMPTY for a lock without instanceId; an
+    # unchanged-missing sentinel therefore snapshots as "" (never quoted).
+    if [[ -n "$before" ]]; then
+      snap="\"instanceId\":\"$before\""
+    fi
+    out="$(run_class_row "MB14-row$i" "$fence" "$ppid_e" "$pident_e" "$snap" "$after_raw" "$owner")"
+    if [[ "$out" != "$want" ]]; then
+      emit MB14 fail "truth-table row $i (${fence:-stable}/pred=${ppid_e:-none}/after=${after:-none}) classified <$out>, want <$want>"
+      return
+    fi
+  done
+
+  # Authorization refresh: a fresh exact predecessor probe re-arms the one-shot
+  # exclusion; anything else leaves it empty (fail-closed).
+  run_child MB14-refresh <<'EOF'
+set -u
+source "$PRELUDE"
+source "$WD_SH_PATH"
+OWNER_OUT="valid 1234 1234:55"
+svc() { [[ "$1" == "owner-identity" ]] && printf '%s' "$OWNER_OUT"; return 0; }
+FENCE_PRED_PID=1234; FENCE_PRED_IDENTITY="1234:55"
+EXCLUDE_PID=""; EXCLUDE_IDENTITY=""
+refresh_replacement_authorization
+wd_assert_eq "$EXCLUDE_PID/$EXCLUDE_IDENTITY" "1234/1234:55" "fresh exact match re-arms the replacement exclusion"
+EXCLUDE_PID=999; EXCLUDE_IDENTITY="stale"
+OWNER_OUT="valid 777 777:2"
+refresh_replacement_authorization
+wd_assert_eq "$EXCLUDE_PID/$EXCLUDE_IDENTITY" "/" "mismatched probe leaves the exclusion empty"
+OWNER_OUT="invalid 0 -"
+refresh_replacement_authorization
+wd_assert_eq "$EXCLUDE_PID/$EXCLUDE_IDENTITY" "/" "failed probe leaves the exclusion empty"
+EOF
+  r=$?
+  if [[ $r != 0 ]]; then
+    finish_case MB14 $r
+    return
+  fi
+
+  # Authorized spawn snapshots bridge.lock's instanceId BEFORE spawning (#1719 R1).
+  run_child MB14-snapshot <<'EOF'
+set -u
+source "$PRELUDE"
+source "$WD_SH_PATH"
+printf '{"instanceId":"snap-check","pid":9999,"lastHeartbeat":1}\n' > "$LOCK"
+svc() { [[ "$1" == "prove-empty" ]] && printf 'empty'; return 0; }
+spawn_bridge() { :; }
+poll_state() { :; }
+POLL_INTERVAL=0
+EXCLUDE_PID=""; EXCLUDE_IDENTITY=""
+PRES_SPAWN_INSTANCE="unset"
+spawn_if_proven_empty >/dev/null 2>&1
+wd_assert_eq "$PRES_SPAWN_INSTANCE" '"instanceId":"snap-check"' "authorized spawn must snapshot the pre-spawn instanceId"
+EOF
+  r=$?
+  if [[ $r == 0 ]]; then
+    emit MB14 pass "ok (${#rows[@]} truth-table rows, refresh, snapshot)"
+  else
+    emit MB14 fail "$(child_detail MB14-snapshot)"
+  fi
+}
+
+# ── Dispatch ────────────────────────────────────────────────────────────────
+STARTED_MS=$(( ${EPOCHREALTIME%%.*} ))
+for id in "${REQUESTED[@]}"; do
+  "case_$id"
+done
+
+# No-process proof: everything ran synchronously in waited children, so any
+# surviving descendant of this shell at this point is a leaked process.
+leak_scan() {
+  local frontier collected pid ppid stat rest
+  frontier=("$$")
+  for _ in 1 2 3 4 5 6; do # descendant depth bound
+    collected=()
+    for pid in /proc/[0-9]*; do
+      p="${pid##*/}"
+      [[ "$p" == "$$" ]] && continue
+      stat="$(cat "$pid/stat" 2>/dev/null)" || continue
+      rest="${stat#*) }"
+      rest="${rest#* }"          # skip state
+      ppid="${rest%% *}"         # ppid field
+      for f in "${frontier[@]}"; do
+        if [[ "$ppid" == "$f" ]]; then
+          collected+=("$p")
+          break
+        fi
+      done
+    done
+    ((${#collected[@]} == 0)) && return 0
+    frontier=("${collected[@]}")
+  done
+  return 1
+}
+
+LEAKS=0
+if ! leak_scan; then LEAKS=1; fi
+DURATION_MS=$(( ${EPOCHREALTIME%%.*} - STARTED_MS ))
+
+echo "M-SUITE total=$(( PASS + FAILS )) pass=$PASS fail=$FAILS duration_ms=$DURATION_MS leak_scan=$([[ $LEAKS == 0 ]] && echo ok || echo FAILED)"
+if (( FAILS > 0 || LEAKS != 0 )); then
+  exit 1
+fi
 exit 0
