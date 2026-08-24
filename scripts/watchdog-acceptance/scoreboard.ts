@@ -6,11 +6,13 @@
 import type {
   ExpectationManifest,
   ManifestExpectation,
+  MockExpectation,
   ScoreboardRow,
   ScenarioOutcome,
   ScenarioId,
   Verdict,
 } from "./contracts.ts";
+import { MOCK_PROJECTION_IDS, contractKeyOfMock, realPublicId } from "./contracts.ts";
 
 /**
  * First committed expectation per scenario id, oldest first. An absent id has
@@ -43,6 +45,80 @@ export function validateManifest(
   }
   for (const id of Object.keys(manifest.scenarios)) {
     if (!seen.has(id)) problems.push({ id, problem: "manifest references an unknown scenario id" });
+  }
+  problems.push(...validateMockScenarios(manifest, history));
+  return problems;
+}
+
+/**
+ * Lift a flat mock manifest entry into the shared expectation shape used by
+ * verdict classification and the exit policy.
+ */
+export function mockEntryAsExpectation(mock: MockExpectation): ManifestExpectation {
+  switch (mock.expect) {
+    case "known-fail":
+      return { expect: "known-fail", owner: mock.owner ?? "", reason: mock.reason ?? "" };
+    case "baseline-advisory":
+      return { expect: "baseline-advisory", reason: mock.reason ?? "" };
+    default:
+      return {
+        expect: "pass",
+        owner: mock.owner,
+        reason: mock.reason,
+        redBaseline: mock.redBaseline,
+      };
+  }
+}
+
+/**
+ * Validate the M projection section (#1712 Task 4). The A/B `scenarios` map
+ * stays the sole real history; M entries are additive and independent. A real
+ * contract without a mock entry is intentional — never an error.
+ */
+export function validateMockScenarios(
+  manifest: ExpectationManifest,
+  history: ManifestHistory = new Map(),
+): ManifestProblem[] {
+  const problems: ManifestProblem[] = [];
+  const pairedRealSeen = new Map<string, string>();
+  for (const [id, mock] of Object.entries(manifest.mockScenarios ?? {})) {
+    const key = contractKeyOfMock(id);
+    if (!key) {
+      problems.push({ id, problem: "mock projection id must have the shape M[AB]<two-digit contract number>" });
+      continue;
+    }
+    if (!MOCK_PROJECTION_IDS.includes(id)) {
+      problems.push({ id, problem: "mock projection is not one of the registered portfolio projections" });
+      continue;
+    }
+    if (mock.contract !== key) {
+      problems.push({ id, problem: `contract suffix mismatch: ${id} must pair contract ${key}, got ${mock.contract}` });
+      continue;
+    }
+    const expectedReal = realPublicId(mock.contract);
+    if (!expectedReal || mock.pairedReal !== expectedReal) {
+      problems.push({ id, problem: `pairedReal mismatch: ${id} must pair ${expectedReal ?? "?"}, got ${mock.pairedReal}` });
+      continue;
+    }
+    if (!manifest.scenarios[mock.contract]) {
+      problems.push({ id, problem: `pairs unknown real contract ${mock.contract}` });
+      continue;
+    }
+    if (typeof mock.projection !== "string" || mock.projection.trim().length === 0) {
+      problems.push({ id, problem: "projection must describe the shell-owned sub-invariant asserted" });
+      continue;
+    }
+    const prior = pairedRealSeen.get(mock.pairedReal);
+    if (prior) {
+      problems.push({ id, problem: `duplicate projection: ${prior} already pairs ${mock.pairedReal}` });
+      continue;
+    }
+    pairedRealSeen.set(mock.pairedReal, id);
+    // M carries its own expectation under the same rules; registered M
+    // projections ship without an owner, so the born-green gate is inert for
+    // them unless someone attaches defect ownership to a projection.
+    const p = validateEntry(id, mockEntryAsExpectation(mock), history);
+    if (p) problems.push({ id, problem: p });
   }
   return problems;
 }

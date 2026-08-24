@@ -1,10 +1,16 @@
 /**
  * Focused harness self-tests: scoreboard and runner-mode semantics (#1712
- * Task 8, R8/R8.1/R8.2). Pure classification — no processes spawned.
+ * Task 8, R8/R8.1/R8.2; M projection validation per Task 4). Pure
+ * classification — no processes spawned.
  */
 import { describe, expect, it } from "vitest";
-import type { ExpectationManifest, ScoreboardRow } from "./contracts.ts";
-import { classifyOutcome, decideExit, sourceCommitProblem, validateManifest } from "./scoreboard.ts";
+import { readFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
+import type { ExpectationManifest, MockExpectation, ScoreboardRow } from "./contracts.ts";
+import { classifyOutcome, decideExit, mockEntryAsExpectation, sourceCommitProblem, validateManifest, validateMockScenarios } from "./scoreboard.ts";
+
+const __dirname = dirname(fileURLToPath(import.meta.url));
 
 const ALL_IDS = [
   ...Array.from({ length: 24 }, (_, i) => `A${i + 1}`),
@@ -185,5 +191,116 @@ describe("exit policy", () => {
       baselineMode: true,
     });
     expect(decision.code).toBe(0);
+  });
+});
+
+describe("mock projection section (M/R migration, Task 4)", () => {
+  function mock(id: string, over: Partial<MockExpectation> = {}): Record<string, MockExpectation> {
+    const track = id[1];
+    const num = String(Number(id.slice(2)));
+    return {
+      [id]: {
+        contract: `${track}${num}`,
+        pairedReal: `R${track}${num.padStart(2, "0")}`,
+        projection: "shell-owned sub-invariant",
+        expect: "pass",
+        ...over,
+      },
+    };
+  }
+
+  it("accepts a manifest with well-formed M entries and leaves real validation untouched", () => {
+    const m = validManifest();
+    m.mockScenarios = { ...mock("MA09"), ...mock("MB14") };
+    expect(validateManifest(m, ALL_IDS)).toHaveLength(0);
+  });
+
+  it("rejects suffix/track mismatch between mock id, contract, and pairedReal", () => {
+    const m = validManifest();
+    m.mockScenarios = mock("MA09", { contract: "B9", pairedReal: "RB09" });
+    expect(validateMockScenarios(m)[0]?.problem).toMatch(/suffix mismatch/);
+    m.mockScenarios = mock("MA09", { contract: "A9", pairedReal: "RB09" });
+    expect(validateMockScenarios(m)[0]?.problem).toMatch(/pairedReal mismatch/);
+  });
+
+  it("rejects unregistered projections and malformed ids", () => {
+    const m = validManifest();
+    m.mockScenarios = mock("MA03"); // not part of the approved portfolio
+    expect(validateMockScenarios(m)[0]?.problem).toMatch(/registered/);
+    (m.mockScenarios as Record<string, unknown>)["MX99"] = mock("MA08")["MA08"];
+    expect(validateMockScenarios(m).some((p) => p.id === "MX99" && p.problem.match(/shape/))).toBe(true);
+  });
+
+  it("rejects duplicate projections of the same real case", () => {
+    const m = validManifest();
+    m.mockScenarios = mock("MA09");
+    (m.mockScenarios as Record<string, MockExpectation>)["MA9"] = {
+      contract: "A9",
+      pairedReal: "RA09",
+      projection: "duplicate",
+      expect: "pass",
+    };
+    const problems = validateMockScenarios(m);
+    expect(problems.some((p) => p.problem.match(/shape/))).toBe(true); // MA9 is not two-digit
+  });
+
+  it("requires a projection description", () => {
+    const m = validManifest();
+    m.mockScenarios = mock("MA12", { projection: "   " });
+    expect(validateMockScenarios(m)[0]?.problem).toMatch(/projection must describe/);
+  });
+
+  it("permits a real-only contract without manufacturing an M entry", () => {
+    const m = validManifest(); // no mockScenarios at all
+    expect(validateManifest(m, ALL_IDS)).toHaveLength(0);
+  });
+
+  it("keeps M expectations independent from their paired R expectation", () => {
+    // MB02's real case is known-fail; its helper projection may pass.
+    const m = validManifest();
+    m.scenarios["B2"] = { expect: "known-fail", owner: "#1711 P3", reason: "wiring defect" };
+    m.mockScenarios = mock("MB02", { expect: "pass" });
+    const mb02 = m.mockScenarios!["MB02"]!;
+    expect(classifyOutcome("MB02", "pass", mockEntryAsExpectation(mb02))).toBe("ok");
+    expect(classifyOutcome("B2", "fail", m.scenarios["B2"])).toBe("ok-known-fail");
+    expect(decideExit({
+      rows: [
+        { id: "B2", publicId: "RB02", title: "b2", outcomeStatus: "fail", verdict: "ok-known-fail", durationMs: 1, expect: m.scenarios["B2"] },
+        { id: "MB02", publicId: "MB02", title: "projection of RB02", outcomeStatus: "pass", verdict: "ok", durationMs: 1, expect: { expect: "pass" } },
+      ],
+      requireAllGreen: false,
+      baselineMode: false,
+    }).code).toBe(0);
+  });
+
+  it("preserves legacy history resolution and the shipped B13 red baseline through the migration", () => {
+    const shipped = JSON.parse(
+      readFileSync(join(__dirname, "expected.json"), "utf-8"),
+    ) as ExpectationManifest;
+    // Real expectation history stays keyed by A/B; its born-green verification
+    // runs against git history inside the runner (R8.2) and is untouched here.
+    expect(Object.keys(shipped.scenarios).sort()).toEqual([...ALL_IDS].sort());
+    expect(shipped.sourceCommit).toBe("2418d7fce5d3582c9e46e402b4283f26e9ce45de");
+    const b13 = shipped.scenarios["B13"];
+    expect(b13?.expect).toBe("pass");
+    if (b13?.expect === "pass") {
+      expect(b13.redBaseline?.commit).toBe("730525282fb324477e1e48ff832dd7a0571fa333");
+      expect(b13.redBaseline?.evidence).toBe("baseline/b13-red-baseline.md");
+    }
+    // The shipped M section registers exactly the approved 12 projections,
+    // each structurally valid and independently expected to pass.
+    const mockIds = Object.keys(shipped.mockScenarios ?? {});
+    expect(mockIds).toHaveLength(12);
+    expect(validateMockScenarios(shipped)).toHaveLength(0);
+    for (const [id, entry] of Object.entries(shipped.mockScenarios ?? {})) {
+      expect(entry.pairedReal).toBe(`R${id.slice(1)}`);
+      expect(entry.expect).toBe("pass");
+    }
+  });
+
+  it("rejects a malformed M expectation body under the same entry rules", () => {
+    const m = validManifest();
+    m.mockScenarios = mock("MA21", { expect: "baseline-advisory" });
+    expect(validateMockScenarios(m)[0]?.problem).toMatch(/baseline-advisory entries require a reason/);
   });
 });

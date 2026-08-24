@@ -1,13 +1,15 @@
 /**
- * Watchdog E2E acceptance runner (#1712 Phase 0).
+ * Watchdog E2E acceptance runner (#1712 Phase 0; M/R portfolio migration).
  *
  * Serial, black-box execution of the scenario suite against the real watchdog
  * shell + freshly bundled supervisor CLI + real OS processes. Modes:
  *
- *   npm run test:watchdog-acceptance                        # manifest-gated
- *   npm run test:watchdog-acceptance -- --baseline          # measure only
- *   npm run test:watchdog-acceptance -- --only A6           # one scenario
- *   npm run test:watchdog-acceptance -- --require-all-green # epic gate
+ *   npm run test:watchdog:real                              # manifest-gated, all 38 R cases
+ *   npm run test:watchdog:real -- --suite fast              # the FAST R subset
+ *   npm run test:watchdog:real -- --suite slow              # the SLOW R subset
+ *   npm run test:watchdog:real -- --baseline                # measure only
+ *   npm run test:watchdog:real -- --only RA06               # one scenario (legacy "A6" also accepted)
+ *   npm run test:watchdog:real -- --require-all-green       # epic gate
  */
 import { execFileSync } from "node:child_process";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
@@ -18,6 +20,12 @@ import { SuiteBuilder, PROFILE_NAMES } from "./build.ts";
 import { ScenarioFailure, World, TIMELINE_CAP, LOG_TAIL_LINES, setDoctorBundle } from "./world.ts";
 import { PRESERVED_SCENARIOS } from "./scenarios/preserved.ts";
 import { DEFICIENCY_SCENARIOS } from "./scenarios/deficiencies.ts";
+import {
+  parseRunArgs,
+  realPublicId,
+  resolveScenarioSelector,
+  selectScenarioContractKeys,
+} from "./contracts.ts";
 import type { ExpectationManifest, ManifestExpectation, ScoreboardRow, ScenarioDefinition, TimelineEntry } from "./contracts.ts";
 import {
   classifyOutcome,
@@ -32,37 +40,10 @@ const REPO_ROOT = resolve(__dirname, "..", "..");
 
 const ALL_SCENARIOS: readonly ScenarioDefinition[] = [...PRESERVED_SCENARIOS, ...DEFICIENCY_SCENARIOS];
 
-interface CliOptions {
-  only: string | null;
-  baseline: boolean;
-  requireAllGreen: boolean;
-  list: boolean;
+/** Canonical public ID of a scenario definition ("A9" -> "RA09"). */
+function pub(def: ScenarioDefinition): string {
+  return realPublicId(def.id) ?? def.id;
 }
-
-function parseArgs(argv: readonly string[]): CliOptions {
-  const opts: CliOptions = { only: null, baseline: false, requireAllGreen: false, list: false };
-  for (let i = 0; i < argv.length; i++) {
-    const a = argv[i];
-    if (a === undefined) continue;
-    if (a === "--only") {
-      const v = argv[i + 1];
-      if (!v) throw new UsageError("--only requires a scenario id");
-      opts.only = v;
-      i++;
-    } else if (a === "--baseline") {
-      opts.baseline = true;
-    } else if (a === "--require-all-green") {
-      opts.requireAllGreen = true;
-    } else if (a === "--list") {
-      opts.list = true;
-    } else {
-      throw new UsageError(`unknown argument ${a}`);
-    }
-  }
-  return opts;
-}
-
-class UsageError extends Error {}
 
 const EXPECTED_JSON_REL = "scripts/watchdog-acceptance/expected.json";
 
@@ -223,6 +204,7 @@ async function runScenario(
   return {
     row: {
       id: def.id,
+      publicId: pub(def),
       title: def.title,
       outcomeStatus,
       verdict: classifyOutcome(def.id, outcomeStatus, null),
@@ -237,25 +219,37 @@ async function runScenario(
 
 async function main(): Promise<number> {
   installGlobalHandlers();
-  let opts: CliOptions;
+  let opts;
   try {
-    opts = parseArgs(process.argv.slice(2));
+    opts = parseRunArgs(process.argv.slice(2));
   } catch (err) {
     process.stderr.write(`${err instanceof Error ? err.message : String(err)}\n`);
-    process.stderr.write("usage: run.ts [--only ID] [--baseline] [--require-all-green] [--list]\n");
+    process.stderr.write(
+      "usage: run.ts [--suite fast|slow|real] [--only RAxx|Axx] [--baseline] [--require-all-green] [--list]\n",
+    );
     return 2;
   }
 
   if (opts.list) {
-    for (const s of ALL_SCENARIOS) process.stdout.write(`${s.id}\t${s.profile}\t${s.title}\n`);
+    for (const s of ALL_SCENARIOS) process.stdout.write(`${pub(s)}\t${s.profile}\t${s.title}\n`);
     return 0;
   }
 
-  const scenarios = opts.only
-    ? ALL_SCENARIOS.filter((s) => s.id.toUpperCase() === opts.only!.toUpperCase())
-    : ALL_SCENARIOS;
+  // Select before building worlds (Task 3): a focused or lane run must not pay
+  // for artifacts it will never use. --only accepts canonical and legacy IDs.
+  let onlyKey: string | null = null;
+  if (opts.only !== null) {
+    const sel = resolveScenarioSelector(opts.only);
+    if (!sel) {
+      process.stderr.write(`no scenario matches --only ${opts.only}\n`);
+      return 2;
+    }
+    onlyKey = sel.contractKey;
+  }
+  const selectedKeys = new Set(selectScenarioContractKeys(opts.suite, onlyKey, ALL_SCENARIOS.map((s) => s.id)));
+  const scenarios = ALL_SCENARIOS.filter((s) => selectedKeys.has(s.id));
   if (scenarios.length === 0) {
-    process.stderr.write(`no scenario matches --only ${opts.only}\n`);
+    process.stderr.write(`empty selection (suite=${opts.suite}${opts.only ? `, only=${opts.only}` : ""})\n`);
     return 2;
   }
 
@@ -300,8 +294,10 @@ async function main(): Promise<number> {
 
   const rows: ScoreboardRow[] = [];
   const evidence: Array<ScenarioRunResult & { expect: unknown }> = [];
+  process.stdout.write(`[suite ${opts.suite}] ${scenarios.length} real scenario(s), serial\n`);
   for (const def of scenarios) {
-    process.stdout.write(`[${def.id}] ${def.title} ... `);
+    const publicId = pub(def);
+    process.stdout.write(`[${publicId}] ${def.title} ... `);
     const result = await runScenario(def, builder);
     const expect = manifest.scenarios[def.id] ?? null;
     const row: ScoreboardRow = {
@@ -313,13 +309,13 @@ async function main(): Promise<number> {
     evidence.push({ ...result, row, expect });
     process.stdout.write(`${row.verdict} (${(row.durationMs / 1000).toFixed(1)}s)\n`);
     if (!opts.baseline && row.verdict !== "ok" && row.verdict !== "ok-known-fail") {
-      printEvidence(def.id, result);
+      printEvidence(publicId, result);
     }
   }
 
   writeFileSync(
     join(artifactsRoot, `run-results-${Date.now()}.json`),
-    JSON.stringify({ commit: builder.evidenceJson(), rows, evidence }, null, 2),
+    JSON.stringify({ commit: builder.evidenceJson(), suite: opts.suite, rows, evidence }, null, 2),
   );
 
   printScoreboard(rows);
@@ -336,7 +332,7 @@ function printScoreboard(rows: readonly ScoreboardRow[]): void {
   process.stdout.write("-".repeat(66) + "\n");
   for (const r of rows) {
     const line = [
-      r.id.padEnd(9),
+      (r.publicId ?? r.id).padEnd(9),
       r.outcomeStatus.padEnd(8),
       r.verdict.padEnd(17),
       `${(r.durationMs / 1000).toFixed(1)}s`,
