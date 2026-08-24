@@ -514,7 +514,7 @@ describe("doctor platform probes use effective credentials (#1258)", () => {
     expect(JSON.stringify(p)).not.toContain("network-tg-fixture");
   });
 
-  it("enforces the 5-second bound with fake time and leaves no pending timer after abort or success", async () => {
+  it("enforces the 15-second bound with fake time and leaves no pending timer after abort or success", async () => {
     await writeEncryptedSecret("TELEGRAM_BOT_TOKEN", "timeout-tg-fixture");
     fetchMock.mockImplementation((_url: unknown, opts: unknown) =>
       new Promise((_resolve, reject) => {
@@ -526,7 +526,7 @@ describe("doctor platform probes use effective credentials (#1258)", () => {
     const { runAllProbes } = await import("./doctor-probes.js");
 
     const abortedRun = runAllProbes();
-    await vi.advanceTimersByTimeAsync(5000);
+    await vi.advanceTimersByTimeAsync(15000);
     const abortedResult = await abortedRun;
     expect(platformsProbe(abortedResult).status).toBe("warning");
     expect(platformsProbe(abortedResult).detail).toContain("unreachable");

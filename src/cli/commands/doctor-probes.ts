@@ -60,7 +60,12 @@ function ago(ms: number): string {
 // authoritative for provider credentials and forbids plaintext .env use.
 // Stale TELEGRAM_TOKEN / DISCORD_TOKEN aliases are not runtime configuration
 // and do not configure a platform.
-const PLATFORM_TIMEOUT_MS = 5000;
+// Bound is 15s, not the original #1258 5s: on hosts with a slow resolver
+// (KP/WSL) undici fetch resolves DNS twice (lookup + net.connect), so a fresh
+// request to api.telegram.org measures ~10.6-10.8s. 5s aborted mid-DNS and
+// produced false "unreachable" warnings for a bridge that was actually healthy.
+// 15s still bounds the probe; both platforms run in parallel.
+const PLATFORM_TIMEOUT_MS = 15000;
 
 type PlatformName = "telegram" | "discord";
 
