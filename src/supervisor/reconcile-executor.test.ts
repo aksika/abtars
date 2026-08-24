@@ -11,7 +11,7 @@ import { tmpdir } from "node:os";
 const isDarwin = process.platform === "darwin";
 
 import { processStartIdentity } from "./identity.js";
-import { containCandidate } from "./reconcile-executor.js";
+import { containCandidate, evaluateSpawnProof, readValidatedOwner } from "./reconcile-executor.js";
 import type { ChildProcess } from "node:child_process";
 
 interface Home {
@@ -161,4 +161,91 @@ describe("containCandidate final authorization (#1711 R6)", () => {
       await waitDead(frozen);
     }
   }, 15000);
+});
+
+describe("evaluateSpawnProof — zero-process proof and the planned-replacement exception (#1711 R3, A9/A20)", () => {
+  it.runIf(!isDarwin)("is inconclusive for an unusable home", async () => {
+    const proof = evaluateSpawnProof("relative/home", null);
+    expect(proof).toEqual({ result: "inconclusive" });
+  });
+
+  it.runIf(!isDarwin)("counts exact same-home children as occupying", async () => {
+    const { home, spawnBridgeChild } = await register();
+    const a = await spawnBridgeChild();
+    try {
+      expect(evaluateSpawnProof(home, null)).toEqual({ result: "occupied", count: 1 });
+      expect(evaluateSpawnProof(home, { pid: a.pid!, startIdentity: processStartIdentity(a.pid!) }))
+        .toEqual({ result: "empty" }); // only the recorded owner remains
+    } finally {
+      a.kill("SIGKILL");
+      await waitDead(a);
+    }
+  }, 10000);
+
+  it.runIf(!isDarwin)("a wrong recorded identity does NOT create the exclusion (PID reuse guard)", async () => {
+    const { home, spawnBridgeChild } = await register();
+    const a = await spawnBridgeChild();
+    try {
+      // Same PID, different start identity: no exclusion exists.
+      expect(evaluateSpawnProof(home, { pid: a.pid!, startIdentity: `${a.pid}:1` }))
+        .toEqual({ result: "occupied", count: 1 });
+    } finally {
+      a.kill("SIGKILL");
+      await waitDead(a);
+    }
+  }, 10000);
+
+  it.runIf(!isDarwin)("any other process vetoes the replacement even with a valid exclusion (A9/A20)", async () => {
+    const { home, spawnBridgeChild } = await register();
+    const owner = await spawnBridgeChild();   // recorded terminated owner
+    const extra = await spawnBridgeChild();   // unknown third party
+    try {
+      const exclude = { pid: owner.pid!, startIdentity: processStartIdentity(owner.pid!) };
+      const proof = evaluateSpawnProof(home, exclude);
+      expect(proof).toEqual({ result: "occupied", count: 1 }); // the extra still vetoes
+    } finally {
+      owner.kill("SIGKILL");
+      extra.kill("SIGKILL");
+      await Promise.all([waitDead(owner), waitDead(extra)]);
+    }
+  }, 10000);
+
+  it.runIf(!isDarwin)("empty home proves empty with and without an exclusion", async () => {
+    const { home } = await register();
+    expect(evaluateSpawnProof(home, null)).toEqual({ result: "empty" });
+    expect(evaluateSpawnProof(home, { pid: 999999, startIdentity: "999999:9" })).toEqual({ result: "empty" });
+  }, 10000);
+});
+
+describe("readValidatedOwner — fresh identity at the command authorization point (#1711 R3)", () => {
+  it.runIf(!isDarwin)("returns the validated owner's pid and start identity", async () => {
+    const { home, spawnBridgeChild } = await register();
+    const owner = await spawnBridgeChild();
+    try {
+      writeFileSync(join(home, "bridge.lock"), JSON.stringify({
+        pid: owner.pid,
+        instanceId: "owner-instance",
+        startIdentity: processStartIdentity(owner.pid!),
+        lastHeartbeat: Date.now(),
+      }));
+
+      const ownerResult = readValidatedOwner(home);
+      expect(ownerResult).toEqual({ pid: owner.pid, startIdentity: processStartIdentity(owner.pid!) });
+
+      // A lock missing instanceId has NO validated owner -> no exception.
+      writeFileSync(join(home, "bridge.lock"), JSON.stringify({
+        pid: owner.pid,
+        startIdentity: processStartIdentity(owner.pid!),
+      }));
+      expect(readValidatedOwner(home)).toBeNull();
+    } finally {
+      owner.kill("SIGKILL");
+      await waitDead(owner);
+    }
+  }, 10000);
+
+  it.runIf(!isDarwin)("returns null without any lock", async () => {
+    const { home } = await register();
+    expect(readValidatedOwner(home)).toBeNull();
+  }, 10000);
 });

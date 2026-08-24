@@ -116,9 +116,20 @@ apply_command() {
       exit 2
       ;;
     restart|update|rollback)
-      # Planned bridge termination (R7.2 resets the rollback counter). Kill the
-      # validated bridge, reset the counter, ack, then break to respawn from the
-      # (possibly repointed) release. The watchdog stays in its loop.
+      # Planned bridge termination (R7.2 resets the rollback counter). Record
+      # the freshly validated owner at the SAME authorization point as its
+      # termination (#1711 R3 planned-replacement exception): during this
+      # command's fence, exactly that PID/start identity may be disregarded by
+      # the replacement proof. Validation failure = no exclusion; stop and
+      # handoff never record one.
+      read -r _ostatus _opid _oidentity <<< "$(svc owner-identity 2>/dev/null)"
+      if [[ "$_ostatus" == "valid" && "$_opid" =~ ^[0-9]+$ && "$_opid" != "0" && -n "$_oidentity" && "$_oidentity" != "-" ]]; then
+        EXCLUDE_PID="$_opid"
+        EXCLUDE_IDENTITY="$_oidentity"
+      else
+        EXCLUDE_PID=""
+        EXCLUDE_IDENTITY=""
+      fi
       svc signal-bridge SIGTERM 2>/dev/null || true
       svc reset-restart-count "command:$type" 2>/dev/null
       svc ack-command "$seq" 2>/dev/null
@@ -212,31 +223,51 @@ wait_for_resume_heartbeat() {
   return 0
 }
 
-# Zero-process proof before ANY spawn (#1711 R3). Only a complete, successful
-# enumeration proving zero exact same-home bridge processes authorizes
-# spawn_bridge. Corrupt-lock repair never bypasses this; occupied or
-# inconclusive snapshots hold (never spawn) and re-check durable state each
-# slice so stop/handoff stay responsive. Unchanged state logs once.
+# Zero-process proof before ANY unplanned spawn (#1711 R3). Only a complete,
+# successful enumeration proving zero exact same-home bridge processes
+# authorizes spawn_bridge. During a planned restart/update/rollback fence, the
+# ONE recorded terminated-owner identity (EXCLUDE_PID/EXCLUDE_IDENTITY) is
+# disregarded so the replacement is not withheld by the dying owner; the
+# exclusion is one-shot and cleared on veto, failed attempt, or fence end.
+# Stop and handoff never set it. Unchanged state logs once.
 spawn_if_proven_empty() {
   local proof state=""
   while true; do
-    proof="$(svc prove-empty 2>/dev/null || echo inconclusive)"
+    if [[ -n "${EXCLUDE_PID:-}" && -n "${EXCLUDE_IDENTITY:-}" ]]; then
+      proof="$(svc prove-empty "$EXCLUDE_PID" "$EXCLUDE_IDENTITY" 2>/dev/null || echo inconclusive)"
+    else
+      proof="$(svc prove-empty 2>/dev/null || echo inconclusive)"
+    fi
     case "$proof" in
       empty)
+        # One-shot consumption: the exception authorizes exactly this attempt.
+        EXCLUDE_PID=""
+        EXCLUDE_IDENTITY=""
         spawn_bridge
         return 0
         ;;
-      occupied*)
-        if [[ "$state" != "occupied" ]]; then
-          logw "Spawn withheld: ${proof} exact same-home process(es) — refusing to create a duplicate"
+      occupied*|inconclusive)
+        # Any other/unknown process or an incomplete snapshot vetoes the
+        # replacement: the exception dies with the attempt (R3).
+        if [[ -n "${EXCLUDE_PID:-}" ]]; then
+          logw "Planned-replacement exclusion vetoed ($proof) — ordinary zero-process proof applies"
+          EXCLUDE_PID=""
+          EXCLUDE_IDENTITY=""
         fi
-        state="occupied"
-        ;;
-      *)
-        if [[ "$state" != "inconclusive" ]]; then
-          logw "Spawn withheld: process enumeration inconclusive"
-        fi
-        state="inconclusive"
+        case "$proof" in
+          occupied*)
+            if [[ "$state" != "occupied" ]]; then
+              logw "Spawn withheld: ${proof} exact same-home process(es) — refusing to create a duplicate"
+            fi
+            state="occupied"
+            ;;
+          *)
+            if [[ "$state" != "inconclusive" ]]; then
+              logw "Spawn withheld: process enumeration inconclusive"
+            fi
+            state="inconclusive"
+            ;;
+        esac
         ;;
     esac
     poll_state
@@ -362,6 +393,8 @@ TRANSITION_FENCE="stable"
 FENCE_AT=0
 LAST_HB_PREV=""
 HB_ADVANCED=0
+EXCLUDE_PID=""
+EXCLUDE_IDENTITY=""
 adopt_or_spawn
 LAST_OBSERVED_HB="$(read_heartbeat)"
 
@@ -417,6 +450,9 @@ while true; do
             TRANSITION_FENCE="stable"
             HB_ADVANCED=0
             LAST_HB_PREV=""
+            # Fence end clears any unconsumed replacement exclusion (R3/R7).
+            EXCLUDE_PID=""
+            EXCLUDE_IDENTITY=""
           fi
         fi
         if [[ "$_vpid" != "$PID" ]]; then
@@ -530,6 +566,20 @@ except Exception:
   if [[ "$PLANNED_RESTART" -eq 1 ]]; then
     PLANNED_RESTART=0
     [[ "$(read_desired_state)" == "stopped" ]] && handle_stopped
+    # Bounded grace (#1711 A9/A20): let a HEALTHY terminated owner finish
+    # exiting so the replacement boots clean. A TERM-ignorer past grace is
+    # handled by the R3 exclusion in spawn_if_proven_empty (deliberate
+    # overlap). kill -0 here only ends the wait early; it never CREATES the
+    # exception — that required fresh validation at the authorization point.
+    if [[ -n "$EXCLUDE_PID" ]]; then
+      _grace=0
+      while (( _grace < 12 )); do
+        kill -0 "$EXCLUDE_PID" 2>/dev/null || break
+        poll_state
+        sleep "$POLL_INTERVAL"
+        _grace=$((_grace+1))
+      done
+    fi
     spawn_if_proven_empty
     continue
   fi

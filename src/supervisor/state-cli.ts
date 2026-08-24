@@ -15,9 +15,9 @@ import {
   setOwnershipEpisode,
   clearOwnershipEpisode,
 } from "./state.js";
-import { validateBridgeLock, signalValidatedBridge, processStartIdentity, potentialHomeBridgeProcesses } from "./identity.js";
+import { validateBridgeLock, signalValidatedBridge, processStartIdentity } from "./identity.js";
 import { atomicWriteSync } from "../components/atomic-write.js";
-import { runReconciliationTick, containCandidate } from "./reconcile-executor.js";
+import { runReconciliationTick, containCandidate, evaluateSpawnProof, readValidatedOwner } from "./reconcile-executor.js";
 import type { TransitionState } from "./reconcile.js";
 
 const home = process.env.ABTARS_HOME ?? resolve(homedir(), ".abtars");
@@ -183,16 +183,37 @@ async function main(): Promise<void> {
       // Zero-process proof before any spawn (#1711 R3). Shell-friendly output:
       // "empty" | "occupied <n>" | "inconclusive". Only "empty" authorizes the
       // existing spawn path; anything else must hold.
-      const exact = potentialHomeBridgeProcesses(home);
-      if (exact === null) {
+      //
+      // Planned-replacement exception (#1711 R3): restart/update/rollback may
+      // pass exactly one recorded terminated-owner identity
+      // (`prove-empty <pid> <startIdentity>`); that identity alone is
+      // disregarded. Any other process or an incomplete snapshot still vetoes.
+      const excludePid = Number(process.argv[3]);
+      const excludeIdentity = process.argv[4];
+      const hasExclude =
+        Number.isInteger(excludePid) && excludePid > 0 &&
+        excludeIdentity !== undefined && excludeIdentity !== "-" && excludeIdentity !== "";
+      const exclude = hasExclude ? { pid: excludePid, startIdentity: excludeIdentity! } : null;
+      const proof = evaluateSpawnProof(home, exclude);
+      if (proof.result === "inconclusive") {
         process.stdout.write("inconclusive\n");
-        process.exit(Exit.Ok);
-      }
-      if (exact.length === 0) {
+      } else if (proof.result === "empty") {
         process.stdout.write("empty\n");
-        process.exit(Exit.Ok);
+      } else {
+        process.stdout.write(`occupied ${proof.count}\n`);
       }
-      process.stdout.write(`occupied ${exact.length}\n`);
+      process.exit(Exit.Ok);
+    }
+
+    case "owner-identity": {
+      // Freshly validated owner identity for the planned-command authorization
+      // point (#1711 R3). Output: "<status> <pid> <startIdentity|->".
+      const owner = readValidatedOwner(home);
+      if (owner) {
+        process.stdout.write(`valid ${owner.pid} ${owner.startIdentity}\n`);
+      } else {
+        process.stdout.write("invalid 0 -\n");
+      }
       process.exit(Exit.Ok);
     }
 

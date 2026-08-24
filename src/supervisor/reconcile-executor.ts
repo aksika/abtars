@@ -7,7 +7,7 @@
  */
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { validateBridgeLock, enumerateBridgeProcesses, isPidAlive } from "./identity.js";
+import { validateBridgeLock, enumerateBridgeProcesses, isPidAlive, potentialHomeBridgeProcesses } from "./identity.js";
 import {
   decideReconciliation,
   isLivenessContainmentEligible,
@@ -27,6 +27,50 @@ export const PRODUCTION_STALE_MS = 300_000;
 const ESCALATION_GRACE_MS = 3_000;
 
 const LOCK_VALIDATOR_NEEDLES = ["abtars.js", "bundle"];
+
+/**
+ * Freshly validate bridge.lock and report the CURRENT owner's identity
+ * (#1711 R3). Used by the planned-command path at the SAME authorization
+ * point as its termination: only a fully valid lock yields a usable
+ * PID/start-identity pair; anything else yields null (no exclusion exists).
+ */
+export function readValidatedOwner(home: string): { readonly pid: number; readonly startIdentity: string } | null {
+  const lock = buildLockObservation(home);
+  if (lock.kind !== "snapshot" || !lock.lock.validatedOwner) return null;
+  if (!Number.isInteger(lock.lock.pid) || lock.lock.pid <= 0) return null;
+  if (!lock.lock.startIdentity) return null;
+  return { pid: lock.lock.pid, startIdentity: lock.lock.startIdentity };
+}
+
+export type SpawnProof =
+  | { readonly result: "empty" }
+  | { readonly result: "occupied"; readonly count: number }
+  | { readonly result: "inconclusive" };
+
+/**
+ * Zero-process proof before spawn (#1711 R3). Blocking set is the BROADER
+ * could-be-same-home predicate: any spelling inside this home, or a relative
+ * spelling whose home cannot be attributed — fail-closed per R2 ("never spawn
+ * beside it"), while containment stays strictly exactTarget.
+ *
+ * `exclude` implements the ONE planned-replacement exception: during a
+ * restart/update/rollback fence, exactly the recorded terminated owner's
+ * PID/start identity may be disregarded. Every other process — exact,
+ * identity-inconclusive, or unknown — and any incomplete snapshot still
+ * vetoes. Stop and handoff never pass an exclusion.
+ */
+export function evaluateSpawnProof(
+  home: string,
+  exclude: { readonly pid: number; readonly startIdentity: string } | null,
+): SpawnProof {
+  const potentials = potentialHomeBridgeProcesses(home);
+  if (potentials === null) return { result: "inconclusive" };
+  const blockers = potentials.filter(
+    (p) => !(exclude !== null && p.pid === exclude.pid && p.startIdentity === exclude.startIdentity),
+  );
+  if (blockers.length === 0) return { result: "empty" };
+  return { result: "occupied", count: blockers.length };
+}
 
 /**
  * Classify the current bridge.lock into the reconciliation lock observation.

@@ -569,6 +569,102 @@ if ! node "$SCRIPT_DIR/check-watchdog-shape.mjs" >/dev/null; then
 fi
 echo "OK: watchdog shape guard passes"
 
+# ── #1711 R3 v4.1: planned-replacement exclusion flow ────────────────────
+EXCL_HOME="$(mktemp -d)"
+mkdir -p "$EXCL_HOME/logs"
+
+EXCL_RUNNER="$EXCL_HOME/excl-runner.sh"
+cat > "$EXCL_RUNNER" <<'RUNNER_EOF'
+#!/usr/bin/env bash
+set -u
+source "$WD_SH_PATH"
+CALLARGS="$EXCL_HOME/calls.log"
+SPAWN_LOG="$EXCL_HOME/spawns.log"
+: > "$CALLARGS"; : > "$SPAWN_LOG"
+svc() {
+  printf '%s\n' "$*" >> "$CALLARGS"
+  if [[ "$1" == "prove-empty" ]]; then
+    local n seqs out
+    n="$(cat "$EXCL_SEQPOS" 2>/dev/null || echo 0)"
+    echo $((n+1)) > "$EXCL_SEQPOS"
+    IFS=';' read -ra seqs <<< "$EXCL_SEQ"
+    out="${seqs[$n]:-}"
+    [[ -z "$out" ]] && out="empty"
+    printf "%s" "$out"
+  fi
+}
+spawn_bridge() { echo x >> "$SPAWN_LOG"; }
+poll_state() { :; }
+POLL_INTERVAL=0
+spawn_if_proven_empty >/dev/null 2>&1
+echo "spawns=$(wc -l < "$SPAWN_LOG")"
+RUNNER_EOF
+
+# Exclusion set + immediate empty proof -> forwarded to prove-empty and
+# consumed exactly once.
+RESULT=$(WD_SH_PATH="$WD_SH" ABTARS_WATCHDOG_SOURCE_ONLY=1 ABTARS_HOME="$EXCL_HOME" EXCL_HOME="$EXCL_HOME" \
+  EXCL_SEQ="empty" EXCL_SEQPOS="$EXCL_HOME/.seqpos" bash -c '
+  set -u
+  source "$WD_SH_PATH"
+  CALLARGS="$EXCL_HOME/calls.log"; SPAWN_LOG="$EXCL_HOME/spawns.log"
+  : > "$CALLARGS"; : > "$SPAWN_LOG"
+  svc() {
+    printf "%s\n" "$*" >> "$CALLARGS"
+    if [[ "$1" == "prove-empty" ]]; then printf "%s" "empty"; fi
+  }
+  spawn_bridge() { echo x >> "$SPAWN_LOG"; }
+  poll_state() { :; }
+  POLL_INTERVAL=0
+  EXCLUDE_PID=4242; EXCLUDE_IDENTITY="4242:777"
+  spawn_if_proven_empty >/dev/null 2>&1
+  echo "spawns=$(wc -l < "$SPAWN_LOG") exclude_cleared=$([[ -z "$EXCLUDE_PID" && -z "$EXCLUDE_IDENTITY" ]] && echo yes || echo no)"
+')
+if [[ "$RESULT" != *"spawns=1 exclude_cleared=yes"* ]]; then
+  echo "FAIL: replacement must consume the one-shot exclusion and spawn — got: $RESULT"
+  exit 1
+fi
+if ! grep -q "^prove-empty 4242 4242:777$" "$EXCL_HOME/calls.log"; then
+  echo "FAIL: prove-empty must receive the recorded owner pid/start identity"
+  exit 1
+fi
+echo "OK: planned-replacement exclusion forwarded to prove-empty and consumed on spawn"
+
+# Veto case: occupied proof clears the exclusion; later calls go WITHOUT it.
+rm -f "$EXCL_HOME/.seqpos"
+RESULT=$(WD_SH_PATH="$WD_SH" ABTARS_WATCHDOG_SOURCE_ONLY=1 ABTARS_HOME="$EXCL_HOME" EXCL_HOME="$EXCL_HOME" \
+  EXCL_SEQPOS="$EXCL_HOME/.seqpos" \
+  bash -c '
+  set -u
+  source "$WD_SH_PATH"
+  CALLARGS="$EXCL_HOME/calls.log"; SPAWN_LOG="$EXCL_HOME/spawns.log"
+  : > "$CALLARGS"; : > "$SPAWN_LOG"
+  svc() {
+    printf "%s\n" "$*" >> "$CALLARGS"
+    if [[ "$1" == "prove-empty" ]]; then
+      local n
+      n="$(cat "$EXCL_SEQPOS" 2>/dev/null || echo 0)"
+      echo $((n+1)) > "$EXCL_SEQPOS"
+      if (( n < 2 )); then printf "%s" "occupied 3"; else printf "%s" "empty"; fi
+    fi
+  }
+  spawn_bridge() { echo x >> "$SPAWN_LOG"; }
+  poll_state() { :; }
+  POLL_INTERVAL=0
+  EXCLUDE_PID=4242; EXCLUDE_IDENTITY="4242:777"
+  spawn_if_proven_empty >/dev/null 2>&1
+  echo "spawns=$(wc -l < "$SPAWN_LOG") exclude_cleared=$([[ -z "${EXCLUDE_PID:-}" ]] && echo yes || echo no)"
+')
+WITH_ARGS=$(grep -c "^prove-empty 4242" "$EXCL_HOME/calls.log")
+WITHOUT_ARGS=$(grep -c "^prove-empty$" "$EXCL_HOME/calls.log")
+VETO_LINES=$(grep -c "Planned-replacement exclusion vetoed" "$EXCL_HOME/logs/watchdog.log")
+if [[ "$RESULT" != *"spawns=1 exclude_cleared=yes"* || "$WITH_ARGS" != "1" || "$WITHOUT_ARGS" -lt 1 || "$VETO_LINES" != "1" ]]; then
+  echo "FAIL: veto by another process must clear the exclusion once, then prove plainly — got: $RESULT with=$WITH_ARGS without=$WITHOUT_ARGS veto=$VETO_LINES"
+  exit 1
+fi
+echo "OK: occupied/inconclusive proofs veto and clear the replacement exclusion (one event line)"
+
+rm -rf "$EXCL_HOME"
+
 rm -rf "$GATE_HOME"
 
 echo "ALL TESTS PASSED"

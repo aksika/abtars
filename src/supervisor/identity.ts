@@ -1,4 +1,4 @@
-import { readFileSync, readdirSync } from "node:fs";
+import { readFileSync, readdirSync, readlinkSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { isAbsolute } from "node:path";
 
@@ -146,32 +146,47 @@ export function exactBridgeProcesses(home: string): readonly BridgeProcess[] | n
 }
 
 /**
- * Spawn-proof predicate (#1711 R2/R3). Broader than the containment predicate
- * BY DESIGN: a process whose argv COULD be this home's bridge — an absolute
- * spelling inside this home, or a relative `app/bundle/abtars.js` spelling
- * whose home cannot be attributed — blocks spawning but is never contained,
- * adopted, or signalled. Killing stays narrow (exactTarget); refusing to
- * create a duplicate is the cheap, fail-closed direction.
- */
-export function couldBeSameHomeBridge(home: string, argv: readonly string[]): boolean {
-  const target = spawnTarget(home);
-  const base = home.replace(/\/+$/, "");
-  for (const arg of argv) {
-    if (arg === target) return true;
-    if (arg.startsWith(`${base}/`) && arg.endsWith("/app/bundle/abtars.js")) return true;
-    if (arg === "app/bundle/abtars.js") return true;
-  }
-  return false;
-}
-
-/**
- * Processes that could plausibly be this home's bridge under ANY spelling, or
- * null when the snapshot is incomplete. Used ONLY for the zero-spawn proof.
+ * Spawn-proof predicate inputs (#1711 R2/R3). Broader than the containment
+ * predicate BY DESIGN: a process whose argv COULD be this home's bridge blocks
+ * spawning but is never contained, adopted, or signalled. Killing stays narrow
+ * (exactTarget); refusing to create a duplicate is the cheap, fail-closed
+ * direction.
+ *
+ * Attribution rules:
+ * - exact canonical literal          -> always blocks;
+ * - absolute spelling inside home    -> always blocks;
+ * - relative `app/bundle/abtars.js`  -> blocked ONLY when the process cwd
+ *   places it inside this home (R2 permits cwd as EVIDENCE; it never
+ *   authorizes adoption/containment/exemption, only spawn-blocking scope).
+ *   An unreadable cwd cannot be cleared and therefore still blocks.
  */
 export function potentialHomeBridgeProcesses(home: string): readonly BridgeProcess[] | null {
   const result = enumerateBridgeProcesses(home);
   if (!result.complete) return null;
-  return result.processes.filter((p) => couldBeSameHomeBridge(home, p.argv));
+  const base = home.replace(/\/+$/, "");
+  const target = `${base}/app/bundle/abtars.js`;
+  return result.processes.filter((p) =>
+    p.argv.some((arg) => {
+      if (arg === target) return true;
+      if (arg.startsWith(`${base}/`) && arg.endsWith("/app/bundle/abtars.js")) return true;
+      if (arg === "app/bundle/abtars.js") {
+        const cwd = processCwd(p.pid);
+        if (cwd === null) return true; // cannot attribute -> fail closed
+        return cwd === base || cwd.startsWith(`${base}/`);
+      }
+      return false;
+    })
+  );
+}
+
+/** Read a process cwd as ATTRIBUTION EVIDENCE ONLY (#1711 R2). Linux only. */
+function processCwd(pid: number): string | null {
+  try {
+    const dest = readlinkSync(`/proc/${pid}/cwd`);
+    return dest;
+  } catch {
+    return null;
+  }
 }
 
 function macProcessField(pid: number, field: "lstart" | "command"): string | null {
