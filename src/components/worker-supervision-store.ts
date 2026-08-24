@@ -1171,8 +1171,11 @@ export class WorkerSupervisionStore {
   private completionGraceMs(attempt: AttemptRow): number {
     try {
       const row = this.getContract(attempt.contract_id);
-      const parsed = row ? JSON.parse(row.contract_json) as { limits?: { max_duration_ms?: unknown } } | null : null;
-      const duration = parsed?.limits?.max_duration_ms;
+      const parsed: unknown = row ? JSON.parse(row.contract_json) : null;
+      if (typeof parsed !== "object" || parsed === null) return FALLBACK_COMPLETION_GRACE_MS;
+      const limits = (parsed as { limits?: unknown }).limits;
+      if (typeof limits !== "object" || limits === null) return FALLBACK_COMPLETION_GRACE_MS;
+      const duration = (limits as { max_duration_ms?: unknown }).max_duration_ms;
       if (typeof duration !== "number" || !Number.isFinite(duration) || !Number.isInteger(duration) || duration <= 0) {
         return FALLBACK_COMPLETION_GRACE_MS;
       }
