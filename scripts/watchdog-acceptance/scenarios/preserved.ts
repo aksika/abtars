@@ -591,10 +591,16 @@ const A24 = A("A24", "In-fence crash after a fresh instanceId remains a recorded
     const events = parseDeathEvents(w.watchdogLogLines(home, 80));
     return events.some((e) => e.reason.endsWith("exit=3") && e.pid !== String(oldPid));
   });
+  // Death accounting is applied by separate CLI invocations right after the
+  // log line lands — wait for the durable state instead of racing it.
+  await w.expectEventually(15000, "in-fence crash recorded in supervisor death accounting", () => {
+    const s = w.supervisorState(home);
+    return Array.isArray(s?.recentDeaths) && (s.recentDeaths as unknown[]).length >= 1 &&
+      Number(s?.restartCount) >= 1;
+  });
   const st = w.supervisorState(home);
-  w.expect(Array.isArray(st?.recentDeaths) && st.recentDeaths.length >= 1,
-    "the in-fence crash must appear in supervisor death accounting");
-  w.expect(Number(st?.restartCount) >= 1, `restartCount must increment for an accountable death (got ${String(st?.restartCount)})`);
+  w.expect(Array.isArray(st?.recentDeaths) && (st.recentDeaths as unknown[]).length === 1,
+    `the in-fence crash must be recorded exactly once (got ${JSON.stringify(st?.recentDeaths)})`);
   w.expect(Number(st?.backoffAttempt) >= 1, `backoff must remain effective for an accountable death (got ${String(st?.backoffAttempt)})`);
   // A settled healthy replacement follows the accounted crash.
   await w.expectEventually(30000, "settled healthy replacement after the accounted crash", () => {
