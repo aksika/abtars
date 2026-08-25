@@ -483,6 +483,41 @@ exit "$rc"`;
     return { lastExitCode: lock?.lastExitCode, lastExitAt: lock?.lastExitAt };
   }
 
+  /** Fixture exit-attempt records (#1722), one JSON line per attempt, in write order. */
+  exitAttempts(home: string): Array<{
+    pid: number;
+    generation: number;
+    code: number;
+    at: number;
+    accepted: boolean;
+    lockPidSeen: unknown;
+    instanceIdSeen: unknown;
+  }> {
+    try {
+      const raw = readFileSync(join(home, "fixture-exit-attempts.jsonl"), "utf-8");
+      const out: Array<{
+        pid: number; generation: number; code: number; at: number; accepted: boolean;
+        lockPidSeen: unknown; instanceIdSeen: unknown;
+      }> = [];
+      for (const line of raw.split("\n")) {
+        if (line.length === 0) continue;
+        out.push(JSON.parse(line));
+      }
+      return out;
+    } catch {
+      return [];
+    }
+  }
+
+  /** One bounded JSON diagnostics file in the artifacts dir (#1722). */
+  captureDiagnostics(label: string, payload: Record<string, unknown>): void {
+    try {
+      const file = join(this.artifactsDir(), `${label}-diagnostics.json`);
+      writeFileSync(file, JSON.stringify({ label, capturedAt: Date.now(), ...payload }, null, 2));
+      this.timeline("diagnostics-captured", label);
+    } catch { /* diagnostics are best effort — never mask the original failure */ }
+  }
+
   /** Fixture self-registry entries ({pid, generation, mode}) for the home. */
   fixtureRegistryEntries(home: string): Array<{ pid: number; generation: number; mode: string }> {
     const dir = join(home, "fixture-registry");
@@ -592,4 +627,24 @@ export function setDoctorBundle(path: string): void {
 export function getDoctorBundle(): string {
   if (!doctorBundlePath) throw new ScenarioFailure("doctor bundle not prepared", "setup");
   return doctorBundlePath;
+}
+
+/**
+ * Failure-time diagnostics snapshot (#1722). A free function (not a WorldApi
+ * member) so `contracts.ts` stays untouched; a no-op if the runtime world is
+ * not the concrete World.
+ */
+export function captureFailureDiagnostics(w: WorldApi, label: string): void {
+  if (!(w instanceof World)) return;
+  const home = w.homeA();
+  w.captureDiagnostics(label, {
+    home,
+    lock: w.lock(home),
+    exitReport: w.exitReportOf(home),
+    exitAttempts: w.exitAttempts(home),
+    supervisorState: w.supervisorState(home),
+    fixtures: w.fixtureRegistryEntries(home),
+    watchdogLog: w.watchdogLogLines(home),
+    timeline: w.cappedTimeline(),
+  });
 }

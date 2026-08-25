@@ -9,6 +9,7 @@
 import { existsSync, readdirSync, statSync } from "node:fs";
 import { join } from "node:path";
 import type { ScenarioDefinition, WorldApi } from "../contracts.ts";
+import { captureFailureDiagnostics } from "../world.ts";
 import { processStartIdentityOf } from "../proc-observers.ts";
 import {
   bridgeAliveWithIdentity,
@@ -598,34 +599,41 @@ const A23 = A("A23", "Sole survivor after unclean watchdog death is adopted", "l
  * (the failure-matrix asymmetry).
  */
 const A24 = A("A24", "In-fence crash after a fresh instanceId remains a recorded death", "lifecycle", async (w) => {
-  const home = w.homeA();
-  const { pid: oldPid } = await startHealthyBridgeUnderWatchdog(w, home);
-  // The REPLACEMENT takes this scheduled mode: initialize ownership (fresh
-  // instanceId) and exit non-zero ~150ms later — inside the fence window.
-  w.setControl(home, {
-    nextSpawns: [{ generation: w.claimNextGeneration(home), mode: "exit", exitCode: 3, delayMs: 150 }],
-  });
-  publishCommand(w, home, "restart", "acceptance-a24");
-  await w.expectEventually(30000, "replacement crash recorded with its own fresh exit code", () => {
-    const events = parseDeathEvents(w.watchdogLogLines(home, 80));
-    return events.some((e) => e.reason.endsWith("exit=3") && e.pid !== String(oldPid));
-  });
-  // Death accounting is applied by separate CLI invocations right after the
-  // log line lands — wait for the durable state instead of racing it.
-  await w.expectEventually(15000, "in-fence crash recorded in supervisor death accounting", () => {
-    const s = w.supervisorState(home);
-    return Array.isArray(s?.recentDeaths) && (s.recentDeaths as unknown[]).length >= 1 &&
-      Number(s?.restartCount) >= 1;
-  });
-  const st = w.supervisorState(home);
-  w.expect(Array.isArray(st?.recentDeaths) && (st.recentDeaths as unknown[]).length === 1,
-    `the in-fence crash must be recorded exactly once (got ${JSON.stringify(st?.recentDeaths)})`);
-  w.expect(Number(st?.backoffAttempt) >= 1, `backoff must remain effective for an accountable death (got ${String(st?.backoffAttempt)})`);
-  // A settled healthy replacement follows the accounted crash.
-  await w.expectEventually(30000, "settled healthy replacement after the accounted crash", () => {
-    const l = w.lock(home);
-    return !!l && Number(l.pid) !== oldPid && bridgeAliveWithIdentity(w, home, Number(l.pid));
-  });
+  try {
+    const home = w.homeA();
+    const { pid: oldPid } = await startHealthyBridgeUnderWatchdog(w, home);
+    // The REPLACEMENT takes this scheduled mode: initialize ownership (fresh
+    // instanceId) and exit non-zero ~150ms later — inside the fence window.
+    w.setControl(home, {
+      nextSpawns: [{ generation: w.claimNextGeneration(home), mode: "exit", exitCode: 3, delayMs: 150 }],
+    });
+    publishCommand(w, home, "restart", "acceptance-a24");
+    await w.expectEventually(30000, "replacement crash recorded with its own fresh exit code", () => {
+      const events = parseDeathEvents(w.watchdogLogLines(home, 80));
+      return events.some((e) => e.reason.endsWith("exit=3") && e.pid !== String(oldPid));
+    });
+    // Death accounting is applied by separate CLI invocations right after the
+    // log line lands — wait for the durable state instead of racing it.
+    await w.expectEventually(15000, "in-fence crash recorded in supervisor death accounting", () => {
+      const s = w.supervisorState(home);
+      return Array.isArray(s?.recentDeaths) && (s.recentDeaths as unknown[]).length >= 1 &&
+        Number(s?.restartCount) >= 1;
+    });
+    const st = w.supervisorState(home);
+    w.expect(Array.isArray(st?.recentDeaths) && (st.recentDeaths as unknown[]).length === 1,
+      `the in-fence crash must be recorded exactly once (got ${JSON.stringify(st?.recentDeaths)})`);
+    w.expect(Number(st?.backoffAttempt) >= 1, `backoff must remain effective for an accountable death (got ${String(st?.backoffAttempt)})`);
+    // A settled healthy replacement follows the accounted crash.
+    await w.expectEventually(30000, "settled healthy replacement after the accounted crash", () => {
+      const l = w.lock(home);
+      return !!l && Number(l.pid) !== oldPid && bridgeAliveWithIdentity(w, home, Number(l.pid));
+    });
+  } catch (err) {
+    // #1722 diagnosis only: capture failure-time evidence, then rethrow
+    // unchanged. No assertion, deadline, or fixture timing is modified here.
+    captureFailureDiagnostics(w, "RA24-1722");
+    throw err;
+  }
 });
 
 export const PRESERVED_SCENARIOS: readonly ScenarioDefinition[] = [

@@ -24,7 +24,7 @@
  * heartbeat/termination flags are polled at a bounded cadence so the harness
  * can stop heartbeats without restarting the process (direct plants included).
  */
-import { closeSync, mkdirSync, openSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { appendFileSync, closeSync, mkdirSync, openSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import {
   initBridgeLock,
@@ -95,6 +95,35 @@ function writeRegistryEntry(generation: number, mode: FixtureMode): void {
   const tmp = `${finalPath}.tmp`;
   writeFileSync(tmp, JSON.stringify(entry));
   renameSync(tmp, finalPath);
+}
+
+/**
+ * Diagnosis record (#1722): logWarn is buffered (flush at 200 lines or a 30s
+ * timer) and the fixture exits on the next statement, so a rejected
+ * owner-scoped exit write is not observable through the bridge log. One
+ * synchronous JSON line per attempt lands in the home BEFORE process.exit,
+ * capturing the lock's pid/instanceId exactly as the exiting fixture saw them.
+ */
+function recordExitAttempt(generation: number, code: number, accepted: boolean): void {
+  let lockPidSeen: unknown = null;
+  let instanceIdSeen: unknown = null;
+  try {
+    const lock = JSON.parse(readFileSync(join(home, "bridge.lock"), "utf-8")) as Record<string, unknown>;
+    lockPidSeen = lock.pid ?? null;
+    instanceIdSeen = lock.instanceId ?? null;
+  } catch { /* no/unreadable lock — record the absence itself */ }
+  const record = {
+    pid: process.pid,
+    generation,
+    code,
+    at: Date.now(),
+    accepted,
+    lockPidSeen,
+    instanceIdSeen,
+  };
+  try {
+    appendFileSync(join(home, "fixture-exit-attempts.jsonl"), `${JSON.stringify(record)}\n`);
+  } catch { /* diagnosis only — never alter fixture behavior */ }
 }
 
 async function main(): Promise<void> {
@@ -231,7 +260,8 @@ async function main(): Promise<void> {
       // Production gated writer (#1711 R1): owners write their own exit
       // fields; a non-owner's self-report is REJECTED, which is exactly the
       // B4 defect shape post-fix — the forgery must not land.
-      writeOwnedExitFields(code, Date.now());
+      const accepted = writeOwnedExitFields(code, Date.now());
+      recordExitAttempt(generation, code, accepted);
       process.exit(code);
     }
 
