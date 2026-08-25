@@ -121,7 +121,12 @@ const POLICIES: Record<OrcIntentKind, OrcIntentPolicy> = {
   },
   project_review: {
     intentKind: "project_review",
-    maxPromptRounds: 3,
+    // #1725: 6, not 3. A successful review turn uses two provider requests
+    // (read case, then review_project, which satisfies the intent and stops
+    // safety mid-round), so 3 left only one spare request — consumed by a
+    // single artifact_pull/channel_read or one invalid proposal. Six leaves
+    // four spare requests while keeping the bound finite.
+    maxPromptRounds: 6,
     allowedTools: REVIEW_TOOLS,
     isActionable: (s) => s.openReviewCase && !s.projectTerminal,
     // The referenced case is consumed once no open case remains for the
@@ -144,7 +149,9 @@ const POLICIES: Record<OrcIntentKind, OrcIntentPolicy> = {
   },
   input_resume: {
     intentKind: "input_resume",
-    maxPromptRounds: 3,
+    // #1725: same review tool surface and the same read-then-submit turn shape
+    // as project_review — same bound.
+    maxPromptRounds: 6,
     allowedTools: INPUT_RESUME_TOOLS,
     isActionable: (s) => s.inputRequestsOutstanding && !s.projectTerminal,
     // The input/review request is consumed once no outstanding request row

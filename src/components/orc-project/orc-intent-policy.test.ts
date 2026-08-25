@@ -63,13 +63,13 @@ function makeSafety() {
 }
 
 describe("#1680 intent policy rows", () => {
-  it("carries the exact prompt bounds and tool surfaces from design.md", () => {
+  it("carries the exact intent prompt bounds and tool surfaces (#1725: review/input bound is 6)", () => {
     const cases: Array<[import("./orc-project-contracts.js").OrcIntentKind, number, string]> = [
       ["contract_authoring", 3, "define_project_contract"],
       ["project_execution", 25, "execute_bash"],
-      ["project_review", 3, "get_project_review_case"],
+      ["project_review", 6, "get_project_review_case"],
       ["repair_review", 5, "check_workers"],
-      ["input_resume", 3, "get_project_review_case"],
+      ["input_resume", 6, "get_project_review_case"],
       ["operator_turn", 25, "operator_surface"],
     ];
     for (const [kind, rounds, firstTool] of cases) {
