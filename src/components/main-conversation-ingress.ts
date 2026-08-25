@@ -86,6 +86,10 @@ export class MainConversationIngress {
       logWarn(TAG, `Pipeline unavailable for ${request.eventId} — not sent`);
       return "not_sent";
     }
+    if (typeof request.result !== "string") {
+      logWarn(TAG, `Rejected malformed announcement ${request.eventId} — not sent`);
+      return "not_sent";
+    }
     const trimmed = request.result.trim();
     if (
       !request.eventId
@@ -95,6 +99,9 @@ export class MainConversationIngress {
       || !request.chatId
       || !request.title
       || !trimmed
+      || !Number.isInteger(request.cardId)
+      || request.cardId < 1
+      || request.eventId !== `scheduled-card:${request.cardId}`
     ) {
       // An empty result must never be announced as a success-shaped turn.
       logWarn(TAG, `Rejected malformed announcement ${request.eventId} — not sent`);
@@ -109,37 +116,43 @@ export class MainConversationIngress {
     // Defense-in-depth target validation before submission; the session-
     // selection middleware re-validates the same predicate on the pipeline
     // path (busy/paused rejection happens there too).
-    const { spin } = await import("./spin.js");
-    const { sessionTypeOf } = await import("./spin-types.js");
-    const session = spin.getActiveSession(request.userId, request.platform);
-    if (
-      session.userId !== request.userId
-      || sessionTypeOf(session.id) !== "A"
-      || session.status === "ended"
-      || String(session.chatId) !== request.chatId
-    ) {
-      logWarn(TAG, `Target A session unavailable/mismatched for ${request.eventId} — not sent`);
+    try {
+      const { spin } = await import("./spin.js");
+      const { sessionTypeOf } = await import("./spin-types.js");
+      const session = spin.getActiveSession(request.userId, request.platform);
+      if (
+        !session
+        || session.userId !== request.userId
+        || sessionTypeOf(session.id) !== "A"
+        || session.status === "ended"
+        || String(session.chatId) !== request.chatId
+      ) {
+        logWarn(TAG, `Target A session unavailable/mismatched for ${request.eventId} — not sent`);
+        return "not_sent";
+      }
+
+      const msg: InboundMessage = {
+        platform: request.platform,
+        channelId: request.chatId,
+        userId: request.userId,
+        senderId: "scheduler",
+        senderName: "scheduler",
+        text: composeScheduledAnnouncementText(request.title, request.cardId, trimmed),
+        timestamp: Date.now(),
+        ...(request.threadId !== undefined ? { threadId: request.threadId } : {}),
+        isGroup: false,
+        isVoice: false,
+        internal: {
+          [SCHEDULED_ANNOUNCEMENT_TOKEN]: true,
+          kind: "scheduled_announcement",
+          eventId: request.eventId,
+          cardId: request.cardId,
+        },
+      };
+      return submitTrustedInternalMessage(msg, adapter, pipelineDeps);
+    } catch (err) {
+      logWarn(TAG, `Target resolution failed for ${request.eventId} — ${err instanceof Error ? err.message : String(err)}`);
       return "not_sent";
     }
-
-    const msg: InboundMessage = {
-      platform: request.platform,
-      channelId: request.chatId,
-      userId: request.userId,
-      senderId: "scheduler",
-      senderName: "scheduler",
-      text: composeScheduledAnnouncementText(request.title, request.cardId, trimmed),
-      timestamp: Date.now(),
-      ...(request.threadId !== undefined ? { threadId: request.threadId } : {}),
-      isGroup: false,
-      isVoice: false,
-      internal: {
-        [SCHEDULED_ANNOUNCEMENT_TOKEN]: true,
-        kind: "scheduled_announcement",
-        eventId: request.eventId,
-        cardId: request.cardId,
-      },
-    };
-    return submitTrustedInternalMessage(msg, adapter, pipelineDeps);
   }
 }

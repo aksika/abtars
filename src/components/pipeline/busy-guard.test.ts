@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, afterEach } from "vitest";
 import { busyGuardMiddleware } from "./busy-guard.js";
 import type { ManagedSession } from "../spin-types.js";
+import { SCHEDULED_ANNOUNCEMENT_TOKEN } from "../../types/platform.js";
 
 function makeSession(overrides: Partial<ManagedSession> = {}): ManagedSession {
   return {
@@ -112,7 +113,7 @@ describe("busyGuardMiddleware", () => {
   // the Kanban delivery poll keeps ownership of retry semantics.
   it("rejects a trusted scheduled announcement on a busy session without queueing (#1724)", async () => {
     const ctx = makeCtx({ busy: true });
-    ctx.msg = { ...ctx.msg, internal: { kind: "scheduled_announcement", eventId: "scheduled-card:12", cardId: 12 } };
+    ctx.msg = { ...ctx.msg, internal: { [SCHEDULED_ANNOUNCEMENT_TOKEN]: true, kind: "scheduled_announcement", eventId: "scheduled-card:12", cardId: 12 } };
     await mockSpin(ctx._session);
     const next = vi.fn();
     await busyGuardMiddleware(ctx, next);
@@ -124,7 +125,7 @@ describe("busyGuardMiddleware", () => {
 
   it("passes a trusted scheduled announcement through when the session is not busy", async () => {
     const ctx = makeCtx({ busy: false });
-    ctx.msg = { ...ctx.msg, internal: { kind: "scheduled_announcement", eventId: "scheduled-card:12", cardId: 12 } };
+    ctx.msg = { ...ctx.msg, internal: { [SCHEDULED_ANNOUNCEMENT_TOKEN]: true, kind: "scheduled_announcement", eventId: "scheduled-card:12", cardId: 12 } };
     await mockSpin(ctx._session);
     const next = vi.fn();
     await busyGuardMiddleware(ctx, next);

@@ -3,6 +3,7 @@ import { setUserRegistryOverride, type UserRegistry } from "./user-registry.js";
 import { classifyContent } from "./clean-response.js";
 import type { ManagedSession } from "./spin-types.js";
 import { DurableContextUnavailableError } from "./transport/pi-core-context.js";
+import { SCHEDULED_ANNOUNCEMENT_TOKEN } from "../types/platform.js";
 
 const detectCitationsSpy = vi.fn().mockReturnValue([1]);
 let abmindReturn: any = { detectCitations: detectCitationsSpy };
@@ -491,7 +492,7 @@ describe("#1724 submitTrustedInternalMessage — receipt-bearing internal submis
       text: SCHEDULED_TEXT,
       senderId: "scheduler",
       senderName: "scheduler",
-      internal: { kind: "scheduled_announcement", eventId: "scheduled-card:12", cardId: 12 },
+      internal: { [SCHEDULED_ANNOUNCEMENT_TOKEN]: true, kind: "scheduled_announcement", eventId: "scheduled-card:12", cardId: 12 },
       ...overrides,
     });
   }
@@ -566,6 +567,20 @@ describe("#1724 submitTrustedInternalMessage — receipt-bearing internal submis
     expect(adapter.sendMessage).not.toHaveBeenCalled();
   });
 
+  it("rejects a scheduler-shaped event without the runtime trust token", async () => {
+    const adapter = mockAdapter();
+    const deps = mockDeps(transport);
+    const outcome = await submitTrustedInternalMessage(
+      announceMsg({ internal: { kind: "scheduled_announcement", eventId: "scheduled-card:12", cardId: 12 } as any }),
+      adapter,
+      deps,
+    );
+
+    expect(outcome).toBe("not_sent");
+    expect(transport.sendPrompt).not.toHaveBeenCalled();
+    expect(adapter.sendMessage).not.toHaveBeenCalled();
+  });
+
   it("resolves not_sent for an empty, [NO_REPLY], or reaction-only Main outcome", async () => {
     for (const raw of ["", "[NO_REPLY]", "[REACT:👍]"]) {
       transport.sendPrompt = vi.fn().mockResolvedValue(raw) as any;
@@ -599,6 +614,21 @@ describe("#1724 submitTrustedInternalMessage — receipt-bearing internal submis
     const notSentOutcome = await submitTrustedInternalMessage(announceMsg(), failingAdapter, deps2);
     expect(notSentOutcome).toBe("not_sent");
   }, 30_000);
+
+  it("resolves unknown when a semantic pre-tool segment was already delivered", async () => {
+    mockSession.showThinking = true;
+    transport.sendPrompt = vi.fn(async () => {
+      await transport.onSegmentBreak?.("The first part is ready.");
+      return "[NO_REPLY]";
+    }) as any;
+    const adapter = mockAdapter();
+    const deps = mockDeps(transport);
+
+    const outcome = await submitTrustedInternalMessage(announceMsg(), adapter, deps);
+
+    expect(outcome).toBe("unknown");
+    expect(adapter.sendMessage).toHaveBeenCalledWith("100", "The first part is ready.", expect.any(Object));
+  });
 
   it("suppresses the user-facing error reply for a failed announcement turn (synthetic convention)", async () => {
     transport.sendPrompt = vi.fn().mockRejectedValue(new Error("All models exhausted")) as any;

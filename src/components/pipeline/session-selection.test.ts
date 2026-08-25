@@ -2,6 +2,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { sessionSelectionMiddleware } from "./session-selection.js";
 import { setUserRegistryOverride } from "../user-registry.js";
 import type { ManagedSession } from "../spin-types.js";
+import { SCHEDULED_ANNOUNCEMENT_TOKEN } from "../../types/platform.js";
 
 function makeSession(overrides: Partial<ManagedSession> = {}): ManagedSession {
   return {
@@ -199,6 +200,7 @@ describe("sessionSelectionMiddleware #1724 trusted scheduled announcements", () 
   let spinMod: typeof import("../spin.js");
 
   const internalMeta = {
+    [SCHEDULED_ANNOUNCEMENT_TOKEN]: true,
     kind: "scheduled_announcement",
     eventId: "scheduled-card:12",
     cardId: 12,

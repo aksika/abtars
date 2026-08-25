@@ -46,7 +46,7 @@ import type { AbtarsMemoryRuntime } from "./memory-runtime.js";
 import type { IdleSave } from "./idle-save.js";
 import type { ConversationBuffer } from "./conversation-buffer.js";
 import type { RunningJob } from "./tasks/task-queue.js";
-import type { InboundMessage, PlatformAdapter, DeliveryCorrelation, MainDeliveryResult } from "../types/platform.js";
+import { isTrustedScheduledAnnouncement, type InboundMessage, type PlatformAdapter, type DeliveryCorrelation, type MainDeliveryResult } from "../types/platform.js";
 import { BOOT_GREETING_TOKEN } from "../types/platform.js";
 import { updateOwnedBridgeLockField } from "./transport/bridge-lock-transport.js";
 import { createMessageContext, runPipeline, voiceMiddleware, sessionSelectionMiddleware, commandMiddleware, pausedGuardMiddleware, busyGuardMiddleware, emergencyRouteMiddleware } from "./pipeline/index.js";
@@ -527,6 +527,9 @@ export async function handleInboundMessage(
       incremental = new IncrementalBlockDeliveryController({
         sendBlock: async (block) => {
           await retrySend(() => adapter.sendMessage(channelId, block, { threadId: msg.threadId }));
+          // Thinking/progress blocks are deliberately not counted as
+          // announcement content; only semantic segments and the terminal
+          // response make a partial announcement ambiguous.
         },
         sanitize: sanitizeOutbound,
         chunkBound: (text: string) => adapter.chunkResponse(text),
@@ -556,6 +559,7 @@ export async function handleInboundMessage(
             await adapter.editMessage(channelId, streamMsgId, clean);
             streamMsgId = undefined;
             incremental?.segmentDelivered(clean);
+            sentAnyChunk = true;
             return;
           } catch { /* fall through to a fresh send */ }
         }
@@ -563,6 +567,7 @@ export async function handleInboundMessage(
           await retrySend(() => adapter.sendMessage(channelId, clean, { threadId: msg.threadId }));
           streamMsgId = undefined;
           incremental?.segmentDelivered(clean);
+          sentAnyChunk = true;
         } catch (err) {
           // #1619: interim send failure is content-free and never rejects the turn.
           logWarn(TAG, `Pre-tool segment delivery failed (content-free): ${err instanceof Error ? err.message : String(err)}`);
@@ -683,6 +688,10 @@ export async function handleInboundMessage(
     // main branch below. The reaction payload comes from the parsed emoji,
     // never the raw [REACT:…] marker.
     if (ctx.delivery === "simple") {
+      if (reactionOnly && isTrustedScheduledAnnouncement(msg.internal)) {
+        settle(sentAnyChunk ? "unknown" : "not_sent");
+        return;
+      }
       if (!userResponse && reactionEmoji) {
         userResponse = reactionEmoji;
       }
@@ -728,7 +737,7 @@ export async function handleInboundMessage(
       // #1724: terminal receipt — after all chunks were externally delivered
       // (and the assistant record attempt completed), never for a
       // reaction-only turn.
-      settle(!reactionOnly && sentAnyChunk ? "sent" : "not_sent");
+      settle(reactionOnly ? "unknown" : (sentAnyChunk ? "sent" : "not_sent"));
       if (isVoice && ttsConfig && adapter.sendVoice) {
         try {
           const audio = await synthesizeSpeech(bootQuestionDelivered ? userResponse : cleanAnswer || response, ttsConfig);
@@ -744,25 +753,36 @@ export async function handleInboundMessage(
     }
 
     // --- Empty response ---
+    if (reactionOnly && isTrustedScheduledAnnouncement(msg.internal)) {
+      settle(sentAnyChunk ? "unknown" : "not_sent");
+      return;
+    }
     if (!userResponse && reactionEmoji) {
       userResponse = reactionEmoji; // emoji IS the response — deliver normally
     }
     if (!userResponse) {
       if (noReply) {
         logDebug(TAG, "LLM returned [NO_REPLY], dropping silently");
-        settle("not_sent");
+        settle(sentAnyChunk ? "unknown" : "not_sent");
         return;
       }
       if (transport.toolCallsSucceeded > 0) {
         logDebug(TAG, `Empty text but ${transport.toolCallsSucceeded} tool call(s) succeeded — suppressing fallback`);
         if (adapter.setReaction && msg.messageId) await adapter.setReaction(channelId, msg.messageId, "").catch(err => logAndSwallow(TAG, "adapter call", err));
-        settle("not_sent");
+        settle(sentAnyChunk ? "unknown" : "not_sent");
         return;
       } else {
         logWarn(TAG, "Empty response from transport");
+        if (isTrustedScheduledAnnouncement(msg.internal)) {
+          // A scheduled announcement must never surface the generic external
+          // error/fallback as its result. Let Kanban retry the durable task
+          // handoff instead.
+          settle(sentAnyChunk ? "unknown" : "not_sent");
+          return;
+        }
         if (adapter.setReaction && msg.messageId) await adapter.setReaction(channelId, msg.messageId, "🤷");
         await adapter.sendMessage(channelId, "🤷 Model returned an empty response. Try again or /reset.", { threadId: msg.threadId });
-        settle("not_sent");
+        settle(sentAnyChunk ? "unknown" : "not_sent");
         return;
       }
     }
@@ -841,7 +861,7 @@ export async function handleInboundMessage(
     // #1724: terminal receipt — after all chunks were externally delivered
     // (and the assistant record attempt completed), never for a
     // reaction-only turn.
-    settle(!reactionOnly && sentAnyChunk ? "sent" : "not_sent");
+    settle(reactionOnly ? "unknown" : (sentAnyChunk ? "sent" : "not_sent"));
 
     // --- TTS for voice notes ---
     if (isVoice && ttsConfig && !pSession.fullMode && adapter.sendVoice) {
@@ -995,6 +1015,10 @@ export async function submitTrustedInternalMessage(
   adapter: PlatformAdapter,
   deps: PipelineDeps,
 ): Promise<MainDeliveryResult> {
+  if (!isTrustedScheduledAnnouncement(msg.internal)) {
+    logWarn(TAG, "Rejected internal submission without the scheduler trust token");
+    return "not_sent";
+  }
   return new Promise<MainDeliveryResult>((resolve) => {
     const receipt: TurnReceipt = { settle: (outcome) => resolve(outcome) };
     void handleInboundMessage(msg, adapter, deps, receipt).catch((err) => {

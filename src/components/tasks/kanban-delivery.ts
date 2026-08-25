@@ -107,7 +107,10 @@ export async function deliverCard(card: KanbanCard, deps: DeliverDeps): Promise<
   // which keep their direct role-session delivery route. There is no
   // direct-send fallback for a matching card — Main is the only component
   // that may deliver this result.
-  const isScheduledTAnnounce = card.source === "task" && card.type === "T" && card.delivery_mode === "announce";
+  // Use the post-claim read, not the caller's possibly stale snapshot, for
+  // the ownership discriminator and payload. A stale snapshot must never
+  // reopen the direct-send path for a card that is now a scheduled T announce.
+  const isScheduledTAnnounce = fresh.source === "task" && fresh.type === "T" && fresh.delivery_mode === "announce";
   if (isScheduledTAnnounce) {
     if (!deps.announceToMain) {
       // Unwired ingress is an unambiguous pre-send failure, not an excuse to
@@ -118,7 +121,7 @@ export async function deliverCard(card: KanbanCard, deps: DeliverDeps): Promise<
       return;
     }
     try {
-      const outcome = await deps.announceToMain(card);
+      const outcome = await deps.announceToMain(fresh);
       recordOutcome(card.id, outcome, "announce_main");
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);

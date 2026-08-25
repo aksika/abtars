@@ -18,6 +18,7 @@
 import type { Middleware } from "./middleware.js";
 import { getMasterUserId } from "../master-user.js";
 import { sessionTypeOf } from "../spin-types.js";
+import { isTrustedScheduledAnnouncement } from "../../types/platform.js";
 
 export const sessionSelectionMiddleware: Middleware = async (ctx, next) => {
   const { spin } = await import("../spin.js");
@@ -28,9 +29,9 @@ export const sessionSelectionMiddleware: Middleware = async (ctx, next) => {
   // binding MUST NOT capture a background scheduler event, and external
   // platform input can never forge the internal metadata that reaches this
   // branch.
-  if (ctx.msg.internal?.kind === "scheduled_announcement") {
+  if (isTrustedScheduledAnnouncement(ctx.msg.internal)) {
     const session = spin.getActiveSession(ctx.userId, ctx.msg.platform);
-    const channelMatches = String(session.chatId) === ctx.msg.channelId;
+    const channelMatches = session ? String(session.chatId) === ctx.msg.channelId : false;
     if (
       !session
       || session.userId !== ctx.userId

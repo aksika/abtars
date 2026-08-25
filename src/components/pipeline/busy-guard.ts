@@ -6,6 +6,7 @@ import type { Middleware } from "./middleware.js";
 import { logInfo, logDebug, logWarn } from "../logger.js";
 import { logAndSwallow } from "../log-and-swallow.js";
 import { randomBytes } from "node:crypto";
+import { isTrustedScheduledAnnouncement } from "../../types/platform.js";
 
 const MAX_QUEUE_DEPTH = 20;
 
@@ -24,7 +25,7 @@ export const busyGuardMiddleware: Middleware = async (ctx, next) => {
     // mutation and without a parallel turn — the Kanban delivery poll owns
     // retry, so an untracked queued announcement would escape its bounded
     // retry/unknown semantics.
-    if (ctx.msg.internal?.kind === "scheduled_announcement") {
+    if (isTrustedScheduledAnnouncement(ctx.msg.internal)) {
       logInfo("busy-guard", `Scheduled announcement rejected for busy ${activeId} (no-queue policy) — delivery will retry`);
       ctx.handled = true;
       return;

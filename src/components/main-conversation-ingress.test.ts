@@ -116,6 +116,8 @@ describe("MainConversationIngress.announceToMain", () => {
       { deps: makeDeps(), request: makeRequest({ chatId: "" }) },
       { deps: makeDeps(), request: makeRequest({ title: "" }) },
       { deps: makeDeps(), request: makeRequest({ eventId: "" }) },
+      { deps: makeDeps(), request: makeRequest({ eventId: "scheduled-card:99" }) },
+      { deps: makeDeps(), request: makeRequest({ cardId: 0 }) },
     ];
     for (const c of cases) {
       submitMock.mockClear();
@@ -142,5 +144,17 @@ describe("MainConversationIngress.announceToMain", () => {
       expect(outcome).toBe("not_sent");
       expect(submitMock).not.toHaveBeenCalled();
     }
+  });
+
+  it("fails closed when active-session lookup throws", async () => {
+    const spinMod = await import("./spin.js");
+    vi.spyOn(spinMod.spin, "getActiveSession").mockImplementation(() => {
+      throw new Error("session registry unavailable");
+    });
+
+    const outcome = await new MainConversationIngress(makeDeps()).announceToMain(makeRequest());
+
+    expect(outcome).toBe("not_sent");
+    expect(submitMock).not.toHaveBeenCalled();
   });
 });

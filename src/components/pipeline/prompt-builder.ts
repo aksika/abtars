@@ -13,7 +13,7 @@ import type { AbtarsMemoryRuntime, MemoryWritePhase } from "../memory-runtime.js
 import { attemptMemoryMutation } from "../memory-runtime.js";
 import { inboundExecutionKey, inboundMessageKey } from "../memory-operation-key.js";
 import type { ConversationBuffer } from "../conversation-buffer.js";
-import type { InboundMessage } from "../../types/platform.js";
+import { isTrustedScheduledAnnouncement, type InboundMessage } from "../../types/platform.js";
 import type { UserRegistry } from "../user-registry.js";
 import { sessionTypeOf, type DurableContextIntent } from "../spin-types.js";
 
@@ -161,7 +161,7 @@ export async function buildPrompt(
     // #1724: a trusted scheduled-announcement event carries its durable,
     // card-derived identity — delivery retries must deduplicate against the
     // same inbound row instead of recording a fresh turn per attempt.
-    const trustedEventId = msg.internal?.kind === "scheduled_announcement" ? msg.internal.eventId : undefined;
+    const trustedEventId = isTrustedScheduledAnnouncement(msg.internal) ? msg.internal.eventId : undefined;
     const messageIdStr = trustedEventId
       ?? (typeof msg.messageId === "number" || typeof msg.messageId === "string" ? String(msg.messageId) : "");
     const messageTimestamp = msg.timestamp;

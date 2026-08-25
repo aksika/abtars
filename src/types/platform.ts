@@ -51,6 +51,17 @@ export interface InternalScheduledAnnouncementMetadata {
   cardId: number;
 }
 
+/** Runtime trust check for the scheduler-only metadata. The discriminant is
+ * intentionally insufficient on its own: platform-shaped objects can carry
+ * ordinary string fields, while this non-serializable token is constructed
+ * only by MainConversationIngress. */
+export function isTrustedScheduledAnnouncement(
+  internal: InternalBootMetadata | InternalScheduledAnnouncementMetadata | undefined,
+): internal is InternalScheduledAnnouncementMetadata {
+  return internal?.kind === "scheduled_announcement"
+    && internal[SCHEDULED_ANNOUNCEMENT_TOKEN] === true;
+}
+
 export interface SendOpts {
   threadId?: string;
   parseMode?: string;
