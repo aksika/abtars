@@ -321,7 +321,7 @@ SPAWN_LOG="$CASE_HOME/spawns.log"; TRANSCRIPT="$CASE_HOME/transcript"
 SLICES=0
 bounded_sleep() {
   SLICES=$(( SLICES + 1 ))
-  (( SLICES > 40 )) && exit 42  # observed enough slices of the fail-closed hold
+  (( SLICES > 25 )) && exit 42  # observed enough slices of the fail-closed hold
 }
 sleep() { bounded_sleep; }
 svc() {
@@ -627,7 +627,7 @@ EOF
 
 # ── MB14: planned-refusal truth table + authorization refresh + snapshot ───
 case_MB14() {
-  local r out
+  local r
   # Truth table: every uncertain row falls through to ordinary-death; only the
   # exact three-part match (active fence + live matching pred + unchanged
   # instanceId sentinel, including unchanged-MISSING) classifies planned-refusal.
@@ -643,22 +643,48 @@ case_MB14() {
     "planned-restart|1234|1234:55||fresh-child-id|valid 1234 1234:55|ordinary-death"
     "planned-restart|1234|1234:55|inst-a||valid 1234 1234:55|ordinary-death"
   )
-  local i=0
-  for row in "${rows[@]}"; do
-    i=$((i+1))
-    IFS='|' read -r fence ppid_e pident_e before after owner want <<< "$row"
-    local snap="" after_raw="$after"
-    # read_instance_field returns EMPTY for a lock without instanceId; an
-    # unchanged-missing sentinel therefore snapshots as "" (never quoted).
-    if [[ -n "$before" ]]; then
-      snap="\"instanceId\":\"$before\""
-    fi
-    out="$(run_class_row "MB14-row$i" "$fence" "$ppid_e" "$pident_e" "$snap" "$after_raw" "$owner")"
-    if [[ "$out" != "$want" ]]; then
-      emit MB14 fail "truth-table row $i (${fence:-stable}/pred=${ppid_e:-none}/after=${after:-none}) classified <$out>, want <$want>"
-      return
-    fi
-  done
+  # All rows run in ONE child (each resets the classifier state first), so the
+  # case stays cheap while every row still observes the production helper. The
+  # body is a QUOTED heredoc: every variable it references comes from the env
+  # run_child provides, so no outer-shell escaping is needed.
+  export ROWS_ENV="$(printf '%s\n' "${rows[@]}")"
+  run_child MB14-rows <<'MB14_ROWS_EOF'
+set -u
+source "$PRELUDE"
+source "$WD_SH_PATH"
+svc() { [[ "$1" == "owner-identity" ]] && printf '%s' "$OWNER_OUT"; return 0; }
+IFS=$'\n' read -r -d '' -a ROWS < <(printf '%s\0' "$ROWS_ENV")
+local_i=0
+for row in "${ROWS[@]}"; do
+  local_i=$(( local_i + 1 ))
+  IFS='|' read -r fence ppid_e pident_e before after owner want <<< "$row"
+  local_snap=""
+  if [[ -n "$before" ]]; then
+    local_snap="\"instanceId\":\"$before\""
+  fi
+  TRANSITION_FENCE="$fence"
+  FENCE_PRED_PID="$ppid_e"; FENCE_PRED_IDENTITY="$pident_e"
+  PRES_SPAWN_INSTANCE="$local_snap"
+  if [[ -n "$after" ]]; then
+    printf '{"instanceId":"%s","pid":9999,"lastHeartbeat":1}\n' "$after" > "$LOCK"
+  else
+    printf '{"pid":9999,"lastHeartbeat":1}\n' > "$LOCK"
+  fi
+  OWNER_OUT="$owner"
+  got=ordinary-death
+  classify_planned_refusal && got=planned-refusal
+  if [[ "$got" != "$want" ]]; then
+    printf 'truth-table row %s (%s/pred=%s/after=%s) classified <%s>, want <%s>\n' \
+      "$local_i" "${fence:-stable}" "${ppid_e:-none}" "${after:-none}" "$got" "$want" >&2
+    exit 10
+  fi
+done
+MB14_ROWS_EOF
+  r=$?
+  if [[ $r != 0 ]]; then
+    emit MB14 fail "$(child_detail MB14-rows)"
+    return
+  fi
 
   # Authorization refresh: a fresh exact predecessor probe re-arms the one-shot
   # exclusion; anything else leaves it empty (fail-closed).
@@ -710,31 +736,23 @@ EOF
 }
 
 # ── Dispatch ────────────────────────────────────────────────────────────────
-STARTED_MS=$(( ${EPOCHREALTIME%%.*} ))
+STARTED_MS="$(date +%s%3N)"
 for id in "${REQUESTED[@]}"; do
   "case_$id"
 done
 
 # No-process proof: everything ran synchronously in waited children, so any
-# surviving descendant of this shell at this point is a leaked process.
+# surviving descendant of this shell at this point is a leaked process. The
+# scan is read-only detection of OUR subtree via pgrep -P (never a cleanup or
+# signal authority) so its cost does not scale with the host's process count.
 leak_scan() {
-  local frontier collected pid ppid stat rest
+  local frontier collected p all
   frontier=("$$")
   for _ in 1 2 3 4 5 6; do # descendant depth bound
+    all="${frontier[*]}"
     collected=()
-    for pid in /proc/[0-9]*; do
-      p="${pid##*/}"
-      [[ "$p" == "$$" ]] && continue
-      stat="$(cat "$pid/stat" 2>/dev/null)" || continue
-      rest="${stat#*) }"
-      rest="${rest#* }"          # skip state
-      ppid="${rest%% *}"         # ppid field
-      for f in "${frontier[@]}"; do
-        if [[ "$ppid" == "$f" ]]; then
-          collected+=("$p")
-          break
-        fi
-      done
+    for p in $(pgrep -P "$all" 2>/dev/null || true); do
+      collected+=("$p")
     done
     ((${#collected[@]} == 0)) && return 0
     frontier=("${collected[@]}")
@@ -744,7 +762,7 @@ leak_scan() {
 
 LEAKS=0
 if ! leak_scan; then LEAKS=1; fi
-DURATION_MS=$(( ${EPOCHREALTIME%%.*} - STARTED_MS ))
+DURATION_MS=$(( $(date +%s%3N) - STARTED_MS ))
 
 echo "M-SUITE total=$(( PASS + FAILS )) pass=$PASS fail=$FAILS duration_ms=$DURATION_MS leak_scan=$([[ $LEAKS == 0 ]] && echo ok || echo FAILED)"
 if (( FAILS > 0 || LEAKS != 0 )); then

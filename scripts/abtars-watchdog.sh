@@ -278,57 +278,73 @@ wait_for_resume_heartbeat() {
 # home could claim — they block the spawn and are logged LOUDLY (one event line
 # per change of the blocking set, PID list included); a silent freeze is a
 # spec violation (B13).
-spawn_if_proven_empty() {
-  local proof state="" blocked=""
-  while true; do
-    if [[ -n "${EXCLUDE_PID:-}" && -n "${EXCLUDE_IDENTITY:-}" ]]; then
-      proof="$(svc prove-empty "$EXCLUDE_PID" "$EXCLUDE_IDENTITY" 2>/dev/null || echo inconclusive)"
-    else
-      proof="$(svc prove-empty 2>/dev/null || echo inconclusive)"
-    fi
-    blocked="$(printf '%s\n' "$proof" | grep '^blocked-unattributable ' || true)"
-    case "$proof" in
-      empty)
-        # One-shot consumption: the exception authorizes exactly this attempt.
+#
+# Task 8A split: the authorization decision lives in prove_empty_once (ONE
+# prove-empty invocation, no polling, no sleeping); spawn_if_proven_empty is
+# only the recovery-path wrapper that repeats it on the existing poll cadence.
+# Verdict of the last prove_empty_once call (fixed vocabulary):
+#   spawned | occupied | inconclusive
+SPAWN_PROOF_VERDICT=""
+
+prove_empty_once() {
+  local proof blocked=""
+  SPAWN_PROOF_VERDICT="inconclusive"
+  if [[ -n "${EXCLUDE_PID:-}" && -n "${EXCLUDE_IDENTITY:-}" ]]; then
+    proof="$(svc prove-empty "$EXCLUDE_PID" "$EXCLUDE_IDENTITY" 2>/dev/null || echo inconclusive)"
+  else
+    proof="$(svc prove-empty 2>/dev/null || echo inconclusive)"
+  fi
+  blocked="$(printf '%s\n' "$proof" | grep '^blocked-unattributable ' || true)"
+  case "$proof" in
+    empty)
+      # One-shot consumption: the exception authorizes exactly this attempt.
+      EXCLUDE_PID=""
+      EXCLUDE_IDENTITY=""
+      # #1719 R1: snapshot bridge.lock's instanceId immediately before the
+      # authorized spawn. The refusing child never reaches initBridgeLock,
+      # so an UNCHANGED value after its exit proves it never took ownership;
+      # a fresh value proves a genuine owner-generation failure (A24).
+      PRES_SPAWN_INSTANCE="$(read_instance_field)"
+      spawn_bridge
+      SPAWN_PROOF_VERDICT="spawned"
+      return 0
+      ;;
+    occupied*|inconclusive)
+      # Any other/unknown process or an incomplete snapshot vetoes the
+      # replacement: the exception dies with the attempt (R3).
+      if [[ -n "${EXCLUDE_PID:-}" ]]; then
+        logw "Planned-replacement exclusion vetoed (${proof%%$'\n'*}) — ordinary zero-process proof applies"
         EXCLUDE_PID=""
         EXCLUDE_IDENTITY=""
-        # #1719 R1: snapshot bridge.lock's instanceId immediately before the
-        # authorized spawn. The refusing child never reaches initBridgeLock,
-        # so an UNCHANGED value after its exit proves it never took ownership;
-        # a fresh value proves a genuine owner-generation failure (A24).
-        PRES_SPAWN_INSTANCE="$(read_instance_field)"
-        spawn_bridge
-        return 0
-        ;;
-      occupied*|inconclusive)
-        # Any other/unknown process or an incomplete snapshot vetoes the
-        # replacement: the exception dies with the attempt (R3).
-        if [[ -n "${EXCLUDE_PID:-}" ]]; then
-          logw "Planned-replacement exclusion vetoed (${proof%%$'\n'*}) — ordinary zero-process proof applies"
-          EXCLUDE_PID=""
-          EXCLUDE_IDENTITY=""
-        fi
-        # R2.1 loud block: unattributable relative-spelled processes carry
-        # PID + argv + reason; one event line per change of the blocking set.
-        if [[ -n "$blocked" ]]; then
-          log_event "blocked:$blocked" "Spawn withheld: $blocked — cannot be attributed to any home; restart or terminate these processes to restore supervision"
-        fi
-        case "$proof" in
-          occupied*)
-            if [[ "$state" != "occupied" ]]; then
-              logw "Spawn withheld: ${proof%%$'\n'*} exact same-home process(es) — refusing to create a duplicate"
-            fi
-            state="occupied"
-            ;;
-          *)
-            if [[ "$state" != "inconclusive" ]]; then
-              logw "Spawn withheld: process enumeration inconclusive"
-            fi
-            state="inconclusive"
-            ;;
-        esac
-        ;;
-    esac
+      fi
+      # R2.1 loud block: unattributable relative-spelled processes carry
+      # PID + argv + reason; one event line per change of the blocking set.
+      if [[ -n "$blocked" ]]; then
+        log_event "blocked:$blocked" "Spawn withheld: $blocked — cannot be attributed to any home; restart or terminate these processes to restore supervision"
+      fi
+      case "$proof" in
+        occupied*)
+          log_event "withheld:${proof%%$'\n'*}" "Spawn withheld: ${proof%%$'\n'*} exact same-home process(es) — refusing to create a duplicate"
+          SPAWN_PROOF_VERDICT="occupied"
+          ;;
+        *)
+          log_event "withheld:inconclusive" "Spawn withheld: process enumeration inconclusive"
+          SPAWN_PROOF_VERDICT="inconclusive"
+          ;;
+      esac
+      return 0
+      ;;
+  esac
+}
+
+# Recovery-path wrapper: repeats the one-shot proof until it authorizes a
+# spawn, delegating every consumption/veto/logging rule to prove_empty_once.
+# Startup admission NEVER loops here — an occupied/inconclusive result must
+# return to the reconciliation tick instead of starving it (Task 8A / B11).
+spawn_if_proven_empty() {
+  while true; do
+    prove_empty_once
+    [[ "$SPAWN_PROOF_VERDICT" == "spawned" ]] && return 0
     poll_state
     sleep "$POLL_INTERVAL"
   done
@@ -388,6 +404,33 @@ handle_reconciliation_line() {
       RECON_COUNT=0
       ;;
   esac
+}
+
+# Shared typed-boundary invocation (#1711 Task 8A): exactly ONE reconcile call
+# per tick, used by BOTH the steady-state monitor loop and startup admission.
+# Forwards the existing fence and frozen-heartbeat window evidence, passes the
+# fixed-vocabulary result to the opaque-token counter, and records the bare
+# decision word in RECON_DECISION for callers that branch on it. Empty means
+# the boundary did not run or said nothing — always fail-closed for callers.
+RECON_DECISION=""
+run_reconciliation_tick() {
+  RECON_DECISION=""
+  observe_liveness_heartbeat
+  # (#1719 R4.1) While an abandoned-transition episode is open the boundary
+  # is NOT invoked: both channels share the one durable episode marker, and
+  # the boundary clears it on every clean decision — which would silently
+  # erase the operator-visible transition report one tick after it was
+  # written. Supervision stays fully live here (validated sole owner,
+  # stale-heartbeat containment remains shell-side); escalation authority
+  # for the predecessor stays with #1711's reconciliation executor.
+  if [[ "${TRANSITION_FAILED_OPEN:-0}" == "1" ]]; then
+    return 0
+  fi
+  local _line
+  _line="$(svc reconcile "$TRANSITION_FENCE" "${LAST_HB_PREV:--}" "$HB_ADVANCED" 2>/dev/null || true)"
+  [[ -z "$_line" ]] && return 0
+  RECON_DECISION="${_line%% *}"; RECON_DECISION="${RECON_DECISION#decision=}"
+  handle_reconciliation_line "$_line"
 }
 
 # ── Planned-fence refusal classification (#1719) ────────────────────────────
@@ -461,15 +504,79 @@ spawn_bridge() {
   LIVENESS_WINDOW_STARTED=0
 }
 
-# Adopt one valid existing bridge, otherwise hold until a complete enumeration
-# proves zero same-home processes, then spawn exactly one (R6.4 + #1711 R3).
+# Adopt one valid existing bridge; otherwise enter STARTUP ADMISSION (v6/B11).
+# The v6 defect: failed adoption fell straight into the BLOCKING spawn-proof
+# loop, so a live exact process behind an unvalidated lock never reached the
+# reconciliation boundary — "Adoption skipped" + "Spawn withheld" forever, no
+# decision, no containment, permanent hold.
 adopt_or_spawn() {
   if adopt_validated_bridge; then
     return 0
   fi
-  logw "Adoption skipped (${_adopt_status:-none}) — requiring zero-process proof before spawn"
+  logw "Adoption skipped (${_adopt_status:-none}) — entering startup reconciliation admission"
   PID=""
-  spawn_if_proven_empty
+  startup_admission
+}
+
+# Startup admission loop (requirements R3 "Startup admission and non-blocking
+# proof"): poll durable commands, retry FRESH validated adoption, run the SAME
+# typed reconciliation boundary as steady state, and invoke the ONE-SHOT
+# zero-process proof only after a complete `none` decision. An occupied or
+# inconclusive proof returns control to the next tick — it must never sleep
+# inside the proof. While no trusted PID exists here, the cached-PID death,
+# stale-heartbeat, and child-reaping branches stay unreachable; a process that
+# becomes valid is freshly adopted before any containment acts on it.
+startup_admission() {
+  local _grace
+  while true; do
+    poll_state   # commands/desired-state first; stop still exits 2 (R3 order 1)
+
+    # A planned command claimed during the hold: its existing fence and
+    # one-shot replacement proof govern (R3) — same sequence as the
+    # post-death planned-restart branch, never the ordinary unplanned proof.
+    if [[ "$PLANNED_RESTART" -eq 1 ]]; then
+      PLANNED_RESTART=0
+      [[ "$(read_desired_state)" == "stopped" ]] && handle_stopped
+      if [[ -n "$EXCLUDE_PID" ]]; then
+        _grace=0
+        while (( _grace < 12 )); do
+          kill -0 "$EXCLUDE_PID" 2>/dev/null || break
+          poll_state
+          sleep "$POLL_INTERVAL"
+          _grace=$((_grace+1))
+        done
+      fi
+      spawn_if_proven_empty
+      return 0
+    fi
+
+    # Fence hard cap applies while holding an unvalidated population too
+    # (R7): a command may not create a permanent startup fence.
+    if [[ "$TRANSITION_FENCE" != "stable" ]] && (( $(date +%s) - FENCE_AT > 300 )); then
+      TRANSITION_FENCE="stable"
+      HB_ADVANCED=0
+      LAST_HB_PREV=""
+      LIVENESS_WINDOW_STARTED=0
+      EXCLUDE_PID=""
+      EXCLUDE_IDENTITY=""
+      REFUSAL_COUNT=0
+    fi
+
+    if adopt_validated_bridge; then
+      return 0   # fresh validated-owner adoption -> normal monitor loop
+    fi
+
+    run_reconciliation_tick   # R3 order 3 — same boundary as steady state
+
+    # R3 orders 4-5: only a complete none decision authorizes ONE zero-process
+    # proof attempt; occupied/inconclusive falls back to the next tick.
+    if [[ "$RECON_DECISION" == "none" && "$TRANSITION_FENCE" == "stable" ]]; then
+      prove_empty_once
+      [[ "$SPAWN_PROOF_VERDICT" == "spawned" ]] && return 0
+    fi
+
+    sleep "$POLL_INTERVAL"
+  done
 }
 
 # #1719: adoption half of adopt_or_spawn, extracted so fence-budget exhaustion
@@ -512,6 +619,7 @@ OWNERSHIP_EPISODE_OPEN=0
 LAST_EVENT_KEY=""
 RECON_TOKEN=""
 RECON_COUNT=0
+RECON_DECISION=""
 TRANSITION_FENCE="stable"
 FENCE_AT=0
 LAST_HB_PREV=""
@@ -557,25 +665,12 @@ while true; do
       continue
     fi
 
-    # Typed reconciliation boundary (#1711 Phase 2): one invocation per tick.
-    # The shell forwards its fence state and frozen-heartbeat window evidence;
-    # the boundary classifies, maintains the episode marker, and may nominate
-    # a containment candidate. The shell only counts opaque tokens.
-    #
-    # (#1719 R4.1) While an abandoned-transition episode is open the boundary
-    # is NOT invoked: both channels share the one durable episode marker, and
-    # the boundary clears it on every clean decision — which would silently
-    # erase the operator-visible transition report one tick after it was
-    # written. Supervision stays fully live here (validated sole owner,
-    # stale-heartbeat containment remains shell-side); escalation authority
-    # for the predecessor stays with #1711's reconciliation executor.
-    observe_liveness_heartbeat
-    if [[ "${TRANSITION_FAILED_OPEN:-0}" != "1" ]]; then
-      _recon_line="$(svc reconcile "$TRANSITION_FENCE" "${LAST_HB_PREV:--}" "$HB_ADVANCED" 2>/dev/null || true)"
-      if [[ -n "$_recon_line" ]]; then
-        handle_reconciliation_line "$_recon_line"
-      fi
-    fi
+    # Typed reconciliation boundary (#1711 Phase 2): one invocation per tick
+    # through the shared helper (Task 8A) — the same boundary startup
+    # admission runs. The shell forwards its fence state and frozen-heartbeat
+    # window evidence; the boundary classifies, maintains the episode marker,
+    # and may nominate a containment candidate. The shell only counts tokens.
+    run_reconciliation_tick
 
     # Bridge alive and still the validated process? Never trust a cached PID:
     # PID reuse must be classified before any signal is sent. Bounded retry
