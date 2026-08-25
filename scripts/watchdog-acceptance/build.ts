@@ -63,7 +63,7 @@ export function getProfileValues(name: string): ProfileValues {
 
 export function getProfile(name: string): TimingProfile {
   const v = getProfileValues(name);
-  return { name, transforms: [...watchdogTransforms(v), ...stateTransforms(v)] };
+  return { name, transforms: [...watchdogTransforms(v), ...stateTransforms(v), ...reconcileExecutorTransforms(v)] };
 }
 
 /**
@@ -92,6 +92,25 @@ function stateTransforms(v: ProfileValues): SourceTransform[] {
       target: "supervisor-state",
       find: "[0, 2000, 5000, 15000, 30000, 60000]",
       replace: `[${v.backoffMs.join(", ")}]`,
+      expectedCount: 1,
+    },
+  ];
+}
+
+/**
+ * reconcile-executor bundle inputs (#1711 R5 liveness staleness in
+ * src/supervisor/reconcile-executor.ts). Without this the executor demands a
+ * REAL 10-minute frozen heartbeat (2 x production 300s) while the shell-side
+ * window runs on the compressed profile STALE — so RB11's liveness escape can
+ * never arm inside any scenario deadline. Mirrors the shell-side `STALE`
+ * transform so both sides of the boundary agree on one compressed threshold.
+ */
+function reconcileExecutorTransforms(v: ProfileValues): SourceTransform[] {
+  return [
+    {
+      target: "reconcile-executor",
+      find: "export const PRODUCTION_STALE_MS = 300_000;",
+      replace: `export const PRODUCTION_STALE_MS = ${v.staleS * 1000};`,
       expectedCount: 1,
     },
   ];
@@ -197,12 +216,16 @@ export class SuiteBuilder {
     const timingPluginFor = (profileName: string): esbuild.Plugin => ({
       name: "timing-patch",
       setup(build) {
-        const escaped = "supervisor/state.ts".replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-        build.onLoad({ filter: new RegExp(`${escaped}$`) }, async (args) => ({
-          contents: applyTransforms(readFileSync(args.path, "utf-8"), getProfile(profileName).transforms, "supervisor-state"),
-          loader: "ts",
-          resolveDir: dirname(args.path),
-        }));
+        const patchable = ["supervisor/state.ts", "supervisor/reconcile-executor.ts"];
+        for (const rel of patchable) {
+          const escaped = rel.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+          const label = rel === "supervisor/state.ts" ? "supervisor-state" : "reconcile-executor";
+          build.onLoad({ filter: new RegExp(`${escaped}$`) }, async (args) => ({
+            contents: applyTransforms(readFileSync(args.path, "utf-8"), getProfile(profileName).transforms, label),
+            loader: "ts",
+            resolveDir: dirname(args.path),
+          }));
+        }
       },
     });
 
