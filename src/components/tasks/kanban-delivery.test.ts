@@ -162,6 +162,147 @@ describe("#1520 delivery separation", () => {
   });
 });
 
+describe("deliverCard — #1724 Main-owned scheduled T announcements", () => {
+  function makeScheduledTCard(resultSummary = "Good morning aksika!"): import("./kanban-board.js").KanbanCard {
+    const id = board.kanbanEnqueue("Morning greeting", "task", "run-t-1", {
+      type: "T",
+      deliveryMode: "announce",
+      chatId: "100",
+      deliveryReady: false,
+    });
+    board.kanbanRunning(id);
+    board.kanbanComplete(id, null, resultSummary);
+    board.kanbanSetDeliveryReady(id);
+    return board.kanbanGetCard(id)!;
+  }
+
+  function makeKAnnounceCard(): import("./kanban-board.js").KanbanCard {
+    const id = board.kanbanEnqueue("Spanish tutor kickoff", "task", "run-k-1", {
+      type: "K",
+      deliveryMode: "announce",
+      chatId: "100",
+    });
+    board.kanbanRunning(id);
+    board.kanbanComplete(id, null, "Hola! Ready?");
+    return board.kanbanGetCard(id)!;
+  }
+
+  it("routes a matching scheduled T announce through Main and never calls the raw sender", async () => {
+    const card = makeScheduledTCard();
+    const deps = makeDeps();
+    const announceToMain = vi.fn().mockResolvedValue("sent" as const);
+    (deps as Record<string, unknown>).announceToMain = announceToMain;
+
+    await deliverCard(card, deps);
+
+    expect(deps.sendMessage).not.toHaveBeenCalled();
+    expect(deps.sendDocument).not.toHaveBeenCalled();
+    expect(announceToMain).toHaveBeenCalledTimes(1);
+    expect(announceToMain.mock.calls[0]![0].id).toBe(card.id);
+    expect(announceToMain.mock.calls[0]![0].result_summary).toBe("Good morning aksika!");
+    expect(board.kanbanGetCard(card.id)!.status).toBe("delivered");
+    expect(board.kanbanGetCard(card.id)!.delivery_result).toBe("sent");
+  });
+
+  it("intercepts a matching card even when a result_path exists — Main is the only route", async () => {
+    const id = board.kanbanEnqueue("Morning greeting", "task", "run-t-2", { type: "T", deliveryMode: "announce", chatId: "100" });
+    board.kanbanRunning(id);
+    board.kanbanComplete(id, join(TEST_HOME, "stray.md"), "hello");
+    const deps = makeDeps();
+    const announceToMain = vi.fn().mockResolvedValue("sent" as const);
+    (deps as Record<string, unknown>).announceToMain = announceToMain;
+
+    await deliverCard(board.kanbanGetCard(id)!, deps);
+
+    expect(deps.sendDocument).not.toHaveBeenCalled();
+    expect(deps.sendMessage).not.toHaveBeenCalled();
+    expect(announceToMain).toHaveBeenCalledOnce();
+    expect(board.kanbanGetCard(id)!.status).toBe("delivered");
+  });
+
+  it("maps not_sent to definitely_not_sent and permits exactly one rerun that succeeds", async () => {
+    const card = makeScheduledTCard();
+    const deps = makeDeps();
+    const announceToMain = vi.fn().mockResolvedValueOnce("not_sent" as const).mockResolvedValueOnce("sent" as const);
+    (deps as Record<string, unknown>).announceToMain = announceToMain;
+
+    await deliverCard(card, deps);
+    expect(board.kanbanGetCard(card.id)!.delivery_result).toBe("definitely_not_sent");
+    expect(board.kanbanGetCard(card.id)!.status).toBe("done");
+
+    await deliverCard(board.kanbanGetCard(card.id)!, deps);
+    expect(announceToMain).toHaveBeenCalledTimes(2);
+    expect(board.kanbanGetCard(card.id)!.status).toBe("delivered");
+
+    await deliverCard(board.kanbanGetCard(card.id)!, deps);
+    expect(announceToMain).toHaveBeenCalledTimes(2);
+  });
+
+  it("maps unknown to operator-review semantics with no automatic resend", async () => {
+    const card = makeScheduledTCard();
+    const deps = makeDeps();
+    const announceToMain = vi.fn().mockResolvedValue("unknown" as const);
+    (deps as Record<string, unknown>).announceToMain = announceToMain;
+
+    await deliverCard(card, deps);
+    await deliverCard(board.kanbanGetCard(card.id)!, deps);
+    await deliverCard(board.kanbanGetCard(card.id)!, deps);
+    expect(announceToMain).toHaveBeenCalledTimes(1);
+    expect(board.kanbanGetCard(card.id)!.delivery_result).toBe("unknown");
+  });
+
+  it("treats an unwired Main ingress as definitely-not-sent — no direct fallback send", async () => {
+    const card = makeScheduledTCard();
+    const deps = makeDeps();
+
+    await deliverCard(card, deps);
+
+    expect(deps.sendMessage).not.toHaveBeenCalled();
+    expect(deps.sendDocument).not.toHaveBeenCalled();
+    expect(board.kanbanGetCard(card.id)!.delivery_result).toBe("definitely_not_sent");
+  });
+
+  it("keeps a scheduled K role card on its direct delivery route", async () => {
+    const card = makeKAnnounceCard();
+    const deps = makeDeps();
+    const announceToMain = vi.fn().mockResolvedValue("sent" as const);
+    (deps as Record<string, unknown>).announceToMain = announceToMain;
+
+    await deliverCard(card, deps);
+
+    expect(announceToMain).not.toHaveBeenCalled();
+    expect(deps.sendMessage).toHaveBeenCalledOnce();
+    expect(deps.sendMessage.mock.calls[0]![1]).toContain("Hola! Ready?");
+    expect(board.kanbanGetCard(card.id)!.status).toBe("delivered");
+  });
+
+  it("keeps a non-task announce card on its direct delivery route", async () => {
+    const card = makeCard({ delivery_mode: "announce", result_summary: "analysis complete" });
+    const deps = makeDeps();
+    const announceToMain = vi.fn().mockResolvedValue("sent" as const);
+    (deps as Record<string, unknown>).announceToMain = announceToMain;
+
+    await deliverCard(card, deps);
+
+    expect(announceToMain).not.toHaveBeenCalled();
+    expect(deps.sendMessage).toHaveBeenCalledOnce();
+    expect(board.kanbanGetCard(card.id)!.status).toBe("delivered");
+  });
+
+  it("maps an ingress rejection to unknown when the callback throws", async () => {
+    const card = makeScheduledTCard();
+    const deps = makeDeps();
+    const announceToMain = vi.fn().mockRejectedValue(new Error("pipeline exploded"));
+    (deps as Record<string, unknown>).announceToMain = announceToMain;
+
+    await deliverCard(card, deps);
+
+    expect(deps.sendMessage).not.toHaveBeenCalled();
+    expect(board.kanbanGetCard(card.id)!.delivery_result).toBe("unknown");
+    expect(board.kanbanGetCard(card.id)!.status).toBe("done");
+  });
+});
+
 describe("deliverCard — O-type acceptance gate (#1595)", () => {
   function makeOCard(initialState: string): { id: number; card: import("./kanban-board.js").KanbanCard } {
     // Non-scheduled project root: the acceptance gate is the behavior under

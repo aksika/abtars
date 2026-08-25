@@ -132,6 +132,13 @@ export interface BootCtx {
   selfHealerTask: import("../types/index.js").HeartbeatTask | null;
   /** #1688: sole SHA admission/transition owner. Set by phase-pipeline-deps. */
   shaCoordinator: import("../components/sha/sha-incident-coordinator.js").ShaIncidentCoordinator | null;
+  /**
+   * #1724: trusted synthetic-Main-turn boundary for scheduled announcements.
+   * Composed once by registerTier3Tasks (inside phase-pipeline-deps) over the
+   * pipeline deps and the platform adapter registry; consumed by the Kanban
+   * delivery closure. Resolves adapters lazily at delivery time.
+   */
+  mainIngress: import("../components/main-conversation-ingress.js").MainConversationIngress | null;
   /** #1688: stage-progression nerve subscriber disposer (shutdown). */
   _shaStageSubscriberDisposer?: () => void;
   dashboardServer: IDashboardSlot | null;
@@ -263,6 +270,7 @@ export function createBootCtx(overrides: Partial<BootCtx> = {}): BootCtx {
     emergencyExecution: null,
     selfHealerTask: null,
     shaCoordinator: null,
+    mainIngress: null,
     dashboardServer: null,
     agentApiServer: null,
     actionGate: null,

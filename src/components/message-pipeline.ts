@@ -46,7 +46,7 @@ import type { AbtarsMemoryRuntime } from "./memory-runtime.js";
 import type { IdleSave } from "./idle-save.js";
 import type { ConversationBuffer } from "./conversation-buffer.js";
 import type { RunningJob } from "./tasks/task-queue.js";
-import type { InboundMessage, PlatformAdapter, DeliveryCorrelation } from "../types/platform.js";
+import type { InboundMessage, PlatformAdapter, DeliveryCorrelation, MainDeliveryResult } from "../types/platform.js";
 import { BOOT_GREETING_TOKEN } from "../types/platform.js";
 import { updateOwnedBridgeLockField } from "./transport/bridge-lock-transport.js";
 import { createMessageContext, runPipeline, voiceMiddleware, sessionSelectionMiddleware, commandMiddleware, pausedGuardMiddleware, busyGuardMiddleware, emergencyRouteMiddleware } from "./pipeline/index.js";
@@ -215,6 +215,15 @@ export interface PipelineDeps extends TransportDeps, MemoryDeps, VoiceDeps {
 }
 
 /**
+ * #1724: terminal delivery receipt for trusted internal submissions.
+ * `settle` is invoked exactly once per turn with the final outcome; later
+ * calls are ignored. Ordinary external callers pass no receipt.
+ */
+export interface TurnReceipt {
+  settle: (outcome: MainDeliveryResult) => void;
+}
+
+/**
  * Process an inbound message through the full pipeline.
  * The adapter has already handled platform-specific pre-processing
  * (voice transcription, mention stripping, group filtering, security).
@@ -223,7 +232,24 @@ export async function handleInboundMessage(
   msg: InboundMessage,
   adapter: PlatformAdapter,
   deps: PipelineDeps,
+  receipt?: TurnReceipt,
 ): Promise<void> {
+  // #1724: outcome tracking for receipt-bearing internal submissions. Every
+  // settle call no-ops without a receipt, so ordinary external-message
+  // behavior is unchanged. Classification contract:
+  //   - "sent"      only after every response chunk was externally delivered
+  //                 and the turn is not reaction-only;
+  //   - "not_sent"  on rejected admission (busy/paused/handled), blocked
+  //                 hooks/transport, empty/no-reply/reaction-only turns, or a
+  //                 failure before any chunk was sent;
+  //   - "unknown"   on an adapter failure after at least one chunk was sent.
+  let settled = false;
+  let sentAnyChunk = false;
+  const settle = (outcome: MainDeliveryResult): void => {
+    if (!receipt || settled) return;
+    settled = true;
+    receipt.settle(outcome);
+  };
   // Run early middleware (emergency → voice → select → coding-route →
   // commands → paused → busy guard)
   // #1635: codingRouteMiddleware sits between session selection and commands so
@@ -234,7 +260,12 @@ export async function handleInboundMessage(
   // selection, coding routing, commands, guards, and BeforeMessage.
   const ctx = createMessageContext(msg, adapter, deps);
   await runPipeline(ctx, [emergencyRouteMiddleware, voiceMiddleware, sessionSelectionMiddleware, codingRouteMiddleware, commandMiddleware, pausedGuardMiddleware, busyGuardMiddleware]);
-  if (ctx.handled) return;
+  if (ctx.handled) {
+    // #1724: rejected admission (paused guard, no-queue busy rejection,
+    // emergency claim, command) — definitely nothing was delivered.
+    settle("not_sent");
+    return;
+  }
 
   // --- BeforeMessage hook ---
   if (hasHooks("BeforeMessage")) {
@@ -245,6 +276,7 @@ export async function handleInboundMessage(
     });
     if (result?.decision === "block") {
       logInfo(TAG, `BeforeMessage hook blocked: ${result.reason ?? "no reason"}`);
+      settle("not_sent");
       return;
     }
   }
@@ -297,11 +329,13 @@ export async function handleInboundMessage(
         } catch (fallbackErr) {
           logWarn(TAG, `A fallback transport attach failed for ${effectiveSessionId}: ${fallbackErr instanceof Error ? fallbackErr.message : String(fallbackErr)}`);
           await adapter.sendMessage(msg.channelId, `⚠️ ${fallbackErr instanceof Error ? fallbackErr.message : String(fallbackErr)}`, { threadId: msg.threadId }).catch(err => logAndSwallow(TAG, "send fallback-transport error notice", err));
+          settle("not_sent");
           return;
         }
       } else {
         logWarn(TAG, `ensureSessionTransport failed for ${effectiveSessionId}: ${err instanceof Error ? err.message : String(err)}`);
         await adapter.sendMessage(msg.channelId, `⚠️ ${err instanceof Error ? err.message : String(err)}`, { threadId: msg.threadId }).catch(err2 => logAndSwallow(TAG, "send transport error notice", err2));
+        settle("not_sent");
         return;
       }
     }
@@ -359,6 +393,7 @@ export async function handleInboundMessage(
 
     if (builtPrompt === "__INJECTION_BLOCKED__") {
       await adapter.sendMessage(channelId, "⛔ Message blocked — suspicious content detected.", { threadId: msg.threadId });
+      settle("not_sent");
       return;
     }
 
@@ -606,6 +641,9 @@ export async function handleInboundMessage(
     const rawResponse = reconciledResponse;
     const { text: cleanedText, reactionEmoji, noReply, topics } = cleanResponse(rawResponse);
     let userResponse = cleanedText;
+    // #1724: a reaction-only turn is a chat control signal, never a
+    // deliverable announcement payload — it must not settle as "sent".
+    const reactionOnly = !cleanedText && Boolean(reactionEmoji);
 
     // #1397: Capture stable execution ID before async cleanup may clear it.
     const deliveryCorrelation: DeliveryCorrelation | undefined =
@@ -631,7 +669,7 @@ export async function handleInboundMessage(
     // after response normalization/redaction and before chunking, send, TTS,
     // or assistant-memory write. Empty, reaction-only, no-reply, think-only,
     // or failed-generation outcomes bypass composition AND settlement.
-    const bootQuestion = msg.text === BOOT_GREETING_TEXT && msg.internal?.[BOOT_GREETING_TOKEN] === true && msg.internal.kind === "boot_greeting"
+    const bootQuestion = msg.text === BOOT_GREETING_TEXT && msg.internal?.kind === "boot_greeting" && msg.internal[BOOT_GREETING_TOKEN] === true
       ? msg.internal.dreamQuestion
       : undefined;
     const bootQuestionDelivered = Boolean(bootQuestion?.id && bootQuestion.text && userResponse.trim().length > 0);
@@ -648,12 +686,18 @@ export async function handleInboundMessage(
       if (!userResponse && reactionEmoji) {
         userResponse = reactionEmoji;
       }
-      if (!userResponse && noReply) return;
+      if (!userResponse && noReply) {
+        settle("not_sent");
+        return;
+      }
       if (userResponse) {
         const chunks = adapter.chunkResponse(userResponse);
         for (const chunk of chunks) {
           const clean = chunk.replace(/\[TOPICS:\s*.+?\]/gi, "").replace(/\[REACT:.+?\]/gi, "").trim();
-          if (clean) await retrySend(() => adapter.sendMessage(channelId, clean, { threadId: msg.threadId, deliveryCorrelation }));
+          if (clean) {
+            await retrySend(() => adapter.sendMessage(channelId, clean, { threadId: msg.threadId, deliveryCorrelation }));
+            sentAnyChunk = true;
+          }
         }
       }
       // Record assistant response to memory (skipped for K — skill-isolated).
@@ -681,6 +725,10 @@ export async function handleInboundMessage(
       if (assistantDurablyRecorded) {
         scheduleAutomaticCompaction(deps, userId, activeSessionId, durableContextIntent);
       }
+      // #1724: terminal receipt — after all chunks were externally delivered
+      // (and the assistant record attempt completed), never for a
+      // reaction-only turn.
+      settle(!reactionOnly && sentAnyChunk ? "sent" : "not_sent");
       if (isVoice && ttsConfig && adapter.sendVoice) {
         try {
           const audio = await synthesizeSpeech(bootQuestionDelivered ? userResponse : cleanAnswer || response, ttsConfig);
@@ -702,17 +750,21 @@ export async function handleInboundMessage(
     if (!userResponse) {
       if (noReply) {
         logDebug(TAG, "LLM returned [NO_REPLY], dropping silently");
+        settle("not_sent");
         return;
       }
       if (transport.toolCallsSucceeded > 0) {
         logDebug(TAG, `Empty text but ${transport.toolCallsSucceeded} tool call(s) succeeded — suppressing fallback`);
         if (adapter.setReaction && msg.messageId) await adapter.setReaction(channelId, msg.messageId, "").catch(err => logAndSwallow(TAG, "adapter call", err));
+        settle("not_sent");
+        return;
       } else {
         logWarn(TAG, "Empty response from transport");
         if (adapter.setReaction && msg.messageId) await adapter.setReaction(channelId, msg.messageId, "🤷");
         await adapter.sendMessage(channelId, "🤷 Model returned an empty response. Try again or /reset.", { threadId: msg.threadId });
+        settle("not_sent");
+        return;
       }
-      return;
     }
 
     // --- Clear 👀 reaction ---
@@ -730,6 +782,7 @@ export async function handleInboundMessage(
       if (clean) {
         await adapter.sendTyping?.(channelId, msg.threadId);
         lastSentMsgId = await retrySend(() => adapter.sendMessage(channelId, clean, { threadId: msg.threadId, deliveryCorrelation }));
+        sentAnyChunk = true;
       }
     }
 
@@ -784,6 +837,11 @@ export async function handleInboundMessage(
     if (assistantDurablyRecorded) {
       scheduleAutomaticCompaction(deps, userId, activeSessionId, durableContextIntent);
     }
+
+    // #1724: terminal receipt — after all chunks were externally delivered
+    // (and the assistant record attempt completed), never for a
+    // reaction-only turn.
+    settle(!reactionOnly && sentAnyChunk ? "sent" : "not_sent");
 
     // --- TTS for voice notes ---
     if (isVoice && ttsConfig && !pSession.fullMode && adapter.sendVoice) {
@@ -851,6 +909,9 @@ export async function handleInboundMessage(
       }).catch(err => logAndSwallow(TAG, "adapter call", err));
     }
   } catch (err) {
+    // #1724: a failure after some content was externally delivered is
+    // ambiguous (partial send) — anything earlier is definitely not_sent.
+    settle(sentAnyChunk ? "unknown" : "not_sent");
     // #287: model not found — surface actionable message to user
     if (err instanceof ModelNotFoundError) {
       logWarn(TAG, `Model not found for ${activeSessionId}: ${err.message}`);
@@ -877,7 +938,9 @@ export async function handleInboundMessage(
     // #1294 + #1298: Synthetic internal prompts are system-initiated, not user requests.
     // If they fail (e.g. models exhausted), don't surface an ❌ error reply — the user sees
     // errors on their own messages, and deliver/announce notifications are queryable via /kanban.
-    const SYNTHETIC_PREFIXES = ["[SESSION START]", "[SYSTEM]", "[TASK COMPLETE]"];
+    // #1724: scheduled-announcement events join the same convention; their
+    // delivery failure is owned by the Kanban retry/unknown state machine.
+    const SYNTHETIC_PREFIXES = ["[SESSION START]", "[SYSTEM]", "[TASK COMPLETE]", "[SCHEDULED TASK COMPLETED]"];
     const notifyUser = !SYNTHETIC_PREFIXES.some(p => text.startsWith(p));
     const isContextOverflow = errStr.includes("ValidationException")
       || (errStr.includes("context window") || errStr.includes("token limit") || errStr.includes("maximum context"));
@@ -917,6 +980,28 @@ export async function handleInboundMessage(
     releaseBusy(pSession, (m, a) => handleInboundMessage(m, a, deps));
     idleSave.reset(activeSessionId, chatId);
   }
+}
+
+/**
+ * #1724: receipt-bearing submission for TRUSTED internal events (scheduled
+ * announcements composed by MainConversationIngress). Unlike the fire-and-
+ * forget adapter inject path, the returned promise settles only when the
+ * turn reaches a terminal delivery outcome — queue acceptance is NOT
+ * delivery. External platform input can never reach this API with trusted
+ * metadata, because adapters never construct `msg.internal`.
+ */
+export async function submitTrustedInternalMessage(
+  msg: InboundMessage,
+  adapter: PlatformAdapter,
+  deps: PipelineDeps,
+): Promise<MainDeliveryResult> {
+  return new Promise<MainDeliveryResult>((resolve) => {
+    const receipt: TurnReceipt = { settle: (outcome) => resolve(outcome) };
+    void handleInboundMessage(msg, adapter, deps, receipt).catch((err) => {
+      logWarn(TAG, `Internal submission failed before the pipeline: ${err instanceof Error ? err.message : String(err)}`);
+      resolve("not_sent");
+    });
+  });
 }
 
 /**

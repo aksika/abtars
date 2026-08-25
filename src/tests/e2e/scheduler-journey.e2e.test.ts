@@ -143,6 +143,9 @@ interface SchedulerDoubles {
   pausedNotifications: string[];
   spawnedCommands: string[];
   dispatchedGoals: string[];
+  /** #1724: Main-owned announcement handoffs from the delivery boundary. */
+  mainAnnouncements: Array<{ eventId: string; cardId: number; title: string; result: string }>;
+  mainAnnouncementOutcome: "sent" | "not_sent" | "unknown";
 }
 
 let doubles: SchedulerDoubles;
@@ -170,7 +173,13 @@ function fakeAgentRunner(request: import("../../components/spin-types.js").SpinR
     err.code = "model_error";
     return Promise.reject(err);
   }
-  const cardId = board.kanbanEnqueue(request.title ?? entryId, "task", request.goal?.slice(0, 80));
+  // Production shape: spin.dispatch pre-creates the card with the request's
+  // type/delivery/chat identity (#1724 makes those fields route delivery).
+  const cardId = board.kanbanEnqueue(request.title ?? entryId, "task", request.goal?.slice(0, 80), {
+    type: request.type,
+    deliveryMode: request.delivery,
+    chatId: request.chatId,
+  });
   // Report tasks: the provider writes the declared artifact before settling.
   if (entryId === "report-task") {
     const dir = join(TEST_HOME, "workspace", "report-task");
@@ -197,6 +206,17 @@ function makeDeliveryDeps() {
     },
     announce: async () => {},
     chatIdFor: () => "42424242",
+    // #1724: boot-composed Main-owned announcement route (boundary double —
+    // the real closure resolves the target and submits through Main).
+    announceToMain: async (card: { id: number; title: string; result_summary: string | null }): Promise<"sent" | "not_sent" | "unknown"> => {
+      doubles.mainAnnouncements.push({
+        eventId: `scheduled-card:${card.id}`,
+        cardId: card.id,
+        title: card.title,
+        result: card.result_summary ?? "",
+      });
+      return doubles.mainAnnouncementOutcome;
+    },
   };
 }
 
@@ -382,6 +402,7 @@ beforeEach(async () => {
     providerFailures: 0, providerErrors: [], admissionRejections: 0,
     sleepCycleCalls: 0, sentMessages: [], sentDocuments: [], injectedReminders: [],
     pausedNotifications: [], spawnedCommands: [], dispatchedGoals: [],
+    mainAnnouncements: [], mainAnnouncementOutcome: "sent",
   };
   swarmTrace.lines = [];
   vi.mocked(child_process.spawn).mockImplementation(((
@@ -532,7 +553,7 @@ describe("#1520 scheduler E2E — journey 3: one-shot T report with validation a
 });
 
 describe("#1520 scheduler E2E — journey 4: one-shot T announcement", () => {
-  it("delivers the actual one-shot result after settlement, not a completion summary (#1610)", async () => {
+  it("hands the settled one-shot result to Main instead of sending it directly (#1724)", async () => {
     const queue = await makeQueue();
     forceDue("announce-task");
     await runTick(queue);
@@ -540,11 +561,12 @@ describe("#1520 scheduler E2E — journey 4: one-shot T announcement", () => {
     expect(ev).toHaveLength(1);
     expect(ev[0]!.outcome).toBe("success");
 
-    // #1610: the dispatched prompt carries the delivery contract — the model
-    // is told its final response is the automatically delivered payload.
+    // #1610/#1724: the dispatched prompt carries the delivery contract — the
+    // model is told its final response is handed to Main, which announces it.
     expect(doubles.dispatchedGoals).toHaveLength(1);
     expect(doubles.dispatchedGoals[0]).toContain("[DELIVERY CONTRACT]");
-    expect(doubles.dispatchedGoals[0]).toContain("automatically delivered");
+    expect(doubles.dispatchedGoals[0]).toContain("handed to Main");
+    expect(doubles.dispatchedGoals[0]).toContain("you must not claim that you announced or sent it");
 
     // #1610: durable history separates the user payload from operational detail.
     expect(ev[0]!.deliveryText).toBe(ANNOUNCE_GREETING);
@@ -555,13 +577,277 @@ describe("#1520 scheduler E2E — journey 4: one-shot T announcement", () => {
     expect(card.result_summary).toBe(ANNOUNCE_GREETING);
     expect(card.result_summary!.length).toBeGreaterThan(200);
 
+    // #1724: the delivery boundary hands the card to Main — the raw platform
+    // sender never sees the announcement text.
     await delivery.pollPendingDeliveries(makeDeliveryDeps());
     await delivery.pollPendingDeliveries(makeDeliveryDeps());
     await delivery.pollPendingDeliveries(makeDeliveryDeps());
-    expect(doubles.sentMessages).toHaveLength(1);
-    // The greeting text itself is delivered — not a status summary.
-    expect(doubles.sentMessages[0]).toContain(ANNOUNCE_GREETING);
+    expect(doubles.mainAnnouncements).toHaveLength(1);
+    expect(doubles.mainAnnouncements[0]!.eventId).toBe(`scheduled-card:${card.id}`);
+    expect(doubles.mainAnnouncements[0]!.result).toBe(ANNOUNCE_GREETING);
+    expect(doubles.sentMessages).toHaveLength(0);
+    expect(board.kanbanGetCard(card.id)!.status).toBe("delivered");
   });
+
+  it("keeps a not_sent Main handoff on the bounded retry path with no direct fallback (#1724)", async () => {
+    const queue = await makeQueue();
+    forceDue("announce-task");
+    await runTick(queue);
+    const ev = events("announce-task");
+    expect(ev[0]!.outcome).toBe("success");
+    const cardId = ev[0]!.kanbanCardId!;
+
+    doubles.mainAnnouncementOutcome = "not_sent";
+    await delivery.pollPendingDeliveries(makeDeliveryDeps());
+    expect(doubles.mainAnnouncements).toHaveLength(1);
+    expect(doubles.sentMessages).toHaveLength(0);
+    expect(board.kanbanGetCard(cardId)!.delivery_result).toBe("definitely_not_sent");
+
+    // Retry succeeds → delivered; exactly two handoffs total.
+    doubles.mainAnnouncementOutcome = "sent";
+    await delivery.pollPendingDeliveries(makeDeliveryDeps());
+    expect(doubles.mainAnnouncements).toHaveLength(2);
+    expect(board.kanbanGetCard(cardId)!.status).toBe("delivered");
+
+    // Delivered cards are never re-handed to Main.
+    await delivery.pollPendingDeliveries(makeDeliveryDeps());
+    expect(doubles.mainAnnouncements).toHaveLength(2);
+  });
+});
+
+describe("#1724 scheduler E2E — journey 13: complete Main-owned announcement journey", () => {
+  interface MemRow { role: "user" | "assistant"; content: string; sessionId: string; timestamp: number; id: number }
+
+  /** Memory boundary double: durable conversation rows + the #1527
+   *  projection contract the Pi transports consume for context assembly. */
+  function makeMemoryRuntime() {
+    const rows: MemRow[] = [];
+    let nextId = 1;
+    const runtime = {
+      state: "ready",
+      capabilities: new Set<string>(["durableContext"]),
+      recordMessage: vi.fn(async (m: { role: "user" | "assistant"; content: string; sessionId: string; timestamp: number }) => {
+        const id = nextId++;
+        rows.push({ ...m, id });
+        return { id };
+      }),
+      recall: vi.fn(async () => ({ hits: [] as unknown[] })),
+      recordFeedback: vi.fn(async () => ({})),
+      assembleSessionContext: vi.fn(async () => ({ coreKnowledge: "", recall: "", wakeUp: "" })),
+      projectDurableContext: vi.fn(async ({ sessionId, beforeMessageId }: { userId: string; sessionId: string; beforeMessageId: number; maxContext: number }) => {
+        const messages = rows
+          .filter(r => r.sessionId === sessionId && r.id < beforeMessageId)
+          .map(r => ({ role: r.role, content: r.content }));
+        return { messages, estimatedTokens: messages.reduce((s, m) => s + m.content.length / 4, 0), sourceMessageCount: rows.length };
+      }),
+    };
+    return { runtime, rows };
+  }
+
+  function makeTransportDouble(reply: string): Record<string, unknown> {
+    return {
+      initialize: vi.fn().mockResolvedValue(undefined),
+      sendPrompt: vi.fn().mockResolvedValue(reply),
+      resetSession: vi.fn().mockResolvedValue(undefined),
+      sendInterrupt: vi.fn().mockResolvedValue(undefined),
+      destroy: vi.fn(),
+      transportCommands: [],
+      get isReady() { return true; },
+      contextPercent: -1,
+      toolCallsSucceeded: 0,
+      get answerOnly() { return reply; },
+    };
+  }
+
+  function makeAdapterDouble() {
+    return {
+      name: "telegram",
+      capabilities: { voice: false, reactions: false, typing: false, threads: false },
+      start: vi.fn().mockResolvedValue(undefined),
+      stop: vi.fn(),
+      authorize: () => true,
+      sendMessage: vi.fn().mockResolvedValue(1),
+      chunkResponse: (t: string) => [t],
+    };
+  }
+
+  async function makeJourney(opts: { mainReply?: string } = {}) {
+    const { MainConversationIngress } = await import("../../components/main-conversation-ingress.js");
+    const mpMod = await import("../../components/message-pipeline.js");
+    const spinMod = await import("../../components/spin.js");
+
+    const CHAT_ID = "1111111111";
+    const mem = makeMemoryRuntime();
+    const adapter = makeAdapterDouble();
+    const mainReply = opts.mainReply ?? `${ANNOUNCE_GREETING.slice(0, 60)}… — here is your morning briefing.`;
+    const transport = makeTransportDouble(mainReply);
+
+    // Real Spin singleton: allocate the master general A session.
+    const session = spinMod.spin.getActiveSession("master", "telegram");
+    session.chatId = parseInt(CHAT_ID, 10);
+    session.platform = "telegram";
+    session.userId = "master";
+    session.status = "ready";
+    vi.spyOn(spinMod.spin, "ensureSessionTransport").mockImplementation(async (s) => { s.transport = transport as never; });
+
+    // The pipeline's model-turn boundary is doubled (like every external
+    // boundary in this harness): the stub mirrors the production contract —
+    // the provider's own string plus its classified outcome.
+    const sessionManager = {
+      spin: async (spec: { sessionId?: string; prompt: string }) => {
+        const result = await (transport as { sendPrompt: (id: string, p: string) => Promise<string> }).sendPrompt(spec.sessionId ?? "", spec.prompt);
+        const { classifyContent } = await import("../../components/clean-response.js");
+        return { sessionId: spec.sessionId ?? "", result, outcome: classifyContent(result) };
+      },
+    };
+
+    const pipelineDeps = {
+      transport: transport as never,
+      config: { workingDir: "/tmp" },
+      startedAt: Date.now(),
+      memoryRuntime: mem.runtime as never,
+      memoryConfig: { memoryEnabled: true, memoryDir: join(TEST_HOME, "memory") },
+      nlmConfig: { enabled: false },
+      idleSave: { reset: vi.fn(), save: vi.fn(), getTimers: () => new Map(), clearAll: vi.fn() },
+      conversationBuffer: { push: vi.fn(), drain: vi.fn().mockReturnValue(null), clear: vi.fn() },
+      sttConfig: null,
+      ttsConfig: null,
+      sessionManager,
+      updateCtxStart: vi.fn(),
+    } as unknown as Parameters<typeof mpMod.handleInboundMessage>[2];
+
+    const ingress = new MainConversationIngress({
+      getPipelineDeps: () => pipelineDeps,
+      getAdapter: () => adapter as never,
+    });
+
+    // Boot-shaped delivery closure: identity resolved at delivery time from
+    // the card; the raw sender is armed to fail loudly if ever used.
+    const makeMainDeliveryDeps = () => ({
+      sendMessage: async (): Promise<never> => { throw new Error("raw sender must not be used for scheduled T announce"); },
+      sendDocument: async (): Promise<never> => { throw new Error("raw document sender must not be used"); },
+      announce: async () => {},
+      chatIdFor: () => CHAT_ID,
+      announceToMain: async (card: { id: number; title: string; result_summary: string | null }) =>
+        ingress.announceToMain({
+          eventId: `scheduled-card:${card.id}`,
+          cardId: card.id,
+          title: card.title,
+          userId: "master",
+          platform: "telegram",
+          chatId: CHAT_ID,
+          result: card.result_summary ?? "",
+        }),
+    });
+
+    function enqueueAnnounceCard(): number {
+      const id = board.kanbanEnqueue("Morning greeting", "task", "run-main-journey", {
+        type: "T", deliveryMode: "announce", chatId: CHAT_ID, deliveryReady: false,
+      });
+      board.kanbanRunning(id);
+      board.kanbanComplete(id, null, ANNOUNCE_GREETING);
+      board.kanbanSetDeliveryReady(id);
+      return id;
+    }
+
+    return { mem, adapter, transport, session, ingress, pipelineDeps, makeMainDeliveryDeps, enqueueAnnounceCard, handleInboundMessage: mpMod.handleInboundMessage, CHAT_ID };
+  }
+
+  it("announces through Main, records both turns durably, and grounds a later follow-up", async () => {
+    const j = await makeJourney();
+    const cardId = j.enqueueAnnounceCard();
+
+    await delivery.pollPendingDeliveries(j.makeMainDeliveryDeps());
+
+    // Exactly one external message — Main's own response, never the raw T result.
+    expect(j.adapter.sendMessage).toHaveBeenCalledTimes(1);
+    const delivered = String(j.adapter.sendMessage.mock.calls[0]![1]);
+    expect(delivered).toContain("here is your morning briefing");
+    expect(board.kanbanGetCard(cardId)!.status).toBe("delivered");
+
+    // Durable target-A-session record: internal event BEFORE the turn,
+    // Main's assistant response AFTER delivery — same session id.
+    expect(j.mem.rows).toHaveLength(2);
+    expect(j.mem.rows[0]!.role).toBe("user");
+    expect(j.mem.rows[0]!.content).toContain("[SCHEDULED TASK COMPLETED]");
+    expect(j.mem.rows[0]!.content).toContain(ANNOUNCE_GREETING);
+    expect(j.mem.rows[0]!.sessionId).toBe(j.session.id);
+    expect(j.mem.rows[1]!.role).toBe("assistant");
+    expect(j.mem.rows[1]!.sessionId).toBe(j.session.id);
+
+    // A later user follow-up is recorded into the same session…
+    const followUp = {
+      platform: "telegram", channelId: j.CHAT_ID, userId: "master",
+      senderId: "42", senderName: "aksika", text: "What did you say about my day?",
+      timestamp: Date.now(), isGroup: false, isVoice: false,
+    };
+    await j.handleInboundMessage(followUp as never, j.adapter as never, j.pipelineDeps);
+    expect(j.mem.rows.length).toBeGreaterThanOrEqual(3);
+
+    // …and a FRESH durable-context assembly exposes the announcement to that turn.
+    const provider = (await import("../../components/transport/pi-core-context.js")).createDurableContextProvider(j.mem.runtime as never);
+    const projected = await provider.projectContext({ userId: "master", sessionId: j.session.id, beforeMessageId: Number.MAX_SAFE_INTEGER, maxContext: 100000 });
+    const contents = projected.messages.map(m => m.content);
+    expect(contents.some(c => c.includes("[SCHEDULED TASK COMPLETED]") && c.includes(ANNOUNCE_GREETING))).toBe(true);
+    expect(contents.some(c => c.includes("morning briefing"))).toBe(true);
+  }, 30_000);
+
+  it("keeps the card retryable when Main is busy, without queueing or direct fallback", async () => {
+    const j = await makeJourney();
+    j.session.busy = true;
+    const cardId = j.enqueueAnnounceCard();
+
+    await delivery.pollPendingDeliveries(j.makeMainDeliveryDeps());
+
+    expect(j.adapter.sendMessage).not.toHaveBeenCalled();
+    expect(j.mem.rows).toHaveLength(0);
+    expect(board.kanbanGetCard(cardId)!.status).toBe("done");
+    expect(board.kanbanGetCard(cardId)!.delivery_result).toBe("definitely_not_sent");
+
+    // Recovery: free Main, retry succeeds through the normal pipeline.
+    j.session.busy = false;
+    await delivery.pollPendingDeliveries(j.makeMainDeliveryDeps());
+    expect(j.adapter.sendMessage).toHaveBeenCalledTimes(1);
+    expect(board.kanbanGetCard(cardId)!.status).toBe("delivered");
+  }, 30_000);
+
+  it("does not treat an empty Main response as successful announcement delivery", async () => {
+    const j = await makeJourney({ mainReply: "" });
+    const cardId = j.enqueueAnnounceCard();
+
+    await delivery.pollPendingDeliveries(j.makeMainDeliveryDeps());
+
+    // No announcement content ever reached the platform, no assistant
+    // content was recorded, and the card stays truthfully retryable.
+    const announced = j.adapter.sendMessage.mock.calls.some(c => String(c[1]).includes("morning briefing"));
+    expect(announced).toBe(false);
+    expect(j.mem.rows.some(r => r.role === "assistant" && r.content.length > 0)).toBe(false);
+    expect(board.kanbanGetCard(cardId)!.status).toBe("done");
+    expect(["definitely_not_sent"]).toContain(board.kanbanGetCard(cardId)!.delivery_result);
+  }, 30_000);
+
+  it("routes a scheduled K Spanish-tutor card on its role-session route, never into A (#1724 discriminator)", async () => {
+    const j = await makeJourney();
+    const ingressSpy = vi.spyOn(j.ingress, "announceToMain");
+    const kCardId = board.kanbanEnqueue("Spanish tutor kickoff", "task", "run-k-tutor", {
+      type: "K", deliveryMode: "announce", chatId: j.CHAT_ID,
+    });
+    board.kanbanRunning(kCardId);
+    board.kanbanComplete(kCardId, null, "Hola! Ready for today's lesson?");
+    const directSends: string[] = [];
+    const deps = {
+      ...j.makeMainDeliveryDeps(),
+      sendMessage: async (_chatId: string, text: string) => { directSends.push(text); return "sent" as const; },
+    };
+
+    await delivery.pollPendingDeliveries(deps);
+
+    expect(ingressSpy).not.toHaveBeenCalled();
+    expect(directSends).toHaveLength(1);
+    expect(directSends[0]).toContain("Hola!");
+    expect(j.mem.rows).toHaveLength(0);
+    expect(board.kanbanGetCard(kCardId)!.status).toBe("delivered");
+  }, 30_000);
 });
 
 describe("#1520 scheduler E2E — journey 5: multi-agent one-shot through the internal O project", () => {
@@ -805,11 +1091,13 @@ describe("#1520 scheduler E2E — journey 8: late/duplicate completion and deliv
     expect(settleRunOnce({ entry, run, outcome: "success" })).toBe("duplicate");
     expect(events("announce-task").filter(e => e.runId === "announce-task_stale")).toHaveLength(1);
 
-    // Duplicate delivery polls send exactly once.
+    // Duplicate delivery polls hand the card to Main exactly once (#1724);
+    // the raw platform sender is never used for the scheduled T announce.
     await delivery.pollPendingDeliveries(makeDeliveryDeps());
     await delivery.pollPendingDeliveries(makeDeliveryDeps());
     await delivery.pollPendingDeliveries(makeDeliveryDeps());
-    expect(doubles.sentMessages).toHaveLength(1);
+    expect(doubles.mainAnnouncements).toHaveLength(1);
+    expect(doubles.sentMessages).toHaveLength(0);
     expect(cardStatuses().filter(s => s.endsWith(":delivered"))).toHaveLength(1);
   });
 });

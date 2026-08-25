@@ -158,7 +158,12 @@ export async function buildPrompt(
   if (durableRequired && memoryRuntime?.state !== "ready") {
     durableContextIntent = { mode: "required_unavailable", reason: "runtime_unavailable" };
   } else if (durableRequired) {
-    const messageIdStr = typeof msg.messageId === "number" || typeof msg.messageId === "string" ? String(msg.messageId) : "";
+    // #1724: a trusted scheduled-announcement event carries its durable,
+    // card-derived identity — delivery retries must deduplicate against the
+    // same inbound row instead of recording a fresh turn per attempt.
+    const trustedEventId = msg.internal?.kind === "scheduled_announcement" ? msg.internal.eventId : undefined;
+    const messageIdStr = trustedEventId
+      ?? (typeof msg.messageId === "number" || typeof msg.messageId === "string" ? String(msg.messageId) : "");
     const messageTimestamp = msg.timestamp;
     const operationKey = messageIdStr
       ? inboundMessageKey(msg.platform, msg.channelId, msg.threadId, userId, messageIdStr)

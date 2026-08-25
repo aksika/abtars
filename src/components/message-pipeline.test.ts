@@ -26,7 +26,7 @@ const MAIN_NOTICE_REGISTRY: UserRegistry = {
   byPlatformId: new Map([["master:telegram", { userId: "master", role: "master", maxClass: 3, tools: ["all"], platforms: { telegram: 100 } }]]),
   byUserId: new Map([["master", { userId: "master", role: "master", maxClass: 3, tools: ["all"], platforms: { telegram: 100 } }]]),
 };
-import { handleInboundMessage, type PipelineDeps } from "./message-pipeline.js";
+import { handleInboundMessage, submitTrustedInternalMessage, type PipelineDeps } from "./message-pipeline.js";
 import type { PlatformAdapter, InboundMessage } from "../types/platform.js";
 import type { IKiroTransport } from "./transport/kiro-transport.js";
 import { Spin } from "./spin.js";
@@ -477,6 +477,138 @@ describe("handleInboundMessage", () => {
     await handleInboundMessage(makeMsg({ userId: "adrika" }), adapter, deps);
 
     expect(transport.sendPrompt).toHaveBeenCalledWith("test_A_01", expect.any(String), undefined, "adrika");
+  });
+});
+
+describe("#1724 submitTrustedInternalMessage — receipt-bearing internal submissions", () => {
+  let transport: IKiroTransport;
+  let mockSession: ManagedSession;
+
+  const SCHEDULED_TEXT = "[SCHEDULED TASK COMPLETED]\nTask: Morning greeting\nCard ID: 12\n\nThe task agent produced the following user-facing result:\nGood morning!\n\nAnnounce this result.";
+
+  function announceMsg(overrides: Partial<InboundMessage> = {}): InboundMessage {
+    return makeMsg({
+      text: SCHEDULED_TEXT,
+      senderId: "scheduler",
+      senderName: "scheduler",
+      internal: { kind: "scheduled_announcement", eventId: "scheduled-card:12", cardId: 12 },
+      ...overrides,
+    });
+  }
+
+  beforeEach(async () => {
+    transport = mockTransport();
+    setUserRegistryOverride(MAIN_NOTICE_REGISTRY);
+    const spinMod = await import("./spin.js");
+    // One stable session object per test — mutations (busy flag) are visible
+    // to every middleware resolution.
+    mockSession = {
+      id: "test_A_01", userId: "master", platform: "telegram", chatId: 100,
+      delivery: "streaming", active: true, status: "ready",
+      idleTimeoutMs: 0, lastActiveAt: Date.now(), messageCount: 0, tokenCount: 0, toolCallCount: 0,
+      log: [], shortIndex: 1,
+      busy: false, queue: [], fullMode: false, pendingStart: false, seen: true,
+      compacting: false, ctxWarned: false, compactFailures: 0, primingTerms: [], completions: [],
+    };
+    vi.spyOn(spinMod.spin, "ensureSessionTransport").mockImplementation(async (session) => {
+      session.transport = transport;
+    });
+    vi.spyOn(spinMod.spin, "getSessionById").mockImplementation((id: string): ManagedSession => (id === "test_A_01" ? mockSession : { ...mockSession, id }));
+    vi.spyOn(spinMod.spin, "getActiveSession").mockImplementation((): ManagedSession => mockSession);
+  });
+
+  afterEach(() => {
+    drainSystemEvents();
+    setUserRegistryOverride(null);
+    vi.restoreAllMocks();
+  });
+
+  it("resolves sent only after the response was externally delivered, and records both turns", async () => {
+    const recordMessage = vi.fn().mockResolvedValue({ id: 1 });
+    const adapter = mockAdapter();
+    const deps = mockDeps(transport, {
+      memoryConfig: { memoryEnabled: true, memoryDir: "/tmp" },
+      memoryRuntime: {
+        state: "ready", capabilities: new Set<string>(), recordMessage,
+        recall: vi.fn().mockResolvedValue({ hits: [] }),
+        recordFeedback: vi.fn().mockResolvedValue({}),
+        assembleSessionContext: vi.fn().mockResolvedValue({ coreKnowledge: "", recall: "", wakeUp: "" }),
+      } as any,
+    });
+
+    const outcome = await submitTrustedInternalMessage(announceMsg(), adapter, deps);
+
+    expect(outcome).toBe("sent");
+    expect(adapter.sendMessage).toHaveBeenCalledWith("100", "Hello from Kiro!", expect.any(Object));
+    // Both the internal event (inbound, before the model turn) and Main's
+    // assistant response are recorded into the same target A session by the
+    // normal pipeline — no task-specific memory writer.
+    const roles = recordMessage.mock.calls.map((c: unknown[]) => (c[0] as { role?: string })?.role);
+    expect(roles).toContain("user");
+    expect(roles).toContain("assistant");
+    const inbound = recordMessage.mock.calls.find((c: unknown[]) => (c[0] as { role?: string })?.role === "user")![0] as { sessionId: string; content: string };
+    const assistant = recordMessage.mock.calls.find((c: unknown[]) => (c[0] as { role?: string })?.role === "assistant")![0] as { sessionId: string };
+    expect(inbound.sessionId).toBe("test_A_01");
+    expect(inbound.content).toContain("[SCHEDULED TASK COMPLETED]");
+    expect(assistant.sessionId).toBe("test_A_01");
+  });
+
+  it("resolves not_sent on a busy session without queueing and without a model turn (#1724 no-queue policy)", async () => {
+    const adapter = mockAdapter();
+    const deps = mockDeps(transport);
+    mockSession.busy = true;
+
+    const outcome = await submitTrustedInternalMessage(announceMsg(), adapter, deps);
+
+    expect(outcome).toBe("not_sent");
+    expect(mockSession.queue).toHaveLength(0);
+    expect(transport.sendPrompt).not.toHaveBeenCalled();
+    expect(adapter.sendMessage).not.toHaveBeenCalled();
+  });
+
+  it("resolves not_sent for an empty, [NO_REPLY], or reaction-only Main outcome", async () => {
+    for (const raw of ["", "[NO_REPLY]", "[REACT:👍]"]) {
+      transport.sendPrompt = vi.fn().mockResolvedValue(raw) as any;
+      const adapter = mockAdapter();
+      const deps = mockDeps(transport);
+      const outcome = await submitTrustedInternalMessage(announceMsg(), adapter, deps);
+      expect(outcome).toBe("not_sent");
+    }
+  }, 20_000);
+
+  it("resolves unknown after a partial send and not_sent when the first chunk fails", async () => {
+    // Two chunks — first delivered, second permanently failing → ambiguous.
+    transport.sendPrompt = vi.fn().mockResolvedValue("part one\n\npart two") as any;
+    const partialAdapter = mockAdapter({
+      chunkResponse: (t: string) => t.split("\n\n"),
+      sendMessage: vi.fn()
+        .mockResolvedValueOnce(11)
+        .mockRejectedValue(new Error("network gone")),
+    });
+    const deps1 = mockDeps(transport);
+    const unknownOutcome = await submitTrustedInternalMessage(announceMsg(), partialAdapter, deps1);
+    expect(unknownOutcome).toBe("unknown");
+
+    // First chunk never lands → definitely not sent.
+    transport.sendPrompt = vi.fn().mockResolvedValue("part one\n\npart two") as any;
+    const failingAdapter = mockAdapter({
+      chunkResponse: (t: string) => t.split("\n\n"),
+      sendMessage: vi.fn().mockRejectedValue(new Error("network gone")),
+    });
+    const deps2 = mockDeps(transport);
+    const notSentOutcome = await submitTrustedInternalMessage(announceMsg(), failingAdapter, deps2);
+    expect(notSentOutcome).toBe("not_sent");
+  }, 30_000);
+
+  it("suppresses the user-facing error reply for a failed announcement turn (synthetic convention)", async () => {
+    transport.sendPrompt = vi.fn().mockRejectedValue(new Error("All models exhausted")) as any;
+    const adapter = mockAdapter();
+    const deps = mockDeps(transport);
+
+    const outcome = await submitTrustedInternalMessage(announceMsg(), adapter, deps);
+
+    expect(outcome).toBe("not_sent");
+    expect(adapter.sendMessage).not.toHaveBeenCalled();
   });
 });
 

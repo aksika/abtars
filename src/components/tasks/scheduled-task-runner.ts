@@ -164,13 +164,15 @@ export class ScheduledTaskRunner {
         }
       }
 
-      // #1610: a scheduled one-shot announce run's final response IS the
-      // delivered payload. The contract is appended after task-file and
-      // context composition, before dispatch, only for announce one-shots —
-      // report and interactive-skill prompts stay unchanged.
+      // #1610: a scheduled one-shot announce run's final response is the
+      // user-facing payload — handed to Main, which announces it in its own
+      // words through the normal conversation pipeline (#1724). The contract
+      // is appended after task-file and context composition, before dispatch,
+      // only for announce one-shots — report and interactive-skill prompts
+      // stay unchanged.
       const deliveryContract = entry.interaction.mode === "oneshot" && entry.delivery === "announce";
       if (deliveryContract) {
-        prompt = `${prompt}\n\n[DELIVERY CONTRACT]\nYour final response is automatically delivered to the target user when this run ends.\n- Return the requested user-facing content in your final response.\n- Do not return only a completion status, a saved-file path, or a summary of what was produced.\n- Do not call platform delivery tools to deliver the result yourself.\n- Saving a workspace copy is allowed but does not replace returning the content in your final response.`;
+        prompt = `${prompt}\n\n[DELIVERY CONTRACT]\nYour final response is handed to Main (the personal agent), which announces it to the target user through the normal conversation.\n- Return the requested user-facing content in your final response; Main delivers it for you.\n- Do not return only a completion status, a saved-file path, or a summary of what was produced.\n- Do not call platform delivery tools — you cannot deliver the result yourself, and you must not claim that you announced or sent it.\n- Saving a workspace copy is allowed but does not replace returning the content in your final response.`;
       }
 
       // #1432: scheduled interactive skill launch. The skill manager launches

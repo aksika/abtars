@@ -19,6 +19,17 @@ export const busyGuardMiddleware: Middleware = async (ctx, next) => {
   if (!entry) { await next(); return; }
 
   if (entry.busy) {
+    // #1724: trusted scheduled-announcement events use an immediate, no-queue
+    // admission policy. A busy Main session rejects the event WITHOUT queue
+    // mutation and without a parallel turn — the Kanban delivery poll owns
+    // retry, so an untracked queued announcement would escape its bounded
+    // retry/unknown semantics.
+    if (ctx.msg.internal?.kind === "scheduled_announcement") {
+      logInfo("busy-guard", `Scheduled announcement rejected for busy ${activeId} (no-queue policy) — delivery will retry`);
+      ctx.handled = true;
+      return;
+    }
+
     const text = ctx.text.trim();
     const lower = text.toLowerCase();
 

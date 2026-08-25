@@ -4,7 +4,7 @@ import { createSelfHealerTask } from "../components/self-healer.js";
 import { shaAdmissionNotice } from "../components/sha/sha-admission-notice.js";
 import { createUserSessionExpiryTask } from "../components/heartbeat-tasks.js";
 import { createHousekeepingTask } from "../components/heartbeat-housekeeping.js";
-import { logInfo } from "../components/logger.js";
+import { logInfo, logWarn } from "../components/logger.js";
 import { abtarsHome } from "../paths.js";
 import { runModelHealthCheck } from "./heartbeat-model-health.js";
 import type { BootCtx } from "./context.js";
@@ -113,6 +113,30 @@ export async function registerTier3Tasks(ctx: BootCtx): Promise<void> {
 
   const masterChatId = [...config.telegram.allowedUserIds][0] ?? 0;
 
+  // #1724: compose the trusted scheduled-announcement ingress once. Adapters
+  // and pipeline deps resolve lazily at delivery time — later boot phases
+  // populate both after this registration.
+  const { MainConversationIngress } = await import("../components/main-conversation-ingress.js");
+  ctx.mainIngress = new MainConversationIngress({
+    getPipelineDeps: () => ctx.pipelineDeps,
+    getAdapter: (platform) => ctx.platformAdapters.get(platform) ?? null,
+  });
+
+  const { loadUsers } = await import("../components/user-registry.js");
+
+  // #1724: resolve the announcement target identity from the durable card
+  // chat id at delivery time. Platform-neutral at this boundary: the user
+  // registry owns the platform↔chat mapping; no platform is named here.
+  const resolveAnnouncementTarget = (chatId: string): { userId: string; platform: string; chatId: string } | null => {
+    const registry = loadUsers();
+    for (const user of registry.users) {
+      for (const [platform, id] of Object.entries(user.platforms)) {
+        if (String(id) === chatId) return { userId: user.userId, platform, chatId };
+      }
+    }
+    return null;
+  };
+
   const deliveryDeps = () => ({
     sendMessage: async (chatId: string, text: string): Promise<import("../components/tasks/kanban-delivery.js").SendOutcome> => {
       if (!ctx.telegramAdapter) return "not_sent";
@@ -138,6 +162,32 @@ export async function registerTier3Tasks(ctx: BootCtx): Promise<void> {
       if (ctx.sendSystemMessage) await ctx.sendSystemMessage(prompt);
     },
     chatIdFor: (card: import("../components/tasks/kanban-board.js").KanbanCard) => card.chat_id || String(masterChatId),
+    // #1724: Main-owned announcement route for scheduled one-shot T announce
+    // cards. Resolves identity now (never from the display title), derives
+    // the stable card-derived event ID, and waits for Main's definite
+    // delivery outcome before the card state advances.
+    announceToMain: async (card: import("../components/tasks/kanban-board.js").KanbanCard): Promise<import("../types/platform.js").MainDeliveryResult> => {
+      const ingress = ctx.mainIngress;
+      if (!ingress) {
+        logWarn(TAG, `Card ${card.id}: no Main ingress composed — announcement not sent`);
+        return "not_sent";
+      }
+      const chatId = card.chat_id || String(masterChatId);
+      const target = resolveAnnouncementTarget(chatId);
+      if (!target) {
+        logWarn(TAG, `Card ${card.id}: no registered user for chat ${chatId} — announcement not sent`);
+        return "not_sent";
+      }
+      return ingress.announceToMain({
+        eventId: `scheduled-card:${card.id}`,
+        cardId: card.id,
+        title: card.title,
+        userId: target.userId,
+        platform: target.platform,
+        chatId: target.chatId,
+        result: card.result_summary ?? "",
+      });
+    },
   });
 
   // #1520: the delivery poll — a periodic bounded claim over done cards.

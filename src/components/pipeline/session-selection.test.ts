@@ -193,3 +193,72 @@ describe("sessionSelectionMiddleware #1432 K routing", () => {
     expect(next).toHaveBeenCalled();
   });
 });
+
+describe("sessionSelectionMiddleware #1724 trusted scheduled announcements", () => {
+  const skillMod = { skillSessionManager: { resolveForInbound: vi.fn(), stop: vi.fn().mockResolvedValue(true) } };
+  let spinMod: typeof import("../spin.js");
+
+  const internalMeta = {
+    kind: "scheduled_announcement",
+    eventId: "scheduled-card:12",
+    cardId: 12,
+  };
+
+  beforeEach(async () => {
+    vi.resetModules();
+    vi.doMock("../skill-session.js", () => skillMod);
+    skillMod.skillSessionManager.resolveForInbound.mockClear();
+    skillMod.skillSessionManager.stop.mockClear();
+    setUserRegistryOverride({ users: [{ userId: "master", role: "master", maxClass: 5, tools: [], platforms: {} }], byPlatformId: new Map(), byUserId: new Map() });
+    spinMod = await import("../spin.js");
+  });
+
+  afterEach(() => { vi.restoreAllMocks(); setUserRegistryOverride(null); });
+
+  function announceCtx(overrides: Record<string, unknown> = {}) {
+    return makeCtx({ msg: { internal: internalMeta, platform: "telegram", channelId: "42424242", text: "[SCHEDULED TASK COMPLETED] Task: x" }, ...overrides });
+  }
+
+  it("routes a trusted announcement to the general A session, bypassing an active K binding", async () => {
+    const ctx = announceCtx();
+    const aSession = makeSession({ id: "1_A_01", userId: "master", platform: "telegram", chatId: 42424242 });
+    vi.spyOn(spinMod.spin, "getActiveSession").mockReturnValue(aSession);
+    const next = vi.fn();
+    await sessionSelectionMiddleware(ctx, next);
+    // The K-binding resolver is NEVER consulted for scheduler events.
+    expect(skillMod.skillSessionManager.resolveForInbound).not.toHaveBeenCalled();
+    expect(ctx.session).toBe(aSession);
+    expect(ctx.sessionId).toBe("1_A_01");
+    expect(next).toHaveBeenCalled();
+  });
+
+  it("rejects the announcement when the target A session is ended", async () => {
+    const ctx = announceCtx();
+    const ended = makeSession({ id: "1_A_01", userId: "master", platform: "telegram", chatId: 42424242, status: "ended" });
+    vi.spyOn(spinMod.spin, "getActiveSession").mockReturnValue(ended);
+    const next = vi.fn();
+    await sessionSelectionMiddleware(ctx, next);
+    expect(ctx.handled).toBe(true);
+    expect(next).not.toHaveBeenCalled();
+  });
+
+  it("rejects the announcement when the session channel does not match the event channel", async () => {
+    const ctx = announceCtx();
+    const otherChat = makeSession({ id: "1_A_01", userId: "master", platform: "telegram", chatId: 999 });
+    vi.spyOn(spinMod.spin, "getActiveSession").mockReturnValue(otherChat);
+    const next = vi.fn();
+    await sessionSelectionMiddleware(ctx, next);
+    expect(ctx.handled).toBe(true);
+    expect(next).not.toHaveBeenCalled();
+  });
+
+  it("rejects the announcement when the active session is not an A session", async () => {
+    const ctx = announceCtx();
+    const tSession = makeSession({ id: "1_T_02", userId: "master", platform: "telegram", chatId: 42424242 });
+    vi.spyOn(spinMod.spin, "getActiveSession").mockReturnValue(tSession);
+    const next = vi.fn();
+    await sessionSelectionMiddleware(ctx, next);
+    expect(ctx.handled).toBe(true);
+    expect(next).not.toHaveBeenCalled();
+  });
+});

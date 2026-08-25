@@ -401,8 +401,11 @@ describe("ScheduledTaskRunner #1610 announce delivery contract", () => {
     expect(outcome.status).toBe("success");
     const goal = agentRunner.mock.calls[0]![0].goal as string;
     expect(goal).toContain("[DELIVERY CONTRACT]");
-    expect(goal).toContain("automatically delivered");
+    // #1724: the contract names Main as the announcer — the worker hands the
+    // result over, cannot deliver it, and must not claim it announced.
+    expect(goal).toContain("handed to Main");
     expect(goal).toContain("Do not call platform delivery tools");
+    expect(goal).toContain("you must not claim that you announced or sent it");
     expect(goal).not.toContain("Telegram");
     expect(goal).not.toContain("DeepSeek");
   });

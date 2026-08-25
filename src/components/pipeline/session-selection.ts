@@ -17,10 +17,35 @@
 
 import type { Middleware } from "./middleware.js";
 import { getMasterUserId } from "../master-user.js";
+import { sessionTypeOf } from "../spin-types.js";
 
 export const sessionSelectionMiddleware: Middleware = async (ctx, next) => {
   const { spin } = await import("../spin.js");
   const targetId = ctx.msg.targetSessionId;
+
+  // #1724: a trusted scheduled-announcement event always targets the user's
+  // general A session for the resolved platform/channel. An explicit K skill
+  // binding MUST NOT capture a background scheduler event, and external
+  // platform input can never forge the internal metadata that reaches this
+  // branch.
+  if (ctx.msg.internal?.kind === "scheduled_announcement") {
+    const session = spin.getActiveSession(ctx.userId, ctx.msg.platform);
+    const channelMatches = String(session.chatId) === ctx.msg.channelId;
+    if (
+      !session
+      || session.userId !== ctx.userId
+      || sessionTypeOf(session.id) !== "A"
+      || session.status === "ended"
+      || !channelMatches
+    ) {
+      ctx.handled = true;
+      return;
+    }
+    ctx.session = session;
+    ctx.sessionId = session.id;
+    await next();
+    return;
+  }
 
   if (targetId) {
     // Targeted routing — authorize before selection
