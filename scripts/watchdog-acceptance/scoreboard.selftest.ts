@@ -8,7 +8,15 @@ import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { ExpectationManifest, MockExpectation, ScoreboardRow } from "./contracts.ts";
-import { classifyOutcome, decideExit, mockEntryAsExpectation, sourceCommitProblem, validateManifest, validateMockScenarios } from "./scoreboard.ts";
+import {
+  classifyOutcome,
+  decideExit,
+  mockEntryAsExpectation,
+  sourceCommitProblem,
+  validateManifest,
+  validateMockPortfolio,
+  validateMockScenarios,
+} from "./scoreboard.ts";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -253,6 +261,14 @@ describe("mock projection section (M/R migration, Task 4)", () => {
   it("permits a real-only contract without manufacturing an M entry", () => {
     const m = validManifest(); // no mockScenarios at all
     expect(validateManifest(m, ALL_IDS)).toHaveLength(0);
+  });
+
+  it("requires every registered M projection when the M portfolio is selected", () => {
+    const m = validManifest();
+    m.mockScenarios = { ...mock("MA09") };
+    const problems = validateMockPortfolio(m);
+    expect(problems.some((p) => p.id === "MA09")).toBe(false);
+    expect(problems.some((p) => p.id === "MA08" && p.problem.includes("missing"))).toBe(true);
   });
 
   it("keeps M expectations independent from their paired R expectation", () => {

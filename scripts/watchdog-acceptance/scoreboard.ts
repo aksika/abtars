@@ -123,6 +123,26 @@ export function validateMockScenarios(
   return problems;
 }
 
+/**
+ * Validate the complete M portfolio when the M runner is requested. A real
+ * contract may intentionally have no projection, but a registered projection
+ * must have a manifest entry or the fast lane could not classify its result
+ * independently from R.
+ */
+export function validateMockPortfolio(
+  manifest: ExpectationManifest,
+  history: ManifestHistory = new Map(),
+): ManifestProblem[] {
+  const problems = validateMockScenarios(manifest, history);
+  const entries = manifest.mockScenarios ?? {};
+  for (const id of MOCK_PROJECTION_IDS) {
+    if (!Object.prototype.hasOwnProperty.call(entries, id)) {
+      problems.push({ id, problem: "registered mock projection is missing from the manifest" });
+    }
+  }
+  return problems;
+}
+
 function validateEntry(id: string, entry: ManifestExpectation, history: ManifestHistory): string | null {
   switch (entry.expect) {
     case "pass": {

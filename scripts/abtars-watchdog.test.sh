@@ -746,13 +746,14 @@ done
 # scan is read-only detection of OUR subtree via pgrep -P (never a cleanup or
 # signal authority) so its cost does not scale with the host's process count.
 leak_scan() {
-  local frontier collected p all
+  local frontier collected p parent
   frontier=("$$")
   for _ in 1 2 3 4 5 6; do # descendant depth bound
-    all="${frontier[*]}"
     collected=()
-    for p in $(pgrep -P "$all" 2>/dev/null || true); do
-      collected+=("$p")
+    for parent in "${frontier[@]}"; do
+      for p in $(pgrep -P "$parent" 2>/dev/null || true); do
+        collected+=("$p")
+      done
     done
     ((${#collected[@]} == 0)) && return 0
     frontier=("${collected[@]}")

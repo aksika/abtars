@@ -1,14 +1,18 @@
 # Post-migration evidence — #1712 M/R portfolio split
 
-Measured against the committed tree at **9cb5c3106ad414b52c354fec888a04652ab40744**
-(abtars dev, M/R migration HEAD). Product sources (`scripts/abtars-watchdog.sh`,
-`src/supervisor/**`, `fixture-bridge.ts`, scenario bodies) are byte-identical
-to the pre-migration commit e428dcdc; the migration changed test/package/docs
-files only.
+The migration run was recorded with HEAD at **9cb5c3106ad414b52c354fec888a04652ab40744**
+and with the then-working-tree watchdog script changes that were subsequently
+included in **6686e0da20f5178341b0dc0c2cd36235f180ea84**. The M/R migration
+itself changes test/package/docs files, but the final landing tree also carries
+a 239-line `scripts/abtars-watchdog.sh` change from the parallel #1711
+implementation session. Therefore this artifact must not claim that #1712 is
+production-source-clean; that #1711 change requires separate attribution and
+review. The measured content is reproducible at 6686e0da.
 
 - Platform: linux x64 (WSL), Node v22 (see run-results artifact for exact)
 - M suite: 12/12 projections pass, 0.84–1.25s (median ~0.9s; final FAST phase
-  0.99s) — saved starting observation was 13.4s
+  0.99s) — saved starting observation was 13.4s; post-review M-only recheck
+  remained 12/12 with `leak_scan=ok` in 1.98s
 - FAST lane: M 0.99s + 16 fast R cases 43.8s, combined exit 0
 - REAL: all 38 R cases executed serially under canonical RA01-RA24/RB01-RB14
 
@@ -38,8 +42,8 @@ epoch seconds (`lastExitAt / 1000 > SPAWNED_AT`); the fixture's scheduled exit
 (delayMs 150) frequently lands in the same second as its spawn, so the report
 is rejected and the death reads `exit=unknown`. Real bridges live far longer
 and are unaffected. Product sources are identical before/after the migration,
-and the same flake reproduces at the pre-migration commit, so this is a
-pre-existing harness/product-boundary race. Tracked separately in backlog
+and the same flake reproduces at the pre-migration measurement tree, so this is
+a pre-existing harness/product-boundary race. Tracked separately in backlog
 (see ticket filed with #1712's migration work); the manifest was NOT revised
 to hide it.
 

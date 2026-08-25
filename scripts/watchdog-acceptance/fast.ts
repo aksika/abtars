@@ -13,9 +13,9 @@ import { spawnSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { MOCK_PROJECTION_IDS, realPublicId } from "./contracts.ts";
+import { MOCK_PROJECTION_IDS } from "./contracts.ts";
 import type { ExpectationManifest, ScoreboardRow } from "./contracts.ts";
-import { classifyOutcome, decideExit, mockEntryAsExpectation } from "./scoreboard.ts";
+import { classifyOutcome, decideExit, mockEntryAsExpectation, validateMockPortfolio } from "./scoreboard.ts";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = resolve(__dirname, "..", "..");
@@ -63,9 +63,13 @@ function runMockSuite(): { rows: MockRunRow[]; durationMs: number } {
   }
   const missing = MOCK_PROJECTION_IDS.filter((id) => !seen.has(id));
   const unknown = [...seen].filter((id) => !MOCK_PROJECTION_IDS.includes(id));
-  if (missing.length > 0 || unknown.length > 0) {
+  const duplicate = rows
+    .map((row) => row.id)
+    .filter((id, index, all) => all.indexOf(id) !== index);
+  if (missing.length > 0 || unknown.length > 0 || duplicate.length > 0 || rows.length !== MOCK_PROJECTION_IDS.length) {
     process.stderr.write(
-      `[fast] M suite portfolio mismatch — missing: ${missing.join(",") || "none"}; unexpected: ${unknown.join(",") || "none"}\n`,
+      `[fast] M suite portfolio mismatch — missing: ${missing.join(",") || "none"}; ` +
+        `unexpected: ${unknown.join(",") || "none"}; duplicates: ${[...new Set(duplicate)].join(",") || "none"}\n`,
     );
     process.exit(2);
   }
@@ -95,6 +99,11 @@ async function main(): Promise<number> {
     return 2;
   }
   const manifest = loadManifest();
+  const manifestProblems = validateMockPortfolio(manifest);
+  if (manifestProblems.length > 0) {
+    for (const p of manifestProblems) process.stderr.write(`manifest problem [${p.id}]: ${p.problem}\n`);
+    return 2;
+  }
 
   // ── Phase 1: M shell projections ────────────────────────────────────────
   const mockPhase = runMockSuite();
@@ -106,7 +115,7 @@ async function main(): Promise<number> {
     const outcomeStatus = mock.outcomeStatus;
     const row: ScoreboardRow = {
       id: mock.id,
-      publicId: entry?.pairedReal ?? realPublicId(`R${mock.id.slice(1)}`) ?? "",
+      publicId: entry?.pairedReal ?? `R${mock.id.slice(1)}`,
       title: entry?.projection ?? "UNREVIEWED PROJECTION — missing manifest entry",
       outcomeStatus,
       verdict: classifyOutcome(mock.id, outcomeStatus, expect),
