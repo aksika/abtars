@@ -192,6 +192,25 @@ export async function registerTier3Tasks(ctx: BootCtx): Promise<void> {
 
   // #1520: the delivery poll — a periodic bounded claim over done cards.
   // Delivery is strictly downstream of settlement; failures never rerun work.
+  //
+  // #1724 (aksika-approved 2026-08-25, separate heartbeat gate): this poll is
+  // now also the durable-outbox trigger for Main-owned scheduled-T announce
+  // handoffs. Documented contract:
+  //   - interval: unchanged 60s tick; no new task registered;
+  //   - worst case: zero-cost scan when no matching card; for a claimed
+  //     scheduled-T announce card, one full Main pipeline turn (model call +
+  //     platform send), typically seconds, bounded ~2min by provider timeout
+  //     plus the pipeline's 3-attempt delivery retry. Single-flight: the
+  //     Kanban claim CAS admits at most one active attempt, and
+  //     bridge.lock.lastHeartbeat updates before tasks run, so watchdog
+  //     liveness cannot be starved;
+  //   - failure behavior: execute() never throws (logAndSwallow); every
+  //     ingress failure maps to card not_sent (bounded ≤5 retry) or unknown
+  //     (operator review, no automatic resend);
+  //   - why this poll remains the correct trigger: it already owns restart
+  //     recovery and bounded retry wake-ups for the durable outbox; the nerve
+  //     card:done hook provides immediacy at settlement. Routing through Main
+  //     changes the payload path only — no second owner, no new timer.
   heartbeat.registerTask({
     name: "kanban-delivery-poll",
     execute: async () => {
