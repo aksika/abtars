@@ -75,12 +75,14 @@ function watchdogTransforms(v: ProfileValues): SourceTransform[] {
     { target: "watchdog", find: "STALE=300", replace: `STALE=${v.staleS}`, expectedCount: 1 },
     { target: "watchdog", find: "POLL=60 ", replace: `POLL=${v.pollS} `, expectedCount: 1 },
     { target: "watchdog", find: "POLL_INTERVAL=5", replace: `POLL_INTERVAL=${v.pollIntervalS}`, expectedCount: 1 },
-    { target: "watchdog", find: "SPAWNED_AT < 180", replace: `SPAWNED_AT < ${v.bootGraceS}`, expectedCount: 1 },
     {
       target: "watchdog",
-      find: "LAST_HEALTH_ACCOUNT:-0} >= 60",
-      replace: `LAST_HEALTH_ACCOUNT:-0} >= ${v.healthAccountS}`,
-      expectedCount: 1,
+      // Two occurrences since #1711 Task 8A: the boot-grace skip AND the
+      // missing-lock boot-window guard in the definitive-death branch — both
+      // must compress together or the guard outlives the profile.
+      find: "SPAWNED_AT < 180",
+      replace: `SPAWNED_AT < ${v.bootGraceS}`,
+      expectedCount: 2,
     },
   ];
 }

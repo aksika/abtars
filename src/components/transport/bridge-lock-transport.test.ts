@@ -84,9 +84,34 @@ describe("bridge.lock writes under an orphan temp file (#1632)", () => {
     initBridgeLock({ pid: 1, startedAt: Date.now(), version: "test", argv: [] });
     plantStaleOrphan();
 
-    updateBridgeLockField("sleepStatus", "sleeping");
+    updateBridgeLockField("customNonGatedField", "value");
 
-    expect(readBridgeLockField<string>("sleepStatus")).toBe("sleeping");
+    expect(readBridgeLockField<string>("customNonGatedField")).toBe("value");
+  });
+
+  it("refuses gated fields on the generic path (#1711 R1) — only CLI/watchdog-owned keys pass", () => {
+    initBridgeLock({ pid: 1, startedAt: Date.now(), version: "test", argv: [] });
+
+    const before = readFileSync(lockPath, "utf-8");
+    for (const key of [
+      "lastHeartbeat",
+      "lastExitCode",
+      "lastExitAt",
+      "heapUsedMB",
+      "lastPromptAt",
+      "startedAt",
+      "acpPids",
+      "sleepStatus",
+      "restartReason",
+    ]) {
+      updateBridgeLockField(key, "forged");
+      expect(readBridgeLockField(key)).not.toBe("forged");
+    }
+    expect(readFileSync(lockPath, "utf-8")).toBe(before);
+
+    // CLI-owned field intentionally remains writable by a non-owner process.
+    updateBridgeLockField("restartRequested", "restart");
+    expect(readBridgeLockField<string>("restartRequested")).toBe("restart");
   });
 });
 

@@ -29,15 +29,15 @@ import { join } from "node:path";
 import {
   initBridgeLock,
   updateLastHeartbeat,
-  updateBridgeLockField,
+  writeOwnedExitFields,
 } from "../../src/components/transport/bridge-lock-transport.js";
 
 interface FixtureMode {
   mode: string;
   exitCode?: number;
   delayMs?: number;
-  forgedExitCode?: number;
-  forgedExitAgeMs?: number;
+  /** Direct plants only: install empty TERM/INT handlers (B7 incident shape). */
+  ignoreTerm?: boolean;
 }
 
 interface LiveExit {
@@ -114,7 +114,7 @@ async function main(): Promise<void> {
   const staleShaped = mode.mode === "stale" || mode.mode === "stale-ignore-term";
   const termIgnoringShaped = mode.mode === "ignore-term" || mode.mode === "stale-ignore-term";
   let heartbeatEnabled = !staleShaped && (direct ? true : (control?.live.heartbeatEnabled ?? true));
-  let ignoreTerm = direct ? termIgnoringShaped : (control?.live.ignoreTerm ?? false);
+  let ignoreTerm = direct ? (mode.ignoreTerm ?? termIgnoringShaped) : (control?.live.ignoreTerm ?? false);
 
   if (ignoreTerm) {
     // Empty handlers keep the process alive through SIGTERM/SIGINT.
@@ -228,8 +228,10 @@ async function main(): Promise<void> {
     if ((dueScheduled || dueLive) && !reported) {
       reported = true;
       const code = dueLive ? liveExit!.code : (mode.exitCode ?? 0);
-      updateBridgeLockField("lastExitCode", code);
-      updateBridgeLockField("lastExitAt", Date.now());
+      // Production gated writer (#1711 R1): owners write their own exit
+      // fields; a non-owner's self-report is REJECTED, which is exactly the
+      // B4 defect shape post-fix — the forgery must not land.
+      writeOwnedExitFields(code, Date.now());
       process.exit(code);
     }
 

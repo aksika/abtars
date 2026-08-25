@@ -118,8 +118,32 @@ export function readLastPromptAt(): number {
   } catch (err) { logAndSwallow("bridge_lock_transport", "readLastPromptAt", err); return 0; }
 }
 
+/**
+ * Fields whose writers are restricted to the owner-scoped path (#1711 R1).
+ * The generic writer stays available for CLI/watchdog-owned fields
+ * (`restartRequested`, watchdog identity); any process reaching the generic
+ * path for a gated field is by definition not the validated owner, so the
+ * write is refused — otherwise the R1 gate would be decorative and any local
+ * process could forge liveness or exit evidence by bypassing it.
+ */
+const GATED_LOCK_FIELDS: ReadonlySet<string> = new Set([
+  "lastHeartbeat",
+  "lastExitCode",
+  "lastExitAt",
+  "heapUsedMB",
+  "lastPromptAt",
+  "startedAt",
+  "acpPids",
+  "sleepStatus",
+  "restartReason",
+]);
+
 /** Update a single field in bridge.lock (read-merge-write). */
 export function updateBridgeLockField(key: string, value: unknown): void {
+  if (GATED_LOCK_FIELDS.has(key)) {
+    logWarn("bridge_lock_transport", `generic write refused for gated field (${key}); use the owner-scoped path`);
+    return;
+  }
   const p = join(abtarsHome(), "bridge.lock");
   try {
     const lock = JSON.parse(readFileSync(p, "utf-8"));

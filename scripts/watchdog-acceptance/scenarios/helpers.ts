@@ -123,15 +123,12 @@ export async function stripLockOwnership(
   delete stripped.startIdentity;
   w.writeLock(home, stripped);
   w.signalBridgeProcess(home, fixturePid, "SIGCONT");
+  writeStrippedUntilStable(w, home, stripped, fixturePid);
 }
 
 /**
- * #1711 R2.1 (B13): remove ONLY `instanceId` from the lock while preserving
- * pid/startIdentity — the exact corruption shape that keeps lock-first
- * attribution working (pid + matching start identity) while making adoption
- * impossible (validateBridgeLock requires instanceId). The fixture is frozen
- * (SIGSTOP) around the mutation so an in-flight heartbeat read-merge-write
- * cannot restore the pre-strip snapshot.
+ * Drive one crash cycle: command the LIVE bridge to self-exit with `code`
+ * after `delayMs`, then wait for a validated replacement.
  */
 export async function stripLockInstanceId(
   w: WorldApi,
@@ -146,6 +143,36 @@ export async function stripLockInstanceId(
   delete stripped.instanceId;
   w.writeLock(home, stripped);
   w.signalBridgeProcess(home, fixturePid, "SIGCONT");
+  writeStrippedUntilStable(w, home, stripped, fixturePid);
+}
+
+/**
+ * Win the strip/replay race deterministically. If SIGSTOP lands between the
+ * fixture's initBridgeLock and its boot-time updateLastHeartbeat, SIGCONT
+ * replays that beat AFTER the strip — through the R1 gated writer's absent-
+ * instanceId accept arm — so a fresh heartbeat lands in the just-stripped
+ * lock and corrupts the scenario's frozen-heartbeat precondition. Stale-
+ * shaped fixtures never write again once booted, so re-asserting the stripped
+ * snapshot briefly is guaranteed to converge.
+ */
+function writeStrippedUntilStable(
+  w: WorldApi,
+  home: string,
+  stripped: Record<string, unknown>,
+  _fixturePid: number,
+): void {
+  void _fixturePid;
+  for (let i = 0; i < 10; i++) {
+    w.writeLock(home, stripped);
+    const cur = w.lock(home) as { instanceId?: unknown; lastHeartbeat?: unknown } | null;
+    if (
+      cur !== null &&
+      cur.instanceId === undefined &&
+      cur.lastHeartbeat === stripped.lastHeartbeat
+    ) {
+      return;
+    }
+  }
 }
 
 /**

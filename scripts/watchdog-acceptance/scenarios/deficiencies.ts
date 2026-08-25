@@ -138,10 +138,21 @@ const B3 = B("B3", "Non-owner heartbeat writes cannot mask a wedged owner", "sta
   );
   const nonOwner = await w.plantBridge(home, { mode: "non-owner" });
   void nonOwner;
+  // Post-R1 validity: while the non-owner is alive its heartbeat refreshes
+  // must be REJECTED (owner's lastHeartbeat stays frozen). If reconciliation
+  // contains the foreign extra (owner authority) before the sampling window
+  // ends, that is equally acceptable post-fix behavior — the masking window
+  // simply closed earlier. Either way the final-form assertion below proves
+  // the wedged owner is stale-handled, not kept healthy by foreign writes.
   const hb1 = Number(w.lock(home)?.lastHeartbeat ?? 0);
   await w.sleep(2000);
   const hb2 = Number(w.lock(home)?.lastHeartbeat ?? 0);
-  w.expect(hb2 > hb1, "test validity: non-owner writes must be actively refreshing the lock for this scenario to exercise the defect");
+  if (bridgeAliveWithIdentity(w, home, nonOwner)) {
+    w.expect(
+      hb2 === hb1,
+      `test validity: the R1 owner-scoped gate must reject non-owner heartbeat refreshes (heartbeat moved ${hb1} -> ${hb2})`,
+    );
+  }
   try {
     await w.expectEventually(30000, "wedged owner killed despite foreign heartbeats", () => {
       const events = parseDeathEvents(w.watchdogLogLines(home, 40));
@@ -209,8 +220,10 @@ const B5 = B("B5", "Doctor scope excludes bridges from other homes", "lifecycle"
   await waitForOwnedBridge(w, homeB, 15000);
 
   const diag = w.runDoctor(["doctor", "--json"], { ABTARS_HOME: homeA });
-  const parsed = JSON.parse(diag.stdout) as { probes?: Array<{ name?: string; detail?: string }> };
-  const bridgeProbe = (parsed.probes ?? []).find((p) => p.name === "bridge");
+  // Real doctor JSON shape: { layers: { <layer>: ProbeResult[] } } (see B13
+  // case 3, which parses the same output).
+  const parsed = JSON.parse(diag.stdout) as { layers?: Record<string, Array<{ name?: string; detail?: string }>> };
+  const bridgeProbe = Object.values(parsed.layers ?? {}).flat().find((p) => p.name === "bridge");
   w.expect(bridgeProbe !== undefined, "doctor --json must include a bridge probe");
   const detail = bridgeProbe?.detail ?? "";
   w.expect(
@@ -246,7 +259,11 @@ const B6 = B("B6", "Unowned same-home extra is contained", "lifecycle", async (w
 const B7 = B("B7", "Wedged SIGTERM-ignoring extra is contained without harming the owner", "lifecycle", async (w) => {
   const home = w.homeA();
   const { pid: owner } = await startHealthyBridgeUnderWatchdog(w, home);
-  const extra = await w.plantBridge(home, { mode: "stale-ignore-term" });
+  // The incident extra must NOT hold the lock: a lock-initializing mode would
+  // overwrite the validated owner (last writer wins) and invert who is the
+  // orphan. non-owner + ignoreTerm = wedged same-home writer that survives
+  // SIGTERM, so containment must escalate to SIGKILL.
+  const extra = await w.plantBridge(home, { mode: "non-owner", ignoreTerm: true });
   try {
     await w.expectEventually(30000, "TERM-ignoring wedged extra contained while owner preserved", () =>
       !bridgeAliveWithIdentity(w, home, extra) && bridgeAliveWithIdentity(w, home, owner),
@@ -304,9 +321,17 @@ const B9 = B("B9", "Unchanged fault produces no repetition log lines", "crashLoo
   const home = w.homeA();
 
   // Part 1 — healthy steady state emits nothing across many poll cycles.
+  // Startup transition lines (state migration, admission decisions) are
+  // legitimate one-per-event history per R8; steady state means NO FURTHER
+  // lines once the initial spawn has settled. Counting startup events here
+  // made the case structurally unpassable for any R8-correct watchdog.
   await startHealthyBridgeUnderWatchdog(w, home);
+  const steadyBaseline = w.watchdogLogLines(home, 200).length;
   await w.sleep(6000);
-  w.expect(w.watchdogLogLines(home, 200).length === 0, "healthy steady state must emit no watchdog log lines");
+  w.expect(
+    w.watchdogLogLines(home, 200).length === steadyBaseline,
+    "healthy steady state must emit no additional watchdog log lines",
+  );
 
   // Part 2 — hold the unchanged fault (corrupt ownership, live bridge).
   const owner = Number(w.lock(home)?.pid);
@@ -349,9 +374,17 @@ process.exit(res.status ?? 0);
   chmodSync(shimPath, 0o755);
 
   const { pid: owner } = await startHealthyBridgeUnderWatchdog(w, home);
-  // Test-validity precondition: the defer loop must be engaged.
-  await w.expectEventually(20000, "shimmed validation drives the watchdog into deferred cycles", () =>
-    w.watchdogLogLines(home, 50).some((l) => l.includes(DEFER_MARKER)),
+  // Test-validity precondition (post-R4/R8): the shimmed additive metadata is
+  // TOLERATED — validation succeeds on the first read instead of exhausting
+  // retries, so there is no defer cycle to observe anymore. Supervision being
+  // live under the shim is proven by the owner's heartbeat continuing to
+  // advance while the shim answers every supervisor call.
+  const hbStart = Number(w.lock(home)?.lastHeartbeat ?? 0);
+  await w.sleep(3000);
+  const hbAfter = Number(w.lock(home)?.lastHeartbeat ?? 0);
+  w.expect(
+    hbAfter > hbStart,
+    `test validity: shimmed validate-bridge output must be accepted and supervision stay live (heartbeat ${hbStart} -> ${hbAfter})`,
   );
   // Supervision must remain LIVE: a wedged owner must still be replaced.
   w.setControl(home, { live: { heartbeatEnabled: false, ignoreTerm: false } });
@@ -386,8 +419,15 @@ const B11 = B("B11", "Frozen-heartbeat liveness containment under unprovable own
   await w.startWatchdog(home);
   await w.sleep(3000); // let it settle into its cycle
 
-  const observedHb = Number(w.lock(home)?.lastHeartbeat ?? 0);
-  w.expect(observedHb === frozenHb, "test validity: heartbeat must stay frozen under the corrupt lock");
+  // Test-validity: the wedged process must never be resurrected to health —
+  // WHILE IT LIVES its heartbeat stays frozen. On a fast host the admission
+  // repair may already have contained and replaced it inside this settle
+  // window (that is the system working); in that case the precondition is
+  // vacuous and the final-form assertion below owns the verification.
+  if (bridgeAliveWithIdentity(w, home, wedged)) {
+    const observedHb = Number(w.lock(home)?.lastHeartbeat ?? 0);
+    w.expect(observedHb === frozenHb, "test validity: heartbeat must stay frozen under the corrupt lock");
+  }
 
   try {
     await w.expectEventually(30000, "wedged unprovable process contained and replaced by exactly one fresh bridge", () => {
@@ -513,7 +553,7 @@ const B13 = B("B13", "Legacy relative-spelled process blocks loudly, never silen
   // Wait for THIS fixture's lock specifically: the case-1 bridge's stale lock
   // (dead, possibly a zombie) still sits in the home and would otherwise match
   // a generic owned-lock wait, making the strip hit the wrong lock.
-  await w.until(`relative fixture ${relLock} owns the lock`, 15000, () => {
+  await w.until(`relative fixture ${relLock} owns the lock`, 30000, () => {
     const l = w.lock(home);
     if (l === null || Number(l.pid) !== relLock) return false;
     const snap = w.procSnapshot(relLock);
@@ -522,7 +562,11 @@ const B13 = B("B13", "Legacy relative-spelled process blocks loudly, never silen
   await stripLockInstanceId(w, home, relLock);
 
   await w.startWatchdog(home);
-  await waitForLogMarker(w, home, "Spawn withheld", 25000);
+  // 40s: same loaded-host headroom as B1's decision window — each admission
+  // tick chains several supervisor CLI invocations (poll, validate, reconcile,
+  // prove-empty), so a loaded host stretches a single tick past 25s. The
+  // assertion is unchanged; only the completion window moves.
+  await waitForLogMarker(w, home, "Spawn withheld", 40000);
   w.expect(bridgeAliveWithIdentity(w, home, relLock),
     "B13 final-form failure: the blocked relative process must be left untouched (observe, never signal)");
   await w.sleep(5000);

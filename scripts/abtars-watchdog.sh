@@ -68,12 +68,12 @@ observe_liveness_heartbeat() {
   local hb now_ms changed=0
   hb="$(read_heartbeat)"
   [[ "$hb" =~ ^[0-9]+$ ]] || return 0
-  if [[ "$LAST_HB_PREV" =~ ^[0-9]+$ && "$hb" != "$LAST_HB_PREV" ]]; then
+  if [[ "${LAST_HB_PREV:-}" =~ ^[0-9]+$ && "$hb" != "${LAST_HB_PREV:-}" ]]; then
     HB_ADVANCED=1
     LIVENESS_WINDOW_STARTED=0
     changed=1
   fi
-  if (( changed == 0 && LIVENESS_WINDOW_STARTED == 0 )); then
+  if (( changed == 0 && ${LIVENESS_WINDOW_STARTED:-0} == 0 )); then
     now_ms=$(( $(date +%s) * 1000 ))
     if (( now_ms - hb > 2 * STALE * 1000 )); then
       HB_ADVANCED=0
@@ -339,12 +339,25 @@ prove_empty_once() {
 
 # Recovery-path wrapper: repeats the one-shot proof until it authorizes a
 # spawn, delegating every consumption/veto/logging rule to prove_empty_once.
-# Startup admission NEVER loops here — an occupied/inconclusive result must
-# return to the reconciliation tick instead of starving it (Task 8A / B11).
+# Each iteration also runs the SHARED reconciliation tick (Task 8A): while the
+# wrapper holds, the typed boundary must stay live or an extra could never be
+# contained (B7's owner-died-first shape starved containment forever here).
+#
+# A12 deadlock fix: an occupant that has SINCE become the validated owner
+# (e.g. a replacement that outlived a stale-lock misread) is adopted through
+# the existing adoption path instead of being withheld forever — EXCEPT the
+ #1719 refusal shape (retained fence predecessor alive and unchanged), which
+# keeps its own bounded budget and transition-failed accounting.
+# Startup admission NEVER loops in the blocking form — it drives the one-shot
+# directly between reconciliation ticks.
 spawn_if_proven_empty() {
   while true; do
     prove_empty_once
     [[ "$SPAWN_PROOF_VERDICT" == "spawned" ]] && return 0
+    run_reconciliation_tick
+    if ! classify_planned_refusal && adopt_validated_bridge; then
+      return 0
+    fi
     poll_state
     sleep "$POLL_INTERVAL"
   done
@@ -371,8 +384,8 @@ handle_reconciliation_line() {
 
   case "$dec" in
     extra-candidate|contain-extra)
-      if [[ "$tok" == "$RECON_TOKEN" ]]; then
-        RECON_COUNT=$((RECON_COUNT+1))
+      if [[ "$tok" == "${RECON_TOKEN:-}" ]]; then
+        RECON_COUNT=$(( ${RECON_COUNT:-0} + 1 ))
       else
         RECON_TOKEN="$tok"
         RECON_COUNT=1
@@ -427,7 +440,7 @@ run_reconciliation_tick() {
     return 0
   fi
   local _line
-  _line="$(svc reconcile "$TRANSITION_FENCE" "${LAST_HB_PREV:--}" "$HB_ADVANCED" 2>/dev/null || true)"
+  _line="$(svc reconcile "${TRANSITION_FENCE:-stable}" "${LAST_HB_PREV:--}" "${HB_ADVANCED:-0}" 2>/dev/null || true)"
   [[ -z "$_line" ]] && return 0
   RECON_DECISION="${_line%% *}"; RECON_DECISION="${RECON_DECISION#decision=}"
   handle_reconciliation_line "$_line"
@@ -455,13 +468,13 @@ read_instance_field() {
 # its exit handler AFTER the duplicate-gate arms, so a refusal never writes
 # lastExitCode and process-gone:exit=unknown carries no signal.
 classify_planned_refusal() {
-  [[ "$TRANSITION_FENCE" != "stable" ]] || return 1
-  [[ -n "$FENCE_PRED_PID" && -n "$FENCE_PRED_IDENTITY" ]] || return 1
+  [[ "${TRANSITION_FENCE:-stable}" != "stable" ]] || return 1
+  [[ -n "${FENCE_PRED_PID:-}" && -n "${FENCE_PRED_IDENTITY:-}" ]] || return 1
   local rstatus rpid ridentity
   read -r rstatus rpid ridentity <<< "$(svc owner-identity 2>/dev/null)"
   # Identity-aware fresh probe only — never kill -0, never a cached lock read.
-  [[ "$rstatus" == "valid" && "$rpid" == "$FENCE_PRED_PID" && "$ridentity" == "$FENCE_PRED_IDENTITY" ]] || return 1
-  [[ "$(read_instance_field)" == "$PRES_SPAWN_INSTANCE" ]] || return 1
+  [[ "$rstatus" == "valid" && "$rpid" == "${FENCE_PRED_PID:-}" && "$ridentity" == "${FENCE_PRED_IDENTITY:-}" ]] || return 1
+  [[ "$(read_instance_field)" == "${PRES_SPAWN_INSTANCE:-}" ]] || return 1
   return 0
 }
 
@@ -761,6 +774,17 @@ except Exception:
         break
         ;;
       dead|reused|wrong-command|mismatch)
+        # Boot-window guard: a JUST-SPAWNED bridge has not written its lock
+        # yet, and a MISSING lock validates as definitive dead — recording a
+        # death for the healthy newborn is the spawn boot race, not a real
+        # outcome. Hold (no reaping, no accounting) while the lock is absent
+        # inside the boot-grace window; the next tick revalidates. An EXISTING
+        # lock with a terminal verdict keeps the unchanged path below. The
+        # literal matches the boot-grace transform anchor.
+        if [[ ! -f "$LOCK" && "$_vpid" == "0" ]] && (( $(date +%s) - SPAWNED_AT < 180 )); then
+          sleep "$POLL_INTERVAL"
+          continue
+        fi
         # Definitive identity result — existing terminal behavior unchanged.
         clear_ownership_episode
         wait "$PID" 2>/dev/null   # reap the child

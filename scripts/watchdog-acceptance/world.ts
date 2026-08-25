@@ -388,7 +388,7 @@ exit "$rc"`;
   }
 
   /**
-   * B12 layout: releases/r1+r2 each carry a full app/bundle; <home>/app is a
+   * B12 layout: releases/r1+r2 each carry a full bundle; <home>/app is a
    * symlink to <home>/current, which points at releases/r1. The production
    * spawn line's literal argv (`app/bundle/abtars.js`) resolves through the
    * chain, so repointing `current` changes which release NEW spawns execute
@@ -401,7 +401,13 @@ exit "$rc"`;
     if (h) return h;
     h = join(this.root, label);
     for (const release of ["r1", "r2"]) {
-      const bundleDir = join(h, "releases", release, "app", "bundle");
+      // Production release shape (#1711 R2): the generation dir contains
+      // `bundle/` DIRECTLY — `<home>/app -> current -> releases/<r>`, so
+      // `$ABTARS_HOME/app/bundle/abtars.js` must resolve to
+      // `releases/<r>/bundle/abtars.js`. Seeding an extra inner `app/` layer
+      // made the canonical spawn target unresolvable and B12 failed at
+      // fixture-lock setup before the watchdog ever ran.
+      const bundleDir = join(h, "releases", release, "bundle");
       mkdirSync(bundleDir, { recursive: true });
       mkdirSync(join(h, "releases", release, "logs"), { recursive: true });
       writeFileSync(join(bundleDir, "package.json"), '{"type":"module"}\n');

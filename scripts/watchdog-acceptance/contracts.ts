@@ -34,6 +34,8 @@ export interface FixtureMode {
   readonly mode: FixtureModeName;
   readonly exitCode?: number;
   readonly delayMs?: number;
+  /** Direct plants only: install empty TERM/INT handlers (B7 incident shape). */
+  readonly ignoreTerm?: boolean;
 }
 
 export interface FixtureLiveControl {
@@ -56,7 +58,7 @@ export interface FixtureControlFile {
 }
 
 /** Named, count-checked source transformations for the current implementation. */
-export type TransformTarget = "watchdog" | "supervisor-state";
+export type TransformTarget = "watchdog" | "supervisor-state" | "reconcile-executor";
 
 export interface SourceTransform {
   readonly target: TransformTarget;
