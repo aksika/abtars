@@ -14,7 +14,7 @@ import { validatePiRuntimeContract, PiRuntimeContractError } from "./pi-runtime-
 import type { PiInstallation, PiModuleSpecifier, PiInstallationState } from "../pi-installation.js";
 import type { PiRuntimeContractDependencies } from "./pi-runtime-contract.js";
 
-const PINNED_INSTALL_COMMAND = "npm i -g '@earendil-works/pi-coding-agent@~0.83.0'";
+const PINNED_INSTALL_COMMAND = "npm i -g '@earendil-works/pi-coding-agent@~0.84.2'";
 
 function makeInstallation(version = "0.84.0"): PiInstallation {
   return {

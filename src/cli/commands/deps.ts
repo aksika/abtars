@@ -471,7 +471,7 @@ function piUpdate(): MutationResult {
   acquireLock("abtars", "update:pi", token);
   try {
     // #1572: `pi update --self` is gone — abtars never moves Pi above the pin.
-    // Update = npm reinstall of the pinned range (newest 0.83.x patch), or a
+    // Update = npm reinstall of the pinned range (newest 0.84.x patch), or a
     // refuse with the downgrade command when the install is above the pin.
     const decision = resolvePiUpdateAction(observePi(), false);
     if (decision.kind === "noop") return { group: "pi", ok: true };

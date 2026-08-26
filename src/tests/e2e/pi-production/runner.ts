@@ -100,10 +100,10 @@ export async function runPiProductionE2E(opts: PiE2EOptions): Promise<PiE2ERunRe
   const abmindRoot = opts.abmindRoot ?? resolve(opts.abtarsRoot, "../abmind");
 
   // The Pi runtime is a required production dependency of the Pi journey: a
-  // standalone pi executable must be resolvable (>= 0.83.0 per
+  // standalone pi executable must be resolvable (>= 0.84.2 per
   // PI_COMPATIBILITY). Missing it blocks the lane — never a passing skip.
   if (!resolvePiExecutable()) {
-    const reason = "standalone `pi` executable not found on PATH (install pi >= 0.83.0 or add it to PATH outside node_modules/.bin)";
+    const reason = "standalone `pi` executable not found on PATH (install pi >= 0.84.2 or add it to PATH outside node_modules/.bin)";
     for (const lane of desiredLanes) {
       lanes.push(blockedResult(lane, opts.profile, reason));
     }

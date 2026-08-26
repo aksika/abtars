@@ -26,10 +26,14 @@ import type { TuiServerFrame } from "../../platforms/tui/tui-protocol.js";
 import type { TuiRuntimeStatus, TuiUsageSnapshot } from "../../platforms/tui/runtime-status.js";
 
 // ── Public module seam (design §1.2) ─────────────────────────────────────
+//
+// Pi 0.84: the runtime `TUI` constructor no longer exists — `TUI` is a
+// TypeScript interface only. The concrete renderer is `TuiMainScreen`; the
+// `TUI` type remains the structural contract for the root UI below.
 
 export interface TuiPresentationModules {
   tui: Pick<typeof import("@earendil-works/pi-tui"),
-    "ProcessTerminal" | "TUI" | "Container" | "Editor" | "Text" |
+    "ProcessTerminal" | "TuiMainScreen" | "Container" | "Editor" | "Text" |
     "Markdown" | "Loader" | "matchesKey">;
   codingAgent: Pick<typeof import("@earendil-works/pi-coding-agent"),
     "initTheme" | "getMarkdownTheme" | "getSelectListTheme" |

@@ -1,14 +1,15 @@
 /**
- * tui-ready-guard.test.ts — #1570 regression: `abtars tui` must call pi-tui
- * TUI.start() exactly once per client lifetime, even when the bridge emits a
+ * tui-ready-guard.test.ts — #1570 regression: `abtars tui` must start the
+ * renderer exactly once per client lifetime, even when the bridge emits a
  * fresh `ready` frame per attachment change (commitAttachment, #1533 rebind).
  * pi-tui's start() is not idempotent — a second call registers a second stdin
  * data listener and every keystroke is processed twice.
  *
  * #1612: the client loads TWO public module surfaces (pi-tui + pi-coding-agent)
  * and constructs the TuiApp render shell; the fake modules below provide both.
- * The honest observable proxy for the pi-tui-side double-listener is the
- * call count on `TUI.start()`.
+ * #1713 (Pi 0.84): the concrete renderer class is `TuiMainScreen`; `TUI` is
+ * type-only. The honest observable proxy for the pi-tui-side double-listener
+ * is the call count on the fake renderer's `start()`.
  */
 
 import { EventEmitter } from "node:events";
@@ -55,7 +56,9 @@ function fakeModules() {
     columns = 80;
     rows = 24;
   }
-  class TUI {
+  // Pi 0.84: the concrete renderer is TuiMainScreen; there is no runtime
+  // `TUI` constructor. The command consumes instances via the TUI interface.
+  class TuiMainScreen {
     constructor(public term: unknown, public showCursor: boolean) {}
     addChild = ui.addChild;
     setFocus = ui.setFocus;
@@ -90,7 +93,7 @@ function fakeModules() {
   }
   const matchesKey = (data: string, key: string): boolean => data === `\x03${key}`;
 
-  const pi = { ProcessTerminal, TUI, Container, Editor, Text, Markdown, Loader, matchesKey };
+  const pi = { ProcessTerminal, TuiMainScreen, Container, Editor, Text, Markdown, Loader, matchesKey };
 
   class UserMessageComponent extends Container {
     constructor(public text: string, public theme: unknown, public pad?: number) { super(); }
@@ -132,7 +135,7 @@ describe("tui client — repeated ready frames (#1570 + #1612)", () => {
       installation: {
         executable: "/usr/bin/pi",
         packageRoot: "/usr/lib/pi-coding-agent",
-        version: "0.83.0",
+        version: "0.84.2",
         source: "path",
         pinStatus: "at-pin",
         moduleRoots: { ai: "/tmp/pi-ai", tui: "/tmp/pi-tui", agentCore: "/tmp/pi-agent-core" },

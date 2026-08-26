@@ -222,7 +222,10 @@ export async function tui(args: string[]): Promise<number> {
   // during teardown — swallow it, the terminal is already gone.
   process.stdout.on("error", () => { /* swallowed: terminal is gone */ });
   const terminal = new modules.tui.ProcessTerminal();
-  const ui = new modules.tui.TUI(terminal, true);   // showHardwareCursor=true
+  // Pi 0.84: the runtime `TUI` class is gone; `TuiMainScreen` is the concrete
+  // main-screen renderer (showHardwareCursor=true preserved). The object is
+  // consumed through the structural `TUI` interface.
+  const ui = new modules.tui.TuiMainScreen(terminal, true);
   const editor = new modules.tui.Editor(ui, nativeEditorTheme(modules.codingAgent));
 
   // Connect.

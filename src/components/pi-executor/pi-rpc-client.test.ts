@@ -169,14 +169,51 @@ describe("SupervisedPiRpcClient", () => {
       );
     });
 
-    it("routes high-frequency message_update events to subscribers", async () => {
+    it("routes high-frequency message_update events to subscribers (#1713 delta-only wire)", async () => {
+      const eventSpy = vi.fn();
+      client.subscribe(eventSpy);
+      // Pi 0.84 wire shape: no cumulative `message`/`partial` snapshot —
+      // only the delta event plus bounded cumulative usage.
+      child.stdout.write(JSON.stringify({
+        type: "message_update",
+        usage: { input: 10, output: 5 },
+        assistantMessageEvent: { type: "text_delta", delta: "Hel" },
+      }) + "\n");
+      child.stdout.write(JSON.stringify({
+        type: "message_update",
+        usage: { input: 10, output: 9 },
+        assistantMessageEvent: { type: "text_delta", delta: "lo" },
+      }) + "\n");
+      expect(eventSpy).toHaveBeenCalledTimes(2);
+      expect(eventSpy).toHaveBeenNthCalledWith(1, expect.objectContaining({
+        type: "message_update",
+        assistantMessageEvent: expect.objectContaining({ type: "text_delta", delta: "Hel" }),
+      }));
+      expect(eventSpy).toHaveBeenNthCalledWith(2, expect.objectContaining({
+        type: "message_update",
+        assistantMessageEvent: expect.objectContaining({ type: "text_delta", delta: "lo" }),
+      }));
+    });
+
+    it("routes terminal message_end/agent_end so final text and usage stay authoritative (#1713)", async () => {
       const eventSpy = vi.fn();
       client.subscribe(eventSpy);
       child.stdout.write(JSON.stringify({
-        type: "message_update", message: { role: "assistant" }, assistantMessageEvent: {},
+        type: "message_end",
+        message: {
+          role: "assistant",
+          content: [{ type: "text", text: "final answer" }],
+          stopReason: "stop",
+          usage: { input: 12, output: 34, totalTokens: 46 },
+        },
       }) + "\n");
-      expect(eventSpy).toHaveBeenCalledTimes(1);
-      expect(eventSpy).toHaveBeenCalledWith(expect.objectContaining({ type: "message_update" }));
+      child.stdout.write(JSON.stringify({ type: "agent_end", messages: [] }) + "\n");
+      expect(eventSpy).toHaveBeenCalledTimes(2);
+      expect(eventSpy).toHaveBeenNthCalledWith(1, expect.objectContaining({
+        type: "message_end",
+        message: expect.objectContaining({ role: "assistant", stopReason: "stop" }),
+      }));
+      expect(eventSpy).toHaveBeenNthCalledWith(2, expect.objectContaining({ type: "agent_end" }));
     });
   });
 

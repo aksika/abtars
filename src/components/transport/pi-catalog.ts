@@ -15,7 +15,7 @@
  *   - Precedence (C1): pi wins ONLY when fully resolvable — warmed ∧ provider maps (C2) ∧
  *     getModel() hits. Custom gateways / ollama / kiro never resolve → always models.json.
  *
- * Contracts verified against @earendil-works/pi-ai@~0.83.0 via devDependency.
+ * Contracts verified against @earendil-works/pi-ai@~0.84.2 via devDependency.
  */
 
 import type { Models } from "@earendil-works/pi-ai";

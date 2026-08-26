@@ -60,7 +60,7 @@ vi.mock("node:child_process", async (importOriginal) => {
       // raised its probe timeout to 15s, which can stall this file's tests
       // past vitest's 5s default under parallel load).
       if (args?.[0] === "--version") {
-        return { status: 0, stdout: "0.83.0\n", stderr: "", pid: 0, output: ["0.83.0\n"], signal: null, error: null };
+        return { status: 0, stdout: "0.84.2\n", stderr: "", pid: 0, output: ["0.84.2\n"], signal: null, error: null };
       }
       return origSpawnRef.current(cmd, args);
     },
@@ -247,7 +247,7 @@ describe("doctor tribe probes (#1439)", () => {
 
     it("warns (not fails) when pi is slow to start — timeout is transient", async () => {
       const fakePi = join(tmpDir, "fake-pi");
-      writeFileSync(fakePi, "#!/bin/sh\necho 0.83.0\n");
+      writeFileSync(fakePi, "#!/bin/sh\necho 0.84.2\n");
       chmodSync(fakePi, 0o755);
       writePiExecutor(fakePi);
       spawnRef.current.push({
@@ -263,18 +263,18 @@ describe("doctor tribe probes (#1439)", () => {
 
     it("reports ok when pi responds with a version", async () => {
       const fakePi = join(tmpDir, "fake-pi");
-      writeFileSync(fakePi, "#!/bin/sh\necho 0.83.0\n");
+      writeFileSync(fakePi, "#!/bin/sh\necho 0.84.2\n");
       chmodSync(fakePi, 0o755);
       writePiExecutor(fakePi);
       spawnRef.current.push({
         cmd: fakePi,
-        behavior: () => ({ status: 0, stdout: "0.83.0\n", stderr: "", pid: 0, output: ["0.83.0\n"], signal: null, error: null }),
+        behavior: () => ({ status: 0, stdout: "0.84.2\n", stderr: "", pid: 0, output: ["0.84.2\n"], signal: null, error: null }),
       });
       const { runAllProbes } = await import("./doctor-probes.js");
       const result = await runAllProbes();
       const pi = result.layers.brain.find((r) => r.name === "pi");
       expect(pi?.status).toBe("ok");
-      expect(pi?.detail).toContain("0.83.0");
+      expect(pi?.detail).toContain("0.84.2");
     });
   });
 

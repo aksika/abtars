@@ -110,7 +110,7 @@ function makeModules(): TuiPresentationModules {
   return {
     tui: {
       ProcessTerminal: FakeProcessTerminal,
-      TUI: FakeTUI,
+      TuiMainScreen: FakeTUI,
       Container: FakeContainer,
       Editor: FakeEditor,
       Text: FakeText,

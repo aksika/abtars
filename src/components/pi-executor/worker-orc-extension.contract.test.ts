@@ -46,7 +46,9 @@ async function loadTools(): Promise<Map<string, RegisteredTool>> {
 }
 
 describe("worker-orc-v1.ts extension contract (#1643)", () => {
-  it("loads with the pinned Pi extension loader and registers exactly the two typed sequential tools", async () => {
+  // The real 0.84 extension loader (jiti) compiles the TS artifact on first
+  // load — cold runs can exceed vitest's default 5s under suite load.
+  it("loads with the pinned Pi extension loader and registers exactly the two typed sequential tools", { timeout: 30_000 }, async () => {
     const tools = await loadTools();
     expect([...tools.keys()].sort()).toEqual(["ask_orc", "tell_orc"]);
     for (const tool of tools.values()) {

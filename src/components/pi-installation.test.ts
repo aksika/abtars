@@ -84,7 +84,7 @@ describe("resolveNestedPackageRoot", () => {
 
 describe("resolvePiInstallation", () => {
   it("uses package metadata without launching the Pi executable", () => {
-    const { bin, packageRoot } = piInstallationFixture("0.83.0");
+    const { bin, packageRoot } = piInstallationFixture("0.84.2");
     const originalPath = process.env.PATH;
     process.env.PATH = bin;
     try {
@@ -93,7 +93,7 @@ describe("resolvePiInstallation", () => {
         state: "compatible",
         installation: {
           packageRoot,
-          version: "0.83.0",
+          version: "0.84.2",
         },
       });
     } finally {
@@ -182,7 +182,7 @@ function makeInstallation(aiRoot: string, tuiRoot: string, agentCoreRoot: string
   return {
     executable: "/usr/bin/pi",
     packageRoot,
-    version: "0.83.0",
+    version: "0.84.2",
     source: "path",
     pinStatus: "at-pin",
     moduleRoots: { ai: aiRoot, tui: tuiRoot, agentCore: agentCoreRoot },

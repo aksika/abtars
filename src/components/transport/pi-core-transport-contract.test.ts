@@ -45,7 +45,7 @@ vi.mock("./pi-core-types.js", async (importOriginal) => {
     createCurrentTurnMessage: (message: string) => ({ role: "abtars_current_turn", content: message }),
     loadAndValidatePiAgentCore: vi.fn().mockResolvedValue({
       module: {},
-      installation: { executable: "/usr/bin/pi", packageRoot: "/usr/lib/pi", version: "0.83.0", source: "path", pinStatus: "at-pin", moduleRoots: { ai: "", tui: "", agentCore: "" } },
+      installation: { executable: "/usr/bin/pi", packageRoot: "/usr/lib/pi", version: "0.84.2", source: "path", pinStatus: "at-pin", moduleRoots: { ai: "", tui: "", agentCore: "" } },
     }),
   };
 });

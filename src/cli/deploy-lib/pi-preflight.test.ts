@@ -34,7 +34,7 @@ const compatibleState: PiInstallationState = {
   installation: {
     executable: "/usr/local/bin/pi",
     packageRoot: "/usr/local/lib/node_modules/@earendil-works/pi-coding-agent",
-    version: "0.83.0",
+    version: "0.84.2",
     source: "path",
     moduleRoots: {
       ai: "/usr/local/lib/node_modules/@earendil-works/pi-ai",
@@ -68,7 +68,7 @@ describe("pi-preflight (#1438)", () => {
 
     expect(exitCode).toBe(0);
     expect(stdout).toContain("✓ Pi");
-    expect(stdout).toContain("0.83.0");
+    expect(stdout).toContain("0.84.2");
   });
 
   it("keeps the downgrade command visible when an above-pin Pi is unloadable", async () => {
@@ -76,7 +76,7 @@ describe("pi-preflight (#1438)", () => {
       state: "compatible",
       installation: {
         ...compatibleState.installation,
-        version: "0.84.0",
+        version: "0.85.0",
         pinStatus: "above-pin",
       },
     });
@@ -91,7 +91,7 @@ describe("pi-preflight (#1438)", () => {
 
     expect(exitCode).toBe(0);
     expect(stdout).toContain("unloadable");
-    expect(stdout).toContain("npm i -g '@earendil-works/pi-coding-agent@~0.83.0'");
+    expect(stdout).toContain("npm i -g '@earendil-works/pi-coding-agent@~0.84.2'");
   });
 
   it("passes when Pi is absent", async () => {

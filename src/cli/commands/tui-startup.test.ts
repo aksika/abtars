@@ -12,6 +12,16 @@ vi.mock("../../components/pi-installation.js", () => ({
 import { resolvePiInstallation, loadPiModule } from "../../components/pi-installation.js";
 import { tui } from "./tui.js";
 
+/** Pi-tui module fixture for the 0.84 surface: concrete `TuiMainScreen`
+ *  renderer, no runtime `TUI` constructor (`TUI` is a type-only export). */
+function pi084TuiModule(): Record<string, unknown> {
+  return {
+    ProcessTerminal: class {}, TuiMainScreen: class {}, Container: class {},
+    Editor: class {}, Text: class {}, Markdown: class {},
+    Loader: class {}, matchesKey: () => false,
+  };
+}
+
 describe("tui startup — pi-tui load failure (#1441)", () => {
   let stderrOutput: string[];
 
@@ -56,7 +66,7 @@ describe("tui startup — pi-tui load failure (#1441)", () => {
       installation: {
         executable: "/usr/bin/pi",
         packageRoot: "/usr/lib/pi-coding-agent",
-        version: "0.83.0",
+        version: "0.84.2",
         source: "path",
         pinStatus: "at-pin",
         moduleRoots: { ai: "/tmp/pi-ai", tui: "/tmp/pi-tui", agentCore: "/tmp/pi-agent-core" },
@@ -76,7 +86,7 @@ describe("tui startup — pi-tui load failure (#1441)", () => {
       installation: {
         executable: "/usr/bin/pi",
         packageRoot: "/usr/lib/pi-coding-agent",
-        version: "0.83.0",
+        version: "0.84.2",
         source: "path",
         pinStatus: "at-pin",
         moduleRoots: { ai: "/tmp/pi-ai", tui: "/tmp/pi-tui", agentCore: "/tmp/pi-agent-core" },
@@ -84,11 +94,7 @@ describe("tui startup — pi-tui load failure (#1441)", () => {
     });
     vi.mocked(loadPiModule).mockImplementation(async (_installation, spec) => {
       if (spec.package === "@earendil-works/pi-tui") {
-        return {
-          ProcessTerminal: class {}, TUI: class {}, Container: class {},
-          Editor: class {}, Text: class {}, Markdown: class {},
-          Loader: class {}, matchesKey: () => false,
-        };
+        return pi084TuiModule();
       }
       // coding-agent without UserMessageComponent — must fail pre-ready.
       return { initTheme: () => {}, getMarkdownTheme: () => ({}), getSelectListTheme: () => ({}) };
@@ -101,13 +107,47 @@ describe("tui startup — pi-tui load failure (#1441)", () => {
     expect(stderrOutput.some(s => s.includes("Reinstall"))).toBe(true);
   });
 
+  it("rejects a pre-0.84 pi-tui module that only exposes the old runtime TUI constructor (#1713)", async () => {
+    vi.mocked(resolvePiInstallation).mockReturnValue({
+      state: "compatible",
+      installation: {
+        executable: "/usr/bin/pi",
+        packageRoot: "/usr/lib/pi-coding-agent",
+        version: "0.84.2",
+        source: "path",
+        pinStatus: "at-pin",
+        moduleRoots: { ai: "/tmp/pi-ai", tui: "/tmp/pi-tui", agentCore: "/tmp/pi-agent-core" },
+      },
+    });
+    vi.mocked(loadPiModule).mockImplementation(async (_installation, spec) => {
+      if (spec.package === "@earendil-works/pi-tui") {
+        // 0.83-shaped module: runtime `TUI` exists but `TuiMainScreen` does not.
+        const legacy = pi084TuiModule() as Record<string, unknown>;
+        delete legacy.TuiMainScreen;
+        legacy.TUI = class {};
+        return legacy;
+      }
+      // Complete coding-agent surface — the failure must come from the TUI seam.
+      return {
+        initTheme: () => {}, getMarkdownTheme: () => ({}), getSelectListTheme: () => ({}),
+        UserMessageComponent: class {}, AssistantMessageComponent: class {}, DynamicBorder: class {},
+      };
+    });
+
+    const exitCode = await tui([]);
+
+    expect(exitCode).toBe(1);
+    expect(stderrOutput.some(s => s.includes("TuiMainScreen"))).toBe(true);
+    expect(stderrOutput.some(s => s.includes("Reinstall"))).toBe(true);
+  });
+
   it("does not silently fall back when the coding-agent package root fails to resolve (#1612)", async () => {
     vi.mocked(resolvePiInstallation).mockReturnValue({
       state: "compatible",
       installation: {
         executable: "/usr/bin/pi",
         packageRoot: "/usr/lib/pi-coding-agent",
-        version: "0.83.0",
+        version: "0.84.2",
         source: "path",
         pinStatus: "at-pin",
         moduleRoots: { ai: "/tmp/pi-ai", tui: "/tmp/pi-tui", agentCore: "/tmp/pi-agent-core" },
