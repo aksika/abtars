@@ -73,6 +73,10 @@ export function createPiExecutionSafetyController(
   let _incident: BehaviorIncident | null = null;
   let _lastTerminalIncident: BehaviorIncident | null = null;
   let _correctiveAdmitted = false;
+  // #1728: one-shot authorization for the admitted corrective provider request.
+  // Armed only when prepareNextTurn() has a valid update in hand; consumed by
+  // beginProviderTurn() exactly when a provider request is actually authorized.
+  let _correctiveTurnPending = false;
   let _terminalSafetyFailure = false;
 
   const classifiedLiterals: Set<string> = new Set();
@@ -152,7 +156,15 @@ export function createPiExecutionSafetyController(
     beginProviderTurn(candidateKey: string): TurnDecision {
       if (_stopped) return { decision: "stop", reason: _stopReason };
       if (_paused) return { decision: "pause" };
-      if (promptRounds >= mp) {
+
+      // #1728: an armed corrective request bypasses ONLY the charged
+      // prompt-bound check below. Candidate identity, rotation, and
+      // per-candidate accounting run exactly as for a charged request; the
+      // token is consumed only when a `continue` is actually returned, so a
+      // rotation stop retains it for the selected replacement candidate.
+      const freeCorrectiveTurn = _correctiveTurnPending;
+
+      if (promptRounds >= mp && !freeCorrectiveTurn) {
         _incident = { type: "prompt_round_limit", candidateKey, roundsUsed: promptRounds };
         _lastTerminalIncident = _incident;
         _terminalSafetyFailure = true;
@@ -164,14 +176,24 @@ export function createPiExecutionSafetyController(
         activeCandidate = candidateKey;
       }
 
+      const advanceChargedRound = (): { decision: "continue" } => {
+        if (freeCorrectiveTurn) {
+          _correctiveTurnPending = false;
+          logDebug(TAG, `Corrective provider turn admitted (uncharged) — charged rounds remain ${promptRounds}/${mp}`);
+        } else {
+          promptRounds++;
+        }
+        candidateRounds++;
+        batchCancelled = false;
+        return { decision: "continue" };
+      };
+
       // #1595: a sole eligible candidate bypasses candidate-round rotation
       // entirely — no temporary exclusion, reselection, or repeated
       // "no alternate, continuing" logs. The prompt-wide limit is the only
       // bound it can hit, so keep advancing promptRounds below.
       if (policy.survivingCandidates().length <= 1) {
-        promptRounds++;
-        batchCancelled = false;
-        return { decision: "continue" };
+        return advanceChargedRound();
       }
 
       if (candidateRounds >= mc) {
@@ -199,22 +221,24 @@ export function createPiExecutionSafetyController(
         // candidate fast path above; retain the prompt-wide hard bound as the
         // final safety limit for a policy that becomes exhausted mid-turn.
         logDebug(TAG, `Candidate round limit for ${candidateKey} — no alternate, continuing`);
-        promptRounds++;
-        candidateRounds++;
-        batchCancelled = false;
-        return { decision: "continue" };
+        return advanceChargedRound();
       }
 
-      promptRounds++;
-      candidateRounds++;
-      batchCancelled = false;
-      return { decision: "continue" };
+      return advanceChargedRound();
     },
 
     prepareNextTurn(context: SafetyPrepareNextTurnContext): AgentLoopTurnUpdate | undefined {
-      if (_paused || _stopped || promptRounds >= mp) {
-        return undefined;
-      }
+      if (_paused || _stopped) return undefined;
+
+      // #1728: the first exact_repeat/repeated_failure recovery may pass even
+      // when the charged counter is already at the bound — the corrective
+      // provider request it arms will be uncharged. A second recovery is
+      // still refused at the bound (and everywhere else) by the lifetime
+      // `_correctiveAdmitted` rule below.
+      const firstBehaviorRecovery = !_correctiveAdmitted
+        && _incident !== null
+        && (_incident.type === "exact_repeat" || _incident.type === "repeated_failure");
+      if (promptRounds >= mp && !firstBehaviorRecovery) return undefined;
 
       if (!_incident) return undefined;
 
@@ -226,15 +250,26 @@ export function createPiExecutionSafetyController(
       if (projectionCtx?.messages) baseline = projectionCtx.messages;
 
       if (inc.type === "exact_repeat" || inc.type === "repeated_failure") {
+        // #1728: lifetime rule — exactly one behavior recovery per execution.
+        // A second behavior incident after the admitted corrective is terminal
+        // regardless of whether an alternate candidate exists (previously only
+        // the no-alternate path enforced this; a re-eligible candidate would
+        // have re-admitted indefinitely).
+        if (_correctiveAdmitted) {
+          logWarn(TAG, `Equivalent incident recurs after corrective admission — terminating`);
+          logTrace(TAG, `pi_corrective_turn_terminal candidate=${context.candidateKey} type=${inc.type}`);
+          _lastTerminalIncident = inc;
+          _terminalSafetyFailure = true;
+          return undefined;
+        }
+
         const candidate = context.candidateKey;
         const [candidateModel, _candidateEndpoint] = candidate.split("@");
         if (candidateModel && _candidateEndpoint) {
           // Behavior recovery should be able to use any healthy candidate;
           // successful-turn rotation exclusions are not health exclusions.
           policy.rotationExcludedKeys.clear();
-          if (!_correctiveAdmitted) {
-            policy.excludedKeys.add(candidate);
-          }
+          policy.excludedKeys.add(candidate);
           logDebug(TAG, `Processing incident ${inc.type} for candidate ${candidate} (correctiveAdmitted=${_correctiveAdmitted})`);
           logTrace(TAG, `pi_behavior_incident type=${inc.type} candidate=${candidate} correctiveAdmitted=${_correctiveAdmitted}`);
         }
@@ -249,6 +284,10 @@ export function createPiExecutionSafetyController(
             return undefined;
           }
           _correctiveAdmitted = true;
+          // #1728: arm the free corrective request only now — after the
+          // replacement model resolved. A failed lookup above returns without
+          // arming anything.
+          _correctiveTurnPending = true;
           loopGuard.resetIncidentState();
           // #1502 (spec §5): append the corrective instruction to the clean
           // projected baseline so the alternate candidate sees why recovery
@@ -267,14 +306,7 @@ export function createPiExecutionSafetyController(
           };
         }
 
-        if (_correctiveAdmitted) {
-          logWarn(TAG, `Equivalent incident recurs after corrective admission — terminating`);
-          logTrace(TAG, `pi_corrective_turn_terminal candidate=${candidate} type=${inc.type}`);
-          _lastTerminalIncident = inc;
-          _terminalSafetyFailure = true;
-          return undefined;
-        }
-
+        // No alternate: retain the sole candidate with the corrective turn.
         policy.excludedKeys.delete(candidate);
         logDebug(TAG, `No alternate candidate for ${candidate} — retaining sole candidate with corrective turn`);
         logTrace(TAG, `pi_corrective_turn_admitted candidate=${candidate} type=${inc.type}`);
@@ -286,6 +318,8 @@ export function createPiExecutionSafetyController(
         }
 
         _correctiveAdmitted = true;
+        // #1728: same arm-after-valid-update rule for the sole-candidate path.
+        _correctiveTurnPending = true;
         loopGuard.resetIncidentState();
 
         const correctiveMsg = {

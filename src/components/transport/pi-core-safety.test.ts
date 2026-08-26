@@ -288,3 +288,125 @@ describe("createPiExecutionSafetyController", () => {
     expect((scrubbed[0] as { content: Array<{ text: string }> }).content[0]?.text).toBe("stored [REDACTED]");
   });
 });
+
+describe("#1728 one-free-corrective accounting", () => {
+  const KEY = "test-model@https://api.test/v1";
+  const MODEL_API = {} as never;
+  let policy: FallbackPolicy;
+
+  beforeEach(() => {
+    policy = new FallbackPolicy([makeCandidate()], makeRegistry());
+  });
+
+  function triggerExactRepeat(ctrl: ReturnType<typeof createPiExecutionSafetyController>, tool = "bash", args = '{"cmd":"same"}'): void {
+    for (let i = 0; i < 3; i++) ctrl.beforeTool(tool, args);
+  }
+
+  function prepare(ctrl: ReturnType<typeof createPiExecutionSafetyController>, opts?: { modelForCandidate?: () => unknown }) {
+    return ctrl.prepareNextTurn({
+      candidateKey: KEY,
+      context: undefined,
+      modelForCandidate: (opts?.modelForCandidate ?? (() => MODEL_API)) as never,
+    } as never);
+  }
+
+  it("at the charged bound the first behavior incident admits exactly one uncharged corrective request", () => {
+    const ctrl = createPiExecutionSafetyController(policy, { maxPromptRounds: 1 });
+    expect(ctrl.beginProviderTurn(KEY).decision).toBe("continue");
+    expect(ctrl.promptRoundsUsed).toBe(1);
+
+    triggerExactRepeat(ctrl);
+    const update = prepare(ctrl);
+    expect(update).toBeDefined();
+    expect(ctrl.correctiveAdmitted).toBe(true);
+
+    // The armed corrective request passes the bound without charging.
+    expect(ctrl.beginProviderTurn(KEY).decision).toBe("continue");
+    expect(ctrl.promptRoundsUsed).toBe(1);
+
+    // The next ordinary request is refused at the charged bound.
+    const refused = ctrl.beginProviderTurn(KEY);
+    expect(refused.decision).toBe("stop");
+    expect((refused as { reason?: string }).reason).toContain("Prompt round limit (1)");
+  });
+
+  it("a second behavior incident receives no second free request", () => {
+    const ctrl = createPiExecutionSafetyController(policy, { maxPromptRounds: 4 });
+    expect(ctrl.beginProviderTurn(KEY).decision).toBe("continue");
+    expect(ctrl.beginProviderTurn(KEY).decision).toBe("continue");
+
+    triggerExactRepeat(ctrl, "bash", '{"n":1}');
+    expect(prepare(ctrl)).toBeDefined();
+    expect(ctrl.beginProviderTurn(KEY).decision).toBe("continue"); // free
+    expect(ctrl.promptRoundsUsed).toBe(2);
+
+    // Charged round three, then a distinct second incident below the bound.
+    expect(ctrl.beginProviderTurn(KEY).decision).toBe("continue");
+    expect(ctrl.promptRoundsUsed).toBe(3);
+    triggerExactRepeat(ctrl, "grep", '{"other":"fingerprint"}');
+    expect(ctrl.prepareNextTurn({
+      candidateKey: KEY,
+      context: undefined,
+      modelForCandidate: (() => MODEL_API) as never,
+    } as never)).toBeUndefined();
+  });
+
+  it("stop and pause defeat an armed corrective request", () => {
+    const ctrl = createPiExecutionSafetyController(policy, { maxPromptRounds: 1 });
+    expect(ctrl.beginProviderTurn(KEY).decision).toBe("continue");
+    triggerExactRepeat(ctrl);
+    expect(prepare(ctrl)).toBeDefined();
+
+    ctrl.requestStop("external stop");
+    expect(ctrl.beginProviderTurn(KEY).decision).toBe("stop");
+
+    const paused = createPiExecutionSafetyController(policy, { maxPromptRounds: 1 });
+    expect(paused.beginProviderTurn(KEY).decision).toBe("continue");
+    triggerExactRepeat(paused);
+    expect(prepare(paused)).toBeDefined();
+    paused.requestPause();
+    expect(paused.beginProviderTurn(KEY).decision).toBe("pause");
+  });
+
+  it("a failed model resolution does not arm the free corrective request", () => {
+    const ctrl = createPiExecutionSafetyController(policy, { maxPromptRounds: 1 });
+    expect(ctrl.beginProviderTurn(KEY).decision).toBe("continue");
+    triggerExactRepeat(ctrl);
+
+    expect(prepare(ctrl, { modelForCandidate: () => undefined })).toBeUndefined();
+    expect(ctrl.correctiveAdmitted).toBe(false);
+
+    // Nothing armed: the bound refusal is a normal prompt_round_limit stop.
+    const refused = ctrl.beginProviderTurn(KEY);
+    expect(refused.decision).toBe("stop");
+    expect((refused as { reason?: string }).reason).toContain("Prompt round limit (1)");
+  });
+
+  it("an alternate-candidate correction preserves candidate identity and per-candidate accounting", () => {
+    const altRegistry = makeRegistry();
+    const altPolicy = new FallbackPolicy([
+      makeCandidate({ model: "model-a", provider: "prov-a", endpoint: "https://a.test/v1", apiKey: "key-a" }),
+      makeCandidate({ model: "model-b", provider: "prov-b", endpoint: "https://b.test/v1", apiKey: "key-b" }),
+    ], altRegistry);
+    const ctrl = createPiExecutionSafetyController(altPolicy, { maxPromptRounds: 5 });
+    const keyA = "model-a@https://a.test/v1";
+    const keyB = "model-b@https://b.test/v1";
+
+    expect(ctrl.beginProviderTurn(keyA).decision).toBe("continue");
+    expect(ctrl.promptRoundsUsed).toBe(1);
+    triggerExactRepeat(ctrl);
+
+    const update = ctrl.prepareNextTurn({
+      candidateKey: keyA,
+      context: undefined,
+      modelForCandidate: ((key: string) => (key.startsWith("model-") ? MODEL_API : undefined)) as never,
+    } as never);
+    expect(update).toBeDefined();
+
+    // The corrective turn on the replacement candidate is uncharged but still
+    // runs full candidate accounting: identity switch resets candidate rounds.
+    expect(ctrl.beginProviderTurn(keyB).decision).toBe("continue");
+    expect(ctrl.promptRoundsUsed).toBe(1);
+    expect(ctrl.activeCandidateKey).toBe(keyB);
+  });
+});
