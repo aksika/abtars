@@ -134,8 +134,8 @@ export async function stop(_opts: {}): Promise<number> {
       const uid = `gui/${process.getuid!()}`;
       serviceWasStopped = await bootoutLaunchAgent(uid, plistPath);
     } else {
-      try { execFileSync("systemctl", ["--user", "stop", "abtars-watchdog"], { timeout: 5000, stdio: 'pipe' }); serviceWasStopped = true; } catch (err) { if (!isExpectedWatchdogAbsence(err)) throw err; }
-      try { execFileSync("systemctl", ["--user", "disable", "abtars-watchdog"], { timeout: 5000, stdio: 'pipe' }); } catch (err) { if (!isExpectedWatchdogAbsence(err)) throw err; }
+      try { execFileSync("systemctl", ["--user", "stop", "abtars-watchdog"], { timeout: 10000, stdio: 'pipe' }); serviceWasStopped = true; } catch (err) { if (!isExpectedWatchdogAbsence(err)) throw err; }
+      try { execFileSync("systemctl", ["--user", "disable", "abtars-watchdog"], { timeout: 10000, stdio: 'pipe' }); } catch (err) { if (!isExpectedWatchdogAbsence(err)) throw err; }
     }
   }
 
