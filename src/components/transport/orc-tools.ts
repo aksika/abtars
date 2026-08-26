@@ -253,7 +253,7 @@ const spawnWorkerTool: ToolDefinition = {
         }
       } catch { /* trace is best-effort — never fail the spawn on it */ }
     }
-    return `+ Worker card #${cardId} created: "${args.title || goal.slice(0, 40)}"${hasStructuredData ? " [supervised]" : ""}`;
+    return `+ Worker card #${cardId} created: "${args.title || goal.slice(0, 40)}"${hasStructuredData ? " [supervised]" : ""}${hasStructuredData ? "\nOnce this worker (or another durable owner) holds the work and you have no further wave to start now, call yield_turn to end your turn." : ""}`;
   },
 };
 
@@ -870,8 +870,50 @@ const reviewProjectTool: ToolDefinition = {
   },
 };
 
+// ── yield_turn (#1728) ────────────────────────────────────────────────────────
+
+/**
+ * #1728: explicit durable-handoff yield for `project_execution` turns. The
+ * model calls this once a durable owner (Worker, contribution, review case, or
+ * terminal project) exists instead of polling to the prompt-round limit. The
+ * host-owned one-shot turn control stays the sole authority: the tool never
+ * decides satisfaction itself — the control's durable postcondition re-read
+ * does. Multi-wave orchestration remains model-controlled (no auto-yield).
+ */
+const yieldTurnTool: ToolDefinition = {
+  name: "yield_turn",
+  description: "End your execution turn after handing the project off to a durable owner. Call it once spawn_worker has created a Worker (or another durable owner exists: contribution, review case, or terminal project) and you have no further orchestration wave to start now. If another wave is genuinely required, continue working instead. If the handoff is not yet durable the turn stays alive and the tool tells you.",
+  parameters: {
+    type: "object",
+    properties: {},
+    required: [],
+  },
+  async execute(_args: Record<string, unknown>, context?: ToolExecutionContext): Promise<string> {
+    const bound = context?.orcContext;
+    if (!bound || bound.intentKind !== "project_execution") {
+      return "[err] yield_turn only works during a project_execution turn.";
+    }
+    const control = context?.orcTurnControl;
+    if (!control) {
+      return "[err] yield_turn requires host-owned turn control; none is bound to this execution.";
+    }
+    // One-shot latch: a repeat must not masquerade as a second success and
+    // must not mutate the winning terminal.
+    if (control.completed !== null) {
+      return "[err] turn already completed";
+    }
+    // The control's verify callback re-reads the durable postcondition under
+    // the exact live run; false with no winning terminal means the handoff is
+    // not yet real. The turn stays alive.
+    if (!control.complete({ kind: "intent_satisfied", code: "project_execution_handed_off" })) {
+      return "[err] no durable owner yet (no Worker/contribution/review case and project not terminal) — keep orchestrating.";
+    }
+    return "✓ Turn handed off — a durable owner now holds the project; end your reply without further tool calls.";
+  },
+};
+
 // ── Export ────────────────────────────────────────────────────────────────────
 
 export function getOrcTools(): ToolDefinition[] {
-  return [defineProjectContractTool, spawnWorkerTool, checkWorkersTool, cancelWorkerTool, reviewWorkerFailureTool, getProjectReviewCaseTool, reviewProjectTool];
+  return [defineProjectContractTool, spawnWorkerTool, checkWorkersTool, cancelWorkerTool, reviewWorkerFailureTool, getProjectReviewCaseTool, reviewProjectTool, yieldTurnTool];
 }

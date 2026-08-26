@@ -65,6 +65,9 @@ const EXECUTION_TOOLS: ReadonlySet<string> = new Set([
   "check_workers",
   "cancel_worker",
   "review_worker_failure",
+  // #1728: explicit durable-handoff yield — ends the execute turn once a
+  // durable owner (Worker/contribution/review case) exists.
+  "yield_turn",
 ]);
 
 const REVIEW_TOOLS: ReadonlySet<string> = new Set([

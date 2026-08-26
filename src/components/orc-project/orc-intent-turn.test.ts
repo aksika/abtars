@@ -362,4 +362,106 @@ describe("#1680 escaped turn boundary (real Spin/coordinator/stores/tools)", () 
     expect(runStore.getRunsForProject(rootId).filter(r => r.intent_kind === "contract_authoring")).toHaveLength(0);
     expect(runStore.getRunsForProject(rootId).filter(r => r.intent_kind === "project_execution")).toHaveLength(1);
   });
+
+  it("yield_turn hands the execute turn off once a durable Worker exists (#1728)", async () => {
+    const rootId = kanban.kanbanEnqueue("Yield Project", "agent", undefined, {
+      type: "O",
+      goal: "local supervised work",
+    });
+    kanban.kanbanRunning(rootId);
+    const store = new reviewStoreMod.ProjectReviewStore();
+    const contractId = `ct_yield_${rootId}`;
+    store.insertContract({
+      schema_version: 2,
+      id: contractId,
+      digest: `d_${contractId}`,
+      project_card_id: rootId,
+      goal: "local supervised work",
+      criteria: [{ id: "c1", description: "goal met", required: true, execution_owner: "delegated", evidence_expectation: "synthesis" }],
+      required_outputs: [],
+      constraints: [],
+      limits: { max_review_rounds: 10, max_repair_rounds: 5 },
+      provenance: { requested_by: "agent", authored_by: "fixture", created_at: new Date().toISOString() },
+    } as never);
+    store.initializeSupervision(rootId, contractId, "executing");
+
+    const specs: Array<import("./orc-project-contracts.js").OrcTurnSpec> = [];
+    const coordinator = new coordinatorMod.OrcProjectCoordinator({
+      ownerPeer: "kp",
+      ownerInstanceId: "inst-yield",
+      startPort: async (spec) => { specs.push(spec); },
+    });
+    const claim = coordinator.scheduleProjectExecution(rootId, "execute");
+    expect(claim.kind).toBe("claimed");
+    await flush();
+    expect(specs).toHaveLength(1);
+    const spec = specs[0]!;
+
+    // spawn_child stub creating a REAL durable child card + worker contract —
+    // exactly the durable state the execution postcondition reads.
+    const { setOrcToolsDeps } = await import("../transport/orc-tools.js");
+    const { WorkerSupervisionStore } = await import("../worker-supervision-store.js");
+    setOrcToolsDeps({
+      spawnChild: () => {
+        const childId = kanban.kanbanEnqueue("Worker lane", "agent", undefined, {
+          type: "W",
+          goal: "lane work",
+          parent_id: rootId,
+        });
+        new WorkerSupervisionStore().insertContract({
+          schema_version: 1,
+          id: `wc_${childId}`,
+          digest: `wd_${childId}`,
+          goal: "lane work",
+          criteria: [{ id: "c1", description: "lane done", required: true }],
+          expected_artifacts: [],
+          verification_commands: [],
+          required_capabilities: [],
+          limits: {},
+          provenance: { root_card_id: rootId, card_id: childId, authored_by: "orc", created_at: new Date().toISOString() },
+        } as never, childId);
+        return childId;
+      },
+    } as never);
+
+    const execCtx = {
+      userId: "kp",
+      orcContext: spec.context,
+      orcTurnControl: spec.turnControl,
+      authorizationMode: "interactive",
+    };
+
+    // Pre-handoff: no durable owner — bounded error, turn stays alive.
+    const before = await toolRegistry.executeToolCall("yield_turn", {}, execCtx);
+    expect(before).toContain("[err]");
+    expect(spec.turnControl.completed).toBeNull();
+
+    // Spawn the real durable Worker through the authorized execution surface.
+    const spawned = await toolRegistry.executeToolCall("spawn_worker", {
+      goal: "lane work",
+      project_card_id: String(rootId),
+      title: "Lane worker",
+      criteria: JSON.stringify([{ id: "c1", description: "lane done", required: true }]),
+      supports_root_criteria: JSON.stringify(["c1"]),
+    }, execCtx);
+    expect(spawned).toContain("+ Worker card #");
+
+    // Post-handoff: the latch wins through the shared turn control.
+    const after = await toolRegistry.executeToolCall("yield_turn", {}, execCtx);
+    expect(after).toContain("✓");
+    expect(spec.turnControl.completed).toMatchObject({ kind: "intent_satisfied", code: "project_execution_handed_off" });
+
+    // A repeat is a bounded error and never mutates the winning terminal.
+    const repeat = await toolRegistry.executeToolCall("yield_turn", {}, execCtx);
+    expect(repeat).toContain("[err] turn already completed");
+
+    // The run releases completed under the existing ownership path while the
+    // Worker stays durably owned for later lifecycle processing.
+    const runStore = new runStoreMod.OrcProjectRunStore();
+    expect(coordinator.releaseOwnedRun(spec.context, "completed")).toBe(true);
+    const row = runStore.getRun((claim as { kind: "claimed"; context: { runId: string } }).context.runId);
+    expect(row?.outcome).toBe("completed");
+    const childCount = runStore.db.prepare(`SELECT COUNT(*) AS cnt FROM kanban_board WHERE parent_id = ? AND status IN ('queued','running')`).get(rootId) as { cnt: number };
+    expect(childCount.cnt).toBe(1);
+  });
 });

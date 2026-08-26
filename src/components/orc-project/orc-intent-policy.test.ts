@@ -153,6 +153,12 @@ describe("#1680 tool authorization matrix (schema + execution boundaries)", () =
     ["project_execution", "define_project_contract", false],
     ["project_execution", "review_project", false],
     ["project_execution", "peer_ask_help", true],
+    // #1728: the durable-handoff yield is execution-only
+    ["contract_authoring", "yield_turn", false],
+    ["project_execution", "yield_turn", true],
+    ["project_review", "yield_turn", false],
+    ["repair_review", "yield_turn", false],
+    ["input_resume", "yield_turn", false],
     // review intents cannot execute or author
     ["project_review", "get_project_review_case", true],
     ["project_review", "review_project", true],
