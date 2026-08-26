@@ -240,6 +240,33 @@ describe("createPiExecutionSafetyController", () => {
     expect(ctrl.lastTerminalIncident?.type).toBe("prompt_round_limit");
   });
 
+  it("sole-eligible turns do not pre-charge a later multi-candidate rotation segment (#1728 review)", () => {
+    const multi = [
+      { model: "model-a", provider: "prov-a", endpoint: "https://a.test/v1", maxContext: 128000, apiKey: "key-a", source: "primary" },
+      { model: "model-b", provider: "prov-b", endpoint: "https://b.test/v1", maxContext: 128000, apiKey: "key-b", source: "primary" },
+    ];
+    const multiPolicy = new FallbackPolicy(multi, registry);
+    const keyA = "model-a@https://a.test/v1";
+    const keyB = "model-b@https://b.test/v1";
+    const ctrl = createPiExecutionSafetyController(multiPolicy, {
+      maxCandidateRounds: 1,
+      maxPromptRounds: 5,
+    });
+
+    // While B is behavior-excluded, A is the sole eligible candidate and
+    // rotation accounting is bypassed exactly as it was before #1728.
+    multiPolicy.excludedKeys.add(keyB);
+    expect(ctrl.beginProviderTurn(keyA).decision).toBe("continue");
+    expect(ctrl.beginProviderTurn(keyA).decision).toBe("continue");
+
+    // Once B becomes eligible, A starts a fresh one-round segment. The buggy
+    // #1728 implementation had already accumulated two candidate rounds and
+    // stopped here immediately.
+    multiPolicy.excludedKeys.delete(keyB);
+    expect(ctrl.beginProviderTurn(keyA).decision).toBe("continue");
+    expect(ctrl.beginProviderTurn(keyA).decision).toBe("stop");
+  });
+
   it("requestPause makes prepareNextTurn return undefined (no update)", () => {
     const ctrl = createPiExecutionSafetyController(policy);
     ctrl.requestPause();

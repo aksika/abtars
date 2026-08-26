@@ -176,14 +176,14 @@ export function createPiExecutionSafetyController(
         activeCandidate = candidateKey;
       }
 
-      const advanceChargedRound = (): { decision: "continue" } => {
+      const authorizeProviderTurn = (advanceCandidateRound: boolean): { decision: "continue" } => {
         if (freeCorrectiveTurn) {
           _correctiveTurnPending = false;
           logDebug(TAG, `Corrective provider turn admitted (uncharged) — charged rounds remain ${promptRounds}/${mp}`);
         } else {
           promptRounds++;
         }
-        candidateRounds++;
+        if (advanceCandidateRound) candidateRounds++;
         batchCancelled = false;
         return { decision: "continue" };
       };
@@ -193,7 +193,10 @@ export function createPiExecutionSafetyController(
       // "no alternate, continuing" logs. The prompt-wide limit is the only
       // bound it can hit, so keep advancing promptRounds below.
       if (policy.survivingCandidates().length <= 1) {
-        return advanceChargedRound();
+        // Preserve the pre-#1728 sole-candidate contract: candidateRounds does
+        // not accumulate while rotation is bypassed. If another candidate
+        // later becomes eligible, it starts a fresh rotation segment.
+        return authorizeProviderTurn(false);
       }
 
       if (candidateRounds >= mc) {
@@ -221,10 +224,10 @@ export function createPiExecutionSafetyController(
         // candidate fast path above; retain the prompt-wide hard bound as the
         // final safety limit for a policy that becomes exhausted mid-turn.
         logDebug(TAG, `Candidate round limit for ${candidateKey} — no alternate, continuing`);
-        return advanceChargedRound();
+        return authorizeProviderTurn(true);
       }
 
-      return advanceChargedRound();
+      return authorizeProviderTurn(true);
     },
 
     prepareNextTurn(context: SafetyPrepareNextTurnContext): AgentLoopTurnUpdate | undefined {

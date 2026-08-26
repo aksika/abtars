@@ -445,6 +445,7 @@ describe("#1680 escaped turn boundary (real Spin/coordinator/stores/tools)", () 
       supports_root_criteria: JSON.stringify(["c1"]),
     }, execCtx);
     expect(spawned).toContain("+ Worker card #");
+    expect(spawned).toContain("call yield_turn");
 
     // Post-handoff: the latch wins through the shared turn control.
     const after = await toolRegistry.executeToolCall("yield_turn", {}, execCtx);

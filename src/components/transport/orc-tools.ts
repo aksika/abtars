@@ -253,7 +253,9 @@ const spawnWorkerTool: ToolDefinition = {
         }
       } catch { /* trace is best-effort — never fail the spawn on it */ }
     }
-    return `+ Worker card #${cardId} created: "${args.title || goal.slice(0, 40)}"${hasStructuredData ? " [supervised]" : ""}${hasStructuredData ? "\nOnce this worker (or another durable owner) holds the work and you have no further wave to start now, call yield_turn to end your turn." : ""}`;
+    const shouldSuggestYield = hasStructuredData
+      && context?.orcContext?.intentKind === "project_execution";
+    return `+ Worker card #${cardId} created: "${args.title || goal.slice(0, 40)}"${hasStructuredData ? " [supervised]" : ""}${shouldSuggestYield ? "\nOnce this worker (or another durable owner) holds the work and you have no further wave to start now, call yield_turn to end your turn." : ""}`;
   },
 };
 
@@ -896,6 +898,11 @@ const yieldTurnTool: ToolDefinition = {
     const control = context?.orcTurnControl;
     if (!control) {
       return "[err] yield_turn requires host-owned turn control; none is bound to this execution.";
+    }
+    // The context and control are one typed start-spec authority. Refuse a
+    // cross-wired control before it can complete a different durable run.
+    if (control.runId !== bound.runId) {
+      return "[err] yield_turn turn control does not match the active Orc run.";
     }
     // One-shot latch: a repeat must not masquerade as a second success and
     // must not mutate the winning terminal.

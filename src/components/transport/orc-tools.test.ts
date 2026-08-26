@@ -56,6 +56,19 @@ describe("#1728 yield_turn", () => {
     expect(await tool().execute({}, { orcContext: { ...EXEC_CONTEXT, intentKind: "project_execution" } } as never)).toContain("[err]");
   });
 
+  it("rejects a host turn control bound to a different run", async () => {
+    const control = makeControl(() => true);
+    const result = await tool().execute({}, {
+      orcContext: { ...EXEC_CONTEXT, runId: "or_other" },
+      orcTurnControl: control,
+    } as never);
+
+    expect(result).toContain("[err]");
+    expect(result).toContain("does not match");
+    expect(control.completed).toBeNull();
+    expect(control.wins).toBe(0);
+  });
+
   it("keeps the turn alive when the durable postcondition is unsatisfied", async () => {
     const control = makeControl(() => false);
     const result = await tool().execute({}, ctx(control));
