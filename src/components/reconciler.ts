@@ -230,8 +230,11 @@ export async function abortProjectById(projectId: number, reason: string): Promi
   await abortProject(generation, projectId, children, reason);
 }
 
-function scheduleOrcReview(generation: ReconcilerGeneration, projectId: number, projectGeneration: number, caseId: string, requestId: string): void {
-  const result = generation.deps.coordinator.scheduleReview(projectId, projectGeneration, caseId);
+function scheduleOrcReview(generation: ReconcilerGeneration, projectId: number, projectGeneration: number, caseId: string, requestId: string, dispatchAttempts = 0): void {
+  // #1728: the request row's stored attempts ride along as trusted scheduler
+  // input; the coordinator derives the escalation ordinal from its claim
+  // result. Read before the dispatch-attempt write below.
+  const result = generation.deps.coordinator.scheduleReview(projectId, projectGeneration, caseId, dispatchAttempts);
   // #1678: count real dispatch attempts only. A successful claim clears any
   // previous failure; a rejected dispatch records its typed reason. An
   // `idempotent` (run already live) or `busy` (another intent owns the
@@ -1210,9 +1213,9 @@ async function handleReviewState(generation: ReconcilerGeneration, projectId: nu
     const authority = projectMutationAuthority(projectId, supervision.generation);
     const { id: rrId } = reviewStore.insertReviewRequest(projectId, openCase.id, supervision.generation, undefined, authority);
     if (!rrId) return;
-    scheduleOrcReview(generation, projectId, supervision.generation, openCase.id, rrId);
+    scheduleOrcReview(generation, projectId, supervision.generation, openCase.id, rrId, 0);
   } else if (existingReq.status === "pending") {
-    scheduleOrcReview(generation, projectId, supervision.generation, openCase.id, existingReq.id);
+    scheduleOrcReview(generation, projectId, supervision.generation, openCase.id, existingReq.id, existingReq.attempts);
   } else if (existingReq.status === "abandoned") {
     // #1678: a stale abandoned request at an older generation is inert — it
     // must neither settle the current generation nor throw from a deep store
@@ -1447,7 +1450,7 @@ async function createReviewCase(generation: ReconcilerGeneration, projectId: num
   });
   logInfo(TAG, `Project ${projectId}: review ready — case ${caseId} created, request ${reviewRequestId} (gen=${supervision.generation}, round=${nextRound})`);
   logSwarmTrace({ event: "review_case_created", project: projectId, card: projectId, reviewCase: caseId, reason: "all_children_terminal", generation: supervision.generation });
-  scheduleOrcReview(generation, projectId, supervision.generation, caseId, reviewRequestId);
+  scheduleOrcReview(generation, projectId, supervision.generation, caseId, reviewRequestId, 0);
 }
 
 /**
@@ -1626,7 +1629,8 @@ function dispatchPendingReviewRequests(generation: ReconcilerGeneration): number
   const pending = store.getPendingReviewRequests();
   let dispatched = 0;
   for (const req of pending) {
-    const result = generation.deps.coordinator.scheduleReview(req.project_card_id, req.generation, req.review_case_id);
+    // #1728: the stored attempts count is the escalation input for this retry.
+    const result = generation.deps.coordinator.scheduleReview(req.project_card_id, req.generation, req.review_case_id, req.attempts);
     // #1678: `dispatched` means "requests acted on this pass" — a real claim or
     // a rejected dispatch. An `idempotent`/`busy` result observed nothing new.
     if (result.kind === "claimed") {

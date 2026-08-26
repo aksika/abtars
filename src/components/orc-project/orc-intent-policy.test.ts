@@ -63,8 +63,7 @@ function makeSafety() {
 }
 
 describe("#1680 intent policy rows", () => {
-  it("carries the exact intent prompt bounds and tool surfaces (#1725: review/input bound is 6)", () => {
-    const cases: Array<[import("./orc-project-contracts.js").OrcIntentKind, number, string]> = [
+  it("carries the exact intent prompt bounds and tool surfaces (#1725: review/input bound is 6)", () => {    const cases: Array<[import("./orc-project-contracts.js").OrcIntentKind, number, string]> = [
       ["contract_authoring", 3, "define_project_contract"],
       ["project_execution", 25, "execute_bash"],
       ["project_review", 6, "get_project_review_case"],
@@ -115,6 +114,30 @@ function emptySnapshot(): import("./orc-intent-policy.js").OrcProjectSnapshot {
     workerOwnedChild: false,
   };
 }
+
+describe("#1728 review dispatch escalation", () => {
+  it("escalates project_review across dispatch ordinals: 6, 8, 10, then caps at 10", () => {
+    expect(policyMod.effectiveMaxPromptRounds("project_review", 1)).toBe(6);
+    expect(policyMod.effectiveMaxPromptRounds("project_review", 2)).toBe(8);
+    expect(policyMod.effectiveMaxPromptRounds("project_review", 3)).toBe(10);
+    expect(policyMod.effectiveMaxPromptRounds("project_review", 4)).toBe(10);
+    expect(policyMod.effectiveMaxPromptRounds("project_review", 5)).toBe(10);
+    expect(policyMod.effectiveMaxPromptRounds("project_review", 99)).toBe(10);
+  });
+
+  it("fails closed to the base bound on invalid ordinals and keeps every other intent fixed", () => {
+    expect(policyMod.effectiveMaxPromptRounds("project_review")).toBe(6);
+    expect(policyMod.effectiveMaxPromptRounds("project_review", 0)).toBe(6);
+    expect(policyMod.effectiveMaxPromptRounds("project_review", -3)).toBe(6);
+    expect(policyMod.effectiveMaxPromptRounds("project_review", 2.5)).toBe(6);
+    expect(policyMod.effectiveMaxPromptRounds("project_review", Number.NaN)).toBe(6);
+    expect(policyMod.effectiveMaxPromptRounds("contract_authoring", 9)).toBe(3);
+    expect(policyMod.effectiveMaxPromptRounds("project_execution", 9)).toBe(25);
+    expect(policyMod.effectiveMaxPromptRounds("repair_review", 4)).toBe(5);
+    expect(policyMod.effectiveMaxPromptRounds("input_resume", 7)).toBe(6);
+    expect(policyMod.effectiveMaxPromptRounds("operator_turn", 3)).toBe(25);
+  });
+});
 
 describe("#1680 tool authorization matrix (schema + execution boundaries)", () => {
   const MATRIX: Array<[import("./orc-project-contracts.js").OrcIntentKind, string, boolean]> = [

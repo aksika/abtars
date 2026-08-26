@@ -175,6 +175,25 @@ export function intentPolicyFor(intentKind: OrcIntentKind): OrcIntentPolicy {
   return POLICIES[intentKind];
 }
 
+/**
+ * #1728: attempt-aware effective prompt bound. Fixed for every intent except
+ * `project_review`, whose durable review-dispatch stream escalates from the
+ * #1725 base of 6 by two requests per additional dispatch attempt, capped at
+ * 10 (`6, 8, 10, 10, 10` across the five permitted attempts). The ordinal is
+ * one-based trusted scheduler input: non-finite, non-integer, zero, or negative
+ * values fail closed to the base bound; large ordinals cap at 10.
+ */
+export function effectiveMaxPromptRounds(intentKind: OrcIntentKind, dispatchOrdinal?: number): number {
+  const base = POLICIES[intentKind].maxPromptRounds;
+  if (intentKind !== "project_review") return base;
+  const ordinal = dispatchOrdinal !== undefined
+    && Number.isInteger(dispatchOrdinal)
+    && dispatchOrdinal >= 1
+    ? dispatchOrdinal
+    : 1;
+  return Math.min(base + (ordinal - 1) * 2, 10);
+}
+
 /** #1680: the allowed tool surface for schema presentation and execution
  *  authorization. `operator_surface` means the full current operator surface. */
 export function orcAllowedToolsFor(intentKind: OrcIntentKind): ReadonlySet<string> | "operator_surface" {

@@ -13,7 +13,7 @@ import type {
 import { readBridgeLockField } from "../transport/bridge-lock-transport.js";
 import { logInfo, logWarn } from "../logger.js";
 import { logAndSwallow } from "../log-and-swallow.js";
-import { intentPolicyFor, readOrcProjectSnapshot } from "./orc-intent-policy.js";
+import { effectiveMaxPromptRounds, intentPolicyFor, readOrcProjectSnapshot } from "./orc-intent-policy.js";
 import { kanbanGetCard } from "../tasks/kanban-board.js";
 import { scheduledOccurrenceState } from "../tasks/scheduled-occurrence-gate.js";
 
@@ -169,7 +169,7 @@ export class OrcProjectCoordinator {
     }, goal);
   }
 
-  scheduleReview(projectCardId: number, _projectGeneration: number, reviewCaseId: string): OrcRunClaimResult {
+  scheduleReview(projectCardId: number, _projectGeneration: number, reviewCaseId: string, dispatchAttempts = 0): OrcRunClaimResult {
     const origin = this.deriveOrigin(projectCardId);
     if (!origin) return { kind: "conflict" as const, reason: "origin_invalid" as const };
     return this.scheduleInternal({
@@ -180,7 +180,7 @@ export class OrcProjectCoordinator {
       cardSource: this.getRootIdentity(projectCardId).source,
       sourcePeer: origin.originPeer,
       expectedProjectGeneration: _projectGeneration,
-    }, `Review project #${projectCardId}: first read the immutable case with get_project_review_case (project_card_id=${projectCardId}, project_generation=${_projectGeneration}, review_case_id=${reviewCaseId}), then submit exactly one review_project decision using its legal_values and compatible evidence ids.`);
+    }, `Review project #${projectCardId}: first read the immutable case with get_project_review_case (project_card_id=${projectCardId}, project_generation=${_projectGeneration}, review_case_id=${reviewCaseId}), then submit exactly one review_project decision using its legal_values and compatible evidence ids.`, dispatchAttempts);
   }
 
   scheduleRepairReview(projectCardId: number, _projectGeneration: number): OrcRunClaimResult {
@@ -224,7 +224,7 @@ export class OrcProjectCoordinator {
     }, `Operator turn for project #${projectCardId}`);
   }
 
-  private scheduleInternal(input: Omit<OrcClaimInput, "goal">, goal: string): OrcRunClaimResult {
+  private scheduleInternal(input: Omit<OrcClaimInput, "goal">, goal: string, reviewDispatchAttempts?: number): OrcRunClaimResult {
     // #1707: the durable occurrence gate is an absolute ownership boundary and
     // runs BEFORE any run-row insertion or provider start. A scheduled root
     // whose task occurrence is terminal/missing is never claimed here; the
@@ -256,7 +256,16 @@ export class OrcProjectCoordinator {
           // #1680: the turn spec is composed only from the persisted run row
           // and its central intent policy — never from the caller's goal or an
           // independently selected intent/bound.
-          this.startPort(buildTurnSpec(this.store, promoted)).catch((err) => {
+          // #1728: a claimed run starts the next dispatch attempt
+          // (`attempts + 1`); an idempotent promotion of an already-counted
+          // queued run retains its counted ordinal instead of silently
+          // receiving the next attempt's budget.
+          const ordinal = input.intentKind === "project_review"
+            ? (result.kind === "claimed"
+              ? (reviewDispatchAttempts ?? 0) + 1
+              : Math.max(1, reviewDispatchAttempts ?? 0))
+            : undefined;
+          this.startPort(buildTurnSpec(this.store, promoted, ordinal)).catch((err) => {
             logWarn(TAG, `Orc start port failed for run ${runId}: ${err instanceof Error ? err.message : String(err)}`);
             // #1628/#1680: through the funnel so the ownership-released event
             // wakes the project and the failed run persists the stable
@@ -413,17 +422,21 @@ function buildContextForRun(run: import("./orc-project-contracts.js").OrcProject
  * run row and its central intent policy. `maxPromptRounds` and the allowed
  * tool surface come from the policy; the turn control re-verifies the durable
  * intent postcondition before it can win.
+ * #1728: `reviewDispatchOrdinal` carries the trusted one-based dispatch ordinal
+ * for `project_review` runs so the effective bound escalates across the
+ * durable review-request retry stream.
  */
 function buildTurnSpec(
   store: OrcProjectRunStore,
   run: import("./orc-project-contracts.js").OrcProjectRunRow,
+  reviewDispatchOrdinal?: number,
 ): OrcTurnSpec {
   const policy = intentPolicyFor(run.intent_kind);
   const context = buildContextForRun(run);
   return {
     context,
     goal: run.goal,
-    maxPromptRounds: policy.maxPromptRounds,
+    maxPromptRounds: effectiveMaxPromptRounds(run.intent_kind, reviewDispatchOrdinal),
     turnControl: createOrcTurnControl(run.id, (terminal) => {
       // #1680: `intent_satisfied` is accepted only after re-reading the durable
       // postcondition under the exact bound run — a tool result string is never

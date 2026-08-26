@@ -789,3 +789,44 @@ describe("#1680 durable bounded run diagnostics (failure_code)", () => {
     expect(h.store.getRun(claim.context.runId)?.failure_code).toBe("provider_failure");
   });
 });
+
+describe("#1728 review retry escalation", () => {
+  it("scales the start-spec bound with the stored dispatch attempts on a fresh claim", () => {
+    const expectations: Array<[number, number]> = [[0, 6], [1, 8], [2, 10], [4, 10]];
+    let cardId = 20;
+    for (const [attempts, expectedBound] of expectations) {
+      const h = makeHarness();
+      cardId += 1;
+      seedProject(h.store, cardId);
+      seedReviewCase(h.store, cardId);
+      const claim = h.coordinator.scheduleReview(cardId, 1, `rc_${cardId}`, attempts);
+      expect(claim.kind).toBe("claimed");
+      expect(h.starts).toHaveLength(1);
+      expect(h.starts[0]!.spec.maxPromptRounds).toBe(expectedBound);
+    }
+  });
+
+  it("an idempotent promotion of a queued counted run retains its original bound", () => {
+    const h = makeHarness();
+    seedProject(h.store, 30);
+    seedReviewCase(h.store, 30);
+    const first = h.coordinator.scheduleReview(30, 1, "rc_30", 0);
+    expect(first.kind).toBe("claimed");
+    expect(h.starts[0]!.spec.maxPromptRounds).toBe(6);
+    // Crash-before-start recovery shape: the claimed run is back in
+    // 'scheduled' (queued) and its dispatch attempt is already counted.
+    h.store.db.prepare(`UPDATE orc_project_runs SET state = 'scheduled' WHERE project_card_id = 30`).run();
+    const second = h.coordinator.scheduleReview(30, 1, "rc_30", 1);
+    expect(second.kind).toBe("idempotent");
+    expect(h.starts).toHaveLength(2);
+    expect(h.starts[1]!.spec.maxPromptRounds).toBe(6);
+  });
+
+  it("non-review intents ignore the dispatch ordinal entirely", () => {
+    const h = makeHarness();
+    seedProject(h.store, 40, "executing");
+    const claim = h.coordinator.scheduleProjectExecution(40, "goal");
+    expect(claim.kind).toBe("claimed");
+    expect(h.starts[0]!.spec.maxPromptRounds).toBe(25);
+  });
+});
