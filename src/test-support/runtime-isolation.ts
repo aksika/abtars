@@ -38,6 +38,7 @@ const SANDBOX_VARS = [
   "ABTARS_RELEASES", "ABTARS_BIN",
   "XDG_CONFIG_HOME", "XDG_CACHE_HOME", "XDG_STATE_HOME",
   "NODE_ENV", "NODE_PATH", "AB_TEST_SANDBOX_ROOT",
+  "EMBEDDING_ENABLED",
 ] as const;
 
 const _originals = new Map<string, { wasSet: boolean; value: string }>();
@@ -82,6 +83,16 @@ function setupSandbox(): TestRuntimeSandbox {
   process.env.XDG_STATE_HOME = xdgState;
   process.env.NODE_ENV = "test";
   process.env.AB_TEST_SANDBOX_ROOT = root;
+
+  // abmind reads EMBEDDING_ENABLED lazily via getAbmindEnv() and freezes it into
+  // a singleton on first use. vitest evaluates setupFiles before importing any
+  // test module, so pinning it here is the only point that is guaranteed to win.
+  // Disabled because an enabled embedding provider makes every real-MemoryManager
+  // test call a live Ollama at localhost:11434: measured 513ms -> 3946ms -> hard
+  // 5000ms timeout purely as a function of whether the model happened to be
+  // resident (#1723). Recall assertions use the lexical FTS/trigram path; the
+  // embedding backend itself is abmind's to test.
+  process.env.EMBEDDING_ENABLED = "false";
 
   // Preserve access to real host-level native deps (~/.local/lib/node_modules/)
   // which resolveNativeDep() and many test files use via homedir() paths.

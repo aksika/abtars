@@ -44,6 +44,23 @@ describe("scheduled project orchestration (#1516)", () => {
 let activeHandle: import("../../components/reconciler.js").ReconcilerHandle | null = null;
 let wakeScheduler: import("../../components/lifecycle-wake-scheduler.js").LifecycleWakeScheduler | null = null;
 
+/**
+ * #1707: a scheduled root's occurrence is resolved through the durable task
+ * catalog (findActiveScheduledOccurrence -> readEntries). An entry that is
+ * only in the queue is swept as an orphan by initializeState(), which deletes
+ * its task_runs reservation — the gate then reads the root as terminal and the
+ * reconciler last-resort-settles it to blocked. Register before enqueueing so
+ * the fixture matches how production always admits a scheduled run (#1723).
+ */
+async function registerAndEnqueue(
+  queue: InstanceType<typeof CronQueue>,
+  entry: import("../../components/tasks/task-types.js").ScheduledTask,
+): Promise<void> {
+  const taskStore = await import("../../components/tasks/task-store.js");
+  taskStore.writeEntry(entry);
+  queue.enqueue(entry, true);
+}
+
 /** #1554: start a real generation over the tmpdir stores with a scripted coordinator. */
 async function startGeneration(coordinator: unknown): Promise<void> {
   const { LifecycleWakeScheduler } = await import("../../components/lifecycle-wake-scheduler.js");
@@ -106,7 +123,7 @@ async function startGeneration(coordinator: unknown): Promise<void> {
     } as never);
 
     const queue = new CronQueue(new ScheduledRunCoordinator({ projectRunner: projectRunnerMod.scheduledProjectRunner }));
-    queue.enqueue({
+    const entry: import("../../components/tasks/task-types.js").ScheduledTask = {
       id: "brief-task", kind: "agent", prompt: "produce the briefing",
       agent: "task", interaction: { mode: "oneshot" }, delivery: "report", at: new Date().toISOString(),
       enabled: true, priority: "medium", chatId: "42",
@@ -117,7 +134,8 @@ async function startGeneration(coordinator: unknown): Promise<void> {
         minBytes: 100,
         requires: { files: [], executables: [], tools: [] },
       },
-    }, true);
+    };
+    await registerAndEnqueue(queue, entry);
 
     const deadline = Date.now() + 3_000;
     while (claims.length === 0 && Date.now() < deadline) {
@@ -219,7 +237,7 @@ async function startGeneration(coordinator: unknown): Promise<void> {
     } as never);
 
     const queue = new CronQueue(new ScheduledRunCoordinator({ projectRunner: projectRunnerMod.scheduledProjectRunner }));
-    queue.enqueue({
+    const entry: import("../../components/tasks/task-types.js").ScheduledTask = {
       id: "stale-task", kind: "agent", prompt: "produce report",
       agent: "task", interaction: { mode: "oneshot" }, delivery: "report", at: new Date().toISOString(),
       enabled: true, priority: "medium", chatId: "42",
@@ -230,7 +248,8 @@ async function startGeneration(coordinator: unknown): Promise<void> {
         minBytes: 100,
         requires: { files: [], executables: [], tools: [] },
       },
-    }, true);
+    };
+    await registerAndEnqueue(queue, entry);
 
     const deadline = Date.now() + 3_000;
     let rootId = 0;
