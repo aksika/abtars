@@ -139,6 +139,20 @@ describe("spawn_worker contract boundary (#1591)", () => {
     expect(validateWorkerRootCriteriaMock).toHaveBeenCalledWith(42, "(pending)", ["c1"]);
     expect(spawnChildMock).toHaveBeenCalled();
   });
+
+  it("does not advertise yield_turn outside project_execution", async () => {
+    const result = await spawnWorker().execute({
+      goal: "Review-only worker",
+      criteria: JSON.stringify([{ id: "c1", description: "Review the evidence" }]),
+      max_duration_ms: "300000",
+    }, {
+      ...orcContext,
+      orcContext: { ...orcContext.orcContext, intentKind: "project_review" },
+    });
+
+    expect(result).toContain("[supervised]");
+    expect(result).not.toContain("yield_turn");
+  });
 });
 
 const EXEC_CONTEXT: OrcInvocationContextV2 = {
