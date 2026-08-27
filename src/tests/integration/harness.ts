@@ -15,6 +15,11 @@ import { MemoryManager, type MemoryConfig, MEMORY_CONFIG_DEFAULTS, detectCitatio
  */
 const TEST_PRIMARY_OWNER = "u1";
 
+// These tests exercise SQLite/FTS recall, quality counters, and citations. The
+// provider-backed Se stage is covered in abmind; leaving it in this harness
+// makes the suite depend on whichever Ollama model happens to be resident.
+const INTEGRATION_RECALL_STAGES = ["Sf", "Ss", "S6"];
+
 function pinTestOwner(): string | undefined {
   const saved = process.env["ABMIND_USER_ID"];
   process.env["ABMIND_USER_ID"] = TEST_PRIMARY_OWNER;
@@ -28,6 +33,7 @@ function restoreTestOwner(saved: string | undefined): void {
 
 export interface IntegrationHarness {
   memory: MemoryManager;
+  recallSearch: MemoryManager["recallSearch"];
   tmpDir: string;
   cleanup: () => void;
 }
@@ -46,9 +52,10 @@ export async function createHarness(): Promise<IntegrationHarness> {
   const tmpDir = mkdtempSync(join(tmpdir(), "abtars-integration-"));
   const config: MemoryConfig = { ...MEMORY_CONFIG_DEFAULTS, memoryDir: tmpDir };
   const memory = new MemoryManager(config);
-  await memory.initialize();
+  await memory.initialize({ skipEmbeddingCheck: true });
   return {
     memory,
+    recallSearch: (params) => memory.recallSearch({ ...params, stages: [...INTEGRATION_RECALL_STAGES] }),
     tmpDir,
     cleanup: () => { memory.close(); rmSync(tmpDir, { recursive: true, force: true }); restoreTestOwner(savedOwner); },
   };

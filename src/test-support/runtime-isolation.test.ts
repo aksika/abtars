@@ -61,6 +61,11 @@ describe("runtime-isolation sandbox", () => {
     expect(env.NODE_PATH).toBe(process.env.NODE_PATH);
   });
 
+  it("disables live embeddings and propagates that setting to children", () => {
+    expect(process.env.EMBEDDING_ENABLED).toBe("false");
+    expect(isolatedChildEnv().EMBEDDING_ENABLED).toBe("false");
+  });
+
   it("isolatedChildEnv does NOT contain common secret variables", () => {
     process.env.MY_API_KEY = "should-not-leak";
     process.env.OPENAI_TOKEN = "should-not-leak";

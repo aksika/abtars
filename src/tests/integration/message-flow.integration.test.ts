@@ -17,7 +17,7 @@ describe("message-flow integration", () => {
       emotionTags: "conviction", topic: "coding",
     });
 
-    const result = await h.memory.recallSearch({ translated: ["TypeScript", "preference"], userId: "u1" });
+    const result = await h.recallSearch({ translated: ["TypeScript", "preference"], userId: "u1" });
     expect(result.results.length).toBeGreaterThan(0);
     expect(result.results[0]!.content).toContain("TypeScript");
   });
@@ -40,7 +40,7 @@ describe("message-flow integration", () => {
       contentOriginal: "deployment", memoryType: "fact", emotionScore: 0, topic: "devops",
     });
 
-    const result = await h.memory.recallSearch({ translated: ["deployment", "GitHub"], userId: "u1" });
+    const result = await h.recallSearch({ translated: ["deployment", "GitHub"], userId: "u1" });
     expect(result.results.length).toBeGreaterThan(0);
     const recalledHits = result.results.filter(r => r.id != null).map(r => ({ id: r.id!, contentEn: r.content }));
 
@@ -63,10 +63,10 @@ describe("message-flow integration", () => {
       classification: 2, topic: "finance",
     });
 
-    const restricted = await h.memory.recallSearch({ translated: ["salary"], userId: "u1", maxClassification: 1 });
+    const restricted = await h.recallSearch({ translated: ["salary"], userId: "u1", maxClassification: 1 });
     expect(restricted.results.length).toBe(0);
 
-    const allowed = await h.memory.recallSearch({ translated: ["salary"], userId: "u1", maxClassification: 2 });
+    const allowed = await h.recallSearch({ translated: ["salary"], userId: "u1", maxClassification: 2 });
     expect(allowed.results.length).toBeGreaterThan(0);
   });
 });

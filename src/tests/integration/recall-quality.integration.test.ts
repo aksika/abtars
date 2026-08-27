@@ -16,7 +16,7 @@ describe("recall quality integration (#824)", () => {
       contentOriginal: "hermes", memoryType: "fact", emotionScore: 0, topic: "mythology",
     });
 
-    const result = await h.memory.recallSearch({ translated: ["hermes"], userId: "u1" });
+    const result = await h.recallSearch({ translated: ["hermes"], userId: "u1" });
     const ids = result.results.filter(r => r.id != null).map(r => r.id!);
     expect(ids.length).toBeGreaterThan(0);
 
@@ -34,7 +34,7 @@ describe("recall quality integration (#824)", () => {
       contentOriginal: "acme", memoryType: "fact", emotionScore: 0, topic: "work",
     });
 
-    const result = await h.memory.recallSearch({ translated: ["Acme", "engineer"], userId: "u1" });
+    const result = await h.recallSearch({ translated: ["Acme", "engineer"], userId: "u1" });
     const ids = result.results.filter(r => r.id != null).map(r => r.id!);
 
     h.memory.bumpCitedCount(ids);
@@ -65,7 +65,7 @@ describe("recall quality integration (#824)", () => {
     // Both need recall_count for the formula to kick in
     for (let i = 0; i < 5; i++) h.memory.bumpRecallCount([goodId, badId]);
 
-    const result = await h.memory.recallSearch({ translated: ["Project", "Alpha", "React"], userId: "u1" });
+    const result = await h.recallSearch({ translated: ["Project", "Alpha", "React"], userId: "u1" });
     expect(result.results.length).toBe(2);
     // Good memory should rank higher
     const goodIdx = result.results.findIndex(r => r.id === goodId);
@@ -79,7 +79,7 @@ describe("recall quality integration (#824)", () => {
       contentOriginal: "migration", memoryType: "event", emotionScore: 0, topic: "devops",
     });
 
-    const result = await h.memory.recallSearch({ translated: ["database", "migration"], userId: "u1" });
+    const result = await h.recallSearch({ translated: ["database", "migration"], userId: "u1" });
     const hits = result.results.filter(r => r.id != null).map(r => ({ id: r.id!, contentEn: r.content }));
 
     // Response talks about something completely different

@@ -141,6 +141,7 @@ const CHILD_ALLOWLIST = new Set<string>([
   "ABTARS_RELEASES", "ABTARS_BIN",
   "XDG_CONFIG_HOME", "XDG_CACHE_HOME", "XDG_STATE_HOME",
   "NODE_ENV", "AB_TEST_SANDBOX_ROOT",
+  "EMBEDDING_ENABLED",
 ]);
 
 export function isolatedChildEnv(overrides?: NodeJS.ProcessEnv): NodeJS.ProcessEnv {

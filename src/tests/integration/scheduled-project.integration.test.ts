@@ -15,6 +15,10 @@ describe("scheduled project orchestration (#1516)", () => {
   let ScheduledRunCoordinator: typeof import("../../components/tasks/scheduled-run-coordinator.js").ScheduledRunCoordinator;
   let toolRegistryMod: typeof import("../../components/transport/tool-registry.js");
 
+  // This fixture deliberately resets and re-imports the full reconciler graph
+  // against a fresh mocked home. Keep its setup budget local to this test: the
+  // integration portfolio may be CPU-cold after earlier files, but product
+  // lifecycle waits retain their own bounded assertions (#1723).
   beforeEach(async () => {
     vi.resetModules();
     home = join(tmpdir(), `abtars-scheduled-project-${Date.now()}-${Math.random().toString(36).slice(2)}`);
@@ -29,7 +33,7 @@ describe("scheduled project orchestration (#1516)", () => {
     projectRunnerMod = await import("../../components/tasks/scheduled-project-runner.js");
     ScheduledRunCoordinator = (await import("../../components/tasks/scheduled-run-coordinator.js")).ScheduledRunCoordinator;
     toolRegistryMod = await import("../../components/transport/tool-registry.js");
-  });
+  }, 30_000);
 
   afterEach(async () => {
     await activeHandle?.stop();

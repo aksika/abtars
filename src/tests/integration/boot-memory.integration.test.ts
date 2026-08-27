@@ -32,7 +32,7 @@ describe("boot-memory integration", () => {
       userId: "u1", contentEn: "Boot test memory", contentOriginal: "boot",
       memoryType: "fact", emotionScore: 0, emotionTags: "trust",
     });
-    const result = await h.memory.recallSearch({ translated: ["boot", "test"], userId: "u1" });
+    const result = await h.recallSearch({ translated: ["boot", "test"], userId: "u1" });
     expect(result.results.length).toBeGreaterThan(0);
   });
 });
