@@ -10,43 +10,83 @@ const TAG = "task_store";
 
 const storePath = (): string => join(abtarsHome(), "tasks", "tasks.json");
 
-function readAll(): ScheduledTask[] {
-  const p = storePath();
-  if (!existsSync(p)) return [];
-  let raw: unknown[];
-  try {
-    raw = JSON.parse(readFileSync(p, "utf-8"));
-  } catch (err) {
-    logAndSwallow(TAG, "readAll tasks.json", err);
-    return [];
-  }
-  if (!Array.isArray(raw)) {
-    logWarn(TAG, "tasks.json is not an array — ignoring");
-    return [];
-  }
+export interface TaskCatalogIssue {
+  readonly index: number;
+  readonly id?: string;
+  readonly error: string;
+}
 
+export type TaskCatalogReadResult =
+  | { readonly kind: "complete"; readonly entries: ScheduledTask[] }
+  | { readonly kind: "partial"; readonly entries: ScheduledTask[]; readonly issues: TaskCatalogIssue[] }
+  | { readonly kind: "unavailable"; readonly reason: "read_failed" | "invalid_json" | "wrong_shape" };
+
+export class TaskCatalogUnavailableError extends Error {
+  readonly reason: "read_failed" | "invalid_json" | "wrong_shape";
+  constructor(reason: "read_failed" | "invalid_json" | "wrong_shape", message?: string, cause?: unknown) {
+    super(message ?? reason);
+    this.name = "TaskCatalogUnavailableError";
+    this.reason = reason;
+    if (cause !== undefined) (this as unknown as { cause: unknown }).cause = cause;
+  }
+}
+
+export function readTaskCatalog(): TaskCatalogReadResult {
+  const p = storePath();
+  if (!existsSync(p)) return { kind: "complete", entries: [] };
+  let rawText: string;
+  try {
+    rawText = readFileSync(p, "utf-8");
+  } catch (err) {
+    logAndSwallow(TAG, "readTaskCatalog tasks.json", err);
+    return { kind: "unavailable", reason: "read_failed" };
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(rawText);
+  } catch (err) {
+    logAndSwallow(TAG, "readTaskCatalog tasks.json", err);
+    return { kind: "unavailable", reason: "invalid_json" };
+  }
+  if (!Array.isArray(parsed)) {
+    logWarn(TAG, "tasks.json is not an array — ignoring");
+    return { kind: "unavailable", reason: "wrong_shape" };
+  }
   const valid: ScheduledTask[] = [];
-  for (const item of raw) {
+  const issues: TaskCatalogIssue[] = [];
+  for (let i = 0; i < parsed.length; i++) {
+    const item = parsed[i];
     const result = normalize(item);
     if (result.ok) {
       valid.push(result.entry);
     } else {
       logWarn(TAG, `Quarantined invalid task entry${result.id ? ` "${result.id}"` : ""}: ${result.error}`);
+      issues.push({ index: i, ...(result.id ? { id: result.id } : {}), error: result.error });
     }
   }
-  return valid;
+  if (issues.length === 0) return { kind: "complete", entries: valid };
+  return { kind: "partial", entries: valid, issues };
 }
 
 function readAllRaw(): unknown[] {
   const p = storePath();
   if (!existsSync(p)) return [];
+  let text: string;
   try {
-    const raw = JSON.parse(readFileSync(p, "utf-8"));
-    return Array.isArray(raw) ? raw : [];
+    text = readFileSync(p, "utf-8");
   } catch (err) {
-    logAndSwallow(TAG, "readAllRaw tasks.json", err);
-    return [];
+    throw new TaskCatalogUnavailableError("read_failed", `tasks.json read failed: ${err instanceof Error ? err.message : String(err)}`, err);
   }
+  let raw: unknown;
+  try {
+    raw = JSON.parse(text);
+  } catch (err) {
+    throw new TaskCatalogUnavailableError("invalid_json", `tasks.json invalid JSON: ${err instanceof Error ? err.message : String(err)}`, err);
+  }
+  if (!Array.isArray(raw)) {
+    throw new TaskCatalogUnavailableError("wrong_shape", "tasks.json is not an array");
+  }
+  return raw;
 }
 
 export function writeEntries(entries: ScheduledTask[]): void {
@@ -58,15 +98,17 @@ export function writeEntries(entries: ScheduledTask[]): void {
 }
 
 export function readEntries(): ScheduledTask[] {
-  const entries = readAll();
-  initializeState(entries);
-  return entries;
+  const catalog = readTaskCatalog();
+  if (catalog.kind === "unavailable") return [];
+  initializeState(catalog.entries);
+  return catalog.entries;
 }
 
 export function readEntry(id: string): ScheduledTask | null {
-  const entries = readAll();
-  initializeState(entries);
-  return entries.find(e => e.id === id) ?? null;
+  const catalog = readTaskCatalog();
+  if (catalog.kind === "unavailable") return null;
+  initializeState(catalog.entries);
+  return catalog.entries.find(e => e.id === id) ?? null;
 }
 
 export function writeEntry(e: ScheduledTask): void {

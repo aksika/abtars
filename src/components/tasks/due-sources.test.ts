@@ -236,7 +236,7 @@ describe("run-deadline inactivity limits #1600", () => {
     writeFileSync(join(TEST_HOME, "tasks", "tasks.json"), JSON.stringify([entry], null, 2));
     stateStore.initializeState(taskStore.readEntries());
     const res = stateStore.reserveRun(entry.id, {
-      runId: "idle-run", groupId: "g", attempt: 1, trigger: "schedule",
+      runId: `${entry.id}-idle-run`, groupId: "g", attempt: 1, trigger: "schedule",
       occurrenceAt: Date.now(), deadlineAt,
     });
     if (!res.ok) throw new Error("reserveRun failed");
@@ -278,7 +278,7 @@ describe("run-deadline inactivity limits #1600", () => {
 
     source.wakeDue(lastProgressAt + taskTypes.runIdleBudgetMs());
     expect(coordinator.deadlineExpired).toHaveBeenCalledTimes(1);
-    expect(coordinator.deadlineExpired).toHaveBeenCalledWith(entry.id, "idle-run", expect.stringContaining("no progress for"));
+    expect(coordinator.deadlineExpired).toHaveBeenCalledWith(entry.id, run.runId, expect.stringContaining("no progress for"));
   });
 
   it("#1600: a run reporting progress forever is settled at the ceiling with the ceiling reason", () => {
@@ -290,7 +290,7 @@ describe("run-deadline inactivity limits #1600", () => {
     stateStore.advanceRun(entry.id, run.runId, { progressAt: now + 5 * 60_000 });
     source.wakeDue(now + 10 * 60_000);
     expect(coordinator.deadlineExpired).toHaveBeenCalledTimes(1);
-    expect(coordinator.deadlineExpired).toHaveBeenCalledWith(entry.id, "idle-run", "absolute ceiling exceeded");
+    expect(coordinator.deadlineExpired).toHaveBeenCalledWith(entry.id, run.runId, "absolute ceiling exceeded");
   });
 
   it("#1600: a spurious wake with no limit elapsed settles nothing", () => {
@@ -320,8 +320,8 @@ describe("run-deadline inactivity limits #1600", () => {
     const { source } = deadlineSource();
 
     const items = source.listDueItems();
-    expect(items.some(i => i.key === "run:idle-run" && i.dueAt === now + 10 * 60_000)).toBe(true);
-    expect(items.some(i => i.key === "idle:idle-run" && i.dueAt === run.lastProgressAt + taskTypes.runIdleBudgetMs())).toBe(true);
+    expect(items.some(i => i.key === `run:${run.runId}` && i.dueAt === now + 10 * 60_000)).toBe(true);
+    expect(items.some(i => i.key === `idle:${run.runId}` && i.dueAt === run.lastProgressAt + taskTypes.runIdleBudgetMs())).toBe(true);
   });
 
   it("#1603: a system run reporting progress through its handler survives the idle budget; a silent one is settled", () => {
@@ -350,7 +350,7 @@ describe("run-deadline inactivity limits #1600", () => {
     expect(silentC.deadlineExpired).not.toHaveBeenCalled();
     silentS.wakeDue(silentRun.lastProgressAt + taskTypes.runIdleBudgetMs());
     expect(silentC.deadlineExpired).toHaveBeenCalledTimes(1);
-    expect(silentC.deadlineExpired).toHaveBeenCalledWith(silent.id, "idle-run", expect.stringContaining("no progress for"));
+    expect(silentC.deadlineExpired).toHaveBeenCalledWith(silent.id, silentRun.runId, expect.stringContaining("no progress for"));
   });
 });
 

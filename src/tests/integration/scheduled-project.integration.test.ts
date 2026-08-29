@@ -309,4 +309,117 @@ async function startGeneration(coordinator: unknown): Promise<void> {
     expect(board.kanbanGetCard(rootId)!.status).toBe("failed");
     expect(board.kanbanGetCard(rootId)!.delivery_attempts).toBe(0);
   });
+
+  // #1735 Task 6: catalog unavailable defers last-resort settlement and recovers after restore.
+  // Keeps #1723 registration fixture: production admission always starts from a catalog entry.
+  it("defers last-resort settlement when catalog is unreadable and recovers after restore — live rows untouched", async () => {
+    const taskStore = await import("../../components/tasks/task-store.js");
+    const stateStore = await import("../../components/tasks/task-state-store.js");
+    const gateMod = await import("../../components/tasks/scheduled-occurrence-gate.js");
+    const runStoreMod = await import("../../components/orc-project/orc-project-run-store.js");
+    const coordinatorMod = await import("../../components/orc-project/orc-project-coordinator.js");
+
+    const ENTRY: import("../../components/tasks/task-types.js").ScheduledTask = {
+      id: "recovery-task", kind: "agent", prompt: "recoverable work",
+      agent: "task", interaction: { mode: "oneshot" }, delivery: "silent",
+      schedule: "* * * * *", enabled: true, priority: "medium", chatId: "42",
+      orchestration: { maxAgents: 2 },
+    };
+
+    // Seed catalog and live scheduled project (matches #1723 production fixture).
+    mkdirSync(join(home, "tasks"), { recursive: true });
+    writeFileSync(join(home, "tasks", "tasks.json"), JSON.stringify([ENTRY], null, 2));
+    const entries = taskStore.readEntries();
+    // initializeState is additive — calling here registers the task_state row
+    const { initializeState } = stateStore;
+    initializeState(entries);
+    const now = Date.now();
+    const runId = `${ENTRY.id}_recovery_${now}`;
+    stateStore.reserveRun(ENTRY.id, {
+      runId,
+      groupId: `${ENTRY.id}:group:${now}`,
+      attempt: 1 as const,
+      trigger: "schedule" as const,
+      occurrenceAt: now,
+      deadlineAt: now + 600_000,
+    });
+    const run = stateStore.readState(ENTRY.id)!.activeRun!;
+    const rootId = board.kanbanEnqueue("Recovery Project", "task", run.runId, { type: "O", goal: "supervised work", maxAgents: 2 });
+    stateStore.updateActiveRun(ENTRY.id, run.runId, { cardId: rootId });
+    const store = new reviewStoreMod.ProjectReviewStore();
+    const contract = {
+      schema_version: 1, id: `ct_${rootId}`, digest: `dg_${rootId}`, project_card_id: rootId,
+      goal: "supervised work",
+      criteria: [{ id: "c1", description: "goal met", required: true, evidence_expectation: "synthesis" }],
+      required_outputs: [], constraints: [], limits: {},
+      provenance: { requested_by: "scheduler", authored_by: "orc", created_at: new Date().toISOString() },
+    } as import("../../components/project-acceptance/project-contract.js").ProjectAcceptanceContractV1;
+    store.insertContract(contract);
+    store.initializeSupervision(rootId, `ct_${rootId}`, "executing" as never);
+    board.kanbanRunning(rootId);
+
+    const starts: number[] = [];
+    const coordinator = new coordinatorMod.OrcProjectCoordinator({
+      ownerPeer: "test-peer",
+      startPort: async () => { starts.push(1); },
+    });
+
+    await startGeneration(coordinator as unknown as never);
+
+    // Snapshot durable state before the outage.
+    const beforeState = stateStore.readState(ENTRY.id)!;
+    expect(beforeState.activeRun?.runId).toBe(run.runId);
+    const beforeCard = board.kanbanGetCard(rootId)!;
+    expect(beforeCard.status).toBe("running");
+    const beforeSup = store.getSupervision(rootId)!;
+    expect(beforeSup.state).toBe("executing");
+    expect(new runStoreMod.OrcProjectRunStore().getRunsForProject(rootId)).toHaveLength(0);
+    expect(gateMod.inspectScheduledOccurrence(beforeCard).state).toBe("active");
+
+    // Make catalog unreadable — invalid JSON (unavailable).
+    writeFileSync(join(home, "tasks", "tasks.json"), "INVALID JSON {{{");
+
+    // Trigger reconciliation while catalog is unavailable.
+    reconciler.requestReconcile(rootId);
+    await new Promise(r => setTimeout(r, 50));
+    await new Promise(r => setTimeout(r, 50));
+
+    // Live rows must remain untouched; no Orc claim, no provider start, no supervision block, no settlement.
+    const midState = stateStore.readState(ENTRY.id)!;
+    expect(midState.activeRun?.runId).toBe(run.runId);
+    expect(board.kanbanGetCard(rootId)!.status).toBe("running");
+    expect(store.getSupervision(rootId)!.state).toBe("executing");
+    expect(new runStoreMod.OrcProjectRunStore().getRunsForProject(rootId)).toHaveLength(0);
+    expect(starts).toHaveLength(0);
+    // Gate must report unavailable, not terminal.
+    const midCard = board.kanbanGetCard(rootId)!;
+    const midInspection = gateMod.inspectScheduledOccurrence(midCard);
+    expect(midInspection.state).toBe("unavailable");
+    if (midInspection.state === "unavailable") {
+      expect(midInspection.reason).toBe("definition_unavailable");
+    }
+    // No history settlement.
+    const histMod = await import("../../components/tasks/task-history-store.js");
+    expect(histMod.recentRuns(ENTRY.id, 10).filter(r => r.outcome === "failed" && r.kanbanCardId === rootId)).toHaveLength(0);
+
+    // Also verify a coordinating claim defers rather than terminalizes.
+    const claimWhileUnavailable = coordinator.scheduleProjectExecution(rootId, "continue");
+    expect(claimWhileUnavailable).toMatchObject({ kind: "conflict", reason: "occurrence_unavailable" });
+    expect(starts).toHaveLength(0);
+
+    // Restore valid catalog.
+    writeFileSync(join(home, "tasks", "tasks.json"), JSON.stringify([ENTRY], null, 2));
+
+    // Later existing wake (no new timer) re-evaluates and allows ownership.
+    reconciler.requestReconcile(rootId);
+    await new Promise(r => setTimeout(r, 50));
+    await new Promise(r => setTimeout(r, 50));
+
+    const afterCard = board.kanbanGetCard(rootId)!;
+    expect(gateMod.inspectScheduledOccurrence(afterCard).state).toBe("active");
+    // Now a claim should succeed (or be busy/idempotent, never unavailable).
+    const claimAfterRestore = coordinator.scheduleProjectExecution(rootId, "continue after restore");
+    expect(["claimed", "idempotent", "busy"].includes(claimAfterRestore.kind)).toBe(true);
+    expect(new runStoreMod.OrcProjectRunStore().getRunsForProject(rootId).length).toBeGreaterThanOrEqual(1);
+  });
 });

@@ -34,7 +34,7 @@ import { REVIEW_REQUEST_ABANDONED, REPAIR_SOURCE_CONTRACT_INVALID } from "./proj
 import { deriveRepairContract } from "./retry/retry-directive.js";
 import { settleRunOnce } from "./tasks/task-run-settler.js";
 import { makeTaskFailure } from "./tasks/task-failure.js";
-import { scheduledOccurrenceState, findActiveScheduledOccurrence, isScheduledRootIdentity as sharedIsScheduledRootIdentity, type ScheduledOccurrence } from "./tasks/scheduled-occurrence-gate.js";
+import { scheduledOccurrenceState, inspectScheduledOccurrence, isScheduledRootIdentity as sharedIsScheduledRootIdentity } from "./tasks/scheduled-occurrence-gate.js";
 import type { PiRunService } from "./pi-executor/pi-run-service.js";
 import type { AttemptLifecycle, AttemptRow } from "./worker-supervision-store.js";
 import type { WorkerAcceptanceContractV1 } from "./worker-contract.js";
@@ -332,6 +332,10 @@ function scheduleContractAuthoringOrSettle(generation: ReconcilerGeneration, pro
     logWarn(TAG, `Project ${projectId}: authoring claim refused — scheduled occurrence terminal — settling as last resort`);
     settleProjectLastResortFor(generation, projectId);
     return { kind: "settled", blockerClass: "occurrence_terminal" };
+  }
+  if (result.kind === "conflict" && result.reason === "occurrence_unavailable") {
+    logWarn(TAG, `Project ${projectId}: authoring claim deferred — scheduled occurrence unavailable — waiting for catalog recovery`);
+    return { kind: "deferred", reason: "busy" };
   }
   if (result.kind === "busy") {
     logWarn(TAG, `Project ${projectId}: authoring claim busy (run ${result.activeRunId}) — deferring; the ownership-released event will re-wake`);
@@ -742,7 +746,7 @@ function inspectProjectOwnership(projectId: number, supervision: ProjectSupervis
  * #1546: the running root's no-owner path. Only a non-terminal project with no
  * resumable owner and no claimable continuation reaches last-resort settlement.
  */
-function claimOrcContinuation(generation: ReconcilerGeneration, projectId: number, _supervision: ProjectSupervisionRow, reviewStore: ProjectReviewStore, project: KanbanCard): "owned" | "settled" {
+function claimOrcContinuation(generation: ReconcilerGeneration, projectId: number, _supervision: ProjectSupervisionRow, reviewStore: ProjectReviewStore, project: KanbanCard): "owned" | "settled" | "deferred" {
   // #1554: the coordinator is a mandatory generation dependency; a running
   // generation always has one.
   const coordinator = generation.deps.coordinator;
@@ -771,6 +775,10 @@ function claimOrcContinuation(generation: ReconcilerGeneration, projectId: numbe
         settleProjectLastResortFor(generation, projectId);
         return "settled";
       }
+      if (result.reason === "occurrence_unavailable") {
+        logWarn(TAG, `Project ${projectId}: continuation deferred — scheduled occurrence unavailable`);
+        return "deferred";
+      }
       // #1546 R3: conflict is never a direct settle signal. Re-read supervision
       // and re-derive ownership once; only a second pass that still finds no
       // owner and no claimable continuation may settle.
@@ -783,6 +791,10 @@ function claimOrcContinuation(generation: ReconcilerGeneration, projectId: numbe
         }
         const retry = coordinator.scheduleProjectExecution(projectId, goal);
         if (retry.kind === "claimed" || retry.kind === "idempotent" || retry.kind === "busy") return "owned";
+        if (retry.kind === "conflict" && retry.reason === "occurrence_unavailable") {
+          logWarn(TAG, `Project ${projectId}: continuation retry deferred — scheduled occurrence unavailable`);
+          return "deferred";
+        }
       }
       settleProjectLastResortFor(generation, projectId);
       return "settled";
@@ -821,7 +833,12 @@ function claimOrcContinuation(generation: ReconcilerGeneration, projectId: numbe
 function settleProjectLastResortFor(generation: ReconcilerGeneration, projectId: number): void {
   const card = kanbanGetCard(projectId);
   if (!card) return;
-  const matched = findActiveScheduledRun(card);
+  const inspection = inspectScheduledOccurrence(card);
+  if (inspection.state === "unavailable") {
+    logWarn(TAG, `Project ${projectId}: last-resort settlement deferred — scheduled occurrence unavailable (${inspection.reason})`);
+    return;
+  }
+  const matched = inspection.state === "active" ? inspection.occurrence : undefined;
   const children = kanbanGetChildren(projectId);
   const reason = "no scheduled Orc continuation owner after restart";
   // The freeze must not prevent the exactly-once settle: even if a child
@@ -885,9 +902,7 @@ export function settleProjectLastResort(projectId: number): void {
   settleProjectLastResortFor(generation, projectId);
 }
 
-function findActiveScheduledRun(card: KanbanCard): ScheduledOccurrence | undefined {
-  return findActiveScheduledOccurrence(card);
-}
+
 
 /**
  * #1546 R3.4: state-branch ownership handlers. `handleInputState` and
@@ -1472,9 +1487,14 @@ async function reconcileProject(generation: ReconcilerGeneration, projectId: num
   // generic contract/continuation path to proceed resurrects the job and can
   // release/reclaim Orc turns forever. The shared fail-closed gate is the
   // reconciler-side defensive layer; the coordinator refuses claims too.
-  if (scheduledOccurrenceState(project) === "terminal") {
+  const occurrenceState = scheduledOccurrenceState(project);
+  if (occurrenceState === "terminal") {
     logWarn(TAG, `Project ${projectId}: scheduled task run ${project.source_id ?? "unknown"} is no longer active — refusing Orc restart`);
     settleProjectLastResortFor(generation, projectId);
+    return;
+  }
+  if (occurrenceState === "unavailable") {
+    logWarn(TAG, `Project ${projectId}: scheduled task run ${project.source_id ?? "unknown"} occurrence unavailable — deferring`);
     return;
   }
 
@@ -1573,7 +1593,9 @@ async function reconcileProject(generation: ReconcilerGeneration, projectId: num
       // A crash between the Orc claim and the card write leaves queued+due,
       // which the next wake observes as already owned and promotes.
       if (inspectProjectOwnership(projectId, supervision, reviewStore) === "none") {
-        if (claimOrcContinuation(generation, projectId, supervision, reviewStore, project) === "settled") return;
+        const claimResult = claimOrcContinuation(generation, projectId, supervision, reviewStore, project);
+        if (claimResult === "settled") return;
+        if (claimResult === "deferred") return;
       }
       if (!kanbanPromoteDueRetry(projectId)) return; // lost the conditional race — next wake re-reads
       continue;
@@ -1618,7 +1640,11 @@ async function reconcileProject(generation: ReconcilerGeneration, projectId: num
         // At most one correlated claim per wake: the coordinator's live row
         // (or a re-derived owner) is re-read on the next wake. The queued
         // branch promotes first and continues so the state owner still runs.
-        if (claimOrcContinuation(generation, projectId, supervision, reviewStore, project) === "settled") return;
+        {
+          const claimResult = claimOrcContinuation(generation, projectId, supervision, reviewStore, project);
+          if (claimResult === "settled") return;
+          if (claimResult === "deferred") return;
+        }
         return; // the claim (or its re-derived owner) now owns the project
     }
   }

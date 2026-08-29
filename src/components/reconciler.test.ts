@@ -37,6 +37,7 @@ vi.mock("./tasks/scheduled-occurrence-gate.js", () => ({
     card.type === "O" && card.parent_id === null && card.source === "task" && !!card.source_id && card.source_id.length > 0,
   findActiveScheduledOccurrence: (): undefined => undefined,
   scheduledOccurrenceState: (): "active" => "active",
+  inspectScheduledOccurrence: (): { state: "terminal" } => ({ state: "terminal" }),
 }));
 
 

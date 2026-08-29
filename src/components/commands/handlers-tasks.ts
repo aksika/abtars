@@ -13,9 +13,13 @@ export async function handleTasksList(_text: string, ctx: CommandContext): Promi
   const now = new Date().toLocaleString("en-GB", { timeZone: tz, dateStyle: "medium", timeStyle: "medium" });
   let listing: string;
   try {
-    const { readEntries } = await import("../tasks/task-store.js");
+    const { readTaskCatalog, readEntries } = await import("../tasks/task-store.js");
     const { readState } = await import("../tasks/task-state-store.js");
-    const entries = readEntries();
+    const catalog = readTaskCatalog();
+    if (catalog.kind === "unavailable") {
+      listing = `⚠️ task catalog unavailable — cannot read tasks.json (${catalog.reason})`;
+    } else {
+      const entries = readEntries();
     const active = entries.filter((e: any) => !e.fired);
     active.sort((a: any, b: any) => {
       const timeOf = (e: any): number => {
@@ -74,6 +78,7 @@ export async function handleTasksList(_text: string, ctx: CommandContext): Promi
       return `${tick}  ${sched.padEnd(16)}${e.id}${pauseMarker}`;
     });
     listing = lines.length > 0 ? "<pre>" + lines.join("\n") + "</pre>" : "(no active entries)";
+    }
   } catch (err) {
     logError("tasks", `Failed to read cron: ${err instanceof Error ? err.message : String(err)}`);
     listing = "(no active entries)";

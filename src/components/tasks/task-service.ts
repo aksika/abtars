@@ -5,6 +5,8 @@ import type { TaskFailureDiagnosticV1 } from "./task-failure.js";
 import { AUTO_RESUME_COOLDOWN_MS, MAX_AUTO_RESUMES_PER_EPISODE } from "./task-failure.js";
 import * as stateStore from "./task-state-store.js";
 import * as historyStore from "./task-history-store.js";
+import { readEntry, writeEntry, TaskCatalogUnavailableError } from "./task-store.js";
+import { logAndSwallow } from "../log-and-swallow.js";
 
 
 export interface TaskView {
@@ -42,12 +44,15 @@ export function getAllViews(tasks: ScheduledTask[], runningTaskIds: Set<string> 
 }
 
 export function setEnabled(taskId: string, enabled: boolean): void {
-  const { readEntries, writeEntries } = require("./task-store.js");
-  const entries = readEntries();
-  const idx = entries.findIndex((e: ScheduledTask) => e.id === taskId);
-  if (idx === -1) return;
-  entries[idx] = { ...entries[idx], enabled } as ScheduledTask;
-  writeEntries(entries);
+  try {
+    const entry = readEntry(taskId);
+    if (!entry) return;
+    const updated: ScheduledTask = { ...entry, enabled } as ScheduledTask;
+    writeEntry(updated);
+  } catch (err) {
+    if (err instanceof TaskCatalogUnavailableError) return;
+    logAndSwallow("task_service", "setEnabled", err);
+  }
 }
 
 export type ResumeResult = "resumed" | "already_running" | "not_paused" | "invalid" | "not_found";
@@ -163,10 +168,4 @@ export function triggerNow(taskId: string, tasks: ScheduledTask[]): boolean {
   return true;
 }
 
-export function removeTask(taskId: string, tasks: ScheduledTask[]): boolean {
-  const idx = tasks.findIndex(t => t.id === taskId);
-  if (idx === -1) return false;
-  tasks.splice(idx, 1);
-  stateStore.removeState(taskId);
-  return true;
-}
+

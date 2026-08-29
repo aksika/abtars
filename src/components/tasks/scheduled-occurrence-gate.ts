@@ -9,14 +9,25 @@
  */
 
 import type { KanbanCard } from "./kanban-board.js";
-import { readEntries } from "./task-store.js";
-import { readState } from "./task-state-store.js";
-import { logWarn } from "../logger.js";
+import { readTaskCatalog } from "./task-store.js";
+import { readTaskRunById } from "./task-state-store.js";
 
 export interface ScheduledOccurrence {
   entry: import("./task-types.js").ScheduledTask;
   run: import("./task-state-store.js").ActiveTaskRun;
 }
+
+export type ScheduledOccurrenceState =
+  | "active"
+  | "terminal"
+  | "unavailable"
+  | "not_scheduled";
+
+export type ScheduledOccurrenceInspection =
+  | { readonly state: "active"; readonly occurrence: ScheduledOccurrence }
+  | { readonly state: "terminal" }
+  | { readonly state: "unavailable"; readonly reason: "run_unavailable" | "definition_unavailable" | "definition_missing" }
+  | { readonly state: "not_scheduled" };
 
 /** Scheduled-root identity — durable facts only (no supervision lookup). */
 export function isScheduledRootIdentity(card: KanbanCard): boolean {
@@ -25,38 +36,41 @@ export function isScheduledRootIdentity(card: KanbanCard): boolean {
   return true;
 }
 
+export function inspectScheduledOccurrence(card: KanbanCard): ScheduledOccurrenceInspection {
+  if (!isScheduledRootIdentity(card)) return { state: "not_scheduled" };
+  const runLookup = readTaskRunById(card.source_id!);
+  if (runLookup.kind === "missing" || runLookup.kind === "terminal") return { state: "terminal" };
+  if (runLookup.kind === "unavailable") return { state: "unavailable", reason: "run_unavailable" };
+  // active
+  if (runLookup.run.cardId !== card.id) return { state: "terminal" };
+  if (runLookup.run.terminalRequest) return { state: "terminal" };
+  const catalog = readTaskCatalog();
+  if (catalog.kind === "unavailable") return { state: "unavailable", reason: "definition_unavailable" };
+  const entry = catalog.entries.find(e => e.id === runLookup.taskId);
+  if (entry) return { state: "active", occurrence: { entry, run: runLookup.run } };
+  return { state: "unavailable", reason: "definition_missing" };
+}
+
 /**
  * Find the live (unfinished) task run this card was created for, with its
  * owning task definition. Undefined means no unfinished matching run exists —
  * the occurrence is missing or already settled.
  */
 export function findActiveScheduledOccurrence(card: KanbanCard): ScheduledOccurrence | undefined {
-  try {
-    for (const entry of readEntries()) {
-      const state = readState(entry.id);
-      const run = state?.activeRun;
-      if (run && run.runId === card.source_id && run.cardId === card.id) return { entry, run };
-    }
-  } catch (err) {
-    // Fail closed on read errors too: an unreadable catalog must never admit
-    // a claim against an unverifiable occurrence.
-    logWarn("occurrence-gate", `occurrence lookup failed for card ${card.id}: ${err instanceof Error ? err.message : String(err)}`);
-    return undefined;
-  }
+  const inspection = inspectScheduledOccurrence(card);
+  if (inspection.state === "active") return inspection.occurrence;
   return undefined;
 }
 
 /**
- * The tri-state admission decision consumed by both claim paths.
+ * The four-state admission decision consumed by both claim paths.
  *
- * - "active":         live matching unfinished run without a terminal request.
+ * - "active":         live matching unfinished run without a terminal request and with a verifiable definition.
  * - "terminal":       scheduled-root identity whose occurrence is missing,
- *                     settled, or carries a durable terminal request.
+ *                     settled, mismatched, or carries a durable terminal request.
+ * - "unavailable":    live run whose definition cannot be verified (db failure or catalog unavailable/missing).
  * - "not_scheduled":  not a scheduled root — the gate does not apply.
  */
-export function scheduledOccurrenceState(card: KanbanCard): "active" | "terminal" | "not_scheduled" {
-  if (!isScheduledRootIdentity(card)) return "not_scheduled";
-  const occurrence = findActiveScheduledOccurrence(card);
-  if (!occurrence || occurrence.run.terminalRequest) return "terminal";
-  return "active";
+export function scheduledOccurrenceState(card: KanbanCard): ScheduledOccurrenceState {
+  return inspectScheduledOccurrence(card).state;
 }

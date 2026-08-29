@@ -220,6 +220,24 @@ export function readState(taskId: string): TaskRuntimeState | null {
   }
 }
 
+export type TaskRunLookup =
+  | { readonly kind: "active"; readonly taskId: string; readonly run: ActiveTaskRun }
+  | { readonly kind: "terminal"; readonly taskId: string }
+  | { readonly kind: "missing" }
+  | { readonly kind: "unavailable" };
+
+export function readTaskRunById(runId: string): TaskRunLookup {
+  try {
+    const db = requireTaskDatabase();
+    const row = db.prepare("SELECT * FROM task_runs WHERE run_id = ?").get(runId) as RunRow | undefined;
+    if (!row) return { kind: "missing" };
+    if (row.finished_at !== null) return { kind: "terminal", taskId: row.task_id };
+    return { kind: "active", taskId: row.task_id, run: activeRunFromRow(row) };
+  } catch {
+    return { kind: "unavailable" };
+  }
+}
+
 /** All task_state column values implied by a partial TaskRuntimeState patch.
  * Key-presence is the contract: `{ lastIncident: undefined }` means CLEAR the
  * column, an absent key means leave it untouched — exactly the spread
@@ -319,16 +337,6 @@ export function initializeState(entries: ScheduledTask[]): void {
       }
       if (existing.consecutive_deferrals === undefined || existing.consecutive_deferrals === null) {
         db.prepare("UPDATE task_state SET consecutive_deferrals = 0 WHERE task_id = ?").run(id);
-        changed = true;
-      }
-    }
-
-    const orphans = db.prepare("SELECT task_id FROM task_state").all() as { task_id: string }[];
-    for (const orphan of orphans) {
-      if (!validIds.has(orphan.task_id)) {
-        logInfo(TAG, `Removed orphan state for "${orphan.task_id}"`);
-        db.prepare("DELETE FROM task_state WHERE task_id = ?").run(orphan.task_id);
-        db.prepare("DELETE FROM task_runs WHERE task_id = ?").run(orphan.task_id);
         changed = true;
       }
     }

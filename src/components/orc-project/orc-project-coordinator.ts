@@ -16,6 +16,7 @@ import { logAndSwallow } from "../log-and-swallow.js";
 import { effectiveMaxPromptRounds, intentPolicyFor, readOrcProjectSnapshot } from "./orc-intent-policy.js";
 import { kanbanGetCard } from "../tasks/kanban-board.js";
 import { scheduledOccurrenceState } from "../tasks/scheduled-occurrence-gate.js";
+import type { ScheduledOccurrenceState } from "../tasks/scheduled-occurrence-gate.js";
 
 const TAG = "orc-coordinator";
 
@@ -48,7 +49,7 @@ export interface OrcCoordinatorDeps {
    * #1707: override the scheduled-occurrence admission read. Defaults to the
    * shared fail-closed gate. Tests may inject a stub to avoid a task catalog.
    */
-  scheduledOccurrenceState?: (projectCardId: number) => "active" | "terminal" | "not_scheduled";
+  scheduledOccurrenceState?: (projectCardId: number) => ScheduledOccurrenceState;
 }
 
 export class OrcProjectCoordinator {
@@ -57,7 +58,7 @@ export class OrcProjectCoordinator {
   private readonly ownerPeer: string;
   private readonly ownerInstanceId: string;
   private readonly getRootIdentity: (projectCardId: number) => OrcRootIdentity;
-  private readonly scheduledOccurrenceState: (projectCardId: number) => "active" | "terminal" | "not_scheduled";
+  private readonly scheduledOccurrenceState: (projectCardId: number) => ScheduledOccurrenceState;
   private readonly ownershipListeners = new Set<(event: OrcOwnershipReleasedV1) => void>();
 
   constructor(deps: OrcCoordinatorDeps) {
@@ -229,9 +230,14 @@ export class OrcProjectCoordinator {
     // runs BEFORE any run-row insertion or provider start. A scheduled root
     // whose task occurrence is terminal/missing is never claimed here; the
     // reconciler's last-resort settlement owns that project instead.
-    if (this.scheduledOccurrenceState(input.projectCardId) === "terminal") {
+    const occurrence = this.scheduledOccurrenceState(input.projectCardId);
+    if (occurrence === "terminal") {
       logWarn(TAG, `Project ${input.projectCardId}: refusing ${input.intentKind} claim — owning scheduled occurrence is terminal`);
       return { kind: "conflict" as const, reason: "occurrence_terminal" as const };
+    }
+    if (occurrence === "unavailable") {
+      logWarn(TAG, `Project ${input.projectCardId}: deferring ${input.intentKind} claim — owning scheduled occurrence is unavailable`);
+      return { kind: "conflict" as const, reason: "occurrence_unavailable" as const };
     }
 
     // #1707 Task 2: bind the owning scheduled occurrence to the attempt so
@@ -385,14 +391,14 @@ function defaultRootIdentity(projectCardId: number): OrcRootIdentity {
 }
 
 /** #1707: shared fail-closed occurrence gate — the coordinator-side default. */
-function defaultScheduledOccurrenceState(projectCardId: number): "active" | "terminal" | "not_scheduled" {
+function defaultScheduledOccurrenceState(projectCardId: number): ScheduledOccurrenceState {
   try {
     const card = kanbanGetCard(projectCardId);
     if (!card) return "not_scheduled";
     return scheduledOccurrenceState(card);
   } catch {
-    // Fail closed: an unreadable board never admits a claim.
-    return "terminal";
+    // Unreadable board defers rather than terminalizes.
+    return "unavailable";
   }
 }
 
