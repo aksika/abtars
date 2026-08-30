@@ -111,32 +111,41 @@ function* walk(dir) {
   }
 }
 
-for (const file of walk(scanDir)) {
-  const relPath = relative(ROOT_DIR, file);
-  if (isExcludedFile(relPath)) continue;
-  const sourceText = readFileSync(file, "utf-8");
-  for (const violation of checkPiBoundarySource(sourceText, file)) {
-    violations.push(violation);
-    failed = true;
+// Only run the scan when executed as a script; the checker is also imported
+// by pi-boundary.test.ts for fixture exercises and must not exit the test
+// process as a side effect.
+function main() {
+  for (const file of walk(scanDir)) {
+    const relPath = relative(ROOT_DIR, file);
+    if (isExcludedFile(relPath)) continue;
+    const sourceText = readFileSync(file, "utf-8");
+    for (const violation of checkPiBoundarySource(sourceText, file)) {
+      violations.push(violation);
+      failed = true;
+    }
+  }
+
+  violations.sort((a, b) => {
+    const ra = relative(ROOT_DIR, a.file);
+    const rb = relative(ROOT_DIR, b.file);
+    if (ra !== rb) return ra < rb ? -1 : 1;
+    return a.line - b.line;
+  });
+
+  for (const violation of violations) {
+    process.stderr.write(
+      `VIOLATION: ${relative(ROOT_DIR, violation.file)}:${violation.line}: non-type import of ${violation.specifier}\n`,
+    );
+  }
+
+  if (failed) {
+    process.stderr.write("\ncheck-pi-boundary: FAIL — @earendil-works runtime imports found in production source.\n");
+    process.exit(1);
+  } else {
+    process.stdout.write("check-pi-boundary: OK — no @earendil-works runtime imports in production source.\n");
   }
 }
 
-violations.sort((a, b) => {
-  const ra = relative(ROOT_DIR, a.file);
-  const rb = relative(ROOT_DIR, b.file);
-  if (ra !== rb) return ra < rb ? -1 : 1;
-  return a.line - b.line;
-});
-
-for (const violation of violations) {
-  process.stderr.write(
-    `VIOLATION: ${relative(ROOT_DIR, violation.file)}:${violation.line}: non-type import of ${violation.specifier}\n`,
-  );
-}
-
-if (failed) {
-  process.stderr.write("\ncheck-pi-boundary: FAIL — @earendil-works runtime imports found in production source.\n");
-  process.exit(1);
-} else {
-  process.stdout.write("check-pi-boundary: OK — no @earendil-works runtime imports in production source.\n");
+if (process.argv[1] && fileURLToPath(import.meta.url) === resolve(process.argv[1])) {
+  main();
 }
