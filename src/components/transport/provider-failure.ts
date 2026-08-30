@@ -13,7 +13,7 @@
  * appear here or in any downstream consumer.
  */
 
-export const TERMINAL_FAILURE_CODES = ["credits_exhausted"] as const;
+export const TERMINAL_FAILURE_CODES = ["credits_exhausted", "context_overflow"] as const;
 export type TerminalFailureCode = (typeof TERMINAL_FAILURE_CODES)[number];
 
 export interface ProviderTerminalFailure {
@@ -43,4 +43,9 @@ export function isProviderExecutionError(err: unknown): err is ProviderExecution
 
 export function isCreditsExhausted(err: unknown): boolean {
   return isProviderExecutionError(err) && err.failure.code === "credits_exhausted";
+}
+
+/** #1745: every attempted candidate rejected the request as over-context. */
+export function isContextOverflowFailure(err: unknown): boolean {
+  return isProviderExecutionError(err) && err.failure.code === "context_overflow";
 }
