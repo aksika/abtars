@@ -279,6 +279,15 @@ vi.mock("./orc-project/orc-project-run-store.js", () => ({
   }),
 }));
 
+// #1751: the continuation not_actionable guard re-reads the Orc snapshot at
+// the decision point. A controllable double lets the tests drive the durable
+// owner flags directly instead of reproducing the 65 ms transition window by
+// timing.
+const readOrcProjectSnapshotMock = vi.fn();
+vi.mock("./orc-project/orc-intent-policy.js", () => ({
+  readOrcProjectSnapshot: (db: unknown, projectCardId: number) => readOrcProjectSnapshotMock(db, projectCardId),
+}));
+
 const hasLiveContributionForProjectMock = vi.fn().mockReturnValue(false);
 vi.mock("./peer-help/contribution-store.js", () => ({
   ContributionStore: vi.fn(),
@@ -396,6 +405,18 @@ async function swapTestGeneration(
   getLiveRunForProjectMock.mockReturnValue(undefined);
   hasLiveContributionForProjectMock.mockReset();
   hasLiveContributionForProjectMock.mockReturnValue(false);
+  readOrcProjectSnapshotMock.mockReset();
+  readOrcProjectSnapshotMock.mockReturnValue({
+    supervisionState: "executing",
+    supervisionGeneration: 1,
+    contractExists: true,
+    projectTerminal: false,
+    contributionActive: false,
+    openReviewCase: false,
+    inputRequestsOutstanding: false,
+    workerOwnedChild: false,
+    acceptedTerminalChildrenReady: false,
+  });
   spawnChildMock.mockReset();
   mod = await import("./reconciler.js");
   activeTestHandle = await startTestGeneration();
@@ -2194,6 +2215,77 @@ describe("Reconciler — #1546 scheduled-root driver", () => {
       { authority: { projectCardId: 1, projectGeneration: 1, scheduledRunId: "run-1" } },
     );
     expect(spawnChildMock).not.toHaveBeenCalled();
+  });
+
+  it("#1751: a live Worker owner defers a not_actionable continuation instead of last-resort abort", async () => {
+    await swapTestGeneration({
+      coordinator: {
+        getStore: makeFakeRunStore,
+        scheduleProjectExecution: () => ({ kind: "not_actionable" as const, reason: "intent_not_actionable" as const }),
+      } as never,
+    });
+    // Incident shape: the Worker card is still queued between its failed
+    // attempt (`.275`) and its terminal transition (`.340`). The attempt is
+    // already terminal, so the decision is a continuation claim — and the
+    // durable snapshot still shows the Worker owning the project.
+    setupExecutingProject({
+      children: [{ ...makeCard({ id: 2, status: "queued", type: "W" }), parent_id: 1 }],
+      attemptLifecycle: "failed",
+    });
+    readOrcProjectSnapshotMock.mockReturnValue({
+      supervisionState: "executing",
+      supervisionGeneration: 1,
+      contractExists: true,
+      projectTerminal: false,
+      contributionActive: false,
+      openReviewCase: false,
+      inputRequestsOutstanding: false,
+      workerOwnedChild: true,
+      acceptedTerminalChildrenReady: false,
+    });
+
+    mod.requestReconcile(1);
+    await flush();
+    await new Promise(r => setTimeout(r, 10));
+    await flush();
+
+    expect(kanbanFailMock).not.toHaveBeenCalled();
+  });
+
+  it("#1751: true owner absence still reaches last-resort settlement", async () => {
+    await swapTestGeneration({
+      coordinator: {
+        getStore: makeFakeRunStore,
+        scheduleProjectExecution: () => ({ kind: "not_actionable" as const, reason: "intent_not_actionable" as const }),
+      } as never,
+    });
+    // Same setup and same claim result; the snapshot re-read at the decision
+    // point shows the owner is gone (its attempt settled and the card
+    // transitioned between claim and re-read) — the safety net must still
+    // fire. An all-terminal child card would instead route to create_review,
+    // so the child stays queued exactly as in the incident.
+    setupExecutingProject({
+      children: [{ ...makeCard({ id: 2, status: "queued", type: "W" }), parent_id: 1 }],
+      attemptLifecycle: "failed",
+    });
+    readOrcProjectSnapshotMock.mockReturnValue({
+      supervisionState: "executing",
+      supervisionGeneration: 1,
+      contractExists: true,
+      projectTerminal: false,
+      contributionActive: false,
+      openReviewCase: false,
+      inputRequestsOutstanding: false,
+      workerOwnedChild: false,
+      acceptedTerminalChildrenReady: false,
+    });
+
+    mod.requestReconcile(1);
+    await flush();
+    await new Promise(r => setTimeout(r, 10));
+    await flush();
+
+    expect(kanbanFailMock).toHaveBeenCalledWith(1, "no scheduled Orc continuation owner after restart");
   });
 });
 
