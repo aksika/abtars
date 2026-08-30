@@ -1131,6 +1131,9 @@ describe("spin(spec) — unified session API (#1271)", () => {
 
       const first = spin.spin({ type: "O", sessionId: oSession.id, prompt: "first turn", await: true });
       await vi.waitFor(() => expect(sendCalls).toHaveLength(1));
+      const firstExecutionId = oSession.activeExecutionId;
+      expect(firstExecutionId).toBeDefined();
+      expect((sendCalls[0]!.context as { executionId?: string }).executionId).toBe(firstExecutionId);
 
       // A second O call against the same session is rejected with the bounded
       // admission error BEFORE it can overwrite the session's active execution

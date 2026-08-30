@@ -729,7 +729,7 @@ export class Spin {
     }
 
     // #1444: Execution telemetry scope — tracks provider calls for this generation
-    const executionTelemetry = createExecutionTelemetryScope(session.activeExecutionId);
+    const executionTelemetry = createExecutionTelemetryScope(capturedExecutionId);
 
     // 3. Kanban card (user-facing work only)
     let cardId = spec.cardId;
@@ -804,7 +804,7 @@ export class Spin {
         session.orcTurnControl = spec.orcTurnControl;
         session.orcMaxPromptRounds = spec.orcMaxPromptRounds;
         const { OrcProjectRunStore } = await import("./orc-project/orc-project-run-store.js");
-        const bind = new OrcProjectRunStore().bindExecution(spec.orcContext, session.id, session.activeExecutionId!);
+        const bind = new OrcProjectRunStore().bindExecution(spec.orcContext, session.id, capturedExecutionId);
         if (!bind.ok) throw new Error(`Orc bindExecution rejected: ${bind.reason}`);
         // #1691: the immutable release/prompt authority for this turn — a
         // fresh object, never the session field. The session fields may
@@ -814,7 +814,7 @@ export class Spin {
         boundOrcContext = {
           ...spec.orcContext,
           sessionId: session.id,
-          executionId: session.activeExecutionId,
+          executionId: capturedExecutionId,
         };
         session.orcContext = boundOrcContext;
         boundOrcTurnControl = spec.orcTurnControl;
@@ -876,6 +876,7 @@ export class Spin {
         providerInactivityTimeoutMs: spec.providerInactivityTimeoutMs,
         // #1691: the initial prompt uses the captured bound turn identity,
         // never a mutable session field that a successor could have replaced.
+        executionId: capturedExecutionId,
         orcContext: boundOrcContext ?? session.orcContext,
         // #1680: the host-owned turn control and the policy-derived prompt
         // bound reach every transport through the shared context.
@@ -931,7 +932,7 @@ export class Spin {
         image?: { mime: string; base64: string },
         ctx?: import("./transport/kiro-transport.js").PromptRequestContext,
       ): Promise<string> => {
-        if ((!this.sessionOutputFeed && !leaseEmitter) || !session.activeExecutionId) {
+        if ((!this.sessionOutputFeed && !leaseEmitter) || session.activeExecutionId !== capturedExecutionId) {
           return await transport.sendPrompt(key, msg, image, ctx);
         }
         const obs = makeOutputObserver();
@@ -998,7 +999,7 @@ export class Spin {
               ...(ctx ?? {}),
               contextProvider: ctx?.contextProvider ?? this.contextProvider.current ?? undefined,
             };
-            if ((!this.sessionOutputFeed && !leaseEmitter) || !session.activeExecutionId) {
+            if ((!this.sessionOutputFeed && !leaseEmitter) || session.activeExecutionId !== capturedExecutionId) {
               return await executor.send(msg, img, enrichedContext);
             }
             const obs = makeOutputObserver();
@@ -1052,8 +1053,8 @@ export class Spin {
         // The initial send promise is created first so the pump can observe
         // send settlement synchronously (see #1627 race note in the pump).
         const sendPromise = send(driver, prompt, spec.imageContent as { mime: string; base64: string } | undefined, promptContext);
-        const pump = driver.steer ? this.createNativeSteeringPump(session, driver, sendPromise) : null;
-        if (!pump) session.steeringAccepting = true;
+        const pump = driver.steer ? this.createNativeSteeringPump(session, driver, sendPromise, capturedExecutionId) : null;
+        if (!pump && session.activeExecutionId === capturedExecutionId) session.steeringAccepting = true;
         try {
           if (pump) {
             // Native path (#1531): the initial send stays active through all
@@ -1073,9 +1074,16 @@ export class Spin {
           // Sequential path (ACP/tmux): no in-process agent queue; instructions
           // queued during the send are drained as post-send continuations.
           let result = await sendPromise;
+          if (session.activeExecutionId !== capturedExecutionId) return result;
           for (let round = 0; round < MAX_STEER_ROUNDS; round++) {
+            // #1691: a stale sequential turn must not lease or mutate a newer
+            // generation's instruction queue or acceptance gate.
+            if (session.activeExecutionId !== capturedExecutionId) return result;
             const batch = leaseInstructions(session, "steer");
-            if (!batch) { session.steeringAccepting = false; break; }
+            if (!batch) {
+              if (session.activeExecutionId === capturedExecutionId) session.steeringAccepting = false;
+              break;
+            }
             try {
               const steeringPrompt = renderSteeringContinuation(batch.instructions as QueuedSessionInstruction[]);
               markDelivered(batch);
@@ -1087,6 +1095,7 @@ export class Spin {
                 // #1680: steering continuations belong to the same Orc turn and
                 // inherit its turn control and prompt bound. #1691: the bound
                 // captured values are used, never a successor's session state.
+                executionId: capturedExecutionId,
                 orcContext: boundOrcContext ?? session.orcContext,
                 orcTurnControl: boundOrcTurnControl ?? session.orcTurnControl,
                 maxPromptRounds: boundMaxPromptRounds ?? session.orcMaxPromptRounds,
@@ -1104,8 +1113,10 @@ export class Spin {
               throw steerErr;
             }
           }
-          session.steeringAccepting = false;
-          if (session.instructionQueue.length > 0) expireInstructions(session, "round_limit");
+          if (session.activeExecutionId === capturedExecutionId) {
+            session.steeringAccepting = false;
+            if (session.instructionQueue.length > 0) expireInstructions(session, "round_limit");
+          }
           return result;
         } finally {
           await driver.close();
@@ -1174,8 +1185,7 @@ export class Spin {
    * in-flight handoff is abandoned and its batch terminalized exactly once,
    * and no new handoff starts.
    */
-  private createNativeSteeringPump(session: ManagedSession, driver: SpinExecutionDriver, sendPromise: Promise<unknown>): { settle: () => Promise<void> } {
-    const executionId = session.activeExecutionId ?? "";
+  private createNativeSteeringPump(session: ManagedSession, driver: SpinExecutionDriver, sendPromise: Promise<unknown>, executionId: string): { settle: () => Promise<void> } {
     let activeLease: import("./spin-types.js").InstructionLease | null = null;
     let closing = false;
     let rounds = 0;
@@ -1190,6 +1200,9 @@ export class Spin {
 
     const drain = async (): Promise<void> => {
       while (!closing) {
+        // #1691: a late pump must never lease or expire instructions belonging
+        // to a newer generation that reused this session.
+        if (session.activeExecutionId !== executionId) return;
         if (activeLease) return;          // one native handoff at a time
         if (rounds >= MAX_STEER_ROUNDS) { // round limit reached
           session.steeringAccepting = false;
@@ -1246,28 +1259,30 @@ export class Spin {
     };
 
     const run = (): void => {
-      if (pumpPromise) return;
+      if (pumpPromise || session.activeExecutionId !== executionId) return;
       pumpPromise = drain().finally(() => { pumpPromise = null; });
     };
 
     // Subscribe BEFORE opening acceptance: an instruction accepted while the
     // driver is still opening must be visible to this pump, never dropped.
     const unsub = subscribeSteerEvents({ sessionId: session.id, executionId }, (event) => {
-      if (event.type !== "steer.queued" || closing) return;
+      if (event.type !== "steer.queued" || closing || session.activeExecutionId !== executionId) return;
       if (activeLease) return;            // the running drain loop picks up successors
       run();
     });
-    session.steeringAccepting = true;
+    if (session.activeExecutionId === executionId) session.steeringAccepting = true;
 
     return {
       settle: async () => {
         if (closing) return;              // idempotent — exactly one cleanup
         closing = true;
-        session.steeringAccepting = false;
+        if (session.activeExecutionId === executionId) session.steeringAccepting = false;
         if (pumpPromise) {
           try { await pumpPromise; } catch { /* drain never rejects */ }
         }
-        if (session.instructionQueue.length > 0) expireInstructions(session, "execution_ended");
+        if (session.activeExecutionId === executionId && session.instructionQueue.length > 0) {
+          expireInstructions(session, "execution_ended");
+        }
         unsub();
       },
     };
@@ -1485,13 +1500,13 @@ export class Spin {
     }
 
     // #1319: Publish execution.completed before clearing association
-    if (spec.type === "O" && session.activeExecutionId) {
+    if (spec.type === "O") {
       this.orcActivityFeed?.publish({
         kind: "execution.completed",
         summary: result.slice(0, 200),
         timestamp: Date.now(),
         sessionId: session.id,
-        executionId: session.activeExecutionId,
+        executionId: capturedExecutionId,
         rootCardId: session.activeRootCardId,
         cardId: session.activeCardId,
       } as Parameters<NonNullable<typeof this.orcActivityFeed>["publish"]>[0]);
@@ -1635,13 +1650,13 @@ export class Spin {
     }
 
     // #1319: Publish execution.failed before clearing association
-    if (spec.type === "O" && session.activeExecutionId) {
+    if (spec.type === "O") {
       this.orcActivityFeed?.publish({
         kind: "execution.failed",
         error: msg,
         timestamp: Date.now(),
         sessionId: session.id,
-        executionId: session.activeExecutionId,
+        executionId: capturedExecutionId,
         rootCardId: session.activeRootCardId,
         cardId: session.activeCardId,
       } as Parameters<NonNullable<typeof this.orcActivityFeed>["publish"]>[0]);
