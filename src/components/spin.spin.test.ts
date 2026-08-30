@@ -956,6 +956,41 @@ describe("spin(spec) — unified session API (#1271)", () => {
       expect(failedPublishes).toHaveLength(0);
     });
 
+    it("#1751: an ownerless O turn gets its own session, never a project-scoped one", async () => {
+      orcReleaseCalls.length = 0;
+      spin.setRuntime(makeRuntime() as any);
+      const orcContext = {
+        version: 2 as const,
+        runId: "run-1751-b",
+        intentKey: "ik-1751-b",
+        intentKind: "project_execution" as const,
+        projectCardId: 999,
+        projectGeneration: 1,
+        ownershipGeneration: 1,
+        ownerPeer: "kp",
+        ownerInstanceId: "kp-1",
+        origin: { kind: "scheduled" as const, peer: "kp" },
+      };
+      const turnControl = {
+        runId: "run-1751-b",
+        complete: () => true,
+        completed: null,
+      };
+      // First: a project-scoped O turn binds its session to the project.
+      const r1 = await spin.spin({
+        type: "O", orcContext, orcTurnControl: turnControl as never,
+        goal: "project work", await: true,
+      });
+      const projectSession = spin.getSessionById(r1.sessionId)!;
+      expect(projectSession.orcContext).toBeDefined();
+
+      // Second: an ownerless O turn must not seize that session — it gets a
+      // fresh one and the project session's authority survives untouched.
+      const r2 = await spin.spin({ type: "O", goal: "user turn", userId: "aksika", platform: "telegram", source: "user", await: true });
+      expect(r2.sessionId).not.toBe(r1.sessionId);
+      expect(spin.getSessionById(r1.sessionId)!.orcContext).toBeDefined();
+    });
+
     it("produces decorated prompt in the exact pre-refactor executeOrc order", async () => {
       const transport = mockTransport({
         sendPrompt: vi.fn(async (sessionKey: string, prompt: string) => {

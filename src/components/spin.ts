@@ -1782,7 +1782,12 @@ export class Spin {
   /** #1010: O-type reuses existing session (one Orc). All others create new. */
   private getOrCreateVisibleSession(userId: string, type: SessionType): ManagedSession | undefined {
     if (type === "O") {
-      const existing = this.sessions.listAll().find(s => s.id.includes("_O_"));
+      // #1751: never hand a project-scoped session to a turn with no project
+      // authority. spin() clears `orcContext` for an O turn without one, so
+      // reusing a live project's session erases that project's ownership —
+      // which is how a foreign O card took over a project's session and ran
+      // minutes past the project's abort.
+      const existing = this.sessions.listAll().find(s => s.id.includes("_O_") && s.orcContext === undefined);
       if (existing) return existing;
     }
     const sub = this.createSubSession(userId, "telegram", type);
