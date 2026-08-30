@@ -80,6 +80,21 @@ vi.mock("./worker-supervision-store.js", () => ({
   },
 }));
 
+// #1751: durable-run store double for the handoff-satisfied regression. The
+// real store opens the production kanban DB; a deterministic double lets the
+// test observe the exact release call failSpin makes (outcome + failure code).
+const orcReleaseCalls: Array<{ context: unknown; outcome: string; failureCode: unknown }> = [];
+vi.mock("./orc-project/orc-project-run-store.js", () => ({
+  OrcProjectRunStore: class {
+    db = {};
+    bindExecution() { return { ok: true as const, row: { id: "run-1751" } }; }
+    release(context: unknown, outcome: string, failureCode?: unknown) {
+      orcReleaseCalls.push({ context, outcome, failureCode });
+      return true;
+    }
+  },
+}));
+
 vi.mock("./spin-notifications.js", () => ({
   drainOrcNotifications: () => [],
 }));
@@ -162,11 +177,12 @@ vi.mock("./soul-bundle.js", () => ({
 }));
 
 import { Spin } from "./spin.js";
-import { kanbanEnqueue } from "./tasks/kanban-board.js";
+import { kanbanEnqueue, kanbanGetCard } from "./tasks/kanban-board.js";
 import { setUserRegistryOverride, type UserRegistry, type UserEntry } from "./user-registry.js";
 import { profileFor, isValidSessionType, SESSION_PROFILES } from "./spin-profiles.js";
 import type { IKiroTransport } from "./transport/kiro-transport.js";
 import type { AgentSession } from "./subagent-runtime.js";
+import { PiCoreToolExecutionError } from "./transport/tool-failure-diagnostic.js";
 
 function makeUser(userId: string, role: "master" | "user" | "guest", telegram = 100): UserEntry {
   return { userId, role, maxClass: role === "master" ? 3 : 1, tools: ["all"], platforms: { telegram } };
@@ -884,6 +900,60 @@ describe("spin(spec) — unified session API (#1271)", () => {
       await expect(spin.spin({ type: "O", goal: "fail", userId: "aksika", platform: "telegram", source: "user", await: true })).rejects.toThrow("transport died");
       // Project authority is no longer held in module-global active-card state.
       expect(activeOrcCardUpdates).toHaveLength(0);
+    });
+
+    it("#1751: a satisfied handoff survives a thrown transport", async () => {
+      orcReleaseCalls.length = 0;
+      const feedPublish = vi.fn();
+      spin.setOrcActivityFeed({ publish: feedPublish } as never);
+      // The transport throws AFTER the bound turn control latched
+      // intent_satisfied — the incident shape: a durable success followed by a
+      // retained terminal tool-failure diagnostic.
+      spin.setRuntime(makeRuntime({
+        sendPromptImpl: async () => {
+          throw new PiCoreToolExecutionError({
+            version: 1,
+            execution_id: "exec-1751",
+            tool: "project_execution",
+            reason: "settlement_lost",
+            timed_out: false,
+            aborted: false,
+          });
+        },
+      }) as any);
+      const cardId = kanbanEnqueue("handoff run", "agent");
+      const orcContext = {
+        version: 2 as const,
+        runId: "run-1751",
+        intentKey: "ik-1751",
+        intentKind: "project_execution" as const,
+        projectCardId: 999,
+        projectGeneration: 1,
+        ownershipGeneration: 1,
+        ownerPeer: "kp",
+        ownerInstanceId: "kp-1",
+        origin: { kind: "scheduled" as const, peer: "kp" },
+      };
+      const turnControl = {
+        runId: "run-1751",
+        complete: () => true,
+        completed: { kind: "intent_satisfied" as const, code: "project_execution_handed_off" },
+      };
+      const thrown: unknown = await spin.spin({
+        type: "O", cardId, orcContext, orcTurnControl: turnControl as never,
+        goal: "hand off the project", await: true,
+      }).catch((e: unknown) => e);
+      expect(thrown).toBeInstanceOf(PiCoreToolExecutionError);
+      // The durable release records the verified success: `completed` with no
+      // failure code — the transport diagnostic cannot downgrade it.
+      const release = orcReleaseCalls.at(-1);
+      expect(release?.outcome).toBe("completed");
+      expect(release?.failureCode).toBeUndefined();
+      // The root card is not re-queued (kanbanRetryOrFail never fired).
+      expect(kanbanGetCard(cardId)!.status).not.toBe("failed");
+      // No operator-visible execution.failed publish for a satisfied handoff.
+      const failedPublishes = feedPublish.mock.calls.filter(c => (c[0] as { kind: string }).kind === "execution.failed");
+      expect(failedPublishes).toHaveLength(0);
     });
 
     it("produces decorated prompt in the exact pre-refactor executeOrc order", async () => {
