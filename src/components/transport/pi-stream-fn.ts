@@ -271,6 +271,7 @@ export function createPiStreamFn(options: AbtarsPiStreamFnOptions): StreamFn {
         );
         const piModel = buildPiModel({
           ...candidate,
+          contextWindow: candidate.maxContext,
           reasoningEffort: options.reasoningEffort,
           maxOutput: model.maxTokens,
         }, pickPiApi(candidate.apiFormat), hasImage, candidate.provider);
@@ -383,7 +384,7 @@ export function createPiStreamFn(options: AbtarsPiStreamFnOptions): StreamFn {
                   break;
                 }
                 if (failed) {
-                  const classified = classifyAttemptFailure(terminal, model.contextWindow, runner.bundle?.pi);
+                  const classified = classifyAttemptFailure(terminal, piModel.contextWindow, runner.bundle?.pi);
                   finishAttempt(event.type === "error" && event.reason === "aborted" ? "aborted" : "failure", terminal, classified.kind, classified.retryAfterMs);
                   break;
                 }
@@ -397,7 +398,7 @@ export function createPiStreamFn(options: AbtarsPiStreamFnOptions): StreamFn {
               if (attemptCommitted && isTerminal(event)) {
                 const result = terminalResult(event);
                 const failed = event.type === "error" || result?.stopReason === "error" || result?.stopReason === "aborted";
-                const classified = classifyAttemptFailure(terminal, model.contextWindow, runner.bundle?.pi);
+                const classified = classifyAttemptFailure(terminal, piModel.contextWindow, runner.bundle?.pi);
                 finishAttempt(failed
                   ? (event.type === "error" && event.reason === "aborted" ? "aborted" : "failure")
                   : "success", terminal, failed ? classified.kind : undefined, failed ? classified.retryAfterMs : undefined);

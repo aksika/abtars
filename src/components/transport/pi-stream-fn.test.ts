@@ -803,6 +803,25 @@ describe("createPiStreamFn", () => {
     expect(registry.isCreditFailed("test-model", "https://api.test/v1")).toBe(false);
   });
 
+  it("uses the attempted candidate's context window for Pi overflow classification", async () => {
+    const candidate = makeCandidate({ maxContext: 64_000 });
+    const candidatePolicy = new FallbackPolicy([candidate], registry);
+    const fakePi = overflowAttempt(
+      () => true,
+      { type: "error", reason: "error", error: { role: "assistant", content: [], stopReason: "error", errorMessage: "This model's maximum context length is 64000 tokens", usage: { input: 0, output: 0 } } },
+    );
+    const attemptFactory = vi.fn().mockResolvedValue(fakePi);
+    const streamFn = createPiStreamFn({ policy: candidatePolicy, executionId: "exec_1", createPiAiAttempt: attemptFactory });
+    for await (const _ev of streamFn({ id: "test", api: "openai-completions", contextWindow: 128_000 }, { messages: [] }, {})) { /* consume */ }
+
+    expect(attemptFactory.mock.calls[0]?.[1]).toMatchObject({ contextWindow: 64_000 });
+    expect(fakePi.pi.isContextOverflow).toHaveBeenCalledWith(
+      expect.objectContaining({ errorMessage: expect.stringContaining("maximum context length") }),
+      64_000,
+    );
+    expect(registry.getBucketLevel("test-model", "https://api.test/v1")).toBe(0);
+  });
+
   it("keeps bucket level unchanged for context_exceeded (no transient fill)", async () => {
     const fakePi = overflowAttempt(
       () => true,
