@@ -715,6 +715,27 @@ describe("#1678 single owner of Orc review-turn liveness", () => {
     await h.stop();
   });
 
+  it("an unavailable scheduled occurrence does not consume the review retry budget", async () => {
+    const store = new reviewStoreMod.ProjectReviewStore();
+    const { requestId } = seedReviewRequest(4);
+    store.db.prepare("UPDATE project_review_requests SET updated_at = ? WHERE id = ?").run(new Date(Date.now() - 60_000).toISOString(), requestId);
+
+    const coordinator = {
+      getStore: () => ({ db: store.db }) as never,
+      bootRecovery: () => [] as number[],
+      onOwnershipReleased: () => () => {},
+      scheduleContractAuthoring: () => ({ kind: "busy" as const, activeRunId: "or_busy" }),
+      scheduleProjectExecution: () => ({ kind: "busy" as const, activeRunId: "or_busy" }),
+      scheduleReview: () => ({ kind: "conflict" as const, reason: "occurrence_unavailable" as const }),
+    } as never;
+    const h = await startGeneration({ coordinator });
+
+    expect(reconciler.retryPendingReviewRequests()).toBe(0);
+    const req = store.db.prepare("SELECT status, attempts FROM project_review_requests WHERE id = ?").get(requestId) as { status: string; attempts: number } | undefined;
+    expect(req).toEqual({ status: "pending", attempts: 4 });
+    await h.stop();
+  });
+
   it("observation ticks never advance the counter while the turn is live", async () => {
     const { OrcProjectRunStore } = await import("./orc-project/orc-project-run-store.js");
     const store = new reviewStoreMod.ProjectReviewStore();

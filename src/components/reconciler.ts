@@ -242,6 +242,10 @@ function scheduleOrcReview(generation: ReconcilerGeneration, projectId: number, 
   if (result.kind === "claimed") {
     try { new ProjectReviewStore().recordReviewRequestDispatchAttempt(requestId, null); } catch (err) { logAndSwallow(TAG, "record review request dispatch attempt", err); }
   } else if (result.kind === "conflict" || result.kind === "not_actionable") {
+    // Catalog/database unavailability is a deferral, not a rejected dispatch.
+    // Do not consume the bounded review-request retry budget while the owning
+    // scheduled occurrence cannot be verified.
+    if (result.kind === "conflict" && result.reason === "occurrence_unavailable") return;
     try { new ProjectReviewStore().recordReviewRequestDispatchAttempt(requestId, result.reason); } catch (err) { logAndSwallow(TAG, "record review request dispatch attempt", err); }
   }
 }
@@ -259,7 +263,7 @@ function legacyOrcDispatch(goal: string, cardId: number): void {
 type AuthoringScheduleResult =
   | { kind: "claimed" }
   | { kind: "idempotent" }
-  | { kind: "deferred"; reason: "busy" | "claim_interval"; activeRunId?: string }
+  | { kind: "deferred"; reason: "busy" | "claim_interval" | "occurrence_unavailable"; activeRunId?: string }
   | { kind: "settled"; blockerClass: string }
   | { kind: "unavailable" };
 
@@ -285,6 +289,16 @@ function scheduleContractAuthoringOrSettle(generation: ReconcilerGeneration, pro
     return { kind: "unavailable" };
   }
   const projectGeneration = supervision.generation;
+
+  // The caller performs the normal admission gate, but this helper can spend
+  // time reading authoring counters before it reaches the coordinator. Re-read
+  // the full boundary here so an outage cannot turn an authoring ceiling into
+  // a project settlement during that interval.
+  const project = kanbanGetCard(projectId);
+  if (project && inspectScheduledOccurrence(project).state === "unavailable") {
+    logWarn(TAG, `Project ${projectId}: authoring decision deferred — scheduled occurrence unavailable`);
+    return { kind: "deferred", reason: "occurrence_unavailable" };
+  }
 
   const startedTurns = runStore.countStartedAuthoringTurns(projectId, projectGeneration);
   if (startedTurns >= MAX_STARTED_CONTRACT_AUTHORING_TURNS) {
@@ -1663,6 +1677,9 @@ function dispatchPendingReviewRequests(generation: ReconcilerGeneration): number
       try { store.recordReviewRequestDispatchAttempt(req.id, null); } catch (err) { logAndSwallow(TAG, "record review request dispatch attempt", err); }
       dispatched++;
     } else if (result.kind === "conflict" || result.kind === "not_actionable") {
+      // An unavailable occurrence is recoverable. Leave the pending request
+      // untouched so the existing retry wake can try again after recovery.
+      if (result.kind === "conflict" && result.reason === "occurrence_unavailable") continue;
       try { store.recordReviewRequestDispatchAttempt(req.id, result.reason); } catch (err) { logAndSwallow(TAG, "record review request dispatch attempt", err); }
       dispatched++;
     }

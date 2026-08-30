@@ -50,7 +50,11 @@ export function setEnabled(taskId: string, enabled: boolean): void {
     const updated: ScheduledTask = { ...entry, enabled } as ScheduledTask;
     writeEntry(updated);
   } catch (err) {
-    if (err instanceof TaskCatalogUnavailableError) return;
+    if (err instanceof TaskCatalogUnavailableError) {
+      // An unavailable catalog is a deliberate fail-closed no-op; never
+      // rewrite a normalized subset while the raw file cannot be read.
+      return;
+    }
     logAndSwallow("task_service", "setEnabled", err);
   }
 }
@@ -167,5 +171,4 @@ export function triggerNow(taskId: string, tasks: ScheduledTask[]): boolean {
   stateStore.resetFailures(taskId);
   return true;
 }
-
 

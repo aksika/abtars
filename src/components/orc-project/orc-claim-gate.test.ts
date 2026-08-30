@@ -156,6 +156,22 @@ describe("#1707 coordinator occurrence gate (real stores)", () => {
     expect(new runStoreMod.OrcProjectRunStore().getRunsForProject(rootId)).toHaveLength(0);
   });
 
+  it("defers when the board is unavailable instead of treating it as a non-scheduled card", async () => {
+    const { rootId } = await seedScheduledProject();
+    const starts: number[] = [];
+    const coordinator = makeCoordinator(starts);
+    kanban.closeTaskDatabase();
+    rmSync(join(TEST_HOME, "kanban"), { recursive: true, force: true });
+    writeFileSync(join(TEST_HOME, "kanban"), "not a directory");
+    try {
+      expect(coordinator.scheduleProjectExecution(rootId, "continue"))
+        .toMatchObject({ kind: "conflict", reason: "occurrence_unavailable" });
+    } finally {
+      rmSync(join(TEST_HOME, "kanban"), { force: true });
+    }
+    expect(starts).toHaveLength(0);
+  });
+
   it("does not block non-scheduled or healthy scheduled projects", async () => {
     const { rootId } = await seedScheduledProject();
 

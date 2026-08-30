@@ -14,7 +14,7 @@ import { readBridgeLockField } from "../transport/bridge-lock-transport.js";
 import { logInfo, logWarn } from "../logger.js";
 import { logAndSwallow } from "../log-and-swallow.js";
 import { effectiveMaxPromptRounds, intentPolicyFor, readOrcProjectSnapshot } from "./orc-intent-policy.js";
-import { kanbanGetCard } from "../tasks/kanban-board.js";
+import { kanbanGetCard, requireTaskDatabase } from "../tasks/kanban-board.js";
 import { scheduledOccurrenceState } from "../tasks/scheduled-occurrence-gate.js";
 import type { ScheduledOccurrenceState } from "../tasks/scheduled-occurrence-gate.js";
 
@@ -393,6 +393,11 @@ function defaultRootIdentity(projectCardId: number): OrcRootIdentity {
 /** #1707: shared fail-closed occurrence gate — the coordinator-side default. */
 function defaultScheduledOccurrenceState(projectCardId: number): ScheduledOccurrenceState {
   try {
+    // kanbanGetCard() intentionally returns undefined when the board is
+    // unavailable, which is indistinguishable from a missing card. Establish
+    // the database capability first so an outage cannot be admitted as a
+    // non-scheduled project.
+    requireTaskDatabase();
     const card = kanbanGetCard(projectCardId);
     if (!card) return "not_scheduled";
     return scheduledOccurrenceState(card);

@@ -285,15 +285,17 @@ export class DashboardServer implements IDashboardSlot {
       if (method === "GET" && pathname === "/api/cron") {
         if (!this.deps.authGate.guard(req, res)) return;
         try {
-          const { readTaskCatalog, readEntries } = await import("../tasks/task-store.js");
+          const { readTaskCatalog } = await import("../tasks/task-store.js");
           const catalog = readTaskCatalog();
           if (catalog.kind === "unavailable") {
             res.writeHead(503, { "Content-Type": "application/json" });
             res.end(JSON.stringify({ ok: false, error: "task catalog unavailable", reason: catalog.reason }));
             return;
           }
+          const { initializeState } = await import("../tasks/task-state-store.js");
+          initializeState(catalog.entries);
           const { getAllViews } = await import("../tasks/task-service.js");
-          const views = getAllViews(readEntries());
+          const views = getAllViews(catalog.entries);
           res.writeHead(200, { "Content-Type": "application/json" });
           res.end(JSON.stringify({ ok: true, entries: views.map(v => ({
             definition: v.definition,

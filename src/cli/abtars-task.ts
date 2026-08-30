@@ -1,6 +1,6 @@
 import { localISO } from "../utils/local-time.js";
 import { readEntries as dbReadEntries, writeEntry, removeEntry as dbRemoveEntry, readTaskCatalog, TaskCatalogUnavailableError } from "../components/tasks/task-store.js";
-import { readState, updateState, removeState } from "../components/tasks/task-state-store.js";
+import { readState, initializeState, updateState, removeState } from "../components/tasks/task-state-store.js";
 import { requireTaskDatabase } from "../components/tasks/kanban-board.js";
 import { recentRuns } from "../components/tasks/task-history-store.js";
 import { validateTaskId, type ScheduledTask, type SystemTaskAction, SYSTEM_ACTIONS } from "../components/tasks/task-types.js";
@@ -124,7 +124,8 @@ function listEntries(): void {
     console.log(JSON.stringify({ ok: false, error: "task catalog unavailable", reason: catalog.reason }));
     process.exit(1);
   }
-  const entries = readEntries();
+  const entries = catalog.entries;
+  initializeState(entries);
   if (entries.length === 0) {
     console.log(JSON.stringify({ ok: true, entries: [], message: "No pending cron entries" }));
     return;
@@ -166,21 +167,26 @@ function remove(id: string): void {
     throw err;
   }
   if (!removed) {
-    const state = readState(id);
-    if (state) {
+    let durableStateExists = false;
+    try {
+      const db = requireTaskDatabase();
+      const row = db.prepare(`
+        SELECT 1 AS present FROM task_state WHERE task_id = ?
+        UNION ALL
+        SELECT 1 AS present FROM task_runs WHERE task_id = ?
+        LIMIT 1
+      `).get(id, id);
+      durableStateExists = row !== undefined;
+    } catch (err) {
+      console.log(JSON.stringify({ ok: false, error: "task state unavailable" }));
+      process.exit(1);
+      return;
+    }
+    if (durableStateExists) {
       removeState(id);
       console.log(JSON.stringify({ ok: true, action: "removed", id }));
       return;
     }
-    try {
-      const db = requireTaskDatabase();
-      const row = db.prepare("SELECT 1 FROM task_runs WHERE task_id = ? LIMIT 1").get(id) as Record<string, unknown> | undefined;
-      if (row) {
-        removeState(id);
-        console.log(JSON.stringify({ ok: true, action: "removed", id }));
-        return;
-      }
-    } catch { /* read failure = report not found */ }
     console.log(JSON.stringify({ ok: false, error: `Entry ${id} not found` })); process.exit(1);
   }
   removeState(id);

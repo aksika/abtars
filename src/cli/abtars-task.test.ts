@@ -73,6 +73,25 @@ describe("abtars-task", () => {
     expect(JSON.parse(out)).toEqual({ ok: true, action: "removed", id });
   });
 
+  it("remove retries durable cleanup when the catalog entry is already absent", async () => {
+    const addOut = await run(["add", "--id", "orphaned-task", "--at", "2026-12-25T08:00", "--message", "orphan", "--chat-id", "1", "--kind", "reminder"]);
+    const id = JSON.parse(addOut).id as string;
+    // This suite also runs in environments without the optional native SQLite
+    // dependency; the existing CLI tests cover the file-only behavior there.
+    try {
+      const { requireTaskDatabase } = await import("../components/tasks/kanban-board.js");
+      requireTaskDatabase();
+    } catch {
+      return;
+    }
+    rmSync(join(tmpDir, ".abtars", "tasks", "tasks.json"));
+
+    const out = await run(["remove", id]);
+    expect(JSON.parse(out)).toEqual({ ok: true, action: "removed", id });
+    const { readState } = await import("../components/tasks/task-state-store.js");
+    expect(readState(id)).toBeNull();
+  });
+
   it("remove with invalid id exits with error", async () => {
     const origExit = process.exit;
     let exitCode: number | undefined;

@@ -234,6 +234,8 @@ export function readTaskRunById(runId: string): TaskRunLookup {
     if (row.finished_at !== null) return { kind: "terminal", taskId: row.task_id };
     return { kind: "active", taskId: row.task_id, run: activeRunFromRow(row) };
   } catch {
+    // Database/open/read failures are an unavailable occurrence. The gate and
+    // its callers provide the bounded operator warning at the decision point.
     return { kind: "unavailable" };
   }
 }

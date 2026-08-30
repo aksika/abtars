@@ -1,4 +1,4 @@
-import { existsSync, readFileSync, writeFileSync, mkdirSync, renameSync } from "node:fs";
+import { readFileSync, writeFileSync, mkdirSync, renameSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { abtarsHome } from "../../paths.js";
 import { logAndSwallow } from "../log-and-swallow.js";
@@ -7,8 +7,19 @@ import { normalize, type ScheduledTask } from "./task-types.js";
 import { initializeState } from "./task-state-store.js";
 
 const TAG = "task_store";
+const MAX_CATALOG_ISSUES = 32;
+const MAX_ISSUE_TEXT_LENGTH = 240;
 
 const storePath = (): string => join(abtarsHome(), "tasks", "tasks.json");
+
+function hasErrorCode(error: unknown, code: string): boolean {
+  return typeof error === "object" && error !== null && "code" in error && error.code === code;
+}
+
+function boundIssueText(value: string): string {
+  if (value.length <= MAX_ISSUE_TEXT_LENGTH) return value;
+  return `${value.slice(0, MAX_ISSUE_TEXT_LENGTH - 3)}...`;
+}
 
 export interface TaskCatalogIssue {
   readonly index: number;
@@ -24,20 +35,22 @@ export type TaskCatalogReadResult =
 export class TaskCatalogUnavailableError extends Error {
   readonly reason: "read_failed" | "invalid_json" | "wrong_shape";
   constructor(reason: "read_failed" | "invalid_json" | "wrong_shape", message?: string, cause?: unknown) {
-    super(message ?? reason);
+    super(message ?? reason, cause === undefined ? undefined : { cause });
     this.name = "TaskCatalogUnavailableError";
     this.reason = reason;
-    if (cause !== undefined) (this as unknown as { cause: unknown }).cause = cause;
   }
 }
 
 export function readTaskCatalog(): TaskCatalogReadResult {
   const p = storePath();
-  if (!existsSync(p)) return { kind: "complete", entries: [] };
   let rawText: string;
   try {
     rawText = readFileSync(p, "utf-8");
   } catch (err) {
+    // ENOENT is the only empty-catalog case. Permission, path, and other
+    // filesystem failures must remain unavailable so callers cannot mistake
+    // an inaccessible catalog for an empty one.
+    if (hasErrorCode(err, "ENOENT")) return { kind: "complete", entries: [] };
     logAndSwallow(TAG, "readTaskCatalog tasks.json", err);
     return { kind: "unavailable", reason: "read_failed" };
   }
@@ -54,14 +67,22 @@ export function readTaskCatalog(): TaskCatalogReadResult {
   }
   const valid: ScheduledTask[] = [];
   const issues: TaskCatalogIssue[] = [];
+  let invalidCount = 0;
   for (let i = 0; i < parsed.length; i++) {
     const item = parsed[i];
     const result = normalize(item);
     if (result.ok) {
       valid.push(result.entry);
     } else {
-      logWarn(TAG, `Quarantined invalid task entry${result.id ? ` "${result.id}"` : ""}: ${result.error}`);
-      issues.push({ index: i, ...(result.id ? { id: result.id } : {}), error: result.error });
+      invalidCount++;
+      const id = result.id ? boundIssueText(result.id) : undefined;
+      const error = boundIssueText(result.error);
+      if (invalidCount <= MAX_CATALOG_ISSUES) {
+        logWarn(TAG, `Quarantined invalid task entry${id ? ` "${id}"` : ""}: ${error}`);
+        issues.push({ index: i, ...(id ? { id } : {}), error });
+      } else if (invalidCount === MAX_CATALOG_ISSUES + 1) {
+        logWarn(TAG, `Additional invalid task entries omitted from catalog diagnostics (limit ${MAX_CATALOG_ISSUES})`);
+      }
     }
   }
   if (issues.length === 0) return { kind: "complete", entries: valid };
@@ -70,11 +91,11 @@ export function readTaskCatalog(): TaskCatalogReadResult {
 
 function readAllRaw(): unknown[] {
   const p = storePath();
-  if (!existsSync(p)) return [];
   let text: string;
   try {
     text = readFileSync(p, "utf-8");
   } catch (err) {
+    if (hasErrorCode(err, "ENOENT")) return [];
     throw new TaskCatalogUnavailableError("read_failed", `tasks.json read failed: ${err instanceof Error ? err.message : String(err)}`, err);
   }
   let raw: unknown;

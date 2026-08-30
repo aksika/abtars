@@ -13,71 +13,72 @@ export async function handleTasksList(_text: string, ctx: CommandContext): Promi
   const now = new Date().toLocaleString("en-GB", { timeZone: tz, dateStyle: "medium", timeStyle: "medium" });
   let listing: string;
   try {
-    const { readTaskCatalog, readEntries } = await import("../tasks/task-store.js");
-    const { readState } = await import("../tasks/task-state-store.js");
+    const { readTaskCatalog } = await import("../tasks/task-store.js");
+    const { initializeState, readState } = await import("../tasks/task-state-store.js");
     const catalog = readTaskCatalog();
     if (catalog.kind === "unavailable") {
-      listing = `⚠️ task catalog unavailable — cannot read tasks.json (${catalog.reason})`;
+      listing = `[warn] task catalog unavailable — cannot read tasks.json (${catalog.reason})`;
     } else {
-      const entries = readEntries();
-    const active = entries.filter((e: any) => !e.fired);
-    active.sort((a: any, b: any) => {
-      const timeOf = (e: any): number => {
-        const s = e.schedule;
-        if (!s) return e.fireAt ?? 0;
-        const parts = s.split(" ");
-        return (parseInt(parts[1] ?? "0", 10) * 60) + parseInt(parts[0] ?? "0", 10);
-      };
-      return timeOf(a) - timeOf(b);
-    });
-    const today = new Date();
-    const dow = today.getDay();
-    const lines = active.map((e: any) => {
-      const sched = e.schedule ?? "one-shot";
-      let runsToday = true;
-      if (sched !== "one-shot") {
-        const parts = sched.split(" ");
-        const dowField = parts[4] ?? "*";
-        if (dowField !== "*") {
-          const allowed = new Set<number>();
-          for (const seg of dowField.split(",")) {
-            if (seg.includes("-")) {
-              const [a, b] = seg.split("-").map(Number);
-              for (let i = a; i <= b; i++) allowed.add(i);
-            } else allowed.add(Number(seg));
+      const entries = catalog.entries;
+      initializeState(entries);
+      const active = entries.filter((e: any) => !e.fired);
+      active.sort((a: any, b: any) => {
+        const timeOf = (e: any): number => {
+          const s = e.schedule;
+          if (!s) return e.fireAt ?? 0;
+          const parts = s.split(" ");
+          return (parseInt(parts[1] ?? "0", 10) * 60) + parseInt(parts[0] ?? "0", 10);
+        };
+        return timeOf(a) - timeOf(b);
+      });
+      const today = new Date();
+      const dow = today.getDay();
+      const lines = active.map((e: any) => {
+        const sched = e.schedule ?? "one-shot";
+        let runsToday = true;
+        if (sched !== "one-shot") {
+          const parts = sched.split(" ");
+          const dowField = parts[4] ?? "*";
+          if (dowField !== "*") {
+            const allowed = new Set<number>();
+            for (const seg of dowField.split(",")) {
+              if (seg.includes("-")) {
+                const [a, b] = seg.split("-").map(Number);
+                for (let i = a; i <= b; i++) allowed.add(i);
+              } else allowed.add(Number(seg));
+            }
+            runsToday = allowed.has(dow);
           }
-          runsToday = allowed.has(dow);
         }
-      }
-      const state = readState(e.id);
-      const autoPaused = state?.autoPaused ?? false;
-      const defPaused = e.paused ?? false;
-      const isPaused = autoPaused || defPaused;
-      const succeeded = e.history?.some((h: any) => h.exitCode === 0 && new Date(h.ts).toDateString() === today.toDateString());
-      const failed = e.history?.some((h: any) => h.exitCode !== undefined && h.exitCode !== 0 && new Date(h.ts).toDateString() === today.toDateString());
-      const started = e.lastRanAt && new Date(e.lastRanAt).toDateString() === today.toDateString();
-      const running = ctx.cronCurrentJob?.entryId === e.id;
-      const activeRun = state?.activeRun;
-      const isActive = activeRun && ["reserved", "queued", "executing", "cancelling", "validating", "settling"].includes(activeRun.phase);
-      const tick = isPaused ? "p" : !runsToday ? "-" : succeeded ? "+" : running || isActive ? "~" : failed ? "x" : started ? "x" : "+";
-      // #1520: show category/code plus failure count, latest occurrence, and
-      // the exact resume command.
-      let pauseMarker = "";
-      if (autoPaused) {
-        const inc = state?.lastIncident;
-        const code = inc ? `${inc.category}/${inc.code}` : `${state?.consecutiveFailures ?? 0}f`;
-        const at = state?.pausedAt ? ` @${new Date(state.pausedAt).toLocaleTimeString()}` : "";
-        pauseMarker = ` [auto-paused:${code} · ${state?.consecutiveFailures ?? 0}f${at} — /task resume ${e.id}]`;
-      } else if (isActive) {
-        pauseMarker = ` [${activeRun.phase}]`;
-      } else if (state?.retrying) {
-        pauseMarker = " [retrying]";
-      } else if (state?.deferredAdmission) {
-        pauseMarker = ` [deferred:${state.deferredAdmission.attempts}/5 → ${new Date(state.deferredAdmission.retryAt).toLocaleTimeString()}]`;
-      }
-      return `${tick}  ${sched.padEnd(16)}${e.id}${pauseMarker}`;
-    });
-    listing = lines.length > 0 ? "<pre>" + lines.join("\n") + "</pre>" : "(no active entries)";
+        const state = readState(e.id);
+        const autoPaused = state?.autoPaused ?? false;
+        const defPaused = e.paused ?? false;
+        const isPaused = autoPaused || defPaused;
+        const succeeded = e.history?.some((h: any) => h.exitCode === 0 && new Date(h.ts).toDateString() === today.toDateString());
+        const failed = e.history?.some((h: any) => h.exitCode !== undefined && h.exitCode !== 0 && new Date(h.ts).toDateString() === today.toDateString());
+        const started = e.lastRanAt && new Date(e.lastRanAt).toDateString() === today.toDateString();
+        const running = ctx.cronCurrentJob?.entryId === e.id;
+        const activeRun = state?.activeRun;
+        const isActive = activeRun && ["reserved", "queued", "executing", "cancelling", "validating", "settling"].includes(activeRun.phase);
+        const tick = isPaused ? "p" : !runsToday ? "-" : succeeded ? "+" : running || isActive ? "~" : failed ? "x" : started ? "x" : "+";
+        // #1520: show category/code plus failure count, latest occurrence, and
+        // the exact resume command.
+        let pauseMarker = "";
+        if (autoPaused) {
+          const inc = state?.lastIncident;
+          const code = inc ? `${inc.category}/${inc.code}` : `${state?.consecutiveFailures ?? 0}f`;
+          const at = state?.pausedAt ? ` @${new Date(state.pausedAt).toLocaleTimeString()}` : "";
+          pauseMarker = ` [auto-paused:${code} · ${state?.consecutiveFailures ?? 0}f${at} — /task resume ${e.id}]`;
+        } else if (isActive) {
+          pauseMarker = ` [${activeRun.phase}]`;
+        } else if (state?.retrying) {
+          pauseMarker = " [retrying]";
+        } else if (state?.deferredAdmission) {
+          pauseMarker = ` [deferred:${state.deferredAdmission.attempts}/5 → ${new Date(state.deferredAdmission.retryAt).toLocaleTimeString()}]`;
+        }
+        return `${tick}  ${sched.padEnd(16)}${e.id}${pauseMarker}`;
+      });
+      listing = lines.length > 0 ? "<pre>" + lines.join("\n") + "</pre>" : "(no active entries)";
     }
   } catch (err) {
     logError("tasks", `Failed to read cron: ${err instanceof Error ? err.message : String(err)}`);

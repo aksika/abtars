@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync, readFileSync, existsSync } from "node:fs";
+import { chmodSync, mkdtempSync, mkdirSync, rmSync, writeFileSync, readFileSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import type { ScheduledTask } from "./task-types.js";
@@ -97,6 +97,25 @@ describe("task-store catalog inspection", () => {
     const catalog = taskStore.readTaskCatalog();
     expect(catalog.kind).toBe("unavailable");
     if (catalog.kind === "unavailable") expect(catalog.reason).toBe("wrong_shape");
+  });
+
+  it("classifies an inaccessible catalog as unavailable and blocks raw mutations", () => {
+    const catalogPath = join(home, "tasks", "tasks.json");
+    writeFileSync(catalogPath, JSON.stringify([VALID], null, 2));
+    const before = readFileSync(catalogPath, "utf-8");
+    const tasksDir = join(home, "tasks");
+    chmodSync(tasksDir, 0o000);
+    try {
+      const catalog = taskStore.readTaskCatalog();
+      expect(catalog).toEqual({ kind: "unavailable", reason: "read_failed" });
+      expect(taskStore.readEntries()).toEqual([]);
+      expect(taskStore.readEntry(VALID.id)).toBeNull();
+      expect(() => taskStore.writeEntry(VALID)).toThrowError(taskStore.TaskCatalogUnavailableError);
+      expect(() => taskStore.removeEntry(VALID.id)).toThrowError(taskStore.TaskCatalogUnavailableError);
+    } finally {
+      chmodSync(tasksDir, 0o700);
+    }
+    expect(readFileSync(catalogPath, "utf-8")).toBe(before);
   });
 
   it("partial catalog exposes valid entries and retains rejected raw entries after setEnabled and writeEntry", async () => {
