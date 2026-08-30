@@ -1814,7 +1814,7 @@ export class Spin {
       return { cardId };
     }
 
-    void this.spin({
+    this.settleUnawaitedSpin(this.spin({
       type: request.type,
       goal: request.goal,
       cardId,
@@ -1837,8 +1837,27 @@ export class Spin {
       executionScope: request.executionScope,
       deadlineAt: request.deadlineAt,
       deliveryReady: request.deliveryReady,
-    });
+    }), request.type, cardId);
     return { cardId };
+  }
+
+  // spin.ts — the only interpreter of a fire-and-forget spin failure.
+  // #1750: `void this.spin(...)` made every pre-try/catch throw in spin() a
+  // process-fatal unhandled rejection (main.ts exits on it). Contention is a
+  // legitimate refusal and leaves the card queued for the existing wake paths;
+  // anything else is a defect and fails the card so it cannot sit queued forever.
+  // Never rethrow: this promise has no observer above it.
+  private settleUnawaitedSpin(promise: Promise<unknown>, type: SessionType, cardId: number): void {
+    void promise.catch((err: unknown) => {
+      if (err instanceof SpinDispatchAdmissionError || err instanceof SpinBindRejectionError) {
+        logWarn(TAG, `${type} card:${cardId} dispatch refused (${err.name}) — left queued: ${err.message}`);
+        return;
+      }
+      const note = err instanceof Error ? err.message : String(err);
+      logError(TAG, `${type} card:${cardId} dispatch failed before execution — failing card`, err);
+      try { kanbanFail(cardId, `dispatch failed before execution: ${note}`); }
+      catch (failErr) { logAndSwallow(TAG, "kanbanFail after dispatch rejection", failErr); }
+    });
   }
 
   /**
@@ -1993,7 +2012,7 @@ export class Spin {
       type: "W",
       parent_id: parentCardId,
     });
-    void this.spin({
+    this.settleUnawaitedSpin(this.spin({
       type: "W",
       goal: request.goal,
       cardId,
@@ -2014,7 +2033,7 @@ export class Spin {
       chatId: request.chatId ? Number(request.chatId) : undefined,
       settlementOwner: "spin",
       await: false,
-    });
+    }), "W", cardId);
     return cardId;
   }
 
