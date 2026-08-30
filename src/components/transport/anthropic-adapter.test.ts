@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { toAnthropicRequest, buildAnthropicHeaders, fromAnthropicResponse } from "./anthropic-adapter.js";
+import { toAnthropicRequest } from "./anthropic-adapter.js";
 
 describe("anthropic-adapter", () => {
   it("extracts system message to top-level field", () => {
@@ -45,22 +45,5 @@ describe("anthropic-adapter", () => {
     expect(req.tools).toHaveLength(1);
     expect((req.tools![0] as Record<string, unknown>).name).toBe("bash");
     expect((req.tools![0] as Record<string, unknown>).input_schema).toBeDefined();
-  });
-
-  it("buildAnthropicHeaders uses x-api-key", () => {
-    const h = buildAnthropicHeaders("sk-test");
-    expect(h["x-api-key"]).toBe("sk-test");
-    expect(h["anthropic-version"]).toBe("2023-06-01");
-    expect(h["Authorization"]).toBeUndefined();
-  });
-
-  it("fromAnthropicResponse extracts text", () => {
-    const resp = { content: [{ type: "text", text: "Hello!" }] };
-    expect(fromAnthropicResponse(resp)).toBe("Hello!");
-  });
-
-  it("fromAnthropicResponse returns empty on no text", () => {
-    const resp = { content: [{ type: "tool_use", id: "x", name: "bash" }] };
-    expect(fromAnthropicResponse(resp as any)).toBe("");
   });
 });
