@@ -79,7 +79,7 @@ async function flush(times = 4): Promise<void> {
   for (let i = 0; i < times; i++) await new Promise(r => setTimeout(r, 25));
 }
 
-async function seedPeerProjectWithContribution(): Promise<number> {
+async function seedPeerProjectWithContribution(withLedger = false): Promise<number> {
   const rootId = kanban.kanbanEnqueue("Peer Project", "peer", undefined, {
     type: "O",
     goal: "supervised peer work",
@@ -103,6 +103,33 @@ async function seedPeerProjectWithContribution(): Promise<number> {
     priority: "HIGH", sourcePeer: "p1", proxyCardId: undefined, notes: {},
   });
   cs.transitionToAccepted("p1", `rq_${rootId}`);
+  if (withLedger) {
+    // #1630: the receiver's accepted help ledger is the terminal-event
+    // identity authority. Seed the durable row the outbox auto-derivation
+    // correlates against (never the mutable card notes).
+    const taskDb = (await import("../tasks/kanban-board.js")).requireTaskDatabase();
+    taskDb.exec(`
+      CREATE TABLE IF NOT EXISTS peer_help_requests (
+        origin_peer TEXT NOT NULL,
+        request_id TEXT NOT NULL,
+        request_hash TEXT NOT NULL,
+        state TEXT NOT NULL,
+        contribution_ref TEXT,
+        local_card_id INTEGER,
+        local_run_id TEXT,
+        response_json TEXT,
+        withdrawn_at TEXT,
+        created_at TEXT NOT NULL DEFAULT (datetime('now')),
+        updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+        PRIMARY KEY (origin_peer, request_id),
+        UNIQUE (contribution_ref)
+      )
+    `);
+    taskDb.prepare(`
+      INSERT INTO peer_help_requests (origin_peer, request_id, request_hash, state, contribution_ref, local_card_id, response_json, created_at, updated_at)
+      VALUES ('p1', ?, ?, 'accepted', ?, ?, '{}', datetime('now'), datetime('now'))
+    `).run(`rq_${rootId}`, `h_${rootId}`, `ref_${rootId}`, rootId);
+  }
   return rootId;
 }
 
@@ -464,5 +491,210 @@ describe("#1680 escaped turn boundary (real Spin/coordinator/stores/tools)", () 
     expect(row?.outcome).toBe("completed");
     const childCount = runStore.db.prepare(`SELECT COUNT(*) AS cnt FROM kanban_board WHERE parent_id = ? AND status IN ('queued','running')`).get(rootId) as { cnt: number };
     expect(childCount.cnt).toBe(1);
+  });
+
+  it("#1691 injected overlap: a second O start on the same session is rejected before it can overwrite the first execution, and the first owner releases its own run", async () => {
+    let releaseFirst!: () => void;
+    const firstHeld = new Promise<void>(r => { releaseFirst = r; });
+    const sendCalls: Array<{ runId: string | undefined }> = [];
+    const transport = mockTransport(async (ctx) => {
+      sendCalls.push({ runId: ctx?.orcContext?.runId });
+      await firstHeld;
+      return "first turn prose — no tool call";
+    });
+
+    const spin = new spinMod.Spin();
+    spin.setRuntime({ session: vi.fn(async () => ({ transport, destroy: vi.fn() })), openExecution: vi.fn(), lastUsage: null } as never);
+
+    const coordinator = new coordinatorMod.OrcProjectCoordinator({
+      ownerPeer: "kp",
+      ownerInstanceId: "inst-test",
+      startPort: async (spec) => {
+        spin.spin({
+          type: "O",
+          goal: spec.goal,
+          sessionId: spec.context.sessionId,
+          cardId: spec.context.projectCardId,
+          settlementOwner: "spin",
+          source: "agent",
+          orcContext: spec.context,
+          orcTurnControl: spec.turnControl,
+          orcMaxPromptRounds: spec.maxPromptRounds,
+          await: false,
+        }).catch(() => { /* injected overlap and later turns assert their own outcomes */ });
+      },
+    });
+
+    const rootId = await seedPeerProjectWithContribution();
+    const claim = coordinator.scheduleContractAuthoring(rootId);
+    expect(claim.kind).toBe("claimed");
+    if (claim.kind !== "claimed") return;
+
+    // The first authoring execution reaches a held sendPrompt on the reusable
+    // O session.
+    await vi.waitFor(() => expect(sendCalls).toHaveLength(1));
+    const oSession = spin.listAllSessions().find(s => s.id.includes("_O_"))!;
+    expect(oSession.orcContext?.runId).toBe(claim.context.runId);
+
+    // Injected overlap: a second O start against the SAME session with a
+    // distinct durable context is rejected with the bounded admission error
+    // BEFORE bind, prompt, or any session-field mutation.
+    await expect(spin.spin({
+      type: "O",
+      sessionId: oSession.id,
+      goal: "overlapping authoring",
+      cardId: rootId,
+      settlementOwner: "spin",
+      source: "agent",
+      orcContext: { ...claim.context, runId: "or_overlap_injected" },
+      orcTurnControl: coordinatorMod.createOrcTurnControl("or_overlap_injected", () => true),
+      orcMaxPromptRounds: 3,
+      await: true,
+    })).rejects.toMatchObject({ name: "SpinDispatchAdmissionError", code: "type_busy" });
+    expect(sendCalls).toHaveLength(1);
+    expect(oSession.orcContext?.runId).toBe(claim.context.runId);
+    expect(oSession.activeExecutionId).toBeDefined();
+
+    // Release the first turn: it settles with its own bound context and
+    // releases the exact claimed run.
+    releaseFirst();
+    await vi.waitFor(() => expect(sendCalls).toHaveLength(1)); // no second prompt ever
+    const runStore = new runStoreMod.OrcProjectRunStore();
+    await vi.waitFor(() => {
+      const row = runStore.getRun(claim.context.runId);
+      expect(row?.state).toBe("released");
+    });
+    const row = runStore.getRun(claim.context.runId);
+    expect(row?.outcome).toBe("failed");
+    expect(row?.failure_code).toBe("intent_postcondition_unsatisfied");
+    expect(oSession.activeExecutionId).toBeUndefined();
+
+    // The session marker is free again — a later start is admitted past the
+    // single-flight gate (its own durable bind is a separate authority).
+    await expect(spin.spin({
+      type: "O",
+      sessionId: oSession.id,
+      goal: "post-settlement turn",
+      cardId: rootId,
+      settlementOwner: "spin",
+      source: "agent",
+      orcContext: { ...claim.context, runId: "or_after_settlement" },
+      orcTurnControl: coordinatorMod.createOrcTurnControl("or_after_settlement", () => true),
+      orcMaxPromptRounds: 3,
+      await: true,
+    })).rejects.toThrow(/Orc bindExecution rejected: run_unknown/);
+    expect(sendCalls).toHaveLength(1);
+  });
+
+  it("#1691 bounded receiver failure: three tiny/no-tool turns exhaust authoring, settle blocked once, and apply one requester-valid failed event exactly once", async () => {
+    const transport = mockTransport(async () => "no tool call, just prose");
+    const spin = new spinMod.Spin();
+    spin.setRuntime({ session: vi.fn(async () => ({ transport, destroy: vi.fn() })), openExecution: vi.fn(), lastUsage: null } as never);
+
+    const coordinator = new coordinatorMod.OrcProjectCoordinator({
+      ownerPeer: "kp",
+      ownerInstanceId: "inst-test",
+      startPort: async (spec) => {
+        spin.spin({
+          type: "O",
+          goal: spec.goal,
+          sessionId: spec.context.sessionId,
+          cardId: spec.context.projectCardId,
+          settlementOwner: "spin",
+          source: "agent",
+          orcContext: spec.context,
+          orcTurnControl: spec.turnControl,
+          orcMaxPromptRounds: spec.maxPromptRounds,
+          await: false,
+        }).catch(() => { /* durable releases are asserted below, not exceptions */ });
+      },
+    });
+
+    const rootId = await seedPeerProjectWithContribution(true);
+    await startGeneration(coordinator);
+    const runStore = new runStoreMod.OrcProjectRunStore();
+
+    // The provider never calls a tool, so every started turn fails the durable
+    // intent postcondition. Claim interval is backdated per cycle so the
+    // 5-second claim interval does not defer the wake.
+    const backdateClaims = (): void => {
+      runStore.db.prepare(
+        `UPDATE orc_project_runs SET created_at = ? WHERE project_card_id = ? AND intent_kind = 'contract_authoring'`,
+      ).run(new Date(Date.now() - 60_000).toISOString(), rootId);
+    };
+
+    for (let cycle = 1; cycle <= 3; cycle++) {
+      await vi.waitFor(() => {
+        expect(runStore.countStartedAuthoringTurns(rootId, 1)).toBe(cycle);
+      });
+      await vi.waitFor(() => {
+        expect(runStore.getLiveRunForProject(rootId)).toBeUndefined();
+      });
+      const live = runStore.getLiveRuns().find(r => r.project_card_id === rootId && r.intent_kind === "contract_authoring");
+      expect(live).toBeUndefined();
+      backdateClaims();
+      reconciler.requestReconcile(rootId);
+      await new Promise(r => setTimeout(r, 25));
+    }
+
+    const authoringRuns = runStore.getRunsForProject(rootId).filter(r => r.intent_kind === "contract_authoring");
+    expect(authoringRuns).toHaveLength(3);
+    for (const run of authoringRuns) {
+      expect(run.state).toBe("released");
+      expect(run.failure_code).toBe("intent_postcondition_unsatisfied");
+    }
+    expect(runStore.getLiveRunForProject(rootId)).toBeUndefined();
+
+    // The next wake settles the receiver terminal: blocked exactly once, no
+    // fourth started turn, no live run, no leaked global slot.
+    backdateClaims();
+    reconciler.requestReconcile(rootId);
+    await vi.waitFor(() => {
+      const supervision = new reviewStoreMod.ProjectReviewStore().getSupervision(rootId)!;
+      expect(supervision.state).toBe("blocked");
+    });
+    const supervision = new reviewStoreMod.ProjectReviewStore().getSupervision(rootId)!;
+    expect(supervision.blocked_reason).toBe("contract_authoring_exhausted");
+    expect(runStore.getRunsForProject(rootId).filter(r => r.intent_kind === "contract_authoring")).toHaveLength(3);
+    expect(runStore.getLiveRuns()).toHaveLength(0);
+
+    // Exactly one requester-valid failed outbox event, correlated to the
+    // accepted contribution reference and request identity.
+    const outbox = new reviewStoreMod.ProjectReviewStore().getPendingAcceptanceOutbox(100)
+      .filter(r => r.project_card_id === rootId);
+    expect(outbox).toHaveLength(1);
+    const { parseContributionEvent, contributionEventDigest } = await import("../peer-help/contract.js");
+    const parsed = parseContributionEvent(JSON.parse(outbox[0]!.payload_json));
+    expect(parsed.ok).toBe(true);
+    if (!parsed.ok) return;
+    expect(parsed.value.kind).toBe("failed");
+    expect(parsed.value.request_id).toBe(`rq_${rootId}`);
+    expect(parsed.value.contribution_ref).toBe(`ref_${rootId}`);
+
+    // The requester applies the event exactly once; replay stays idempotent.
+    const { ContributionStore } = await import("../peer-help/contribution-store.js");
+    const contributions = new ContributionStore(
+      (await import("../tasks/kanban-board.js")).requireTaskDatabase() as never,
+      { kanbanGetCard: () => undefined, kanbanUpdate: () => {}, kanbanComplete: () => {}, kanbanFail: () => {} } as never,
+    );
+    expect(contributions.adoptContributionRef("p1", `rq_${rootId}`, `ref_${rootId}`)).toBe(true);
+    const applied = contributions.applyEvent(
+      "p1",
+      parsed.value,
+      contributionEventDigest(parsed.value),
+      JSON.stringify(parsed.value.projection),
+    );
+    expect(applied).toBe("applied");
+    expect(contributions.getContribution("p1", `rq_${rootId}`)!.state).toBe("failed");
+
+    const replay = contributions.applyEvent(
+      "p1",
+      parsed.value,
+      contributionEventDigest(parsed.value),
+      JSON.stringify(parsed.value.projection),
+    );
+    expect(replay).toBe("duplicate");
+    expect(contributions.getContribution("p1", `rq_${rootId}`)!.state).toBe("failed");
+    expect(contributions.getContribution("p1", `rq_${rootId}`)!.terminal_event_id).toBeDefined();
   });
 });
