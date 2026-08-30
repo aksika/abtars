@@ -104,7 +104,10 @@ export async function createSubagentTransport(role: SubagentRole, registry?: imp
     const configured: ModelCandidate = {
       model: agent.model, provider: agent.providerName, endpoint: primaryEndpoint,
       apiKey, maxContext: agent.contextWindow, apiFormat: agent.provider.apiFormat,
-      thinking: agent.provider.thinking, source: "primary",
+      thinking: agent.provider.thinking,
+      // #1748: keep the resolved provider policy on the candidate so fallback
+      // rotation cannot inherit the primary provider's retention setting.
+      cacheRetention: agent.provider.cacheRetention ?? "short", source: "primary",
     };
 
     // #1611: configured-only transports never inherit Main or route fallbacks —
@@ -132,7 +135,13 @@ export async function createSubagentTransport(role: SubagentRole, registry?: imp
           model: inheritedSpec.model, provider: inheritedSpec.provider, endpoint: inheritedSpec.endpoint,
           apiKey: inheritedProvider?.apiKeyEnv ? getEnv().getApiKey(inheritedProvider.apiKeyEnv) : apiKey,
           maxContext: inheritedSpec.maxContext, apiFormat: inheritedSpec.apiFormat,
-          thinking: inheritedSpec.thinking, source: "inherited_chain",
+          thinking: inheritedSpec.thinking,
+          // Prefer the current provider config; an absent current setting is
+          // short rather than a stale long value from an older Main candidate.
+          cacheRetention: inheritedProvider
+            ? inheritedProvider.cacheRetention ?? "short"
+            : inheritedSpec.cacheRetention ?? "short",
+          source: "inherited_chain",
         };
       }
 
@@ -143,7 +152,8 @@ export async function createSubagentTransport(role: SubagentRole, registry?: imp
           model: fb.model, provider: fb.provider, endpoint: fbProvider?.endpoint ?? primaryEndpoint,
           apiKey: fbProvider?.apiKeyEnv ? getEnv().getApiKey(fbProvider.apiKeyEnv) : apiKey,
           maxContext: mainAgent?.contextWindow ?? agent.contextWindow, apiFormat: fbProvider?.apiFormat,
-          thinking: fbProvider?.thinking, source: "agent_fallback",
+          thinking: fbProvider?.thinking,
+          cacheRetention: fbProvider?.cacheRetention ?? "short", source: "agent_fallback",
         };
       });
 

@@ -250,6 +250,9 @@ export async function buildTransport(ctx: BootCtx): Promise<PhaseResult> {
         maxContext: fbResolved?.contextWindow ?? resolved.contextWindow,
         apiFormat: fbResolved?.provider.apiFormat,
         thinking: fbResolved?.provider.thinking,
+        // #1748: resolve retention from the fallback provider itself; absent
+        // means short and must not inherit a primary provider's long policy.
+        cacheRetention: fbResolved?.provider.cacheRetention ?? "short",
         source: "agent_fallback",
       };
     });
@@ -263,6 +266,8 @@ export async function buildTransport(ctx: BootCtx): Promise<PhaseResult> {
         maxContext: resolved.contextWindow,
         apiFormat: resolved.provider.apiFormat,
         thinking: resolved.provider.thinking,
+        // #1748: every candidate carries its provider-resolved retention.
+        cacheRetention: resolved.provider.cacheRetention ?? "short",
         source: "primary",
       },
       fallbacks: fallbackCandidates,

@@ -246,10 +246,11 @@ function wrapEventStream(source: AsyncGenerator<AssistantMessageEvent>, fallback
 
 export function createPiStreamFn(options: AbtarsPiStreamFnOptions): StreamFn {
   return (model: Model<Api>, context: Context, fnOptions: SimpleStreamOptions = {}): AssistantMessageEventStream => {
-    // #1748: session-level cache options are transport-level constants, merged
-    // here once so every attempt (including candidate rotation) carries the
-    // same identity and retention. Headers are untouched — buildAttemptOptions
-    // still owns x-client-request-id per attempt.
+    // #1748: the session-level cache identity is merged here once so every
+    // attempt (including candidate rotation) carries the same identity. The
+    // retention value is resolved per candidate below because fallback
+    // providers may have different policies. Headers are untouched —
+    // buildAttemptOptions still owns x-client-request-id per attempt.
     const streamOptions: SimpleStreamOptions = {
       ...fnOptions,
       ...(options.cacheIdentity !== undefined ? { sessionId: options.cacheIdentity } : {}),
@@ -295,12 +296,20 @@ export function createPiStreamFn(options: AbtarsPiStreamFnOptions): StreamFn {
 
         let attemptCommitted = false;
         let retried = false;
+        // #1748: retention belongs to the provider candidate, not the
+        // transport. A missing candidate value falls back to the transport
+        // option for direct callers and ultimately pins Pi's current default.
+        const cacheRetention = candidate.cacheRetention
+          ?? options.cacheRetention
+          ?? fnOptions.cacheRetention
+          ?? "short";
 
         while (true) {
           const providerRequestId = (options.providerRequestIdFactory ?? randomUUID)();
+          const cacheOptions: SimpleStreamOptions = { ...streamOptions, cacheRetention };
           const attemptOptions = isOpenAiCompatible(piModel.api)
-            ? buildAttemptOptions(streamOptions, providerRequestId)
-            : { ...streamOptions };
+            ? buildAttemptOptions(cacheOptions, providerRequestId)
+            : cacheOptions;
 
           logDebug(TAG, `provider attempt execution=${options.executionId} request=${providerRequestId} candidate=${candidateKey(candidate.model, candidate.endpoint)}`);
 

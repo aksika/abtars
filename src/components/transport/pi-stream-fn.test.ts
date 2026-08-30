@@ -595,6 +595,30 @@ describe("createPiStreamFn", () => {
     expect(opts2?.sessionId).toBe("rotation-stable-id");
   });
 
+  it("uses each candidate's retention policy during provider rotation", async () => {
+    const first = makeCandidate({ model: "first", endpoint: "https://first/v1", cacheRetention: "short" });
+    const second = makeCandidate({ model: "second", endpoint: "https://second/v1", cacheRetention: "long" });
+    const rotationPolicy = new FallbackPolicy([first, second], registry);
+    const attemptFactory = vi.fn()
+      .mockRejectedValueOnce(new Error("API error 503: overloaded"))
+      .mockResolvedValueOnce(makeFakeStream([
+        { type: "done", reason: "stop", message: { role: "assistant", content: "recovered", stopReason: "stop", usage: { input: 1, output: 1 } } },
+      ]));
+
+    const streamFn = createPiStreamFn({
+      policy: rotationPolicy, createPiAiAttempt: attemptFactory, executionId: "exec_1",
+      cacheIdentity: "rotation-stable-id", cacheRetention: "short",
+    });
+    for await (const _ev of streamFn({ id: "test" }, { messages: [] }, {})) { /* consume */ }
+
+    const opts1 = attemptFactory.mock.calls[0]?.[3] as SimpleStreamOptions;
+    const opts2 = attemptFactory.mock.calls[1]?.[3] as SimpleStreamOptions;
+    expect(opts1?.cacheRetention).toBe("short");
+    expect(opts2?.cacheRetention).toBe("long");
+    expect(opts1?.sessionId).toBe("rotation-stable-id");
+    expect(opts2?.sessionId).toBe("rotation-stable-id");
+  });
+
   it("keeps x-client-request-id fresh per attempt while the cache identity stays stable", async () => {
     const ids: string[] = [];
     const requestIdFactory = vi.fn(() => {

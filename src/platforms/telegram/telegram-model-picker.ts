@@ -314,12 +314,18 @@ export async function handleModelPickerCallback(
               endpoint: fbRes?.provider.endpoint ?? newResolved!.provider.endpoint!,
               apiKey: fbRes?.provider.apiKeyEnv ? getEnv().getApiKey(fbRes.provider.apiKeyEnv) : apiKey,
               maxContext: fbRes?.contextWindow ?? newResolved!.contextWindow,
+              cacheRetention: fbRes?.provider.cacheRetention ?? "short",
               source: "agent_fallback" as const,
             };
           });
           const candidates = buildCandidates({
             role: "main",
-            configured: { model, provider: providerName, endpoint: newResolved!.provider.endpoint!, apiKey, maxContext: newResolved!.contextWindow, source: "primary" },
+            configured: {
+              model, provider: providerName, endpoint: newResolved!.provider.endpoint!, apiKey,
+              maxContext: newResolved!.contextWindow,
+              cacheRetention: newResolved!.provider.cacheRetention ?? "short",
+              source: "primary",
+            },
             fallbacks: fallbackCandidates,
           });
           const registry = (deps.transport as unknown as { policy?: { registry: InstanceType<typeof ModelHealthRegistry> } }).policy?.registry ?? new ModelHealthRegistry();

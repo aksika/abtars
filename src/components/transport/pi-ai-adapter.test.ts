@@ -188,9 +188,9 @@ describe("deriveCacheIdentity", () => {
   });
 
   it("contains no substring of a user id, chat id, or platform name built into the scope", () => {
-    const scope = "telegram:7773842843:user_qakosal";
+    const scope = "telegram:7773842843:user_alpha";
     const id = deriveCacheIdentity(scope);
-    for (const needle of ["telegram", "7773842843", "user_qakosal", "qakosal"]) {
+    for (const needle of ["telegram", "7773842843", "user_alpha", "alpha"]) {
       expect(id).not.toContain(needle);
     }
   });

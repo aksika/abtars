@@ -31,6 +31,10 @@ export interface CandidateSpec {
   maxContext: number;
   apiFormat?: ApiFormat;
   thinking?: PiAiCandidate["thinking"];
+  /** #1748: provider-resolved prompt-cache retention for this candidate.
+   *  Keeping it on the candidate prevents a fallback provider from inheriting
+   *  the primary provider's retention policy. */
+  cacheRetention?: "none" | "short" | "long";
 }
 
 /** Full canonical candidate — provider identity is required (#1418). */
