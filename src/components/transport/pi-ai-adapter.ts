@@ -43,11 +43,52 @@ import type {
   CreateProviderOptions,
 } from "@earendil-works/pi-ai";
 
-import {
-  clampThinkingLevel,
-} from "@earendil-works/pi-ai";
+// #1746: Pi's authoritative thinking-level clamp, captured from the runtime
+// pi-ai root module. It is held in a module slot because resolveCandidateModel()
+// is synchronous and is called from PiCoreTransport's constructor and from
+// setReasoningEffort() — neither may become async (#1619 clamps at construction
+// so /status cannot claim xhigh before the first turn). Populated by
+// ensurePiThinkingClamp(); unset means "pi not loaded yet", never "no clamp
+// needed". No @earendil-works implementation may enter the bundle through a
+// static import — the pi installation is the only source of this function
+// (enforced by scripts/check-pi-boundary.mjs and scripts/check-bundle-boundary.mjs).
+let piThinkingClamp: ((model: Model<Api>, level: ModelThinkingLevel) => ModelThinkingLevel) | null = null;
 
-import { logWarn } from "../logger.js";
+/** #1746: log the unpopulated-clamp pass-through at most once per process. */
+let clampMissLogged = false;
+
+/**
+ * #1746: load the pi-ai root module once and capture `clampThinkingLevel`.
+ * Idempotent and safe to call from several boot paths. Accepts a pi-ai root
+ * module the caller has already loaded (the runtime-contract probe) and
+ * otherwise resolves it through the standard installation-scoped loader. No
+ * new module specifier: the pi-ai root is what defaultLoadPi/defaultLoadApi
+ * resolve today. Resolves without populating the slot when the installation
+ * is absent or unloadable — the api route fails its runtime contract on the
+ * first prompt in that case, so a boot-time throw would only move the same
+ * failure earlier and less informatively. Never throws to its caller.
+ */
+export async function ensurePiThinkingClamp(piAiRoot?: Record<string, unknown>): Promise<void> {
+  if (piThinkingClamp) return;
+  let root = piAiRoot;
+  if (!root) {
+    try {
+      const result = resolvePiInstallation();
+      if (result.state !== "compatible") return;
+      const aiSpec: PiModuleSpecifier = { package: "@earendil-works/pi-ai" };
+      root = await loadPiModule<Record<string, unknown>>(result.installation, aiSpec);
+    } catch {
+      // absent or unloadable installation — degrade, never throw
+      return;
+    }
+  }
+  const clamp = root.clampThinkingLevel;
+  if (typeof clamp === "function") {
+    piThinkingClamp = clamp as (model: Model<Api>, level: ModelThinkingLevel) => ModelThinkingLevel;
+  }
+}
+
+import { logWarn, logDebug } from "../logger.js";
 import { resolvePiInstallation, loadPiModule } from "../pi-installation.js";
 import type { PiModuleSpecifier } from "../pi-installation.js";
 import type { ReasoningEffort } from "./kiro-transport.js";
@@ -243,9 +284,13 @@ export function resolveCandidateModel(
     contextWindow: candidate.maxContext,
   };
   const model = buildPiModel(piCandidate, pickPiApi(candidate.apiFormat), hasImage, candidate.provider);
-  const clamped = clampThinkingLevel(model, requestedEffort);
+  const clamped = piThinkingClamp ? piThinkingClamp(model, requestedEffort) : requestedEffort;
   const effective = clamped === "minimal" || clamped === "max" ? ("high" as ReasoningEffort) : (clamped as ReasoningEffort);
   if (effective === "off") model.reasoning = false;
+  if (!piThinkingClamp && !clampMissLogged) {
+    clampMissLogged = true;
+    logDebug(TAG, "#1746: thinking clamp not populated — passing requested effort through (pi not loaded yet)");
+  }
   return { model, requested: requestedEffort, effective };
 }
 
