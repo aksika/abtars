@@ -195,6 +195,7 @@ export function getActiveOrcCoordinator(): OrcProjectCoordinator | null {
 }
 
 import { OrcProjectCoordinator } from "./orc-project/orc-project-coordinator.js";
+import { readOrcProjectSnapshot } from "./orc-project/orc-intent-policy.js";
 
 import {
   MAX_STARTED_CONTRACT_AUTHORING_TURNS,
@@ -702,6 +703,19 @@ function claimOrcContinuation(generation: ReconcilerGeneration, projectId: numbe
       // turn that phase guard into a terminal last-resort settlement.
       if (reviewStore.getSupervision(projectId)?.state !== "executing") {
         logWarn(TAG, `Project ${projectId}: continuation not actionable outside executing — deferring to the phase owner`);
+        return "owned";
+      }
+      // #1751: `intent_not_actionable` means the project_execution intent cannot
+      // start *now* — most often because a Worker/contribution/review/input-
+      // request owns the project. That is a deferral, not proof of owner
+      // absence, and routing it to last-resort settlement aborted a healthy
+      // run whose Worker card was queued for 65 ms between a failed attempt
+      // and its terminal state. Re-read at the decision point: if the owner
+      // has since gone terminal, the settlement below still runs.
+      const snapshot = readOrcProjectSnapshot(coordinator.getStore().db, projectId);
+      if (snapshot.workerOwnedChild || snapshot.contributionActive
+          || snapshot.openReviewCase || snapshot.inputRequestsOutstanding) {
+        logWarn(TAG, `Project ${projectId}: continuation not actionable — higher-priority owner active, deferring to its wake`);
         return "owned";
       }
       logWarn(TAG, `Project ${projectId}: scheduled continuation not actionable (${result.reason}) — settling as last resort`);
