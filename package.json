@@ -12,6 +12,7 @@
     "typecheck": "tsc --noEmit && tsc -p tsconfig.scripts.json",
     "typecheck:tests": "tsc -p tsconfig.test.json --noEmit",
     "check-imports": "node scripts/check-imports.mjs && node scripts/check-silent-catches.mjs && node scripts/check-async-promises.mjs",
+    "check:bundle-boundary": "node scripts/check-bundle-boundary.mjs",
     "check:watchdog-shape": "node scripts/check-watchdog-shape.mjs",
     "smoke:deps-standalone": "bash scripts/smoke-deps-standalone.sh",
     "test": "vitest --run --exclude 'src/tests/integration/**' --exclude 'src/tests/e2e/**' --exclude '**/*integration.test.ts' --exclude '**/*e2e.test.ts' --exclude 'src/tests/recovery-redesign.test.ts'",
