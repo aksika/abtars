@@ -10,6 +10,7 @@ import { cleanResponse } from "./clean-response.js";
 import { loadUsers } from "./user-registry.js";
 import { ModelNotFoundError } from "./transport/acp-transport.js";
 import { DurableContextUnavailableError } from "./transport/pi-core-context.js";
+import { isContextOverflowFailure } from "./transport/provider-failure.js";
 import type { SttConfig } from "./stt.js";
 import { synthesizeSpeech, type TtsConfig } from "./tts.js";
 import { attemptMemoryMutation } from "./memory-runtime.js";
@@ -953,7 +954,7 @@ export async function handleInboundMessage(
       }).catch(err => logAndSwallow(TAG, "adapter call", err));
     }
 
-    // Auto-reset on context window overflow (ValidationException or actual context errors)
+    // #1745: context overflow is decided at the transport (typed code), not here.
     const errStr = String(err instanceof Error ? err.message : JSON.stringify(err));
     // #1294 + #1298: Synthetic internal prompts are system-initiated, not user requests.
     // If they fail (e.g. models exhausted), don't surface an ❌ error reply — the user sees
@@ -962,14 +963,17 @@ export async function handleInboundMessage(
     // delivery failure is owned by the Kanban retry/unknown state machine.
     const SYNTHETIC_PREFIXES = ["[SESSION START]", "[SYSTEM]", "[TASK COMPLETE]", "[SCHEDULED TASK COMPLETED]"];
     const notifyUser = !SYNTHETIC_PREFIXES.some(p => text.startsWith(p));
-    const isContextOverflow = errStr.includes("ValidationException")
-      || (errStr.includes("context window") || errStr.includes("token limit") || errStr.includes("maximum context"));
     const isTimeout = errStr.includes("timed out") || errStr.includes("Prompt already in progress");
 
-    if (isContextOverflow) {
-      logWarn(TAG, `Context overflow detected — auto-resetting session`);
-      await resetAndPrepare({ transport, sessionKey: activeSessionId, reason: `ctx-overflow: ${errStr.slice(0, 100)}` });
-      if (notifyUser) await adapter.sendMessage(channelId, "🔄 Context window full — session reset. Send your message again.", { threadId: msg.threadId }).catch(err => logAndSwallow(TAG, "adapter call", err));
+    if (isContextOverflowFailure(err)) {
+      // #1745: overflow is reported by the transport as a terminal failure
+      // code. Never re-derive it from error text here — the transport holds
+      // the provider message and the model's context window; this layer holds
+      // neither. The previous four-substring sniff reset the live conversation
+      // on the weakest evidence in the pipeline.
+      logWarn(TAG, `Context overflow reported by transport — auto-resetting session`);
+      await resetAndPrepare({ transport, sessionKey: activeSessionId, reason: "ctx-overflow" });
+      if (notifyUser) await adapter.sendMessage(channelId, "Context window full — session reset. Send your message again.", { threadId: msg.threadId }).catch(err => logAndSwallow(TAG, "adapter call", err));
     } else if (isTimeout) {
       logWarn(TAG, `Request timeout — not resetting session`);
       if (notifyUser) await adapter.sendMessage(channelId, "❌ Model timed out.", { threadId: msg.threadId }).catch(err => logAndSwallow(TAG, "adapter call", err));

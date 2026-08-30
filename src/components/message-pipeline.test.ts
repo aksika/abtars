@@ -3,6 +3,7 @@ import { setUserRegistryOverride, type UserRegistry } from "./user-registry.js";
 import { classifyContent } from "./clean-response.js";
 import type { ManagedSession } from "./spin-types.js";
 import { DurableContextUnavailableError } from "./transport/pi-core-context.js";
+import { ProviderExecutionError } from "./transport/provider-failure.js";
 import { SCHEDULED_ANNOUNCEMENT_TOKEN } from "../types/platform.js";
 
 const detectCitationsSpy = vi.fn().mockReturnValue([1]);
@@ -402,6 +403,45 @@ describe("handleInboundMessage", () => {
     await handleInboundMessage(makeMsg({ text: "hello there" }), adapter, deps);
 
     expect(adapter.sendMessage).toHaveBeenCalled();
+  });
+
+  // ── Context-overflow recovery (#1745) ─────────────────────────────────────
+
+  it("resets the session on ProviderExecutionError with code context_overflow", async () => {
+    const failure = { code: "context_overflow", retryable: false, attemptedCandidates: 2, message: "The request exceeds the context window of every configured model" };
+    transport.sendPrompt = vi.fn().mockRejectedValue(new ProviderExecutionError(failure)) as any;
+    const adapter = mockAdapter();
+    const deps = mockDeps(transport);
+
+    await handleInboundMessage(makeMsg(), adapter, deps);
+
+    expect(transport.resetSession).toHaveBeenCalledTimes(1);
+    expect(adapter.sendMessage).toHaveBeenCalledWith("100", "Context window full — session reset. Send your message again.", expect.any(Object));
+    expect((deps as any)._session.busy).toBe(false);
+  });
+
+  it("does NOT reset the session for a plain Error whose message mentions token limit", async () => {
+    transport.sendPrompt = vi.fn().mockRejectedValue(new Error("API error 429: token limit reached")) as any;
+    const adapter = mockAdapter();
+    const deps = mockDeps(transport);
+
+    await handleInboundMessage(makeMsg(), adapter, deps);
+
+    // The four-substring sniff is gone — overflow must travel as the typed code.
+    expect(transport.resetSession).not.toHaveBeenCalled();
+    expect(adapter.sendMessage).toHaveBeenCalled();
+  });
+
+  it("resets on overflow without notifying for synthetic-prefixed prompts", async () => {
+    const failure = { code: "context_overflow", retryable: false, attemptedCandidates: 1, message: "The request exceeds the context window of every configured model" };
+    transport.sendPrompt = vi.fn().mockRejectedValue(new ProviderExecutionError(failure)) as any;
+    const adapter = mockAdapter();
+    const deps = mockDeps(transport);
+
+    await handleInboundMessage(makeMsg({ text: "[SESSION START] You just came online. Greet the user." }), adapter, deps);
+
+    expect(transport.resetSession).toHaveBeenCalledTimes(1);
+    expect(adapter.sendMessage).not.toHaveBeenCalled();
   });
 
   it("handles command and returns early", async () => {
