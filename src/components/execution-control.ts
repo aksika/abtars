@@ -281,6 +281,14 @@ export function createExecutionSupervisor(options: ExecutionSupervisorOptions): 
       // them from the Spin legacy drain. Standalone Pi cards start only via
       // the Reconciler Pi lane after shared admission.
       if (card.type === "pi") continue;
+      // #1750: an O root is Orc/Reconciler-owned by identity. The
+      // `project_supervision` row that isSupervisedRootIdentity() reads is
+      // written when the Reconciler adopts the project, which can be minutes
+      // after kanban_manage created the card — draining in that window raced
+      // a live O execution into the shared session and crashed the bridge.
+      // reconcileProject starts these cards (legacyOrcDispatch); this drain
+      // never should.
+      if (card.type === "O" && card.parent_id === null) continue;
       // #677: respect DAG dependencies
       if (!isUnblocked(card)) continue;
       // #1327: validate card.type is a real SessionType BEFORE dispatching.
