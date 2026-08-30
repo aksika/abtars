@@ -44,8 +44,13 @@ async function buildModelEntries(providerName: string, providerConfig: { transpo
 
   // Tier 1: pi-catalog (small list → use directly)
   let pi: Array<{ id: string; cost: { input: number; output: number } }> | null = null;
-  const { modelsForProviderSync } = await import("../../components/transport/pi-catalog.js");
+  const { modelsForProviderSync, mapProviderName, logUnmappedProviderOnce } = await import("../../components/transport/pi-catalog.js");
   pi = modelsForProviderSync(providerName);
+  if (pi === null && providerConfig?.transport === "api" && !mapProviderName(providerName)) {
+    // #1747: no pi mapping → Tier 2 falls back to models.json; log once so the
+    // silently skipped stale-ID validation filter is observable.
+    logUnmappedProviderOnce(providerName);
+  }
   if (pi && pi.length > 0 && pi.length <= PICKER_MAX) {
     return pi.map(m => ({ id: m.id, label: `${m.id} (${formatCost(m.cost)})` }));
   }

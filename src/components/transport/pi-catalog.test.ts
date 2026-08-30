@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, vi } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import type { Model, Api, Models } from "@earendil-works/pi-ai";
 
 // Mock pi-installation so loadPiModels() never hits the real filesystem.
@@ -8,9 +8,11 @@ import {
   mapProviderName, resolveModelMeta, modelsForProvider, modelsForProviderSync,
   piCostRatesByModel,
   loadPiModels, getWarmedModels, isWarmed,
+  logUnmappedProviderOnce, _resetUnmappedWarnForTest,
   _resetForTest, _setWarmedForTest,
 } from "./pi-catalog.js";
 import { resolvePiInstallation, loadPiModule } from "../../components/pi-installation.js";
+import * as logger from "../logger.js";
 
 function fakeModel(over: Partial<Model<Api>> = {}): Model<Api> {
   return {
@@ -48,6 +50,41 @@ describe("mapProviderName (C2)", () => {
     expect(mapProviderName("ollama")).toBeNull();
     expect(mapProviderName("kiro")).toBeNull();
     expect(mapProviderName("9router")).toBeNull();
+  });
+  it("covers every pi 0.84.2 KnownProvider id (#1747 set completion)", () => {
+    for (const id of ["baseten", "radius", "qwen-token-plan", "qwen-token-plan-cn", "qwen-token-plan-individual"]) {
+      expect(mapProviderName(id)).toBe(id);
+    }
+  });
+});
+
+describe("logUnmappedProviderOnce (#1747 diagnostic)", () => {
+  let warnSpy: ReturnType<typeof vi.spyOn>;
+
+  beforeEach(() => {
+    _resetUnmappedWarnForTest();
+    warnSpy = vi.spyOn(logger, "logWarn").mockImplementation(() => {});
+  });
+  afterEach(() => {
+    warnSpy.mockRestore();
+  });
+
+  it("warns exactly once per unmapped provider per process", () => {
+    logUnmappedProviderOnce("my-custom-gateway");
+    logUnmappedProviderOnce("my-custom-gateway");
+    expect(warnSpy).toHaveBeenCalledTimes(1);
+    expect(warnSpy.mock.calls[0]![1]).toMatch(/my-custom-gateway/);
+    expect(warnSpy.mock.calls[0]![1]).toMatch(/no pi mapping/);
+  });
+
+  it("warns separately for distinct providers", () => {
+    logUnmappedProviderOnce("a");
+    logUnmappedProviderOnce("b");
+    expect(warnSpy).toHaveBeenCalledTimes(2);
+  });
+
+  it("never throws", () => {
+    expect(() => logUnmappedProviderOnce("weird name")).not.toThrow();
   });
 });
 

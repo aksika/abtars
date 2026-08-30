@@ -32,9 +32,28 @@ const KNOWN_PI_PROVIDERS = new Set<string>([
   "azure-openai-responses", "openai-codex", "nvidia", "deepseek", "github-copilot", "xai",
   "groq", "cerebras", "openrouter", "vercel-ai-gateway", "zai", "zai-coding-cn", "mistral",
   "minimax", "minimax-cn", "moonshotai", "moonshotai-cn", "huggingface", "fireworks",
-  "together", "opencode", "opencode-go", "kimi-coding", "cloudflare-workers-ai",
-  "cloudflare-ai-gateway", "xiaomi", "xiaomi-token-plan-cn", "xiaomi-token-plan-ams", "xiaomi-token-plan-sgp",
+  "together", "baseten", "opencode", "opencode-go", "kimi-coding", "cloudflare-workers-ai",
+  "cloudflare-ai-gateway", "radius", "qwen-token-plan", "qwen-token-plan-cn", "qwen-token-plan-individual",
+  "xiaomi", "xiaomi-token-plan-cn", "xiaomi-token-plan-ams", "xiaomi-token-plan-sgp",
 ]);
+
+/**
+ * Log once per process when a configured `transport === "api"` provider has no
+ * pi mapping. Makes the picker's silent fallback to models.json observable
+ * (#1748 split of #1747) without changing fallback behavior.
+ */
+const warnedUnmappedProviders = new Set<string>();
+
+export function logUnmappedProviderOnce(providerName: string): void {
+  if (warnedUnmappedProviders.has(providerName)) return;
+  warnedUnmappedProviders.add(providerName);
+  logWarn(TAG, `provider "${providerName}" has transport="api" but no pi mapping (KNOWN_PI_PROVIDERS) — falling to models.json; pi cost/metadata unavailable`);
+}
+
+/** @internal Reset the dedup set between unit tests. */
+export function _resetUnmappedWarnForTest(): void {
+  warnedUnmappedProviders.clear();
+}
 
 /**
  * Map an abtars provider name → pi provider id, or null if there is no pi mapping

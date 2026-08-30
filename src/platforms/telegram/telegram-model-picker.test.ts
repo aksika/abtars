@@ -35,6 +35,8 @@ vi.mock("../../components/transport-config.js", () => ({
 
 vi.mock("../../components/transport/pi-catalog.js", () => ({
   modelsForProviderSync: MOCK_modelsForProviderSync,
+  mapProviderName: (name: string) => (name === "openrouter" || name === "codex" ? name : null),
+  logUnmappedProviderOnce: vi.fn(),
 }));
 
 import { handleModelPickerCallback, isModelPickerCallback } from "./telegram-model-picker.js";

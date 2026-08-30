@@ -29,8 +29,14 @@ export async function phaseTransport(ctx: BootCtx): Promise<PhaseResult> {
   // sync hot path that reads the warmed cache. Skipped entirely when no provider opts in.
   const { anyApiProviderConfigured } = await import("../components/transport-config.js");
   if (anyApiProviderConfigured()) {
-    const { loadPiModels } = await import("../components/transport/pi-catalog.js");
+    const { loadPiModels, logUnmappedProviderOnce, mapProviderName } = await import("../components/transport/pi-catalog.js");
     await loadPiModels();
+    // #1747: surface configured api providers with no pi mapping so the
+    // models.json fallback is observable instead of silently skipped.
+    const { loadTransport } = await import("../components/transport-config.js");
+    for (const [name, p] of Object.entries(loadTransport()?.providers ?? {})) {
+      if (p.transport === "api" && !mapProviderName(name)) logUnmappedProviderOnce(name);
+    }
     // #1746: capture pi's thinking clamp before buildTransport() constructs
     // PiCoreTransport — resolveCandidateModel() clamps synchronously in the
     // constructor (#1619), so the clamp must already be populated. The same
