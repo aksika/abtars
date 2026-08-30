@@ -29,7 +29,7 @@
 import { resolvePiInstallation, loadPiModule } from "../pi-installation.js";
 import type { PiInstallation, PiModuleSpecifier } from "../pi-installation.js";
 import { validatePiAgentCoreModule, PiCoreContractError } from "./pi-core-types.js";
-import { pickPiApi } from "./pi-ai-adapter.js";
+import { pickPiApi, ensurePiThinkingClamp } from "./pi-ai-adapter.js";
 import { formatPiPinnedInstallCommand } from "../../config/pi-compatibility.js";
 import type { ModelCandidate } from "./model-candidates.js";
 
@@ -153,6 +153,13 @@ export async function validatePiRuntimeContract(
       { component: "pi-ai", capability: "createProvider", installationVersion: installation.version },
     );
   }
+
+  // #1746: populate the thinking clamp from the pi-ai root module already
+  // loaded here. This is the second population site after the phase-transport
+  // boot warm: rebuildTransport (/reset) bypasses boot, so any transport built
+  // outside boot still clamps at construction. Never throws — a root module
+  // without a callable clamp just leaves the slot unset (pass-through).
+  await ensurePiThinkingClamp(aiModule as Record<string, unknown>);
 
   // The same mapping live requests use; duplicates collapse before loading.
   // pickPiApi's declared return type is the wider pi Api union; the three

@@ -31,6 +31,13 @@ export async function phaseTransport(ctx: BootCtx): Promise<PhaseResult> {
   if (anyProviderUseProviderLib()) {
     const { loadPiModels } = await import("../components/transport/pi-catalog.js");
     await loadPiModels();
+    // #1746: capture pi's thinking clamp before buildTransport() constructs
+    // PiCoreTransport — resolveCandidateModel() clamps synchronously in the
+    // constructor (#1619), so the clamp must already be populated. The same
+    // boot-order invariant the #1311 C8 catalog warm above carries: a sync
+    // hot path reads a warm populated here.
+    const { ensurePiThinkingClamp } = await import("../components/transport/pi-ai-adapter.js");
+    await ensurePiThinkingClamp();
   }
 
   await buildTransport(ctx);

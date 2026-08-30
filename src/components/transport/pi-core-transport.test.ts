@@ -6,8 +6,10 @@
 // boundary with the unreachable test endpoint — see #1582.
 // Real-Pi integration coverage stays deferred: requires a full Pi installation.
 
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, beforeAll } from "vitest";
+import { clampThinkingLevel } from "@earendil-works/pi-ai";
 import { PiCoreTransport, extractAssistantText } from "./pi-core-transport.js";
+import { ensurePiThinkingClamp } from "./pi-ai-adapter.js";
 import { PiCoreContextProjection, DurableContextUnavailableError, createDurableContextProvider } from "./pi-core-context.js";
 import { PiCoreContractError, convertCurrentTurnToLlm } from "./pi-core-types.js";
 import type { DurableContextProviderHolder } from "./pi-core-context.js";
@@ -486,6 +488,15 @@ describe("context projection at transport level", () => {
 });
 
 describe("#1619 reasoning effort (session-scoped)", () => {
+  // #1746: resolveCandidateModel reads pi's clamp from the runtime slot now.
+  // Production populates it at boot and in the contract probe; these tests do
+  // the same with pi's real function so the constructor-time clamp is
+  // exercised as shipped (the pi-installation mock above is "absent", so the
+  // slot is fed the already-loaded module directly).
+  beforeAll(async () => {
+    await ensurePiThinkingClamp({ clampThinkingLevel });
+  });
+
   it("initializes requested effort from effort-style thinking config; off otherwise", () => {
     const t = makeTransport();
     const status = t.getRuntimeStatus();

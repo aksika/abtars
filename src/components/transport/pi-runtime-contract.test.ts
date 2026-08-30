@@ -10,7 +10,9 @@
  */
 
 import { describe, it, expect, vi } from "vitest";
+import { clampThinkingLevel } from "@earendil-works/pi-ai";
 import { validatePiRuntimeContract, PiRuntimeContractError } from "./pi-runtime-contract.js";
+import { resolveCandidateModel } from "./pi-ai-adapter.js";
 import type { PiInstallation, PiModuleSpecifier, PiInstallationState } from "../pi-installation.js";
 import type { PiRuntimeContractDependencies } from "./pi-runtime-contract.js";
 
@@ -240,5 +242,26 @@ describe("validatePiRuntimeContract (#1573)", () => {
 
     boundary.modules.set("@earendil-works/pi-ai/api/openai-completions", makeApiModule());
     await expect(validatePiRuntimeContract([{ apiFormat: "chat" }], contractDeps(boundary))).resolves.toBeUndefined();
+  });
+
+  it("#1746 — the probe populates the thinking clamp so a transport built outside boot clamps correctly", async () => {
+    const boundary = makeDependencies({
+      modules: {
+        "@earendil-works/pi-agent-core": makeAgentCoreModule(),
+        "@earendil-works/pi-ai": { createProvider: vi.fn(), clampThinkingLevel },
+        "@earendil-works/pi-ai/api/openai-completions": makeApiModule(),
+      },
+    });
+    await validatePiRuntimeContract([{ apiFormat: "chat" }], contractDeps(boundary));
+    // rebuildTransport (/reset) constructs PiCoreTransport outside the boot
+    // warm; the contract probe is its population site, so the constructor's
+    // synchronous clamp must already be live.
+    const resolved = resolveCandidateModel(
+      { model: "test-model", provider: "test-provider", endpoint: "https://api.test/v1", maxContext: 128000 },
+      "xhigh",
+      false,
+    );
+    expect(resolved.requested).toBe("xhigh");
+    expect(resolved.effective).toBe("high");
   });
 });
