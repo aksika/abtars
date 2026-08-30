@@ -3,7 +3,7 @@ process.umask(0o077);
 import { reloadSecrets } from "./boot/env.js";
 import { initEnv, _resetEnv } from "./components/env-schema.js";
 import { startBridge } from "./bridge-app.js";
-import { logInfo } from "./components/logger.js";
+import { logInfo, logError, flushLogs } from "./components/logger.js";
 import { resetAbmindCache } from "./utils/abmind-lazy.js";
 import { writeOwnedExitFields } from "./components/transport/bridge-lock-transport.js";
 
@@ -65,12 +65,20 @@ process.on("uncaughtException", (err) => {
     console.error(`[WARN] Suppressed spawn ENOENT (binary not found, bridge continues): ${e.syscall} — ${e.message}`);
     return;
   }
+  // #1750: the fatal reason must survive in the bridge's own log. The logger
+  // buffers, so flush synchronously — process.exit() below does not wait for
+  // the buffered writer, and this must never be the thing that throws on the way out.
+  try { logError("main", `FATAL uncaught exception`, err); flushLogs(); } catch { /* stderr below is the fallback */ }
   console.error(`[FATAL] Uncaught exception: ${err.stack ?? err.message ?? err}`);
   process.exit(1);
 });
 
 process.on("exit", (code) => {
   const stack = new Error("exit trace").stack?.split("\n").slice(1, 6).join("\n") ?? "";
+  // #1750: the fatal reason must survive in the bridge's own log. The logger
+  // buffers, so flush synchronously — process.exit() below does not wait for
+  // the buffered writer, and this must never be the thing that throws on the way out.
+  try { logError("main", `FATAL exit code=${code}`, stack); flushLogs(); } catch { /* stderr below is the fallback */ }
   console.error(`[EXIT] code=${code} at ${new Date().toISOString()}\n${stack}`);
   try {
     // #1711 R1: exit fields are bridge-owned — written through the owner gate
@@ -87,6 +95,10 @@ process.on("unhandledRejection", (reason) => {
     console.error(`[WARN] Suppressed ACP rejection (transport will reinit): ${msg}`);
     return;
   }
+  // #1750: the fatal reason must survive in the bridge's own log. The logger
+  // buffers, so flush synchronously — process.exit() below does not wait for
+  // the buffered writer, and this must never be the thing that throws on the way out.
+  try { logError("main", `FATAL unhandled rejection`, reason); flushLogs(); } catch { /* stderr below is the fallback */ }
   console.error(`[FATAL] Unhandled rejection: ${reason instanceof Error ? reason.stack ?? reason.message : reason}`);
   process.exit(1);
 });
