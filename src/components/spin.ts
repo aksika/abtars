@@ -767,7 +767,7 @@ export class Spin {
         kind: "execution.started",
         timestamp: Date.now(),
         sessionId: session.id,
-        executionId: session.activeExecutionId!,
+        executionId: capturedExecutionId,
         rootCardId: session.activeRootCardId,
         cardId,
       } as Parameters<NonNullable<typeof this.orcActivityFeed>["publish"]>[0]);
