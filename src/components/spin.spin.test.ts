@@ -1047,6 +1047,76 @@ describe("spin(spec) — unified session API (#1271)", () => {
     });
   });
 
+  describe("#1750 — the heartbeat drain cannot kill the process", () => {
+    beforeEach(() => {
+      spin.setRuntime(makeRuntime() as any);
+    });
+
+    it("drain dispatch refused by a busy O session leaves the card queued and never reaches unhandledRejection", async () => {
+      // A live O execution holds the shared session (card #5 shape: a queued
+      // ownerless O root with no supervision row draining into a busy session).
+      let releaseFirst!: () => void;
+      const firstHeld = new Promise<void>(r => { releaseFirst = r; });
+      const heldTransport = mockTransport({
+        sendPrompt: vi.fn(async () => { await firstHeld; return "first result"; }),
+      });
+      const oSession = spin.createSession("aksika", "background", "O") as import("./spin-types.js").ManagedSession;
+      oSession.transport = heldTransport;
+      const first = spin.spin({ type: "O", sessionId: oSession.id, prompt: "first turn", await: true });
+      await vi.waitFor(() => expect(oSession.activeExecutionId).toBeDefined());
+
+      const cardId = kanbanEnqueue("legacy O root", "agent");
+      const mod = await import("./tasks/kanban-board.js");
+      (mod as any)._kanbanSetCardField(cardId, "type", "O");
+      (mod as any)._kanbanSetCardField(cardId, "parent_id", null);
+      (mod as any)._kanbanSetCardField(cardId, "goal", "legacy O root");
+
+      const logWarnSpy = vi.spyOn(await import("./logger.js"), "logWarn");
+      const unhandled: unknown[] = [];
+      const handler = (reason: unknown) => { unhandled.push(reason); };
+      process.on("unhandledRejection", handler);
+      try {
+        await (spin as any).tick();
+        await new Promise(r => setTimeout(r, 20));
+        expect(unhandled).toHaveLength(0);
+        const card = (await import("./tasks/kanban-board.js")).kanbanGetCard(cardId) as { status: string } | null;
+        expect(card?.status).toBe("queued");
+        expect(logWarnSpy).toHaveBeenCalledWith(expect.any(String), expect.stringContaining("dispatch refused"));
+      } finally {
+        process.off("unhandledRejection", handler);
+        logWarnSpy.mockRestore();
+        releaseFirst();
+        await first.catch(() => {});
+      }
+    });
+
+    it("a non-contention rejection from the drain fails the card with the diagnostic", async () => {
+      const cardId = kanbanEnqueue("ended session card", "agent");
+      const mod = await import("./tasks/kanban-board.js");
+      (mod as any)._kanbanSetCardField(cardId, "type", "W");
+      (mod as any)._kanbanSetCardField(cardId, "parent_id", null);
+      (mod as any)._kanbanSetCardField(cardId, "goal", "ended session card");
+
+      // The drain never passes a sessionId, so "sessionId … is ended" can only
+      // reach the sink through a future throw site — stub the chokepoint to
+      // reject with the diagnostic and verify the sink fails the card.
+      const spinSpy = vi.spyOn(spin, "spin").mockRejectedValue(new Error("Spin: sessionId sess-dead is ended"));
+      const unhandled: unknown[] = [];
+      const handler = (reason: unknown) => { unhandled.push(reason); };
+      process.on("unhandledRejection", handler);
+      try {
+        await (spin as any).tick();
+        await new Promise(r => setTimeout(r, 20));
+        expect(unhandled).toHaveLength(0);
+        const card = (await import("./tasks/kanban-board.js")).kanbanGetCard(cardId) as { status: string } | null;
+        expect(card?.status).toBe("failed");
+      } finally {
+        process.off("unhandledRejection", handler);
+        spinSpy.mockRestore();
+      }
+    });
+  });
+
   describe("#1274 — sessionId reuse rejects ended sessions", () => {
     it("spin({ sessionId }) on an ended session throws, sendPrompt never called", async () => {
       const transport = mockTransport();
