@@ -11,7 +11,9 @@ const mockCreatePiStreamFn = vi.hoisted(() => vi.fn(() => vi.fn()));
 
 vi.mock("./pi-stream-fn.js", () => ({ createPiStreamFn: mockCreatePiStreamFn }));
 
-const { FakeHost } = vi.hoisted(() => {
+const { FakeHost, setSettlementGate } = vi.hoisted(() => {
+  /** #1691: deferred settlement latch so a test can hold the first prompt. */
+  let settlementGate: Promise<"prompt_completed_without_agent_end"> | null = null;
   class FakeHost {
     isSettled = false;
     state = "created";
@@ -27,14 +29,19 @@ const { FakeHost } = vi.hoisted(() => {
     async waitForSettlement(): Promise<"prompt_completed_without_agent_end"> {
       this.state = "settled";
       this.isSettled = true;
-      return "prompt_completed_without_agent_end";
+      return settlementGate ?? Promise.resolve("prompt_completed_without_agent_end");
     }
 
     cancel(): void { this.isSettled = true; }
     async steer(): Promise<void> {}
     async followUp(): Promise<void> {}
   }
-  return { FakeHost };
+  return {
+    FakeHost,
+    setSettlementGate: (gate: Promise<"prompt_completed_without_agent_end"> | null): void => {
+      settlementGate = gate;
+    },
+  };
 });
 
 vi.mock("./pi-core-host.js", () => ({ PiCoreExecutionHost: FakeHost }));
@@ -99,5 +106,38 @@ describe("PiCoreTransport — #1622 prompt completion without agent_end", () => 
     // The rejection unwound the ownership chain: no active host or slot left.
     expect((t as unknown as { activeHost: unknown }).activeHost).toBeNull();
     expect((t as unknown as { activeSlot: unknown }).activeSlot).toBeNull();
+  });
+
+  it("#1691: a second sendPrompt is rejected while the first slot is held; the first settles and clears both fields", async () => {
+    const t = makeTransport();
+    await t.initialize();
+
+    // Hold the first host's settlement so the first prompt stays active.
+    let releaseSettlement!: (reason: "prompt_completed_without_agent_end") => void;
+    setSettlementGate(new Promise<"prompt_completed_without_agent_end">((resolve) => {
+      releaseSettlement = resolve;
+    }));
+    try {
+      const first = t.sendPrompt("session_1", "hello");
+      await vi.waitFor(() => expect((t as unknown as { activeSlot: unknown }).activeSlot).not.toBeNull());
+      const firstHost = (t as unknown as { activeHost: unknown }).activeHost;
+      expect(firstHost).not.toBeNull();
+
+      // A second prompt fails BEFORE it can replace the slot/host or reset any
+      // shared per-call state — the first call keeps exclusive ownership.
+      await expect(t.sendPrompt("session_2", "second")).rejects.toThrow(/already active/);
+      expect((t as unknown as { activeSlot: unknown }).activeSlot).not.toBeNull();
+      expect((t as unknown as { activeHost: unknown }).activeHost).toBe(firstHost);
+
+      // Releasing the first settlement lets it reach its terminal contract
+      // error and clear the host/slot it owns — nothing of the second call
+      // leaked into the shared state.
+      releaseSettlement("prompt_completed_without_agent_end");
+      await expect(first).rejects.toBeInstanceOf(PiCoreContractError);
+      expect((t as unknown as { activeHost: unknown }).activeHost).toBeNull();
+      expect((t as unknown as { activeSlot: unknown }).activeSlot).toBeNull();
+    } finally {
+      setSettlementGate(null);
+    }
   });
 });

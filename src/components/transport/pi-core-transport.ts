@@ -261,7 +261,18 @@ export class PiCoreTransport implements IKiroTransport {
     return host;
   }
 
+  /**
+   * #1691: one active provider prompt per transport. A second sendPrompt()
+   * is rejected before it can construct or assign a new slot, replace the
+   * active host, or reset shared per-call state — the first call keeps
+   * exclusive ownership of its host, slot, and finalizer until settlement.
+   * The rejection propagates to Spin as an execution failure once a durable
+   * run has bound, so the existing bounded failure release owns the run.
+   */
   private createActiveSlot(): ActivePiExecution {
+    if (this.activeSlot) {
+      throw new Error("Pi execution already active — overlapping sendPrompt rejected");
+    }
     let resolveHost!: (host: PiCoreExecutionHost) => void;
     let rejectHost!: (error: unknown) => void;
     const hostReady = new Promise<PiCoreExecutionHost>((resolve, reject) => {

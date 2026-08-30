@@ -198,20 +198,19 @@ describe("PiCoreTransport — #1531 execution slot steering", () => {
     const sendP1 = t.sendPrompt("session_1", "hello");
     const host1 = hostInstances[0]!;
 
-    const steerP = t.steer("steer me", makeLease({ sessionId: "session_1" }));
-    // A second send replaces the active slot before the first's host becomes ready.
-    const sendP2 = t.sendPrompt("session_1", "again");
-    const host2 = hostInstances[1]!;
-    expect(host2).not.toBe(host1);
+    // #1691: a second send while the first slot is active is rejected instead
+    // of replacing it — generation isolation is now guaranteed by admission,
+    // so a steer can never be routed to a successor host.
+    await expect(t.sendPrompt("session_1", "again")).rejects.toThrow(/already active/);
+    expect(hostInstances).toHaveLength(1);
 
+    // The first execution keeps its slot; its steer still delivers to host1.
     host1.becomeSteerable();
-    await expect(steerP).rejects.toThrow(/no longer current/);
-    expect(host1.steer).not.toHaveBeenCalled();
+    await t.steer("steer me", makeLease({ sessionId: "session_1" }));
+    expect(host1.steer).toHaveBeenCalledTimes(1);
 
     finishHost(host1);
-    finishHost(host2);
-    await sendP1.catch(() => {});
-    await sendP2.catch(() => {});
+    await sendP1;
   });
 
   it("steer after execution settlement is rejected, not silently dropped", async () => {
