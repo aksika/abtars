@@ -10,6 +10,7 @@
     "dev": "node --import tsx src/main.ts",
     "start": "node dist/main.js",
     "typecheck": "tsc --noEmit && tsc -p tsconfig.scripts.json",
+    "typecheck:tests": "tsc -p tsconfig.test.json --noEmit",
     "check-imports": "node scripts/check-imports.mjs && node scripts/check-silent-catches.mjs && node scripts/check-async-promises.mjs",
     "check:watchdog-shape": "node scripts/check-watchdog-shape.mjs",
     "smoke:deps-standalone": "bash scripts/smoke-deps-standalone.sh",

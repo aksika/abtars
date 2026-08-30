@@ -1,0 +1,13 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    // Test files are exempt from unused-code enforcement by decision (2026-08-30):
+    // best-effort tidying only, never a gate, and reviewers do not flag it. Without
+    // these two overrides the lane reports ~212 unused-import errors forever and can
+    // never be chained into a gate.
+    "noUnusedLocals": false,
+    "noUnusedParameters": false
+  },
+  "include": ["src/**/*.ts"],
+  "exclude": ["node_modules", "dist"]
+}
