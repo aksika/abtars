@@ -772,6 +772,87 @@ describe("createPiStreamFn", () => {
     vi.useRealTimers();
   });
 
+  // ── Context-overflow classification (#1745) ────────────────────────────────
+
+  function overflowAttempt(overflow: (message: unknown) => boolean, event: any): any {
+    return {
+      stream: makeFakeStream([event]),
+      pi: {
+        createProvider: vi.fn(),
+        isContextOverflow: vi.fn().mockImplementation(overflow),
+      },
+    };
+  }
+
+  it("classifies an overflow terminal message as context_exceeded with no status", async () => {
+    const fakePi = overflowAttempt(
+      () => true,
+      { type: "error", reason: "error", error: { role: "assistant", content: [], stopReason: "error", errorMessage: "This model's maximum context length is 128000 tokens. However, your messages resulted in 129000 tokens", usage: { input: 0, output: 0 } } },
+    );
+    const streamFn = createPiStreamFn({ policy, executionId: "exec_1", createPiAiAttempt: vi.fn().mockResolvedValue(fakePi) });
+    for await (const _ev of streamFn({ id: "test", api: "openai-completions", contextWindow: 128000 }, { messages: [] }, {})) { /* consume */ }
+
+    // The predicate receives the AssistantMessage (not a stringified error) and
+    // the model's context window — the evidence the seam used to discard.
+    expect(fakePi.pi.isContextOverflow).toHaveBeenCalledWith(
+      expect.objectContaining({ errorMessage: expect.stringContaining("maximum context length") }),
+      128000,
+    );
+    // #1326's no-fill handling finally has a producer: bucket level unchanged.
+    expect(registry.getBucketLevel("test-model", "https://api.test/v1")).toBe(0);
+    expect(registry.isCreditFailed("test-model", "https://api.test/v1")).toBe(false);
+  });
+
+  it("keeps bucket level unchanged for context_exceeded (no transient fill)", async () => {
+    const fakePi = overflowAttempt(
+      () => true,
+      { type: "error", reason: "error", error: { role: "assistant", content: [], stopReason: "error", errorMessage: "prompt is too long: 200000 tokens > 128000 maximum", usage: { input: 0, output: 0 } } },
+    );
+    const streamFn = createPiStreamFn({ policy, executionId: "exec_1", createPiAiAttempt: vi.fn().mockResolvedValue(fakePi) });
+    for await (const _ev of streamFn({ id: "test", api: "openai-completions" }, { messages: [] }, {})) { /* consume */ }
+
+    expect(registry.getBucketLevel("test-model", "https://api.test/v1")).toBe(0);
+  });
+
+  it("keeps credits sticky when a 402 message also mentions tokens", async () => {
+    // The overflow predicate even agrees — a definite credits verdict must win.
+    const fakePi = overflowAttempt(
+      () => true,
+      { type: "error", reason: "error", error: { role: "assistant", content: [], stopReason: "error", errorMessage: "API error 402: insufficient credits — token limit exceeded", usage: { input: 0, output: 0 } } },
+    );
+    const streamFn = createPiStreamFn({ policy, executionId: "exec_1", createPiAiAttempt: vi.fn().mockResolvedValue(fakePi) });
+    for await (const _ev of streamFn({ id: "test", api: "openai-completions" }, { messages: [] }, {})) { /* consume */ }
+
+    expect(registry.isCreditFailed("test-model", "https://api.test/v1")).toBe(true);
+    expect(registry.getBucketLevel("test-model", "https://api.test/v1")).toBe(100);
+  });
+
+  it("keeps rate_limit when a 429 message mentions token limit (reset-false-positive guard)", async () => {
+    const fakePi = overflowAttempt(
+      () => true,
+      { type: "error", reason: "error", error: { role: "assistant", content: [], stopReason: "error", errorMessage: 'API error 429: token limit reached {"retry_after": 60}', usage: { input: 0, output: 0 } } },
+    );
+    const streamFn = createPiStreamFn({ policy, executionId: "exec_1", createPiAiAttempt: vi.fn().mockResolvedValue(fakePi) });
+    for await (const _ev of streamFn({ id: "test", api: "openai-completions" }, { messages: [] }, {})) { /* consume */ }
+
+    // rate_limit fills 0.5 and arms the retry-after cooldown — not context_exceeded.
+    expect(registry.getBucketLevel("test-model", "https://api.test/v1")).toBe(50);
+    expect(registry.shouldSkip("test-model", "https://api.test/v1")).toBe(true);
+    expect(registry.isCreditFailed("test-model", "https://api.test/v1")).toBe(false);
+  });
+
+  it("keeps content_filter as transient (unchanged from today)", async () => {
+    const fakePi = overflowAttempt(
+      () => false,
+      { type: "error", reason: "error", error: { role: "assistant", content: [], stopReason: "error", errorMessage: "Provider finish_reason: content_filter", usage: { input: 0, output: 0 } } },
+    );
+    const streamFn = createPiStreamFn({ policy, executionId: "exec_1", createPiAiAttempt: vi.fn().mockResolvedValue(fakePi) });
+    for await (const _ev of streamFn({ id: "test", api: "openai-completions" }, { messages: [] }, {})) { /* consume */ }
+
+    expect(registry.getBucketLevel("test-model", "https://api.test/v1")).toBeGreaterThan(0);
+    expect(registry.isCreditFailed("test-model", "https://api.test/v1")).toBe(false);
+  });
+
   // ── Terminal credit failure callback (#1297) ───────────────────────────────
 
   it("reports credits_exhausted when every candidate (including pre-poisoned) is credit-failed", async () => {
@@ -861,6 +942,74 @@ describe("createPiStreamFn", () => {
     expect(attemptFactory).toHaveBeenCalledTimes(1);
     expect(attemptFactory.mock.calls[0]?.[0]).toMatchObject({ model: "second" });
     expect(events.some((e) => e.type === "text_delta" && e.delta === "recovered")).toBe(true);
+    expect(onTerminalFailure).not.toHaveBeenCalled();
+  });
+
+  // ── Terminal context-overflow failure (#1745) ──────────────────────────────
+
+  it("reports context_overflow when every attempted candidate overflowed", async () => {
+    const first = makeCandidate({ model: "first", endpoint: "https://first/v1" });
+    const second = makeCandidate({ model: "second", endpoint: "https://second/v1" });
+    const overflowPolicy = new FallbackPolicy([first, second], registry);
+
+    const onTerminalFailure = vi.fn();
+    const overflowEvent = { type: "error", reason: "error", error: { role: "assistant", content: [], stopReason: "error", errorMessage: "This model's maximum context length is 128000 tokens", usage: { input: 0, output: 0 } } };
+    const attemptFactory = vi.fn().mockResolvedValue(overflowAttempt(() => true, overflowEvent));
+    const streamFn = createPiStreamFn({ policy: overflowPolicy, executionId: "exec_1", createPiAiAttempt: attemptFactory, onTerminalFailure });
+    for await (const _ev of streamFn({ id: "test", api: "openai-completions" }, { messages: [] }, {})) { /* consume */ }
+
+    expect(attemptFactory).toHaveBeenCalledTimes(2);
+    expect(onTerminalFailure).toHaveBeenCalledTimes(1);
+    expect(onTerminalFailure).toHaveBeenCalledWith(expect.objectContaining({
+      code: "context_overflow",
+      retryable: false,
+      attemptedCandidates: 2,
+    }));
+  });
+
+  it("does NOT report a terminal code for a mix of overflow and auth failures", async () => {
+    const first = makeCandidate({ model: "first", endpoint: "https://first/v1" });
+    const second = makeCandidate({ model: "second", endpoint: "https://second/v1" });
+    const mixedPolicy = new FallbackPolicy([first, second], registry);
+
+    const onTerminalFailure = vi.fn();
+    const overflowEvent = { type: "error", reason: "error", error: { role: "assistant", content: [], stopReason: "error", errorMessage: "This model's maximum context length is 128000 tokens", usage: { input: 0, output: 0 } } };
+    const attemptFactory = vi.fn()
+      .mockResolvedValueOnce(overflowAttempt(() => true, overflowEvent))
+      .mockRejectedValueOnce(new Error("API error 401: invalid credentials"));
+    const streamFn = createPiStreamFn({ policy: mixedPolicy, executionId: "exec_1", createPiAiAttempt: attemptFactory, onTerminalFailure });
+    for await (const _ev of streamFn({ id: "test", api: "openai-completions" }, { messages: [] }, {})) { /* consume */ }
+
+    expect(attemptFactory).toHaveBeenCalledTimes(2);
+    expect(onTerminalFailure).not.toHaveBeenCalled();
+  });
+
+  it("still reports credits_exhausted when all candidates are credit-failed (#1297 unchanged)", async () => {
+    const first = makeCandidate({ model: "first", endpoint: "https://first/v1" });
+    const second = makeCandidate({ model: "second", endpoint: "https://second/v1" });
+    const creditsPolicy = new FallbackPolicy([first, second], registry);
+    registry.recordError("first", "https://first/v1", "credits");
+    registry.recordError("second", "https://second/v1", "credits");
+
+    const onTerminalFailure = vi.fn();
+    const streamFn = createPiStreamFn({ policy: creditsPolicy, executionId: "exec_1", onTerminalFailure });
+    for await (const _ev of streamFn({ id: "test", api: "openai-completions" }, { messages: [] }, {})) { /* consume */ }
+
+    expect(onTerminalFailure).toHaveBeenCalledTimes(1);
+    expect(onTerminalFailure).toHaveBeenCalledWith(expect.objectContaining({ code: "credits_exhausted" }));
+  });
+
+  it("reports no terminal code on an aborted execution", async () => {
+    const controller = new AbortController();
+    const onTerminalFailure = vi.fn();
+    const overflowEvent = { type: "error", reason: "error", error: { role: "assistant", content: [], stopReason: "error", errorMessage: "This model's maximum context length is 128000 tokens", usage: { input: 0, output: 0 } } };
+    const attemptFactory = vi.fn().mockImplementation(async () => {
+      controller.abort();
+      return overflowAttempt(() => true, overflowEvent);
+    });
+    const streamFn = createPiStreamFn({ policy, executionId: "exec_1", createPiAiAttempt: attemptFactory, onTerminalFailure });
+    for await (const _ev of streamFn({ id: "test", api: "openai-completions" }, { messages: [] }, { signal: controller.signal })) { /* consume */ }
+
     expect(onTerminalFailure).not.toHaveBeenCalled();
   });
 });

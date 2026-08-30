@@ -80,6 +80,7 @@ import { PiCoreTransport } from "./pi-core-transport.js";
 import { ProviderExecutionError } from "./provider-failure.js";
 import { ModelHealthRegistry } from "./model-health-registry.js";
 import type { ModelCandidate } from "./model-candidates.js";
+import { createPiStreamFn } from "./pi-stream-fn.js";
 
 function makeTransport(): PiCoreTransport {
   const candidate: ModelCandidate = {
@@ -125,6 +126,33 @@ describe("PiCoreTransport terminal provider failure (#1297)", () => {
 
     const text = await transport.sendPrompt("session", "continue");
     expect(text).toBe("committed output");
+  });
+
+  it("throws ProviderExecutionError carrying context_overflow when the stream boundary reports it (#1745)", async () => {
+    const transport = makeTransport();
+    await transport.initialize();
+    vi.mocked(createPiStreamFn).mockImplementationOnce((options: { onTerminalFailure?: (f: unknown) => void }) => {
+      options.onTerminalFailure?.({
+        code: "context_overflow",
+        retryable: false,
+        attemptedCandidates: 2,
+        message: "The request exceeds the context window of every configured model",
+      });
+      return vi.fn(() => ({
+        [Symbol.asyncIterator]: async function* () {
+          yield { type: "error", reason: "error", error: { role: "assistant", content: [], stopReason: "error", errorMessage: "All model candidates failed", usage: {} } };
+        },
+        result: async () => ({ role: "assistant", content: [], stopReason: "error", errorMessage: "All model candidates failed", usage: {} }),
+      }));
+    });
+
+    const err = await transport.sendPrompt("session", "continue").catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(ProviderExecutionError);
+    expect((err as ProviderExecutionError).failure).toMatchObject({
+      code: "context_overflow",
+      retryable: false,
+      attemptedCandidates: 2,
+    });
   });
 
   it("does not leak terminal-failure state into the next execution", async () => {

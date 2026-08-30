@@ -10,8 +10,14 @@ vi.mock("./pi-ai-adapter.js", async (importOriginal) => {
   return {
     ...actual!,
     createPiAiAssistantStream: vi.fn().mockResolvedValue({
-      [Symbol.asyncIterator]: async function* () {
-        yield { type: "done", reason: "stop", message: { role: "assistant", content: "", stopReason: "stop", usage: { input: 0, output: 0 } } };
+      stream: {
+        [Symbol.asyncIterator]: async function* () {
+          yield { type: "done", reason: "stop", message: { role: "assistant", content: "", stopReason: "stop", usage: { input: 0, output: 0 } } };
+        },
+      },
+      pi: {
+        createProvider: vi.fn(),
+        isContextOverflow: () => false,
       },
     }),
   };

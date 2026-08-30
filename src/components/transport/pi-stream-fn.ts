@@ -18,9 +18,10 @@ import type { ProviderTerminalFailure } from "./provider-failure.js";
 import type { ExecutionTelemetryScope, ProviderCallTerminal } from "../execution-telemetry.js";
 import type { StreamFn } from "./pi-core-types.js";
 import { buildPiModel, pickPiApi, createPiAiAssistantStream } from "./pi-ai-adapter.js";
+import type { PiAiModule } from "./pi-ai-adapter.js";
 import { randomUUID } from "node:crypto";
 import { ProviderAttemptRunner } from "./provider-attempt-runner.js";
-import type { ProviderAttemptExit, ProviderAttemptFactory } from "./provider-attempt-runner.js";
+import type { ProviderAttemptBundle, ProviderAttemptExit, ProviderAttemptFactory } from "./provider-attempt-runner.js";
 
 const TAG = "pi-stream-fn";
 
@@ -124,6 +125,32 @@ function classifyAttemptError(err: unknown): { kind: ErrorKind; retryAfterMs?: n
   return { kind: classifyError(status, msg), retryAfterMs: parseRetryAfter(err) };
 }
 
+/**
+ * #1745: classify a provider attempt failure from the terminal `AssistantMessage`
+ * pi actually produced. The status classifier runs first; the overflow verdict
+ * may reclaim ONLY a `transient` outcome. Widening this — letting overflow
+ * displace a definite auth/credits/rate-limit verdict — would let a mistaken
+ * verdict reset a live conversation, and a 429 whose text merely mentions
+ * tokens would destroy the session. Credits stickiness (#1296), auth demotion
+ * and rate-limit cooldown are policy decisions; overflow is a request-shape
+ * fact that only the pi predicate (26 provider phrasings, silent and
+ * length-stop overflow) can express.
+ */
+function classifyAttemptFailure(
+  terminal: AssistantMessage | undefined,
+  contextWindow: number | undefined,
+  pi: PiAiModule | undefined,
+): { kind: ErrorKind; retryAfterMs?: number } {
+  const errorMessage = terminal?.errorMessage ?? "";
+  const status = parseErrorStatus(errorMessage);
+  const kind = classifyError(status, errorMessage);
+  const retryAfterMs = parseRetryAfter(errorMessage);
+  if (kind === "transient" && terminal && pi?.isContextOverflow(terminal, contextWindow)) {
+    return { kind: "context_exceeded" };
+  }
+  return { kind, retryAfterMs };
+}
+
 function isOpenAiCompatible(api: Api): boolean {
   return api === "openai-completions" || api === "openai-responses";
 }
@@ -144,7 +171,7 @@ async function defaultCreatePiAiAttempt(
   context: Context,
   _options: SimpleStreamOptions,
   signal: AbortSignal,
-): Promise<AssistantMessageEventStream> {
+): Promise<ProviderAttemptBundle> {
   const piCandidate: import("./pi-ai-adapter.js").PiAiCandidate = {
     model: candidate.model,
     endpoint: candidate.endpoint,
@@ -154,13 +181,13 @@ async function defaultCreatePiAiAttempt(
     maxOutput: model.maxTokens,
     contextWindow: model.contextWindow,
   };
-  const source = await createPiAiAssistantStream(piCandidate, model, context, _options, signal);
+  const bundle = await createPiAiAssistantStream(piCandidate, model, context, _options, signal);
   let terminal: AssistantMessage | undefined;
   let resolveResult: ((message: AssistantMessage) => void) | undefined;
   const resultPromise = new Promise<AssistantMessage>((resolve) => { resolveResult = resolve; });
   async function* iterator(): AsyncGenerator<AssistantMessageEvent> {
     try {
-      for await (const event of source) {
+      for await (const event of bundle.stream) {
         yield event;
         if (isTerminal(event)) terminal = terminalResult(event) ?? terminal;
         if (event.type === "done") { resolveResult?.(event.message); terminal = event.message; }
@@ -172,9 +199,14 @@ async function defaultCreatePiAiAttempt(
     }
   }
   return {
-    [Symbol.asyncIterator]: () => iterator(),
-    result: () => resultPromise,
-  } as unknown as AssistantMessageEventStream;
+    stream: {
+      [Symbol.asyncIterator]: () => iterator(),
+      result: () => resultPromise,
+    } as unknown as AssistantMessageEventStream,
+    // #1745: the narrowed module that created this stream carries the overflow
+    // predicate — the execution owner classifies terminal messages through it.
+    pi: bundle.pi,
+  };
 }
 
 function wrapEventStream(source: AsyncGenerator<AssistantMessageEvent>, fallback: () => AssistantMessage): AssistantMessageEventStream {
@@ -218,6 +250,11 @@ export function createPiStreamFn(options: AbtarsPiStreamFnOptions): StreamFn {
         ? [firstSelected, ...options.policy.candidates.filter((candidate) => candidate !== firstSelected)]
         : [];
       let attemptedCandidateCount = 0;
+      // #1745: execution-scoped overflow count. Overflow is a property of THIS
+      // request's size, not of any candidate's health. Never promote it to the
+      // shared ModelHealthRegistry — a shared sticky overflow flag would exclude
+      // healthy models from later, smaller requests.
+      let overflowFailures = 0;
       for (const candidate of orderedCandidates) {
         const selected = options.policy.selectModel();
         if (!selected || selected !== candidate) continue;
@@ -289,6 +326,7 @@ export function createPiStreamFn(options: AbtarsPiStreamFnOptions): StreamFn {
             if (result === "success") {
               options.policy.recordSuccess(candidate);
             } else if (result !== "aborted") {
+              if (kind === "context_exceeded") overflowFailures++;
               poisonCandidate(kind, retryAfterMs);
             }
           };
@@ -345,7 +383,7 @@ export function createPiStreamFn(options: AbtarsPiStreamFnOptions): StreamFn {
                   break;
                 }
                 if (failed) {
-                  const classified = classifyAttemptError(terminal?.errorMessage ?? "");
+                  const classified = classifyAttemptFailure(terminal, model.contextWindow, runner.bundle?.pi);
                   finishAttempt(event.type === "error" && event.reason === "aborted" ? "aborted" : "failure", terminal, classified.kind, classified.retryAfterMs);
                   break;
                 }
@@ -359,7 +397,7 @@ export function createPiStreamFn(options: AbtarsPiStreamFnOptions): StreamFn {
               if (attemptCommitted && isTerminal(event)) {
                 const result = terminalResult(event);
                 const failed = event.type === "error" || result?.stopReason === "error" || result?.stopReason === "aborted";
-                const classified = classifyAttemptError(terminal?.errorMessage ?? "");
+                const classified = classifyAttemptFailure(terminal, model.contextWindow, runner.bundle?.pi);
                 finishAttempt(failed
                   ? (event.type === "error" && event.reason === "aborted" ? "aborted" : "failure")
                   : "success", terminal, failed ? classified.kind : undefined, failed ? classified.retryAfterMs : undefined);
@@ -466,6 +504,18 @@ export function createPiStreamFn(options: AbtarsPiStreamFnOptions): StreamFn {
           retryable: false,
           attemptedCandidates: attemptedCandidateCount,
           message: "All model candidates are blocked by provider credit exhaustion",
+        });
+      } else if (!signal.aborted && attemptedCandidateCount > 0 && overflowFailures === attemptedCandidateCount) {
+        // #1745: every attempted candidate rejected the request as over-context.
+        // Mirrors the credits predicate's same-cause-for-every-candidate
+        // semantics; a mixed execution (overflow + auth) reports no terminal
+        // code so the session is not reset on ambiguous evidence. Credits keeps
+        // precedence — at most one terminal code is emitted per execution.
+        options.onTerminalFailure?.({
+          code: "context_overflow",
+          retryable: false,
+          attemptedCandidates: attemptedCandidateCount,
+          message: "The request exceeds the context window of every configured model",
         });
       }
       yield terminalError(model, signal.aborted ? "aborted" : "error", signal.aborted ? "Execution cancelled" : "All model candidates failed");

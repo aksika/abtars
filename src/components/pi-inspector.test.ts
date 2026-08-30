@@ -31,7 +31,7 @@ function makeInstallation(aiRoot: string, tuiRoot: string, agentCoreRoot: string
 function makeAiPackage(root: string, exports: unknown): void {
   mkdirSync(join(root, "dist", "api"), { recursive: true });
   mkdirSync(join(root, "dist", "providers"), { recursive: true });
-  writeFileSync(join(root, "dist", "index.js"), "export const createProvider = () => {};\nexport const isRetryableAssistantError = () => false;\n");
+  writeFileSync(join(root, "dist", "index.js"), "export const createProvider = () => {};\nexport const isContextOverflow = () => false;\n");
   writeFileSync(join(root, "dist", "api", "openai-completions.js"), "export const stream = async function*(){};\nexport const streamSimple = async function*(){};\n");
   writeFileSync(join(root, "dist", "providers", "all.js"), "export const builtinModels = () => ({});\n");
   writeFileSync(join(root, "package.json"), JSON.stringify({ name: "@earendil-works/pi-ai", exports }));

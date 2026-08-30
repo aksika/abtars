@@ -2,8 +2,22 @@ import type { Api, AssistantMessageEvent, AssistantMessageEventStream, Context, 
 import { logDebug } from "../logger.js";
 import { logAndSwallow } from "../log-and-swallow.js";
 import type { ModelCandidate } from "./model-candidates.js";
+import type { PiAiModule } from "./pi-ai-adapter.js";
 
 const TAG = "provider-attempt-runner";
+
+/** #1745: normalized attempt result — the stream plus, when the attempt went
+ *  through the adapter path, the narrowed pi-ai module carrying the overflow
+ *  predicate. Legacy factories returning a bare stream yield `pi: undefined`,
+ *  which keeps the status-based classification as the floor. */
+export interface ProviderAttemptBundle {
+  stream: AssistantMessageEventStream;
+  pi?: PiAiModule;
+}
+
+export function isProviderAttemptBundle(value: AssistantMessageEventStream | ProviderAttemptBundle): value is ProviderAttemptBundle {
+  return typeof value === "object" && value !== null && "stream" in value;
+}
 
 /** #1506: One whole provider attempt — acquisition AND streaming — owned by a
  *  single liveness guard armed before the first external await. */
@@ -13,7 +27,7 @@ export type ProviderAttemptFactory = (
   context: Context,
   options: SimpleStreamOptions,
   signal: AbortSignal,
-) => Promise<AssistantMessageEventStream>;
+) => Promise<AssistantMessageEventStream | ProviderAttemptBundle>;
 
 export type ProviderAttemptPhase = "acquiring" | "streaming" | "terminal" | "cleanup";
 
@@ -48,7 +62,7 @@ export interface ProviderAttemptRunnerOptions {
 
 interface AcquireOutcome {
   kind: "acquired" | "failed";
-  stream?: AssistantMessageEventStream;
+  result?: AssistantMessageEventStream | ProviderAttemptBundle;
   error?: unknown;
 }
 
@@ -74,6 +88,7 @@ export class ProviderAttemptRunner {
   private readonly now: () => number;
   private removeOuterAbortListener: (() => void) | null = null;
   private _phase: ProviderAttemptPhase = "acquiring";
+  private _bundle: ProviderAttemptBundle | null = null;
 
   constructor(opts: ProviderAttemptRunnerOptions) {
     this.opts = opts;
@@ -91,6 +106,13 @@ export class ProviderAttemptRunner {
 
   get phase(): ProviderAttemptPhase {
     return this._phase;
+  }
+
+  /** #1745: normalized attempt result, set once acquisition settles. The
+   *  execution owner reads `pi` from here to classify a terminal message —
+   *  never re-derived from error text downstream. */
+  get bundle(): ProviderAttemptBundle | null {
+    return this._bundle;
   }
 
   /** Candidate-local abort signal shared with the provider request. */
@@ -168,8 +190,8 @@ export class ProviderAttemptRunner {
    */
   private detachAcquisition(acquired: Promise<AcquireOutcome>): void {
     void acquired.then((result) => {
-      if (result.kind === "acquired" && result.stream) {
-        return this.closeStreamBestEffort(result.stream);
+      if (result.kind === "acquired" && result.result) {
+        return this.closeStreamBestEffort(isProviderAttemptBundle(result.result) ? result.result.stream : result.result);
       }
       return undefined;
     }).catch((err) => {
@@ -195,7 +217,7 @@ export class ProviderAttemptRunner {
         { ...this.opts.options, signal: this.attemptSignal },
         this.attemptSignal,
       )).then(
-        (stream) => ({ kind: "acquired" as const, stream }),
+        (result) => ({ kind: "acquired" as const, result }),
         (error) => ({ kind: "failed" as const, error }),
       );
       const acquireOutcome = await Promise.race([acquiredPromise, acquireGuard.guard]);
@@ -220,12 +242,14 @@ export class ProviderAttemptRunner {
         yield { kind: "failed", phase: "acquiring", error: acquireOutcome.error };
         return;
       }
-      const stream = acquireOutcome.stream;
-      if (!stream) {
+      const raw = acquireOutcome.result;
+      if (!raw) {
         this.setPhase("terminal");
         yield { kind: "failed", phase: "acquiring", error: new Error("attempt factory resolved without a stream") };
         return;
       }
+      this._bundle = isProviderAttemptBundle(raw) ? raw : { stream: raw, pi: undefined };
+      const stream = this._bundle.stream;
 
       // ── streaming ─────────────────────────────────────────────────────────
       this.setPhase("streaming");

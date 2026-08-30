@@ -41,6 +41,7 @@ import type {
   SimpleStreamOptions,
   Provider,
   CreateProviderOptions,
+  AssistantMessageEventStream,
 } from "@earendil-works/pi-ai";
 
 // #1746: Pi's authoritative thinking-level clamp, captured from the runtime
@@ -160,7 +161,8 @@ export interface PiAiConversation {
 /** The pi-ai root module surface this adapter uses, narrowed from the lazy require. */
 export interface PiAiModule {
   createProvider(input: CreateProviderOptions): Provider;
-  isRetryableAssistantError(message: AssistantMessage): boolean;
+  /** #1745: overflow predicate — the one ErrorKind an HTTP status cannot express. */
+  isContextOverflow(message: AssistantMessage, contextWindow?: number): boolean;
 }
 
 // ─── error tagging ──────────────────────────────────────────────────────────
@@ -401,13 +403,21 @@ async function defaultLoadApi(api: Api): Promise<ProviderStreams> {
   return mod as unknown as ProviderStreams;
 }
 
+/** #1745: the stream plus the narrowed pi-ai module loaded for the attempt —
+ *  the one layer that holds the provider's `AssistantMessage` and the
+ *  overflow predicate together. */
+export interface PiAiAssistantBundle {
+  stream: AssistantMessageEventStream;
+  pi: PiAiModule;
+}
+
 export async function createPiAiAssistantStream(
   candidate: PiAiCandidate,
   model: Model<Api>,
   context: Context,
   options: SimpleStreamOptions,
   signal: AbortSignal,
-): Promise<import("@earendil-works/pi-ai").AssistantMessageEventStream> {
+): Promise<PiAiAssistantBundle> {
   const api = pickPiApi(candidate.apiFormat);
   const pi = await (defaultLoadPi)();
   const apiMod = await defaultLoadApi(api);
@@ -427,10 +437,13 @@ export async function createPiAiAssistantStream(
     models: [model],
     api: { stream: apiMod.stream, streamSimple: apiMod.streamSimple },
   });
-  return provider.streamSimple(model, context, {
-    ...options,
-    apiKey: candidate.apiKey,
-    signal,
-    maxRetries: 0,
-  });
+  return {
+    stream: provider.streamSimple(model, context, {
+      ...options,
+      apiKey: candidate.apiKey,
+      signal,
+      maxRetries: 0,
+    }),
+    pi,
+  };
 }

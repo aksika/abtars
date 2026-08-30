@@ -178,7 +178,7 @@ export async function inspectPiRuntime(): Promise<PiRuntimeReport> {
   const tui = await loadRuntimeModule(installation, "pi-tui", { package: "@earendil-works/pi-tui" }, checks);
   const codingAgent = await loadRuntimeModule(installation, "pi-coding-agent", { package: "@earendil-works/pi-coding-agent" }, checks);
 
-  checkExports(checks, "pi-ai", ai, ["createProvider", "clampThinkingLevel"]);
+  checkExports(checks, "pi-ai", ai, ["createProvider", "clampThinkingLevel", "isContextOverflow"]);
   checkAgentCore(checks, agentCore);
   checkExports(checks, "pi-tui", tui, REQUIRED_PI_TUI_EXPORTS);
   checkExports(checks, "pi-coding-agent", codingAgent, REQUIRED_PI_CODING_AGENT_EXPORTS);
