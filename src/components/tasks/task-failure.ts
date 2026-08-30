@@ -103,6 +103,7 @@ const KNOWN_CODES: Readonly<Record<TaskFailureCategory, ReadonlySet<string>>> = 
     "criterion_unevidenced",
     "contract_uncovered",
     "project_blocked",
+    "salvage_exhausted",
   ]),
 };
 

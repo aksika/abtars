@@ -135,6 +135,7 @@ export class OrcProjectRunStore {
         started_at            TEXT,
         released_at           TEXT,
         updated_at            TEXT NOT NULL,
+        salvage_for_run_id    TEXT,
         UNIQUE(project_card_id, ownership_generation),
         UNIQUE(project_card_id, intent_key, ownership_generation)
       );
@@ -170,6 +171,7 @@ export class OrcProjectRunStore {
     this.migrateTaskRunId();
     this.migrateFuseClearedGeneration();
     this.migrateBridgeSequence();
+    this.migrateSalvageForRunId();
   }
 
   /** Global claim ordering for bridge-wide fuse resets; per-card generations are not comparable. */
@@ -218,6 +220,18 @@ export class OrcProjectRunStore {
     if (columns.some(c => c.name === "task_run_id")) return;
     this.db.exec(`ALTER TABLE orc_project_runs ADD COLUMN task_run_id TEXT`);
     this.db.exec(`CREATE INDEX IF NOT EXISTS idx_orc_runs_task_run ON orc_project_runs(project_card_id, task_run_id)`);
+  }
+
+  private migrateSalvageForRunId(): void {
+    const columns = this.db.prepare(`PRAGMA table_info(orc_project_runs)`).all() as Array<{ name: string }>;
+    if (!columns.some(c => c.name === "salvage_for_run_id")) {
+      this.db.exec(`ALTER TABLE orc_project_runs ADD COLUMN salvage_for_run_id TEXT`);
+    }
+    this.db.exec(`
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_one_orc_salvage_per_generation
+        ON orc_project_runs(project_card_id, project_generation)
+        WHERE salvage_for_run_id IS NOT NULL
+    `);
   }
 
   /**
@@ -372,14 +386,254 @@ export class OrcProjectRunStore {
         INSERT INTO orc_project_runs
           (id, intent_key, intent_kind, intent_ref, goal, project_card_id,
            project_generation, ownership_generation, owner_peer, owner_instance_id,
-           global_sequence, origin_kind, origin_peer, task_run_id, state, created_at, updated_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'scheduled', ?, ?)
+           global_sequence, origin_kind, origin_peer, task_run_id, salvage_for_run_id, state, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'scheduled', ?, ?)
       `).run(runId, intentKey, input.intentKind, input.intentRef ?? null, input.goal, input.projectCardId,
         projectGeneration, nextGen, ownerPeer, ownerInstanceId,
-        globalCounter.sequence, input.originKind, originPeer, input.taskRunId ?? null, now, now);
+        globalCounter.sequence, input.originKind, originPeer, input.taskRunId ?? null, null, now, now);
 
       const row = this.db.prepare(`SELECT * FROM orc_project_runs WHERE id = ?`).get(runId) as unknown as OrcProjectRunRow;
       return { kind: "claimed" as const, context: buildContextFromRow(row) };
+    });
+  }
+
+  /**
+   * #1729: salvage claim — one salvage per generation, before review.
+   * The caller (coordinator) supplies only projectCardId and durable identity;
+   * the store derives the primary row, generation, and goal. Returns
+   * salvage_not_needed / salvage_ineligible / salvage_exhausted / fuse_open /
+   * occurrence_terminal / busy as per the exact transaction order.
+   */
+  claimSalvageExecution(
+    input: Omit<OrcClaimInput, "goal" | "intentKind" | "intentRef" | "expectedProjectGeneration">,
+    ownerPeer: string,
+    ownerInstanceId: string,
+  ): OrcRunClaimResult {
+    const guardrails = this.effectiveGuardrails();
+    return this.db.transaction(() => {
+      // 1. Supervision must be executing at current generation
+      const sup = this.db.prepare(`SELECT state, generation, contract_id FROM project_supervision WHERE project_card_id = ?`).get(input.projectCardId) as
+        | { state: string; generation: number; contract_id: string }
+        | undefined;
+      if (!sup || sup.state !== "executing") {
+        return { kind: "conflict" as const, reason: "salvage_ineligible" as const };
+      }
+      const projectGeneration = sup.generation;
+
+      // 2. Root card must be task-sourced with matching source_id and active occurrence
+      const card = this.db.prepare(`SELECT source, source_id FROM kanban_board WHERE id = ?`).get(input.projectCardId) as
+        | { source: string; source_id: string | null }
+        | undefined;
+      if (!card || card.source !== "task" || !card.source_id) {
+        return { kind: "conflict" as const, reason: "salvage_ineligible" as const };
+      }
+      const taskRunId = input.taskRunId ?? card.source_id;
+      if (!taskRunId || card.source_id !== taskRunId) {
+        return { kind: "conflict" as const, reason: "salvage_ineligible" as const };
+      }
+      // Check occurrence is active — use inspect via direct read to avoid catalog unavailable misclassification
+      // We treat missing run or terminal as terminal, unavailable as conflict unavailable
+      // For salvage we need active; terminal → occurrence_terminal, unavailable → occurrence_unavailable
+      try {
+        const runLookup = this.db.prepare(`SELECT finished_at, run_id FROM task_runs WHERE run_id = ?`).get(taskRunId) as
+          | { finished_at: string | null; run_id: string }
+          | undefined;
+        if (!runLookup || runLookup.finished_at !== null) {
+          return { kind: "conflict" as const, reason: "occurrence_terminal" as const };
+        }
+      } catch {
+        return { kind: "conflict" as const, reason: "occurrence_unavailable" as const };
+      }
+
+      // 3. Deadlines must be open (both scheduled due_at and contract hard_deadline)
+      const now = Date.now();
+      try {
+        const schedRow = this.db.prepare(`SELECT due_at FROM kanban_board WHERE id = ?`).get(input.projectCardId) as { due_at: string | null } | undefined;
+        if (schedRow?.due_at) {
+          const due = Date.parse(schedRow.due_at);
+          if (Number.isFinite(due) && now >= due) return { kind: "conflict" as const, reason: "deadline_expired" as const };
+        }
+        const contractRow = this.db.prepare(`SELECT contract_json FROM project_contracts WHERE project_card_id = ?`).get(input.projectCardId) as
+          | { contract_json: string }
+          | undefined;
+        if (contractRow) {
+          try {
+            const parsed = JSON.parse(contractRow.contract_json) as { limits?: { hard_deadline_at?: string } };
+            if (parsed.limits?.hard_deadline_at) {
+              const hd = Date.parse(parsed.limits.hard_deadline_at);
+              if (Number.isFinite(hd) && now >= hd) return { kind: "conflict" as const, reason: "deadline_expired" as const };
+            }
+          } catch { /* ignore malformed */ }
+        }
+      } catch {
+        return { kind: "conflict" as const, reason: "salvage_ineligible" as const };
+      }
+
+      // 4. No live Orc row for this project
+      const live = this.db.prepare(`SELECT id FROM orc_project_runs WHERE project_card_id = ? AND state IN ('scheduled','dispatching','running') LIMIT 1`).get(input.projectCardId) as { id: string } | undefined;
+      if (live) {
+        return { kind: "busy" as const, activeRunId: live.id };
+      }
+
+      // 5. No open review case and accepted terminal lanes ready
+      try {
+        const openCase = this.db.prepare(`SELECT 1 FROM project_review_cases WHERE project_card_id = ? AND status = 'open' LIMIT 1`).get(input.projectCardId);
+        if (openCase) return { kind: "conflict" as const, reason: "salvage_ineligible" as const };
+      } catch {
+        return { kind: "conflict" as const, reason: "salvage_ineligible" as const };
+      }
+      try {
+        const totalRow = this.db.prepare(`SELECT COUNT(*) AS n FROM kanban_board WHERE parent_id = ? AND type = 'W'`).get(input.projectCardId) as { n: number } | undefined;
+        const total = totalRow?.n ?? 0;
+        if (total === 0) return { kind: "conflict" as const, reason: "salvage_ineligible" as const };
+        const readyRow = this.db.prepare(`
+          SELECT COUNT(*) AS n FROM kanban_board AS k
+           WHERE k.parent_id = ? AND k.type = 'W' AND k.status = 'done'
+             AND EXISTS (
+               SELECT 1 FROM worker_attempts AS wa
+                WHERE wa.card_id = k.id
+                  AND wa.ordinal = (SELECT MAX(ordinal) FROM worker_attempts WHERE card_id = k.id)
+                  AND wa.lifecycle = 'completed'
+                  AND EXISTS (SELECT 1 FROM worker_results AS wr WHERE wr.attempt_id = wa.id)
+             )
+        `).get(input.projectCardId) as { n: number } | undefined;
+        if ((readyRow?.n ?? 0) !== total) return { kind: "conflict" as const, reason: "salvage_ineligible" as const };
+      } catch {
+        return { kind: "conflict" as const, reason: "salvage_ineligible" as const };
+      }
+
+      // 6. Newest project_execution row for same card, generation, task_run_id
+      const newest = this.db.prepare(`
+        SELECT id, state, outcome, failure_code, started_at, salvage_for_run_id, goal, ownership_generation
+        FROM orc_project_runs
+        WHERE project_card_id = ? AND project_generation = ? AND task_run_id = ? AND intent_kind = 'project_execution'
+        ORDER BY ownership_generation DESC LIMIT 1
+      `).get(input.projectCardId, projectGeneration, taskRunId) as
+        | { id: string; state: string; outcome: string | null; failure_code: string | null; started_at: string | null; salvage_for_run_id: string | null; goal: string; ownership_generation: number }
+        | undefined;
+      if (!newest) return { kind: "conflict" as const, reason: "salvage_ineligible" as const };
+      // If newest is successful primary or successful salvage → not needed
+      if (newest.outcome === "completed") {
+        return { kind: "conflict" as const, reason: "salvage_not_needed" as const };
+      }
+      // If newest is a failed/cancelled/stale salvage (salvage marker not null) → exhausted
+      if (newest.salvage_for_run_id !== null) {
+        return { kind: "conflict" as const, reason: "salvage_exhausted" as const };
+      }
+      // Must be primary: salvage_for_run_id IS NULL, state released, outcome failed, started_at not null, failure code allowlisted
+      const allowedCodes = new Set(["prompt_round_limit", "provider_failure", "intent_postcondition_unsatisfied"]);
+      if (newest.salvage_for_run_id !== null || newest.state !== "released" || newest.outcome !== "failed" || !newest.started_at || !newest.failure_code || !allowedCodes.has(newest.failure_code)) {
+        return { kind: "conflict" as const, reason: "salvage_ineligible" as const };
+      }
+      const primaryRow = newest;
+
+      // 7. No existing salvage row for this generation
+      const existingSalvage = this.db.prepare(`SELECT 1 FROM orc_project_runs WHERE project_card_id = ? AND project_generation = ? AND salvage_for_run_id IS NOT NULL LIMIT 1`).get(input.projectCardId, projectGeneration);
+      if (existingSalvage) {
+        return { kind: "conflict" as const, reason: "salvage_exhausted" as const };
+      }
+
+      // 8. Fuses and thresholds — capture guardrails, check card/bridge fuses
+      // For salvage, the terminal_execution_attempt fuse is bypassed for the exact primary row
+      // We do this by checking fuse state but ignoring terminal_execution_attempt if primary exists
+      const cardFuseRow = this.db.prepare(`SELECT opened_at, trip_reason, cleared_generation FROM orc_fuse_state WHERE scope = ?`).get(`card:${input.projectCardId}`) as
+        | { opened_at: string | null; trip_reason: string | null; cleared_generation: number | null }
+        | undefined;
+      if (cardFuseRow?.opened_at) {
+        // If fuse is terminal_execution_attempt and we have proven primary, allow; otherwise refuse
+        if (cardFuseRow.trip_reason !== "terminal_execution_attempt") {
+          return { kind: "not_actionable" as const, reason: "fuse_open" as const };
+        }
+        // Allow bypass only for the exact primary; otherwise still blocked (should not happen as we checked primary)
+        // If trip reason is terminal_execution_attempt but primary is the one that tripped, we allow
+        // For simplicity, allow salvage to bypass this one fuse
+      } else {
+        // Check thresholds via evaluateCardFuse-like logic but without terminal check
+        // For brevity, reuse evaluateCardFuse but with a flag to allow terminal bypass
+        // We manually check failed attempts and no_progress without terminal
+        const clearedGen = cardFuseRow?.cleared_generation ?? 0;
+        const nowSec = Math.floor(Date.now() / 1000);
+        const failedFrom = nowSec - Math.floor(CARD_FAILED_ATTEMPTS_WINDOW_MS / 1000);
+        const failedAttempts = this.db.prepare(`
+          SELECT COUNT(*) AS n FROM orc_project_runs
+           WHERE project_card_id = ? AND state = 'released'
+             AND outcome = 'failed'
+             AND ownership_generation > ?
+             AND unixepoch(created_at) >= ?
+        `).get(input.projectCardId, clearedGen, failedFrom) as { n: number };
+        if (failedAttempts.n >= guardrails.sameCard.failedOrNoProgress.max) {
+          return { kind: "not_actionable" as const, reason: "fuse_open" as const };
+        }
+        const churnFrom = nowSec - Math.floor(CARD_NO_PROGRESS_WINDOW_MS / 1000);
+        const noProgressStarts = this.db.prepare(`
+          SELECT COUNT(*) AS n FROM orc_project_runs
+           WHERE project_card_id = ? AND started_at IS NOT NULL
+             AND state IN ('released','superseded')
+             AND outcome IS NOT NULL AND outcome != 'completed' AND outcome != 'failed'
+             AND ownership_generation > ?
+             AND unixepoch(created_at) >= ?
+        `).get(input.projectCardId, clearedGen, churnFrom) as { n: number };
+        if (noProgressStarts.n >= guardrails.sameCard.startsWithoutProgress.max) {
+          return { kind: "not_actionable" as const, reason: "fuse_open" as const };
+        }
+      }
+      const bridgeFuseRow = this.db.prepare(`SELECT opened_at FROM orc_fuse_state WHERE scope = 'bridge'`).get() as { opened_at: string | null } | undefined;
+      if (bridgeFuseRow?.opened_at) {
+        return { kind: "not_actionable" as const, reason: "fuse_open" as const };
+      }
+      // Bridge windows
+      const nowSec2 = Math.floor(Date.now() / 1000);
+      const startsBase = `FROM orc_project_runs WHERE started_at IS NOT NULL AND global_sequence > ? AND unixepoch(created_at) >= ?`;
+      const clearedSequence = (this.db.prepare(`SELECT cleared_global_sequence FROM orc_fuse_state WHERE scope = 'bridge'`).get() as { cleared_global_sequence: number | null } | undefined)?.cleared_global_sequence ?? 0;
+      const starts5mFrom = nowSec2 - Math.floor(BRIDGE_STARTS_5M_WINDOW_MS / 1000);
+      const starts5m = this.db.prepare(`SELECT COUNT(*) AS n ${startsBase}`).get(clearedSequence, starts5mFrom) as { n: number };
+      if (starts5m.n >= guardrails.bridge.starts5m) return { kind: "not_actionable" as const, reason: "fuse_open" as const };
+      const starts1hFrom = nowSec2 - Math.floor(BRIDGE_STARTS_HOUR_WINDOW_MS / 1000);
+      const starts1h = this.db.prepare(`SELECT COUNT(*) AS n ${startsBase}`).get(clearedSequence, starts1hFrom) as { n: number };
+      if (starts1h.n >= guardrails.bridge.starts1h) return { kind: "not_actionable" as const, reason: "fuse_open" as const };
+      const rows5mFrom = nowSec2 - Math.floor(BRIDGE_ROWS_5M_WINDOW_MS / 1000);
+      const rows5m = this.db.prepare(`SELECT COUNT(*) AS n FROM orc_project_runs WHERE global_sequence > ? AND unixepoch(created_at) >= ?`).get(clearedSequence, rows5mFrom) as { n: number };
+      if (rows5m.n >= guardrails.bridge.newRunRows5m) return { kind: "not_actionable" as const, reason: "fuse_open" as const };
+
+      // 9. Allocate counters and insert salvage row
+      const counter = this.db.prepare(`UPDATE orc_project_ownership_counters SET next_generation = next_generation + 1 WHERE project_card_id = ?`).run(input.projectCardId);
+      let nextGen: number;
+      if (counter.changes === 0) {
+        nextGen = 1;
+        this.db.prepare(`INSERT INTO orc_project_ownership_counters (project_card_id, next_generation) VALUES (?, 2)`).run(input.projectCardId);
+      } else {
+        const row = this.db.prepare(`SELECT next_generation FROM orc_project_ownership_counters WHERE project_card_id = ?`).get(input.projectCardId) as { next_generation: number };
+        nextGen = row.next_generation - 1;
+      }
+      const runId = `or_${input.projectCardId}_${nextGen}_${Date.now()}`;
+      const globalCounter = this.db.prepare(`UPDATE orc_global_run_counter SET next_sequence = next_sequence + 1 WHERE singleton = 1 RETURNING next_sequence - 1 AS sequence`).get() as { sequence: number };
+      const nowIso = new Date().toISOString();
+      const intentKey = deriveIntentKey("project_execution", input.projectCardId, projectGeneration, undefined);
+      const admittedOrigin = input.cardSource === "peer" ? "peer" : "local";
+      const authenticatedPeer = input.originPeer ?? input.sourcePeer ?? null;
+      const originPeer = admittedOrigin === "peer" ? authenticatedPeer : null;
+      const salvageGoal = `[SALVAGE SYNTHESIS] Project #${input.projectCardId} has accepted terminal Worker lanes. Do not spawn, retry, or cancel Workers. Read their durable results with check_workers, synthesize the final report, write the declared report artifact, then call yield_turn so the Reconciler can create the review case.\n\n${primaryRow.goal}`;
+      try {
+        this.db.prepare(`
+          INSERT INTO orc_project_runs
+            (id, intent_key, intent_kind, intent_ref, goal, project_card_id,
+             project_generation, ownership_generation, owner_peer, owner_instance_id,
+             global_sequence, origin_kind, origin_peer, task_run_id, salvage_for_run_id, state, created_at, updated_at)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'scheduled', ?, ?)
+        `).run(runId, intentKey, "project_execution", null, salvageGoal, input.projectCardId,
+          projectGeneration, nextGen, ownerPeer, ownerInstanceId,
+          globalCounter.sequence, admittedOrigin, originPeer, taskRunId, primaryRow.id, nowIso, nowIso);
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e);
+        if (msg.includes("UNIQUE") && msg.includes("idx_one_orc_salvage")) {
+          return { kind: "conflict" as const, reason: "salvage_exhausted" as const };
+        }
+        throw e;
+      }
+
+      // 10. Return claimed context
+      const inserted = this.db.prepare(`SELECT * FROM orc_project_runs WHERE id = ?`).get(runId) as unknown as OrcProjectRunRow;
+      return { kind: "claimed" as const, context: buildContextFromRow(inserted) };
     });
   }
 
@@ -984,5 +1238,6 @@ function buildContextFromRow(row: OrcProjectRunRow): OrcInvocationContextV2 {
     },
     sessionId: row.session_id ?? undefined,
     executionId: row.execution_id ?? undefined,
+    salvageForRunId: (row as unknown as { salvage_for_run_id?: string | null }).salvage_for_run_id ?? undefined,
   };
 }

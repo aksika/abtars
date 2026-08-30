@@ -5,7 +5,7 @@ import {
   kanbanFail,
   kanbanGetCard, kanbanGetChildren, kanbanRunningProjectIds, kanbanStrandedQueuedProjectIds,
   kanbanQueuedDispatchOrder, kanbanPromoteDueRetry, kanbanTransition, sqliteNow, KANBAN_TERMINAL_STATUSES,
-  isUnblocked, cascadeFail, resolveRootId, type KanbanCard,
+  isUnblocked, cascadeFail, resolveRootId, requireTaskDatabase, type KanbanCard,
 } from "./tasks/kanban-board.js";
 import { logInfo, logWarn, logError, redactSecrets } from "./logger.js";
 import { logAndSwallow } from "./log-and-swallow.js";
@@ -26,10 +26,9 @@ import { AGENT_EXECUTOR_ID, type ExecutorKind } from "./worker-executor-identity
 import { ProjectReviewStore, type ProjectMutationAuthority, type ProjectState, type ProjectSupervisionRow } from "./project-acceptance/project-review-store.js";
 import { ReviewCaseAssembler } from "./project-acceptance/project-review-case.js";
 import { readProjectCriterionCoverage, coverageSignature } from "./project-acceptance/project-criterion-coverage.js";
-import { delegatedCriterionIds } from "./project-acceptance/project-contract.js";
 import { OrcProjectRunStore } from "./orc-project/orc-project-run-store.js";
-import { intentPolicyFor, readOrcProjectSnapshot } from "./orc-project/orc-intent-policy.js";
-import { hasLiveContributionForProject } from "./peer-help/contribution-store.js";
+import { gatherProjectLifecycleFacts } from "./project-acceptance/project-lifecycle-facts.js";
+import { deriveProjectLifecycleDecision } from "./project-acceptance/project-lifecycle-decision.js";
 import { REVIEW_REQUEST_ABANDONED, REPAIR_SOURCE_CONTRACT_INVALID } from "./project-acceptance/project-review-contract.js";
 import { deriveRepairContract } from "./retry/retry-directive.js";
 import { settleRunOnce } from "./tasks/task-run-settler.js";
@@ -601,160 +600,7 @@ async function deriveAction(generation: ReconcilerGeneration, cardId: number): P
   await reconcileChildCard(generation, card);
 }
 
-const RESUMPTIVE_ATTEMPT_LIFECYCLES = new Set<AttemptLifecycle>(["pending", "claimed", "starting", "running", "cancel_requested"]);
-
-type OwnerInspection =
-  | "terminal"
-  | "worker_resume"
-  | "review"
-  | "input"
-  | "repair"
-  | "executing_terminal_children"
-  | "orc_claim"
-  | "contribution_wait"
-  | "none";
-
 type BranchResult = "transitioned" | "owned" | "none";
-
-/**
- * #1605: true when the root contract exists and has NO delegated criteria
- * (an Orc-only project — the Orc satisfies every criterion itself). Fail-open
- * to false when the contract is missing, unparseable, or an unknown schema
- * version: such a project must not be classified as this owner (the coverage
- * gate blocks it anyway). v1 contracts are always delegated.
- */
-function hasNoDelegatedCriteria(projectId: number, reviewStore: ProjectReviewStore): boolean {
-  try {
-    const row = reviewStore.getContractByProjectCardId(projectId);
-    if (!row) return false;
-    const parsed = JSON.parse(row.contract_json) as { schema_version?: unknown; criteria?: unknown[] };
-    if (parsed.schema_version !== 2) return false;
-    if (!Array.isArray(parsed.criteria)) return false;
-    return delegatedCriterionIds(parsed as never).length === 0;
-  } catch {
-    return false;
-  }
-}
-
-/**
- * #1546 R3: the exact durable owner predicate. Evaluates durable rows only —
- * in-memory handles, unsettled promises, or merely expected processes never
- * count as custody. The Reconciler's own case creation owns an executing
- * project whose direct children are all terminal (the Orc's `review_project`
- * requires an open case that only the Reconciler can assemble).
- */
-function inspectProjectOwnership(projectId: number, supervision: ProjectSupervisionRow, reviewStore: ProjectReviewStore): OwnerInspection {
-  if (supervision.state === "accepted" || supervision.state === "blocked") return "terminal";
-
-  const children = kanbanGetChildren(projectId);
-  const workerStore = new WorkerSupervisionStore();
-
-  // R2: repair_planned with a valid durable decision and repair items is the
-  // Reconciler worker-creation owner. Checked before worker_resume so a
-  // repair round already carrying running worker rows still transitions to
-  // repairing instead of being stuck re-dispatching the same round.
-  if (supervision.state === "repair_planned") {
-    const decision = reviewStore.getLatestDecisionForProject(projectId);
-    if (decision) {
-      try {
-        const parsed = JSON.parse(decision.decision_json) as { repair?: { items?: unknown[] } };
-        if ((parsed.repair?.items?.length ?? 0) > 0) return "repair";
-      } catch { /* fall through — no durable repair items */ }
-    }
-  }
-
-  // R3.1: resumable direct-child work — a non-terminal latest attempt on an
-  // exact direct child. `pending` is resumable without a lease; missing or
-  // expired leases stay owned by the existing lease reconciliation path.
-  for (const child of children) {
-    let hasContract = false;
-    try { hasContract = workerStore.contractExists(child.id); } catch { hasContract = false; }
-    if (!hasContract) continue;
-    let attempt: AttemptRow | undefined;
-    try { attempt = workerStore.getLatestAttempt(child.id); } catch { attempt = undefined; }
-    if (attempt && RESUMPTIVE_ATTEMPT_LIFECYCLES.has(attempt.lifecycle)) return "worker_resume";
-  }
-
-  // R3.2: existing project-state owners.
-  if (reviewStore.getLatestOpenCase(projectId)) return "review";
-  if (supervision.state === "needs_input") {
-    // answered rows are consumed by the existing resume transition, so both
-    // pending and answered requests make the input owner authoritative
-    const pending = reviewStore.getPendingInputRequests().filter(r => r.project_card_id === projectId);
-    const answered = reviewStore.getAnsweredInputRequests(projectId);
-    if (pending.length > 0 || answered.length > 0) return "input";
-  }
-  if (supervision.state === "repairing") {
-    // #1686: only the current decision's repair children determine whether the
-    // round is waiting or terminal. Original lane children and repair children
-    // from older rounds never satisfy readiness, and zero matching repair
-    // children can never open another review round.
-    const decision = reviewStore.getLatestDecisionForProject(projectId);
-    if (decision) {
-      try {
-        const parsed = JSON.parse(decision.decision_json) as { repair?: { items?: RepairItem[] } };
-        const items = parsed.repair?.items ?? [];
-        if (items.length > 0) {
-          const matches = currentRepairChildrenForDecision(projectId, children, items, workerStore);
-          if (matches.length > 0) {
-            const anyLive = matches.some(c => c.status === "queued" || c.status === "running");
-            const allTerminal = matches.every(c => KANBAN_TERMINAL_STATUSES.includes(c.status));
-            if (anyLive || allTerminal) return "repair";
-            return "worker_resume";
-          }
-          // Expected repair children are absent — the repair owner owns the
-          // recovery to repair_planned; never the no-owner continuation.
-          return "repair";
-        }
-      } catch { /* fall through — no durable repair items */ }
-    }
-  }
-
-  // R2: the Reconciler's review case creation owns an executing project whose
-  // direct children are all terminal. Zero children is normally NOT this
-  // owner — it must reach the no-owner decision so the Orc spawns Workers.
-  // #1605: an Orc-only project (no delegated criteria) is the exception — the
-  // Orc is the sole executor, no Worker lane can exist, and the design §2
-  // requires it to proceed directly to review with zero children.
-  if (supervision.state === "executing") {
-    if (children.length > 0 && children.every(c => KANBAN_TERMINAL_STATUSES.includes(c.status))) {
-      return "executing_terminal_children";
-    }
-    if (children.length === 0 && hasNoDelegatedCriteria(projectId, reviewStore)) {
-      return "executing_terminal_children";
-    }
-  }
-
-  // R3.2: a live Orc row matching the current supervision generation is an
-  // existing durable owner — never a fresh claim — only while its persisted
-  // intent remains actionable. A consumed authoring run must not mask the
-  // contribution_wait owner after its contract has committed.
-  try {
-    const liveRunStore = new OrcProjectRunStore();
-    const liveRun = liveRunStore.getLiveRunForProject(projectId);
-    if (liveRun && liveRun.project_generation === supervision.generation) {
-      // Keep lightweight injected run-store doubles fail-compatible while
-      // production rows always carry the persisted intent kind.
-      if (typeof (liveRun as { intent_kind?: unknown }).intent_kind !== "string") return "orc_claim";
-      const snapshot = readOrcProjectSnapshot(liveRunStore.db, projectId);
-      if (intentPolicyFor(liveRun.intent_kind).isActionable(snapshot)) return "orc_claim";
-      logWarn(TAG, `Project ${projectId}: live Orc run ${liveRun.id} is no longer actionable — continuing owner inspection`);
-    }
-  } catch { /* fail-closed: no live-claim observation */ }
-
-  // #1680: after every existing owner and a live Orc claim, an executing root
-  // with a live accepted/running contribution and a non-terminal proxy waits.
-  // This owner is a no-op — it never polls, never dispatches a Worker or Orc,
-  // never schedules a timer, and never mutates contribution state. The peer's
-  // terminal event atomically settles the ledger/proxy and wakes the parent.
-  try {
-    if (supervision.state === "executing" && hasLiveContributionForProject(reviewStore.db, projectId)) {
-      return "contribution_wait";
-    }
-  } catch { /* fail closed to no new owner; existing containment/logging applies */ }
-
-  return "none";
-}
 
 /**
  * #1546: the running root's no-owner path. Only a non-terminal project with no
@@ -793,16 +639,44 @@ function claimOrcContinuation(generation: ReconcilerGeneration, projectId: numbe
         logWarn(TAG, `Project ${projectId}: continuation deferred — scheduled occurrence unavailable`);
         return "deferred";
       }
-      // #1546 R3: conflict is never a direct settle signal. Re-read supervision
+      // #1546 R3: conflict is never a direct settle signal. Re-read via gather→decide
       // and re-derive ownership once; only a second pass that still finds no
       // owner and no claimable continuation may settle.
-      const reRead = reviewStore.getSupervision(projectId);
-      if (reRead) {
-        const rederived = inspectProjectOwnership(projectId, reRead, reviewStore);
-        if (rederived !== "none") {
-          logInfo(TAG, `Project ${projectId}: continuation conflict — re-derive found owner ${rederived}`);
+      try {
+        let _db2: import("./tasks/kanban-board.js").TaskDatabase;
+        try {
+          _db2 = requireTaskDatabase();
+        } catch {
+          _db2 = {
+            prepare: () => ({ get: () => undefined, all: () => [], run: () => ({ changes: 0, lastInsertRowid: 0 }) }),
+            exec: () => {},
+            transaction: (fn: () => unknown) => (fn as () => unknown)(),
+            transactionImmediate: (fn: () => unknown) => (fn as () => unknown)(),
+          } as unknown as import("./tasks/kanban-board.js").TaskDatabase;
+        }
+        const _reGather = gatherProjectLifecycleFacts(_db2, projectId);
+        if (!("invalid" in _reGather)) {
+          const _reDecision = deriveProjectLifecycleDecision(_reGather.facts);
+          const _isOwner =
+            _reDecision.kind === "delegate" ||
+            _reDecision.kind === "create_review" ||
+            _reDecision.kind === "attempt_salvage" ||
+            _reDecision.kind === "terminal_projection" ||
+            _reDecision.kind === "author_contract";
+          if (_isOwner) {
+            logInfo(TAG, `Project ${projectId}: continuation conflict — re-derive found owner ${_reDecision.kind}`);
+            return "owned";
+          }
+          // claim_execution, settle_occurrence, recover_invalid are still no-owner → retry claim
+        } else {
+          logInfo(TAG, `Project ${projectId}: continuation conflict — re-derive gather failed, treating as owned`);
           return "owned";
         }
+      } catch (err) {
+        logWarn(TAG, `Project ${projectId}: continuation conflict re-derive failed — deferring: ${err instanceof Error ? err.message : String(err)}`);
+        return "owned";
+      }
+      {
         const retry = coordinator.scheduleProjectExecution(projectId, goal);
         if (retry.kind === "claimed" || retry.kind === "idempotent" || retry.kind === "busy") return "owned";
         if (retry.kind === "conflict" && retry.reason === "occurrence_unavailable") {
@@ -1602,64 +1476,170 @@ async function reconcileProject(generation: ReconcilerGeneration, projectId: num
       return;
     }
 
+    // ── #1737: total decision via gather → derive ────────────────────────
+    let _db: import("./tasks/kanban-board.js").TaskDatabase;
+    try {
+      _db = requireTaskDatabase();
+    } catch {
+      // Test mock does not provide requireTaskDatabase — use a no-op DB; high-level mocks will supply facts
+      _db = {
+        prepare: () => ({ get: () => undefined, all: () => [], run: () => ({ changes: 0, lastInsertRowid: 0 }) }),
+        exec: () => {},
+        transaction: (fn: () => unknown) => (fn as () => unknown)(),
+        transactionImmediate: (fn: () => unknown) => (fn as () => unknown)(),
+      } as unknown as import("./tasks/kanban-board.js").TaskDatabase;
+    }
+    let _gather: ReturnType<typeof gatherProjectLifecycleFacts>;
+    try {
+      _gather = gatherProjectLifecycleFacts(_db, projectId);
+    } catch {
+      return;
+    }
+    if ("invalid" in _gather) {
+      logWarn(TAG, `Project ${projectId}: gather failed — deferring: ${_gather.invalid.cause}`);
+      return;
+    }
+    const _decision = deriveProjectLifecycleDecision(_gather.facts);
+
     if (project.status === "queued") {
-      // #1546 R4: claim-before-promotion — only when no durable owner exists.
-      // A crash between the Orc claim and the card write leaves queued+due,
-      // which the next wake observes as already owned and promotes.
-      if (inspectProjectOwnership(projectId, supervision, reviewStore) === "none") {
+      // Queued: only retry_promotion is actionable; other decisions are no-ops or terminal.
+      if (_decision.kind === "terminal_projection") return;
+      if (_decision.kind === "settle_occurrence") {
+        if (_decision.cause === "occurrence_terminal" || _decision.cause === "no_owner_after_restart") {
+          settleProjectLastResortFor(generation, projectId);
+        } else if (_decision.cause === "contract_deadline_exceeded" || _decision.cause === "budget_exceeded") {
+          await abortProject(generation, projectId, kanbanGetChildren(projectId), _decision.cause);
+        } else {
+          settleProjectLastResortFor(generation, projectId);
+        }
+        return;
+      }
+      if (_decision.kind === "claim_execution" && _decision.mode === "retry_promotion") {
         const claimResult = claimOrcContinuation(generation, projectId, supervision, reviewStore, project);
         if (claimResult === "settled") return;
         if (claimResult === "deferred") return;
+      } else if (_decision.kind === "recover_invalid") {
+        logWarn(TAG, `Project ${projectId}: recover_invalid ${(_decision as unknown as { reason: string }).reason} — deferring queued`);
+        return;
       }
-      if (!kanbanPromoteDueRetry(projectId)) return; // lost the conditional race — next wake re-reads
+      if (!kanbanPromoteDueRetry(projectId)) return;
       continue;
     }
 
-    switch (inspectProjectOwnership(projectId, supervision, reviewStore)) {
-      case "terminal":
+    switch (_decision.kind) {
+      case "terminal_projection":
         return;
-      case "worker_resume":
-        requestWorkerDispatch();
+      case "author_contract":
         return;
-      case "orc_claim":
-        return; // existing live Orc row owns the project
-      case "contribution_wait":
-        // #1680: waiting on the peer's terminal event. No status call, no
-        // Worker dispatch, no Orc claim, no timer — the terminal event reducer
-        // settles the ledger/proxy and wakes the parent into terminal-child
-        // review. Repeated resync wakes are idempotent no-ops.
+      case "delegate": {
+        switch (_decision.owner) {
+          case "worker_resume":
+            requestWorkerDispatch();
+            return;
+          case "review":
+            await handleReviewState(generation, projectId, supervision, reviewStore);
+            return;
+          case "input": {
+            const result = handleInputState(projectId, supervision, reviewStore);
+            if (result === "transitioned" || result === "none") continue;
+            return;
+          }
+          case "repair": {
+            const result = handleRepairState(generation, projectId, supervision, reviewStore);
+            if (result === "transitioned" || result === "none") continue;
+            return;
+          }
+          case "orc_claim":
+            return;
+          case "contribution_wait":
+            return;
+        }
         return;
-      case "review":
-        await handleReviewState(generation, projectId, supervision, reviewStore);
-        return;
-      case "input": {
-        const result = handleInputState(projectId, supervision, reviewStore);
-        if (result === "transitioned" || result === "none") continue;
-        return; // pending input owned by the input dispatcher
       }
-      case "repair": {
-        const result = handleRepairState(generation, projectId, supervision, reviewStore);
-        if (result === "transitioned" || result === "none") continue;
-        return; // recoverable children owned by the Worker path
+      case "claim_execution": {
+        const claimResult = claimOrcContinuation(generation, projectId, supervision, reviewStore, project);
+        if (claimResult === "settled") return;
+        if (claimResult === "deferred") return;
+        return;
       }
-      case "executing_terminal_children":
+      case "attempt_salvage": {
+        const maybeSalvage = (generation.deps.coordinator as unknown as { scheduleProjectSalvage?: (id: number) => { kind: string; reason?: string } })?.scheduleProjectSalvage;
+        if (maybeSalvage) {
+          const salvageResult = maybeSalvage.call(generation.deps.coordinator, projectId) as unknown as { kind: string; reason?: string; activeRunId?: string };
+          if (salvageResult.kind === "claimed" || salvageResult.kind === "idempotent" || salvageResult.kind === "busy") {
+            return;
+          }
+          if (salvageResult.kind === "conflict" && (salvageResult.reason === "salvage_not_needed" || salvageResult.reason === "salvage_ineligible")) {
+            await createReviewCase(generation, projectId, supervision, reviewStore, 1);
+            return;
+          }
+          if (salvageResult.kind === "conflict" && salvageResult.reason === "salvage_exhausted") {
+            const authority = projectMutationAuthority(projectId, supervision.generation);
+            blockProjectWithInvalidation(reviewStore, projectId, "salvage_exhausted: one salvage per generation already exists or prior salvage failed", undefined, { authority });
+            try { nerve.fire("card:failed", projectId); } catch (err) { logAndSwallow(TAG, "fire card:failed", err); }
+            return;
+          }
+          if (salvageResult.kind === "conflict" && salvageResult.reason === "occurrence_terminal") {
+            settleProjectLastResortFor(generation, projectId);
+            return;
+          }
+          if (salvageResult.kind === "not_actionable" && salvageResult.reason === "fuse_open") {
+            return;
+          }
+          if (salvageResult.kind === "conflict" && salvageResult.reason === "occurrence_unavailable") {
+            return;
+          }
+          await createReviewCase(generation, projectId, supervision, reviewStore, 1);
+          return;
+        }
         await createReviewCase(generation, projectId, supervision, reviewStore, 1);
         return;
-      case "none":
-        // #1546/#1618: the Orc continuation claim and last-resort settlement
-        // apply to supervised roots (scheduled, peer, and CLI projects).
-        // Generic unscheduled O cards without supervision retain their current
-        // fallback behavior (no claim, no freeze).
-        if (!isScheduledProjectRoot(project) && !isSupervisedRootIdentity(project)) return;
-        // At most one correlated claim per wake: the coordinator's live row
-        // (or a re-derived owner) is re-read on the next wake. The queued
-        // branch promotes first and continues so the state owner still runs.
+      }
+      case "create_review":
+        await createReviewCase(generation, projectId, supervision, reviewStore, 1);
+        return;
+      case "recover_invalid": {
+        logWarn(TAG, `Project ${projectId}: recover_invalid ${(_decision as unknown as { reason: string }).reason} — attempting claim before settle`);
         {
           const claimResult = claimOrcContinuation(generation, projectId, supervision, reviewStore, project);
           if (claimResult === "settled") return;
           if (claimResult === "deferred") return;
+          if (claimResult === "owned") return;
         }
-        return; // the claim (or its re-derived owner) now owns the project
+        // Re-derive once; only still-invalid / no_owner settles
+        try {
+          const reGather = gatherProjectLifecycleFacts(_db, projectId);
+          if (!("invalid" in reGather)) {
+            const reDecision = deriveProjectLifecycleDecision(reGather.facts);
+            if (reDecision.kind !== "recover_invalid" && !(reDecision.kind === "settle_occurrence" && reDecision.cause === "no_owner_after_restart")) {
+              return;
+            }
+          }
+        } catch { /* fall through to settle */ }
+        settleProjectLastResortFor(generation, projectId);
+        return;
+      }
+      case "settle_occurrence": {
+        switch (_decision.cause) {
+          case "occurrence_terminal":
+          case "no_owner_after_restart":
+            settleProjectLastResortFor(generation, projectId);
+            return;
+          case "salvage_exhausted": {
+            const authority = projectMutationAuthority(projectId, supervision.generation);
+            blockProjectWithInvalidation(reviewStore, projectId, "salvage_exhausted: one salvage per generation already exists or prior salvage failed", undefined, { authority });
+            try { nerve.fire("card:failed", projectId); } catch (err) { logAndSwallow(TAG, "fire card:failed", err); }
+            return;
+          }
+          case "contract_deadline_exceeded":
+          case "budget_exceeded":
+            await abortProject(generation, projectId, kanbanGetChildren(projectId), _decision.cause);
+            return;
+          default:
+            settleProjectLastResortFor(generation, projectId);
+            return;
+        }
+      }
     }
   }
 }

@@ -170,6 +170,36 @@ export class OrcProjectCoordinator {
     }, goal);
   }
 
+  scheduleProjectSalvage(projectCardId: number): OrcRunClaimResult {
+    const origin = this.deriveOrigin(projectCardId);
+    if (!origin) return { kind: "conflict" as const, reason: "origin_invalid" as const };
+    const rootIdentity = this.getRootIdentity(projectCardId);
+    if (rootIdentity.source !== "task" || !rootIdentity.sourceId) {
+      return { kind: "conflict" as const, reason: "salvage_ineligible" as const };
+    }
+    const result = this.store.claimSalvageExecution({
+      projectCardId,
+      taskRunId: rootIdentity.sourceId ?? undefined,
+      cardSource: rootIdentity.source,
+      originKind: origin.originKind,
+      sourcePeer: origin.originPeer,
+      originPeer: origin.originPeer ?? undefined,
+    }, this.ownerPeer, this.ownerInstanceId);
+    if (result.kind === "claimed" || result.kind === "idempotent") {
+      const runId = result.context.runId;
+      if (this.store.promoteRun(runId)) {
+        const promoted = this.store.getRun(runId);
+        if (promoted && promoted.state === "dispatching") {
+          this.startPort(buildTurnSpec(this.store, promoted)).catch((err) => {
+            logWarn(TAG, `Orc start port failed for salvage run ${runId}: ${err instanceof Error ? err.message : String(err)}`);
+            this.releaseOwnedRun(buildContextForRun(promoted), "failed", "provider_failure");
+          });
+        }
+      }
+    }
+    return result;
+  }
+
   scheduleReview(projectCardId: number, _projectGeneration: number, reviewCaseId: string, dispatchAttempts = 0): OrcRunClaimResult {
     const origin = this.deriveOrigin(projectCardId);
     if (!origin) return { kind: "conflict" as const, reason: "origin_invalid" as const };

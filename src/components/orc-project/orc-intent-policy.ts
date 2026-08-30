@@ -30,6 +30,8 @@ export interface OrcProjectSnapshot {
   readonly inputRequestsOutstanding: boolean;
   /** A direct child card carrying a worker contract (Worker/repair ownership). */
   readonly workerOwnedChild: boolean;
+  /** #1729: every direct W child is done with a completed attempt and a result row. */
+  readonly acceptedTerminalChildrenReady: boolean;
 }
 
 export interface OrcIntentCompletion {
@@ -117,8 +119,8 @@ const POLICIES: Record<OrcIntentKind, OrcIntentPolicy> = {
       && !s.inputRequestsOutstanding,
     // A durable owner (Worker/contribution/review) or a terminal project means
     // the execution intent has handed off; synthesis without any durable owner
-    // is unsatisfied.
-    completion: (s) => s.projectTerminal || s.workerOwnedChild || s.contributionActive || s.openReviewCase
+    // is unsatisfied. #1729: accepted terminal lanes also satisfy the salvage turn.
+    completion: (s) => s.projectTerminal || s.workerOwnedChild || s.contributionActive || s.openReviewCase || s.acceptedTerminalChildrenReady
       ? { satisfied: true, code: "project_execution_handed_off" }
       : { satisfied: false, code: "intent_postcondition_unsatisfied" },
   },
@@ -211,6 +213,32 @@ export function orcToolAllowedOnIntent(toolName: string, intentKind: OrcIntentKi
 }
 
 /**
+ * #1729: true when every direct W child is done with a completed attempt and a result.
+ * Fail-closed: any read error, missing table, or zero children returns false.
+ */
+export function hasAcceptedTerminalChildren(db: TaskDatabase, projectCardId: number): boolean {
+  try {
+    const totalRow = db.prepare(`SELECT COUNT(*) AS n FROM kanban_board WHERE parent_id = ? AND type = 'W'`).get(projectCardId) as { n: number } | undefined;
+    const total = totalRow?.n ?? 0;
+    if (total === 0) return false;
+    const readyRow = db.prepare(`
+      SELECT COUNT(*) AS n FROM kanban_board AS k
+       WHERE k.parent_id = ? AND k.type = 'W' AND k.status = 'done'
+         AND EXISTS (
+           SELECT 1 FROM worker_attempts AS wa
+            WHERE wa.card_id = k.id
+              AND wa.ordinal = (SELECT MAX(ordinal) FROM worker_attempts WHERE card_id = k.id)
+              AND wa.lifecycle = 'completed'
+              AND EXISTS (SELECT 1 FROM worker_results AS wr WHERE wr.attempt_id = wa.id)
+         )
+    `).get(projectCardId) as { n: number } | undefined;
+    return (readyRow?.n ?? 0) === total;
+  } catch {
+    return false;
+  }
+}
+
+/**
  * #1680: durable read-only snapshot of one project for intent decisions.
  * Reads are fail-closed: any read error yields the least-assertive value so a
  * transient failure can never satisfy a durable postcondition.
@@ -223,6 +251,7 @@ export function readOrcProjectSnapshot(db: TaskDatabase, projectCardId: number):
   let openReviewCase = false;
   let inputRequestsOutstanding = false;
   let workerOwnedChild = false;
+  let acceptedTerminalChildrenReady = false;
 
   try {
     const sup = db.prepare(`SELECT state, generation FROM project_supervision WHERE project_card_id = ?`).get(projectCardId) as { state: string; generation: number } | undefined;
@@ -272,6 +301,10 @@ export function readOrcProjectSnapshot(db: TaskDatabase, projectCardId: number):
     workerOwnedChild = row !== undefined;
   } catch { /* fail closed */ }
 
+  try {
+    acceptedTerminalChildrenReady = hasAcceptedTerminalChildren(db, projectCardId);
+  } catch { /* fail closed */ }
+
   return {
     supervisionState,
     supervisionGeneration,
@@ -281,6 +314,7 @@ export function readOrcProjectSnapshot(db: TaskDatabase, projectCardId: number):
     openReviewCase,
     inputRequestsOutstanding,
     workerOwnedChild,
+    acceptedTerminalChildrenReady,
   };
 }
 

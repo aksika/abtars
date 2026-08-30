@@ -124,6 +124,7 @@ const spawnWorkerTool: ToolDefinition = {
   async execute(args: Record<string, string>, context): Promise<string> {
     const projectCardId = resolveCardId(args, context);
     if (!projectCardId) return "[err] No active Orc project. spawn_worker only works during orchestration.";
+    if (context?.orcContext?.salvageForRunId) return "[err] salvage turns cannot mutate Worker lanes";
 
     // #1363 Task 7: refuse spawn during review/repair/input turns
     const { ProjectReviewStore } = await import("../project-acceptance/project-review-store.js");
@@ -415,6 +416,7 @@ const cancelWorkerTool: ToolDefinition = {
   async execute(args: Record<string, string>, context): Promise<string> {
     const projectCardId = resolveCardId(args, context);
     if (!projectCardId) return "[err] No active Orc project and no project_card_id provided.";
+    if (context?.orcContext?.salvageForRunId) return "[err] salvage turns cannot mutate Worker lanes";
     const cardId = parseInt(args.card_id ?? "", 10);
     if (isNaN(cardId)) return "[err] Invalid card_id.";
     const { kanbanGetCard } = await import("../tasks/kanban-board.js");
@@ -459,6 +461,7 @@ const reviewWorkerFailureTool: ToolDefinition = {
   async execute(args: Record<string, string>, context): Promise<string> {
     const projectCardId = resolveCardId(args, context);
     if (!projectCardId) return "[err] No active Orc project.";
+    if (context?.orcContext?.salvageForRunId) return "[err] salvage turns cannot mutate Worker lanes";
     const bound = context?.orcContext;
     if (!bound) return "[err] No active Orc project.";
     const attemptId = args.attempt_id;

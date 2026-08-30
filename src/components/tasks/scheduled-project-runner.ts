@@ -470,7 +470,8 @@ function readProjectTerminal(rootCardId: number): ProjectTerminalRead | undefine
         try {
           const parsed = JSON.parse(decision.decision_json) as { action?: unknown };
           if (parsed.action === "blocked") {
-            const diagnostic = makeTaskFailure("supervision", "project_blocked", "executing",
+            const blockedCode = reason.includes("salvage_exhausted") ? "salvage_exhausted" as const : "project_blocked" as const;
+            const diagnostic = makeTaskFailure("supervision", blockedCode, "executing",
               reason, "none",
               {
                 rootCardId,
@@ -490,9 +491,12 @@ function readProjectTerminal(rootCardId: number): ProjectTerminalRead | undefine
     // lane codes (design §5).
     const uncovered = parseCoverageUncovered(supervision?.coverage_uncovered_ids);
     const isCoverageUndeterminable = reason.startsWith("coverage_undeterminable");
+    const isSalvageExhausted = reason.includes("salvage_exhausted");
     const { code, message } = isCoverageUndeterminable
       ? { code: "project_blocked" as const, message: reason }
-      : selectSupervisionCode(lanes, uncovered);
+      : isSalvageExhausted
+        ? { code: "salvage_exhausted" as const, message: reason }
+        : selectSupervisionCode(lanes, uncovered);
     const diagnostic = makeTaskFailure("supervision", code, "executing",
       code === "project_blocked" ? reason : message, "none",
       {
