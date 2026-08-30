@@ -16,6 +16,7 @@ import { describe, it, expect, vi, beforeAll, afterAll, beforeEach } from "vites
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { clampThinkingLevel } from "@earendil-works/pi-ai";
 
 const { resolveAgentMock, loadTransportStructuredMock, createAgentTransportMock, readAndClearAcpPidsMock } = vi.hoisted(() => ({
   resolveAgentMock: vi.fn(),
@@ -28,7 +29,7 @@ vi.mock("../components/transport-config.js", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../components/transport-config.js")>();
   return {
     ...actual,
-    anyProviderUseProviderLib: () => false,
+    anyApiProviderConfigured: () => false,
     resolveAgent: (...args: unknown[]) => resolveAgentMock(...args),
     getEnvFallback: () => ({
       model: "fb-model", provider: "fb-provider", providerName: "fb",
@@ -75,6 +76,7 @@ import { buildTransport, rebuildTransport, phaseTransport } from "./phase-transp
 import { createBootCtx, type BootCtx } from "./context.js";
 import { PiCoreTransport } from "../components/transport/pi-core-transport.js";
 import { PiRuntimeContractError, validatePiRuntimeContract } from "../components/transport/pi-runtime-contract.js";
+import * as piAiAdapter from "../components/transport/pi-ai-adapter.js";
 import type { IKiroTransport } from "../components/transport/kiro-transport.js";
 
 const TEST_MODEL = "test-model";
@@ -261,5 +263,27 @@ describe("transport readiness contract (#1573)", () => {
     expect(ctx.transport).not.toBe(oldTransport);
     expect((ctx.pipelineDeps as { transport: IKiroTransport }).transport).toBe(ctx.transport);
     expect((ctx.idleSave as unknown as { transport: IKiroTransport }).transport).toBe(ctx.transport);
+  });
+
+  it("preloads Pi's clamp before a rebuild constructs the replacement transport", async () => {
+    const ctx = makeBootCtx();
+    resolveAgentMock.mockReturnValue({
+      ...validResolvedAgent(),
+      provider: { ...validResolvedAgent().provider, thinking: { style: "effort", default: "xhigh" } },
+    });
+    const actualEnsure = piAiAdapter.ensurePiThinkingClamp;
+    const ensureSpy = vi.spyOn(piAiAdapter, "ensurePiThinkingClamp").mockImplementation(async () => {
+      await actualEnsure({ clampThinkingLevel });
+    });
+    try {
+      await expect(rebuildTransport(ctx)).resolves.toBe("ran");
+      expect(ensureSpy).toHaveBeenCalledTimes(1);
+      const replacement = ctx.transport;
+      if (!replacement) throw new Error("rebuild did not install a transport");
+      expect(replacement.getRuntimeStatus().reasoning).toBe("high");
+      expect(replacement.getRuntimeStatus().reasoningRequested).toBe("xhigh");
+    } finally {
+      ensureSpy.mockRestore();
+    }
   });
 });

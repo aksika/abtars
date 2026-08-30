@@ -19,14 +19,14 @@ vi.mock("../../components/transport-config.js", () => ({
       professor: { model: "tencent/hy3-preview", provider: "openrouter", fallbacks: [] },
     },
     providers: {
-      openrouter: { transport: "api", useProviderLib: true, endpoint: "https://openrouter.ai/api/v1" },
-      codex: { transport: "api", useProviderLib: false },
+      openrouter: { transport: "api", endpoint: "https://openrouter.ai/api/v1" },
+      codex: { transport: "api" },
     },
   }),
   resolveAgent: () => ({ model: "tencent/hy3-preview", providerName: "openrouter" }),
   getAvailableProviders: () => [
-    { name: "openrouter", config: { transport: "api", useProviderLib: true } },
-    { name: "codex", config: { transport: "api", useProviderLib: false } },
+    { name: "openrouter", config: { transport: "api", endpoint: "https://openrouter.ai/api/v1" } },
+    { name: "codex", config: { transport: "api" } },
   ],
   writeTransportConfig: vi.fn(),
   validateProviderReady: () => ({ ok: true }),
@@ -120,7 +120,7 @@ describe("telegram-model-picker (#1320)", () => {
       expect(labels).not.toContain("stale-id-not-in-catalog (★★★★★, free)");
     });
 
-    it("non-pi provider (useProviderLib:false) → curated list unvalidated", async () => {
+    it("non-pi provider (pi catalog null) → curated list unvalidated", async () => {
       MOCK_modelsForProviderSync.mockReturnValue(null);
       MOCK_getModelsForProvider.mockReturnValue([
         { id: "custom-model", entry: { rank: 2, cost: { input: 1, output: 2 } } },

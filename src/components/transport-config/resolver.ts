@@ -226,7 +226,7 @@ export function validateAtStartup(): void {
 }
 
 /** #1311 C8: true if any provider opts into the pi-ai engine (gates the boot warm). */
-export function anyProviderUseProviderLib(tc?: TransportConfig | null): boolean {
+export function anyApiProviderConfigured(tc?: TransportConfig | null): boolean {
   const config = tc ?? loadTransport();
   if (!config) return false;
   return Object.values(config.providers).some(p => p.transport === "api");

@@ -27,8 +27,8 @@ export async function phaseTransport(ctx: BootCtx): Promise<PhaseResult> {
 
   // #1311 C8: warm pi-ai's catalog before buildTransport() resolves agents — resolveAgent is a
   // sync hot path that reads the warmed cache. Skipped entirely when no provider opts in.
-  const { anyProviderUseProviderLib } = await import("../components/transport-config.js");
-  if (anyProviderUseProviderLib()) {
+  const { anyApiProviderConfigured } = await import("../components/transport-config.js");
+  if (anyApiProviderConfigured()) {
     const { loadPiModels } = await import("../components/transport/pi-catalog.js");
     await loadPiModels();
     // #1746: capture pi's thinking clamp before buildTransport() constructs
@@ -226,6 +226,11 @@ export async function buildTransport(ctx: BootCtx): Promise<PhaseResult> {
   } else if (resolved.provider.transport === "api") {
     const { PiCoreTransport } = await import("../components/transport/pi-core-transport.js");
     const { ModelHealthRegistry } = await import("../components/transport/model-health-registry.js");
+    // #1746: buildTransport() also owns the /reset replacement path, which
+    // bypasses phaseTransport()'s boot warm. Populate Pi's clamp at the actual
+    // construction boundary so the synchronous constructor status is truthful.
+    const { ensurePiThinkingClamp } = await import("../components/transport/pi-ai-adapter.js");
+    await ensurePiThinkingClamp();
     const apiKey = getEnv().getApiKey(resolved.provider.apiKeyEnv ?? "API_KEY");
 
     const fallbackCandidates: ModelCandidate[] = (resolved.fallbacks ?? []).map(fb => {
