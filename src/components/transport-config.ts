@@ -7,6 +7,13 @@
 
 export * from "./transport-config/types.js";
 export * from "./transport-config/validator.js";
-export * from "./transport-config/loader.js";
+export {
+  configDir,
+  loadModels,
+  computeCostDisplay,
+  loadTransportStructured,
+  loadTransport,
+  clearTransportCache,
+} from "./transport-config/loader.js";
 export * from "./transport-config/writer.js";
 export * from "./transport-config/resolver.js";

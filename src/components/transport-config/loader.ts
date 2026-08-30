@@ -155,3 +155,9 @@ export function clearTransportCache(): void {
   cachedTransport = null;
   cachedSource = null;
 }
+
+/** Internal writer hook; intentionally omitted from the public barrel. */
+export function cacheTransportAfterWrite(config: TransportConfig): void {
+  cachedTransport = config;
+  cachedSource = "primary";
+}

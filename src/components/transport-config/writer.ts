@@ -14,7 +14,7 @@ import type {
   TransportConfig,
   TransportWriteResult,
 } from "./types.js";
-import { configDir, loadTransport, clearTransportCache } from "./loader.js";
+import { configDir, loadTransport, cacheTransportAfterWrite, clearTransportCache } from "./loader.js";
 import { validateTransportConfig, serializeTransportConfig, validateTransportAssignments, routeAssignments } from "./validator.js";
 
 const TAG = "transport-config";
@@ -122,7 +122,7 @@ export function writeTransportConfig(candidate: TransportConfig, reason: string)
       renameSync(oldTmp, oldPath);
     }
 
-    clearTransportCache();
+    cacheTransportAfterWrite(vr.config);
     try { unlinkSync(rollbackPrimaryTmp); } catch { /* best effort */ }
     try { unlinkSync(rollbackOldTmp); } catch { /* best effort */ }
     logInfo(TAG, `transport.json updated — ${reason}`);
