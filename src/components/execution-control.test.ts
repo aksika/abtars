@@ -51,4 +51,22 @@ describe("createExecutionSupervisor — legacy drain ownership (#1638/#1648)", (
     expect(dispatch).toHaveBeenCalledTimes(1);
     expect(dispatch).toHaveBeenCalledWith(expect.objectContaining({ cardId, type: "T" }));
   });
+
+  it("#1750 skips an ownerless O root by identity while still dispatching a W child", async () => {
+    const sup = createExecutionSupervisor({ maxConcurrent: {} });
+    const dispatch = vi.fn();
+    // #1750 shape: a bare type=O root with no parent and no project_supervision
+    // row (the row is written later when the Reconciler adopts the project).
+    const oRoot = kanbanMod.kanbanEnqueue("o root", "agent", undefined, { type: "O", goal: "o root" });
+    const wChild = kanbanMod.kanbanEnqueue("w child", "agent", undefined, { type: "W", parent_id: oRoot, goal: "w child" });
+    expect(oRoot).toBeGreaterThan(0);
+    expect(wChild).toBeGreaterThan(0);
+
+    sup.drainLegacyQueued(dispatch as never);
+
+    expect(dispatch).toHaveBeenCalledTimes(1);
+    expect(dispatch).toHaveBeenCalledWith(expect.objectContaining({ cardId: wChild, type: "W" }));
+    const oCard = kanbanMod.kanbanGetCard(oRoot) as { status: string } | undefined;
+    expect(oCard?.status).toBe("queued");
+  });
 });
