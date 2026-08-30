@@ -173,15 +173,6 @@ export function validatePiAgentCoreModule(
   mod: unknown,
   version?: string,
 ): asserts mod is PiAgentCoreModule {
-  // The installed 0.80.7 executor stops its sequential loop after the active
-  // call observes abort and never emits terminal results for later calls. Do
-  // not report readiness until a public Pi release repairs that contract.
-  if (version === "0.80.7") {
-    throw new PiCoreContractError(
-      "pi-agent-core 0.80.7 is not ready for #1446: sequential cancellation omits terminal results for unstarted calls",
-      { installationVersion: version, missingCapability: "sequential-batch-cancellation" },
-    );
-  }
   if (!mod || typeof mod !== "object") {
     throw new PiCoreContractError("Loaded pi-agent-core module is not an object", { installationVersion: version });
   }

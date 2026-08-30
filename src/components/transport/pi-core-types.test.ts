@@ -28,13 +28,8 @@ describe("validatePiAgentCoreModule", () => {
     expect(() => validatePiAgentCoreModule(mod, "0.80.8")).not.toThrow();
   });
 
-  it("blocks the known-incompatible 0.80.7 sequential cancellation contract", () => {
-    expect(() => validatePiAgentCoreModule({ Agent: makeValidAgent() }, "0.80.7")).toThrow(/sequential cancellation/);
-    try {
-      validatePiAgentCoreModule({ Agent: makeValidAgent() }, "0.80.7");
-    } catch (err) {
-      expect((err as PiCoreContractError).missingCapability).toBe("sequential-batch-cancellation");
-    }
+  it("no longer blocks 0.80.7 (blocklist removed in #1747; minimum is ~0.84.2)", () => {
+    expect(() => validatePiAgentCoreModule({ Agent: makeValidAgent() }, "0.80.7")).not.toThrow();
   });
 
   it("rejects null", () => {
