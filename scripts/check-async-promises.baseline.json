@@ -1,0 +1,27 @@
+{
+  "_comment": "Existing floating/misused-promise debt, frozen by #1733. May shrink, never grow. A baseline increase is a review red flag.",
+  "_recorded": "2026-08-30",
+  "files": {
+    "src/boot/heartbeat-tier3.ts": 2,
+    "src/boot/phase-agent-api.ts": 1,
+    "src/boot/phase-platforms-connect.ts": 1,
+    "src/boot/phase-transport.ts": 1,
+    "src/capabilities/sleep/index.ts": 1,
+    "src/components/agent-api-server.ts": 1,
+    "src/components/dashboard/dashboard-server.ts": 1,
+    "src/components/idle-save.ts": 1,
+    "src/components/message-pipeline.ts": 1,
+    "src/components/peer-transport/peer-ws-broker.ts": 3,
+    "src/components/peer-transport/ws-peer-client.ts": 2,
+    "src/components/permission-handler.ts": 1,
+    "src/components/pi-executor/pi-coding-session-service.ts": 3,
+    "src/components/pi-executor/pi-executor.ts": 4,
+    "src/components/service-registry.ts": 1,
+    "src/components/spin.ts": 5,
+    "src/platforms/discord/discord-api.ts": 4,
+    "src/platforms/discord/discord-poller.ts": 1,
+    "src/platforms/telegram/telegram-coding-projection.ts": 2,
+    "src/tests/e2e/local-swarm-runner.ts": 3,
+    "src/tests/e2e/pi-production/child-process.ts": 1
+  }
+}

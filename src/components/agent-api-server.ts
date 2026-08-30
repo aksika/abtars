@@ -4,7 +4,7 @@ import { createServer } from "https";
 import { mkdirSync, writeFileSync } from "fs";
 import { join } from "path";
 import { abtarsHome } from "../paths.js";
-import { AgentApiConfig } from "./agent-api-config.js";
+import type { AgentApiConfig } from "./agent-api-config.js";
 import type { AbtarsMemoryRuntime } from "./memory-runtime.js";
 import { abmind } from "../utils/abmind-lazy.js";
 import { logInfo, logWarn, logDebug, logTrace } from "./logger.js";

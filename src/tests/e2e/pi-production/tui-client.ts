@@ -175,6 +175,7 @@ export class TuiAcceptanceClient {
             return settle ?? { role: "assistant", markdown: accumulated };
           }
         }
+        return undefined;
       },
       timeoutMs,
       "TUI assistant message",
