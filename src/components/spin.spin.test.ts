@@ -66,6 +66,20 @@ vi.mock("./worker-supervision-service.js", () => ({
   validateWorkerRootCriteria: () => null,
 }));
 
+// #1750: the drain's cardHasSupervision reads the REAL worker-supervision
+// store, which opens the production kanban DB — a test card id colliding with
+// a live contract there made the drain skip nondeterministically. Stub it
+// deterministic: no contract, no attempts.
+vi.mock("./worker-supervision-store.js", () => ({
+  WorkerSupervisionStore: class {
+    contractExists() { return false; }
+    getAttempt() { return undefined; }
+    getLatestAttempt() { return undefined; }
+    terminalSettlement() { return undefined; }
+    cancelProjectChild() { return undefined; }
+  },
+}));
+
 vi.mock("./spin-notifications.js", () => ({
   drainOrcNotifications: () => [],
 }));
@@ -1053,8 +1067,10 @@ describe("spin(spec) — unified session API (#1271)", () => {
     });
 
     it("drain dispatch refused by a busy O session leaves the card queued and never reaches unhandledRejection", async () => {
-      // A live O execution holds the shared session (card #5 shape: a queued
-      // ownerless O root with no supervision row draining into a busy session).
+      // A live O execution holds the shared session. The queued card is an O
+      // CHILD (parent_id set) — the drain skips O roots by identity (#1750),
+      // so the child is the drain-visible shape that still reaches the
+      // busy-session admission fence at spin() and must be settled, not fatal.
       let releaseFirst!: () => void;
       const firstHeld = new Promise<void>(r => { releaseFirst = r; });
       const heldTransport = mockTransport({
@@ -1065,11 +1081,11 @@ describe("spin(spec) — unified session API (#1271)", () => {
       const first = spin.spin({ type: "O", sessionId: oSession.id, prompt: "first turn", await: true });
       await vi.waitFor(() => expect(oSession.activeExecutionId).toBeDefined());
 
-      const cardId = kanbanEnqueue("legacy O root", "agent");
+      const cardId = kanbanEnqueue("legacy O child", "agent");
       const mod = await import("./tasks/kanban-board.js");
       (mod as any)._kanbanSetCardField(cardId, "type", "O");
-      (mod as any)._kanbanSetCardField(cardId, "parent_id", null);
-      (mod as any)._kanbanSetCardField(cardId, "goal", "legacy O root");
+      (mod as any)._kanbanSetCardField(cardId, "parent_id", 1);
+      (mod as any)._kanbanSetCardField(cardId, "goal", "legacy O child");
 
       const logWarnSpy = vi.spyOn(await import("./logger.js"), "logWarn");
       const unhandled: unknown[] = [];
