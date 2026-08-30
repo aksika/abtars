@@ -1610,6 +1610,14 @@ export class Spin {
     logWarn(TAG, `${spec.type} spin failed (error=${errorKind}, error_chars=${msg.length})`);
     pushLog(session, `failed (${errorKind})`);
     let staleWorkerFailure = false;
+    // #1751: an `intent_satisfied` latch is durable-verified under the exact
+    // bound run (orc-project-contracts.ts:181) — the transport throwing
+    // afterwards is late noise about a turn that already succeeded. Releasing
+    // `provider_failure` here lost the run: the root was re-queued and the
+    // project was later aborted as ownerless. The release authority is the
+    // captured bound control, never the session mirror.
+    const boundTerminal = (bound?.orcTurnControl ?? session.orcTurnControl)?.completed;
+    const handoffSatisfied = boundTerminal?.kind === "intent_satisfied";
     if (cardId !== undefined) {
       // #1248: If terminal already won (cancellation), skip fail settlement
       if (spec.executionControl?.terminal) {
@@ -1643,14 +1651,16 @@ export class Spin {
           logWarn(TAG, `Card ${cardId}: failure settlement failed: ${settlementErr instanceof Error ? settlementErr.message : String(settlementErr)}`);
         }
       }
-      if (!staleWorkerFailure && spec.settlementOwner !== "caller") {
+      if (!staleWorkerFailure && !handoffSatisfied && spec.settlementOwner !== "caller") {
         kanbanRetryOrFail(cardId, msg);
         if (spec.callbackPeer) fireCallback(spec.callbackPeer, cardId, "failed", undefined, msg);
       }
     }
 
-    // #1319: Publish execution.failed before clearing association
-    if (spec.type === "O") {
+    // #1319: Publish execution.failed before clearing association. A satisfied
+    // handoff is not a failed execution — publishing it would be an
+    // operator-visible lie about a turn that already succeeded.
+    if (spec.type === "O" && !handoffSatisfied) {
       this.orcActivityFeed?.publish({
         kind: "execution.failed",
         error: msg,
@@ -1676,21 +1686,20 @@ export class Spin {
     const releaseContext = bound?.orcContext ?? session.orcContext;
     if (releaseContext) {
       let failureCode: import("./orc-project/orc-project-contracts.js").OrcRunFailureCode | undefined;
-      const terminal = (bound?.orcTurnControl ?? session.orcTurnControl)?.completed;
-      if (terminal?.kind === "failed") failureCode = terminal.failureCode;
-      else if (terminal?.kind === "cancelled") failureCode = terminal.failureCode;
+      if (boundTerminal?.kind === "failed") failureCode = boundTerminal.failureCode;
+      else if (boundTerminal?.kind === "cancelled") failureCode = boundTerminal.failureCode;
       try {
         const { getActiveOrcCoordinator } = await import("./reconciler.js");
         const coordinator = getActiveOrcCoordinator();
         if (coordinator) {
-          const released = coordinator.releaseOwnedRun(releaseContext, "failed", failureCode);
+          const released = coordinator.releaseOwnedRun(releaseContext, handoffSatisfied ? "completed" : "failed", handoffSatisfied ? undefined : failureCode);
           if (!released) this.reportFailedOrcRelease(coordinator.getStore(), releaseContext);
         } else {
           // #1628: coordinator unavailable — fall back to the direct store
           // release; the boot sweep remains the recovery floor.
           const { OrcProjectRunStore } = await import("./orc-project/orc-project-run-store.js");
           const store = new OrcProjectRunStore();
-          const released = store.release(releaseContext, "failed", failureCode);
+          const released = store.release(releaseContext, handoffSatisfied ? "completed" : "failed", handoffSatisfied ? undefined : failureCode);
           if (!released) this.reportFailedOrcRelease(store, releaseContext);
         }
       } catch (err) { logWarn(TAG, `Orc release error: ${err instanceof Error ? err.message : String(err)}`); }
