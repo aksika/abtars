@@ -1111,6 +1111,58 @@ describe("spin(spec) — unified session API (#1271)", () => {
     });
   });
 
+  describe("#1691 — one active O execution per reusable session", () => {
+    it("a second O call on a busy session is rejected before mutation; the first execution settles with its own context", async () => {
+      let releaseFirst!: () => void;
+      const firstHeld = new Promise<void>(r => { releaseFirst = r; });
+      const sendCalls: Array<{ context: unknown }> = [];
+      const heldTransport = mockTransport({
+        sendPrompt: vi.fn(async (_k: string, _m: string, _i: unknown, ctx?: unknown) => {
+          sendCalls.push({ context: ctx });
+          await firstHeld;
+          return "first result";
+        }),
+      });
+      spin.setRuntime(makeRuntime() as any);
+
+      // Allocate the reusable O session and attach its persistent transport.
+      const oSession = spin.createSession("aksika", "background", "O") as import("./spin-types.js").ManagedSession;
+      oSession.transport = heldTransport;
+
+      const first = spin.spin({ type: "O", sessionId: oSession.id, prompt: "first turn", await: true });
+      await vi.waitFor(() => expect(sendCalls).toHaveLength(1));
+
+      // A second O call against the same session is rejected with the bounded
+      // admission error BEFORE it can overwrite the session's active execution
+      // id, orc fields, or transport state — it never reaches sendPrompt.
+      await expect(
+        spin.spin({ type: "O", sessionId: oSession.id, prompt: "second turn", await: true }),
+      ).rejects.toMatchObject({ name: "SpinDispatchAdmissionError", code: "type_busy" });
+      expect(sendCalls).toHaveLength(1);
+      expect(oSession.activeExecutionId).toBeDefined();
+      // Release the first turn: it settles with its own captured identity and
+      // clears the session marker for the next execution.
+      releaseFirst();
+      const firstResult = await first;
+      expect(firstResult.result).toBe("first result");
+      // finishSpin clears the marker — the session is single-flight again.
+      expect(oSession.activeExecutionId).toBeUndefined();
+    });
+
+    it("sequential O turns on one session still admit normally after settlement", async () => {
+      const transport = mockTransport();
+      spin.setRuntime(makeRuntime() as any);
+      const oSession = spin.createSession("aksika", "background", "O") as import("./spin-types.js").ManagedSession;
+      oSession.transport = transport;
+
+      const r1 = await spin.spin({ type: "O", sessionId: oSession.id, prompt: "turn 1", await: true });
+      const r2 = await spin.spin({ type: "O", sessionId: oSession.id, prompt: "turn 2", await: true });
+      expect(r1.sessionId).toBe(oSession.id);
+      expect(r2.sessionId).toBe(oSession.id);
+      expect((transport.sendPrompt as ReturnType<typeof vi.fn>).mock.calls).toHaveLength(2);
+    });
+  });
+
   describe("#1274 — session cap gate at dispatch/dispatchAwait layer", () => {
     const MAX = parseInt(process.env["MAX_TOTAL_SESSIONS"] ?? "12", 10);
 

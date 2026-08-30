@@ -686,6 +686,16 @@ export class Spin {
     }
     const stepIndex = (session.messageCount >> 1) + 1;
 
+    // #1691: one active O execution per reusable session. A second O call
+    // against a session whose execution is still running is rejected before
+    // any session field, turn control, card association, or transport state
+    // is mutated — it is never serialized behind the first execution and can
+    // never overwrite its context. The coordinator's start-port catch maps
+    // this rejected start to the bounded `start_port_rejected` release.
+    if (spec.type === "O" && session.activeExecutionId) {
+      throw new SpinDispatchAdmissionError("type_busy", "O session is busy — an execution is already active on this session");
+    }
+
     // A legacy/user O turn has no project authority. Never inherit the prior
     // project's context when a project-scoped session is reused.
     if (spec.type === "O" && !spec.orcContext) {
@@ -769,6 +779,14 @@ export class Spin {
     //       the cardId in this.running forever, wedging single-slot types
     //       (O/T/B/D/H) until bridge restart. (#1274)
     const started = Date.now();
+    // #1691: the bound turn identity is captured exactly once, immediately
+    // after the durable bind succeeds. Prompt, steering continuation,
+    // completion, and release all use these immutable local values — the
+    // session fields are inspection mirrors only and can never become the
+    // release authority of a successor turn.
+    let boundOrcContext: import("./orc-project/orc-project-contracts.js").OrcInvocationContextV2 | undefined;
+    let boundOrcTurnControl: import("./orc-project/orc-project-contracts.js").OrcTurnControl | undefined;
+    let boundMaxPromptRounds: number | undefined;
     try {
       // #1611: the candidate policy is immutable per attached session —
       // reusing a session with a conflicting policy fails closed, whether or
@@ -788,11 +806,19 @@ export class Spin {
         const { OrcProjectRunStore } = await import("./orc-project/orc-project-run-store.js");
         const bind = new OrcProjectRunStore().bindExecution(spec.orcContext, session.id, session.activeExecutionId!);
         if (!bind.ok) throw new Error(`Orc bindExecution rejected: ${bind.reason}`);
-        session.orcContext = {
+        // #1691: the immutable release/prompt authority for this turn — a
+        // fresh object, never the session field. The session fields may
+        // mirror it, but only these locals travel with the completion
+        // helpers; a successor turn can never be released by a late
+        // completion reading newer session state.
+        boundOrcContext = {
           ...spec.orcContext,
           sessionId: session.id,
           executionId: session.activeExecutionId,
         };
+        session.orcContext = boundOrcContext;
+        boundOrcTurnControl = spec.orcTurnControl;
+        boundMaxPromptRounds = spec.orcMaxPromptRounds;
       }
       // 4. before-hook
       await profile.beforePrompt?.(session, cardId);
@@ -848,11 +874,13 @@ export class Spin {
         executionScope: spec.executionScope,
         deadlineAt: spec.deadlineAt,
         providerInactivityTimeoutMs: spec.providerInactivityTimeoutMs,
-        orcContext: session.orcContext,
+        // #1691: the initial prompt uses the captured bound turn identity,
+        // never a mutable session field that a successor could have replaced.
+        orcContext: boundOrcContext ?? session.orcContext,
         // #1680: the host-owned turn control and the policy-derived prompt
         // bound reach every transport through the shared context.
-        orcTurnControl: session.orcTurnControl,
-        maxPromptRounds: session.orcMaxPromptRounds,
+        orcTurnControl: boundOrcTurnControl ?? session.orcTurnControl,
+        maxPromptRounds: boundMaxPromptRounds ?? session.orcMaxPromptRounds,
         executionTelemetry,
         // #1527: Spin forwards its own provider reference (late-bound holder
         // populated by boot composition), never a scraped transport property.
@@ -869,7 +897,9 @@ export class Spin {
         const base: OutputObserver = this.sessionOutputFeed
           ? createOutputObserver(this.sessionOutputFeed, {
             sessionId: session.id,
-            executionId: session.activeExecutionId!,
+            // #1691: output correlation uses the captured execution identity,
+            // never a potentially newer session.activeExecutionId.
+            executionId: capturedExecutionId,
           })
           : {};
         if (!leaseEmitter) return base;
@@ -879,12 +909,12 @@ export class Spin {
             base.onDelta?.(event);
             if (event.kind !== "text" || !event.text) return;
             leaseOutputUnits += Math.max(1, Buffer.byteLength(event.text, "utf8"));
-            leaseEmitter.emitOutput(spec.attemptId!, spec.executionControl!.generation!, "spin-local", leaseOutputUnits, `output:${session.activeExecutionId}:${leaseOutputUnits}`);
+            leaseEmitter.emitOutput(spec.attemptId!, spec.executionControl!.generation!, "spin-local", leaseOutputUnits, `output:${capturedExecutionId}:${leaseOutputUnits}`);
           },
           onToolStart: (event) => {
             base.onToolStart?.(event);
             leaseToolOrdinal++;
-            leaseEmitter.emitToolStart(spec.attemptId!, spec.executionControl!.generation!, "spin-local", `tool:${session.activeExecutionId}:${leaseToolOrdinal}`, event.name);
+            leaseEmitter.emitToolStart(spec.attemptId!, spec.executionControl!.generation!, "spin-local", `tool:${capturedExecutionId}:${leaseToolOrdinal}`, event.name);
           },
           end: (reason) => base.end?.(reason),
           invalidate: () => base.invalidate?.(),
@@ -1054,11 +1084,12 @@ export class Spin {
                 // #1552: every context Spin builds carries the trusted type.
                 sessionType: sessionType(session),
                 executionTelemetry,
-                orcContext: session.orcContext,
                 // #1680: steering continuations belong to the same Orc turn and
-                // inherit its turn control and prompt bound.
-                orcTurnControl: session.orcTurnControl,
-                maxPromptRounds: session.orcMaxPromptRounds,
+                // inherit its turn control and prompt bound. #1691: the bound
+                // captured values are used, never a successor's session state.
+                orcContext: boundOrcContext ?? session.orcContext,
+                orcTurnControl: boundOrcTurnControl ?? session.orcTurnControl,
+                maxPromptRounds: boundMaxPromptRounds ?? session.orcMaxPromptRounds,
                 // #1629: steering continuations belong to the same execution
                 // and inherit its trusted authorization mode.
                 authorizationMode,
@@ -1085,11 +1116,11 @@ export class Spin {
         executeWithSteering().then(r => {
           const telemetryUsage = executionTelemetry.snapshot();
           executionTelemetry.close();
-          return this.finishSpin(spec, profile, session, capturedExecutionId, cardId, stepIndex, started, r, classifyContent(r), terminate, telemetryUsage);
+          return this.finishSpin(spec, profile, session, capturedExecutionId, cardId, stepIndex, started, r, classifyContent(r), terminate, telemetryUsage, this.boundTurnContext(boundOrcContext, boundOrcTurnControl, boundMaxPromptRounds));
         }).catch(e => {
           const telemetryUsage = executionTelemetry.snapshot();
           executionTelemetry.close();
-          this.failSpin(spec, profile, session, capturedExecutionId, cardId, stepIndex, started, e, terminate, telemetryUsage);
+          this.failSpin(spec, profile, session, capturedExecutionId, cardId, stepIndex, started, e, terminate, telemetryUsage, this.boundTurnContext(boundOrcContext, boundOrcTurnControl, boundMaxPromptRounds));
         });
         return { sessionId: session.id, cardId };
       }
@@ -1099,14 +1130,14 @@ export class Spin {
       const outcome = classifyContent(result);
       const telemetryUsage = executionTelemetry.snapshot();
       executionTelemetry.close();
-      await this.finishSpin(spec, profile, session, capturedExecutionId, cardId, stepIndex, started, result, outcome, terminate, telemetryUsage);
+      await this.finishSpin(spec, profile, session, capturedExecutionId, cardId, stepIndex, started, result, outcome, terminate, telemetryUsage, this.boundTurnContext(boundOrcContext, boundOrcTurnControl, boundMaxPromptRounds));
       return { sessionId: session.id, cardId, result, outcome };
     } catch (err) {
       const telemetryUsage = executionTelemetry.snapshot();
       executionTelemetry.close();
       // Covers: pre-exec throws (steps 4-6) AND awaited execution failures (step 7).
       // failSpin calls markDone + drainQueued — concurrency slot always released.
-      await this.failSpin(spec, profile, session, capturedExecutionId, cardId, stepIndex, started, err, terminate, telemetryUsage);
+      await this.failSpin(spec, profile, session, capturedExecutionId, cardId, stepIndex, started, err, terminate, telemetryUsage, this.boundTurnContext(boundOrcContext, boundOrcTurnControl, boundMaxPromptRounds));
       if (spec.await) {
         // #1502: surface the cardId on rejection so caller-owned settlers (the
         // scheduled-task runner) can fail the Kanban card. Under caller ownership
@@ -1251,12 +1282,28 @@ export class Spin {
     return session.status === "ended" || session.activeExecutionId !== capturedExecutionId;
   }
 
+  /**
+   * #1691: package the captured bound turn identity for the completion
+   * helpers. Undefined when no durable Orc bind happened (non-O turns or a
+   * pre-bind failure), so those paths keep their legacy session fallback.
+   */
+  private boundTurnContext(
+    orcContext: import("./orc-project/orc-project-contracts.js").OrcInvocationContextV2 | undefined,
+    orcTurnControl: import("./orc-project/orc-project-contracts.js").OrcTurnControl | undefined,
+    maxPromptRounds: number | undefined,
+  ): { orcContext: import("./orc-project/orc-project-contracts.js").OrcInvocationContextV2; orcTurnControl?: import("./orc-project/orc-project-contracts.js").OrcTurnControl; maxPromptRounds?: number } | undefined {
+    return orcContext ? { orcContext, orcTurnControl, maxPromptRounds } : undefined;
+  }
+
   private async finishSpin(
     spec: SpinSessionSpec, profile: SessionProfile, session: ManagedSession, capturedExecutionId: string,
     cardId: number | undefined, stepIndex: number, started: number, result: string,
     outcome: ContentOutcome,
     terminate: "call" | "response" | "external",
     telemetryUsage?: { input: number; output: number; cacheRead?: number; cacheWrite?: number },
+    // #1691: the immutable bound turn identity captured at bind time. When
+    // present it is the release authority — never the mutable session fields.
+    bound?: { orcContext: import("./orc-project/orc-project-contracts.js").OrcInvocationContextV2; orcTurnControl?: import("./orc-project/orc-project-contracts.js").OrcTurnControl; maxPromptRounds?: number },
   ): Promise<void> {
     await revokeSealedSecretExecution(capturedExecutionId);
     // #1611: a quarantined/superseded generation is inert — a late provider
@@ -1460,11 +1507,13 @@ export class Spin {
     // unsatisfied intent (prose-only completion) is released `failed` with the
     // stable `intent_postcondition_unsatisfied` code. A turn that ended by the
     // host-owned turn control (durable intent satisfied) releases `completed`
-    // with `failure_code = NULL`.
-    if (session.orcContext) {
+    // with `failure_code = NULL`. #1691: the release authority is the captured
+    // bound context, never the mutable session fields.
+    const releaseContext = bound?.orcContext ?? session.orcContext;
+    if (releaseContext) {
       let outcome: import("./orc-project/orc-project-contracts.js").OrcRunOutcome = "completed";
       let failureCode: import("./orc-project/orc-project-contracts.js").OrcRunFailureCode | undefined;
-      const terminal = session.orcTurnControl?.completed;
+      const terminal = (bound?.orcTurnControl ?? session.orcTurnControl)?.completed;
       if (terminal) {
         if (terminal.kind === "failed") {
           outcome = "failed";
@@ -1474,7 +1523,7 @@ export class Spin {
           failureCode = terminal.failureCode;
         }
         // intent_satisfied keeps `completed` / NULL.
-      } else if (session.orcContext.intentKind) {
+      } else if (releaseContext.intentKind) {
         // Natural model completion: verify the durable postcondition. A read
         // failure fails closed to unsatisfied — provider text alone can never
         // satisfy a durable Orc intent.
@@ -1482,8 +1531,8 @@ export class Spin {
           const { OrcProjectRunStore } = await import("./orc-project/orc-project-run-store.js");
           const { intentPolicyFor, readOrcProjectSnapshot } = await import("./orc-project/orc-intent-policy.js");
           const store = new OrcProjectRunStore();
-          const completion = intentPolicyFor(session.orcContext.intentKind)
-            .completion(readOrcProjectSnapshot(store.db, session.orcContext.projectCardId));
+          const completion = intentPolicyFor(releaseContext.intentKind)
+            .completion(readOrcProjectSnapshot(store.db, releaseContext.projectCardId));
           if (!completion.satisfied) {
             outcome = "failed";
             failureCode = "intent_postcondition_unsatisfied";
@@ -1498,15 +1547,15 @@ export class Spin {
         const { getActiveOrcCoordinator } = await import("./reconciler.js");
         const coordinator = getActiveOrcCoordinator();
         if (coordinator) {
-          const released = coordinator.releaseOwnedRun(session.orcContext, outcome, failureCode);
-          if (!released) this.reportFailedOrcRelease(coordinator.getStore(), session.orcContext);
+          const released = coordinator.releaseOwnedRun(releaseContext, outcome, failureCode);
+          if (!released) this.reportFailedOrcRelease(coordinator.getStore(), releaseContext);
         } else {
           // #1628: coordinator unavailable — fall back to the direct store
           // release; the boot sweep remains the recovery floor.
           const { OrcProjectRunStore } = await import("./orc-project/orc-project-run-store.js");
           const store = new OrcProjectRunStore();
-          const released = store.release(session.orcContext, outcome, failureCode);
-          if (!released) this.reportFailedOrcRelease(store, session.orcContext);
+          const released = store.release(releaseContext, outcome, failureCode);
+          if (!released) this.reportFailedOrcRelease(store, releaseContext);
         }
       } catch (err) { logWarn(TAG, `Orc release error: ${err instanceof Error ? err.message : String(err)}`); }
     }
@@ -1527,6 +1576,9 @@ export class Spin {
     cardId: number | undefined, stepIndex: number, started: number, err: unknown,
     terminate: "call" | "response" | "external",
     telemetryUsage?: { input: number; output: number; cacheRead?: number; cacheWrite?: number },
+    // #1691: the immutable bound turn identity captured at bind time. When
+    // present it is the release authority — never the mutable session fields.
+    bound?: { orcContext: import("./orc-project/orc-project-contracts.js").OrcInvocationContextV2; orcTurnControl?: import("./orc-project/orc-project-contracts.js").OrcTurnControl; maxPromptRounds?: number },
   ): Promise<void> {
     await revokeSealedSecretExecution(capturedExecutionId);
     // #1611: a quarantined/superseded generation is inert — its failure must
@@ -1603,25 +1655,28 @@ export class Spin {
     // #1480/#1680: Release Orc run after a failed turn. The stable bounded
     // failure code comes from the host-owned turn control when the transport
     // recorded one (prompt_round_limit, turn_cancelled); anything else maps to
-    // `provider_failure`. Raw provider/model prose is never persisted.
-    if (session.orcContext) {
+    // `provider_failure`. Raw provider/model prose is never persisted. #1691: the
+    // release authority is the captured bound context, never the mutable
+    // session fields.
+    const releaseContext = bound?.orcContext ?? session.orcContext;
+    if (releaseContext) {
       let failureCode: import("./orc-project/orc-project-contracts.js").OrcRunFailureCode | undefined;
-      const terminal = session.orcTurnControl?.completed;
+      const terminal = (bound?.orcTurnControl ?? session.orcTurnControl)?.completed;
       if (terminal?.kind === "failed") failureCode = terminal.failureCode;
       else if (terminal?.kind === "cancelled") failureCode = terminal.failureCode;
       try {
         const { getActiveOrcCoordinator } = await import("./reconciler.js");
         const coordinator = getActiveOrcCoordinator();
         if (coordinator) {
-          const released = coordinator.releaseOwnedRun(session.orcContext, "failed", failureCode);
-          if (!released) this.reportFailedOrcRelease(coordinator.getStore(), session.orcContext);
+          const released = coordinator.releaseOwnedRun(releaseContext, "failed", failureCode);
+          if (!released) this.reportFailedOrcRelease(coordinator.getStore(), releaseContext);
         } else {
           // #1628: coordinator unavailable — fall back to the direct store
           // release; the boot sweep remains the recovery floor.
           const { OrcProjectRunStore } = await import("./orc-project/orc-project-run-store.js");
           const store = new OrcProjectRunStore();
-          const released = store.release(session.orcContext, "failed", failureCode);
-          if (!released) this.reportFailedOrcRelease(store, session.orcContext);
+          const released = store.release(releaseContext, "failed", failureCode);
+          if (!released) this.reportFailedOrcRelease(store, releaseContext);
         }
       } catch (err) { logWarn(TAG, `Orc release error: ${err instanceof Error ? err.message : String(err)}`); }
     }
