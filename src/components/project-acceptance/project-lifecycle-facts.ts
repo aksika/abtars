@@ -149,10 +149,14 @@ export function gatherProjectLifecycleFacts(
                 source_id: root.source_id,
               };
             }
-          } catch {}
+          } catch {
+            // best-effort enrichment — a failed re-read keeps the root as loaded above
+          }
         }
       }
-    } catch {}
+    } catch {
+      // best-effort root load — a failed probe falls through to the SQL fallback below
+    }
     if (!root) {
       const rootRow = db.prepare(`SELECT * FROM kanban_board WHERE id = ?`).get(projectCardId) as Record<string, unknown> | undefined;
       if (!rootRow) {
@@ -177,7 +181,9 @@ export function gatherProjectLifecycleFacts(
       if (sup) {
         supervision = { state: sup.state, generation: sup.generation, repair_round: sup.repair_round ?? 0 };
       }
-    } catch {}
+    } catch {
+      // best-effort store probe — a failed read falls through to the SQL fallback below
+    }
     if (!supervision) {
       try {
         const sup = db.prepare(`SELECT state, generation, repair_round FROM project_supervision WHERE project_card_id = ?`).get(projectCardId) as
@@ -199,12 +205,16 @@ export function gatherProjectLifecycleFacts(
     try {
       const store = new ProjectReviewStore(db as unknown as never);
       contractExistsHigh = (store as unknown as { contractExists: (id: number) => boolean }).contractExists(projectCardId);
-    } catch {}
+    } catch {
+      // best-effort store probe — contractExistsHigh stays undefined on failure
+    }
     try {
       const store = new ProjectReviewStore(db as unknown as never);
       const cRow = (store as unknown as { getContractByProjectCardId: (id: number) => { contract_json: string } | undefined }).getContractByProjectCardId(projectCardId);
       if (cRow) contractJson = cRow.contract_json;
-    } catch {}
+    } catch {
+      // best-effort store probe — a failed read falls through to the SQL fallback below
+    }
     if (!contractJson) {
       try {
         const cRow = db.prepare(`SELECT contract_json FROM project_contracts WHERE project_card_id = ?`).get(projectCardId) as
@@ -263,7 +273,9 @@ export function gatherProjectLifecycleFacts(
         try {
           const c = kanbanGetCard(projectCardId);
           if (c) return c as unknown as Parameters<typeof scheduledOccurrenceState>[0];
-        } catch {}
+        } catch {
+          // best-effort card read — the synthetic gate card below keeps the probe total
+        }
         return { id: projectCardId, source: root.source, source_id: root.source_id, type: "O", parent_id: null, status: root.status } as unknown as Parameters<typeof scheduledOccurrenceState>[0];
       })();
       const occState = scheduledOccurrenceState(cardForGate);
@@ -541,7 +553,9 @@ export function gatherProjectLifecycleFacts(
               outcome: q.outcome,
             };
           }
-        } catch {}
+        } catch {
+          // best-effort queue probe — liveOrcRun stays undefined on failure
+        }
       }
     }
 
