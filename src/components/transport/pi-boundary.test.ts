@@ -105,5 +105,3 @@ describe("no upstream provider wire copies (#1425)", () => {
     expect(src).not.toContain(`"stream": true`);
   });
 });
-
-

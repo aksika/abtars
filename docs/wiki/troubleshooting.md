@@ -135,7 +135,7 @@ npm install && npm run build
 
 # 3. Build abtars
 cd ~/.abtars-releases/src/abtars
-npm install && node esbuild.config.js
+npm install && npm run bundle
 
 # 4. Run the install directly via node
 node ~/.abtars-releases/src/abtars/bundle/abtars-cli.js install
@@ -143,7 +143,7 @@ node ~/.abtars-releases/src/abtars/bundle/abtars-cli.js install
 
 For subsequent updates from source:
 ```bash
-cd ~/.abtars-releases/src/abtars && git pull && node esbuild.config.js
+cd ~/.abtars-releases/src/abtars && git pull && npm run bundle
 node ~/.abtars-releases/src/abtars/bundle/abtars-cli.js update --from-local
 ```
 

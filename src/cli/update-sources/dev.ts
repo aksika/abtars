@@ -158,8 +158,10 @@ export function makeLocalBuildSource(opts: LocalBuildOptions = {}): UpdateSource
         runCmd('npm', ['ci'], repoRoot);
       }
 
-      // Bundle mode (esbuild) — build directly, skip npm run bundle (it requires ../abmind)
       runCmd('node', ['esbuild.config.js'], repoRoot);
+      // #1746: preserve the established direct build flow while checking the
+      // emitted artifact before the local release is staged.
+      runCmd('node', ['scripts/check-bundle-boundary.mjs'], repoRoot);
       const publicSrc = join(repoRoot, 'src', 'components', 'dashboard', 'public');
       if (existsSync(publicSrc)) cpSync(publicSrc, join(repoRoot, 'bundle', 'public'), { recursive: true });
       const agentsSrc = join(repoRoot, 'agents');

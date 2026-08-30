@@ -616,6 +616,10 @@ export async function runDevUpdate(
 
     const build = await execP("node", ["esbuild.config.js"], { cwd: abtarsDir, timeout: 180_000 });
     if (!build.ok) throw new Error(`build failed: ${build.stderr.slice(-400) || build.stdout.slice(-400)}`);
+    // #1746: preserve the established direct build flow while checking the
+    // emitted artifact before this update can deploy it.
+    const boundary = await execP("node", ["scripts/check-bundle-boundary.mjs"], { cwd: abtarsDir, timeout: 30_000 });
+    if (!boundary.ok) throw new Error(`build failed: ${boundary.stderr.slice(-400) || boundary.stdout.slice(-400)}`);
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     logWarn("update", `update aborted: ${msg}`);

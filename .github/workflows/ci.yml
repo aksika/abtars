@@ -64,7 +64,7 @@ jobs:
         run: npm run check-imports
 
       - name: Build
-        run: node esbuild.config.js
+        run: npm run bundle
 
       - name: Typecheck
         run: npm run typecheck
@@ -118,7 +118,7 @@ jobs:
 
       - name: Build
         if: env.run == 'true'
-        run: node esbuild.config.js
+        run: npm run bundle
 
       - name: Typecheck
         if: env.run == 'true'

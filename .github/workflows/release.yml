@@ -34,7 +34,7 @@ jobs:
 
       - name: Build
         if: steps.version-check.outputs.already == 'false'
-        run: node esbuild.config.js
+        run: npm run bundle
 
       - name: Publish to npm (latest)
         if: steps.version-check.outputs.already == 'false'

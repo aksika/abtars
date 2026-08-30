@@ -12,7 +12,8 @@
 import { describe, it, expect, vi } from "vitest";
 import { clampThinkingLevel } from "@earendil-works/pi-ai";
 import { validatePiRuntimeContract, PiRuntimeContractError } from "./pi-runtime-contract.js";
-import { resolveCandidateModel } from "./pi-ai-adapter.js";
+import { PiCoreTransport } from "./pi-core-transport.js";
+import { ModelHealthRegistry } from "./model-health-registry.js";
 import type { PiInstallation, PiModuleSpecifier, PiInstallationState } from "../pi-installation.js";
 import type { PiRuntimeContractDependencies } from "./pi-runtime-contract.js";
 
@@ -253,15 +254,23 @@ describe("validatePiRuntimeContract (#1573)", () => {
       },
     });
     await validatePiRuntimeContract([{ apiFormat: "chat" }], contractDeps(boundary));
-    // rebuildTransport (/reset) constructs PiCoreTransport outside the boot
-    // warm; the contract probe is its population site, so the constructor's
-    // synchronous clamp must already be live.
-    const resolved = resolveCandidateModel(
-      { model: "test-model", provider: "test-provider", endpoint: "https://api.test/v1", maxContext: 128000 },
-      "xhigh",
-      false,
-    );
-    expect(resolved.requested).toBe("xhigh");
-    expect(resolved.effective).toBe("high");
+    // A caller that owns the contract probe but not phase-transport's boot
+    // warm must still see truthful constructor-time status.
+    const transport = new PiCoreTransport({
+      role: "main",
+      systemPrompt: "",
+      candidates: [{
+        model: "test-model",
+        provider: "test-provider",
+        endpoint: "https://api.test/v1",
+        maxContext: 128000,
+        thinking: { style: "effort", default: "xhigh" },
+      }],
+      healthRegistry: new ModelHealthRegistry(),
+      sandboxPolicy: { allowedTools: ["*"], allowedRead: ["*"], allowedWrite: ["*"], canExecuteBash: true },
+    });
+    expect(transport.getRuntimeStatus().reasoning).toBe("high");
+    expect(transport.getRuntimeStatus().reasoningRequested).toBe("xhigh");
+    transport.destroy();
   });
 });

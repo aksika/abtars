@@ -154,11 +154,11 @@ export async function validatePiRuntimeContract(
     );
   }
 
-  // #1746: populate the thinking clamp from the pi-ai root module already
-  // loaded here. This is the second population site after the phase-transport
-  // boot warm: rebuildTransport (/reset) bypasses boot, so any transport built
-  // outside boot still clamps at construction. Never throws — a root module
-  // without a callable clamp just leaves the slot unset (pass-through).
+  // #1746: retain clamp population from the pi-ai root module already loaded
+  // here. buildTransport() populates it before construction, including the
+  // /reset path; this call also covers transports initialized outside that
+  // composition boundary. Never throws — a root module without a callable
+  // clamp just leaves the slot unset (pass-through).
   await ensurePiThinkingClamp(aiModule as Record<string, unknown>);
 
   // The same mapping live requests use; duplicates collapse before loading.
