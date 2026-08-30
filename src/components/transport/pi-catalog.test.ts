@@ -83,6 +83,11 @@ describe("logUnmappedProviderOnce (#1747 diagnostic)", () => {
     expect(warnSpy).toHaveBeenCalledTimes(2);
   });
 
+  it("does not warn for a known pi provider", () => {
+    logUnmappedProviderOnce("openai");
+    expect(warnSpy).not.toHaveBeenCalled();
+  });
+
   it("never throws", () => {
     expect(() => logUnmappedProviderOnce("weird name")).not.toThrow();
   });

@@ -45,6 +45,7 @@ const KNOWN_PI_PROVIDERS = new Set<string>([
 const warnedUnmappedProviders = new Set<string>();
 
 export function logUnmappedProviderOnce(providerName: string): void {
+  if (mapProviderName(providerName)) return;
   if (warnedUnmappedProviders.has(providerName)) return;
   warnedUnmappedProviders.add(providerName);
   logWarn(TAG, `provider "${providerName}" has transport="api" but no pi mapping (KNOWN_PI_PROVIDERS) — falling to models.json; pi cost/metadata unavailable`);
