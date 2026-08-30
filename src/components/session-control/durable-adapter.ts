@@ -10,6 +10,7 @@
 
 import type { AbtarsMemoryRuntime } from "../memory-runtime.js";
 import type { ConversationCompactionSummarizer } from "../compact-summarizer.js";
+import { estimateTokensFromChars } from "../transport/token-budget.js";
 import { memoryOperationKey } from "../memory-operation-key.js";
 import { createHash } from "node:crypto";
 import type {
@@ -102,7 +103,7 @@ export class DurableConversationCompactionAdapter
         sourceTokenCount: candidate.sourceTokenCount,
       },
       summary: summary.text,
-      summaryTokenCount: Math.ceil(summary.text.length / 4),
+      summaryTokenCount: estimateTokensFromChars(summary.text.length),
       summarizer: { provider: summary.provider, model: summary.model },
       activeRequestModel: summary.model,
       reason: request.reason,
@@ -116,7 +117,7 @@ export class DurableConversationCompactionAdapter
         ...base,
         status: "completed",
         tokensBefore: candidate.sourceTokenCount,
-        tokensAfter: Math.ceil(summary.text.length / 4),
+        tokensAfter: estimateTokensFromChars(summary.text.length),
         generation: commit.generation,
         provider: summary.provider ?? undefined,
         model: summary.model ?? undefined,

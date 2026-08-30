@@ -8,6 +8,7 @@ import type {
 } from "./abmind-client-contract.js";
 
 import { logWarn, redactSecrets } from "./logger.js";
+import { estimateTokensFromChars } from "./transport/token-budget.js";
 import type { MemoryMutationFamily } from "./memory-operation-key.js";
 
 // ── Types ──────────────────────────────────────────────────────────────────
@@ -928,7 +929,7 @@ function normalizePrepareResult(value: unknown): PrepareConversationCompactionRe
       throw new Error("Compaction prepare candidate digest is malformed");
     }
     const sourceTokenCount = safeInteger(c["sourceTokenCount"], "sourceTokenCount", { min: 1 });
-    if (sourceTokenCount !== Math.ceil(c["serializedTurns"].length / 4)) {
+    if (sourceTokenCount !== estimateTokensFromChars(c["serializedTurns"].length)) {
       throw new Error("Compaction prepare candidate token estimate is inconsistent");
     }
     const sourceDigest = createHash("sha256").update(c["serializedTurns"], "utf-8").digest("hex").slice(0, 16);

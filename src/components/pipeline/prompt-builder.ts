@@ -5,6 +5,7 @@
  */
 
 import { logInfo, logDebug, logTrace } from "../logger.js";
+import { estimateTokensFromChars } from "../transport/token-budget.js";
 import { localTime } from "../../utils/local-time.js";
 import { interceptLargeMessage } from "../message-interceptor.js";
 import { abmind } from "../../utils/abmind-lazy.js";
@@ -95,7 +96,7 @@ export async function buildPrompt(
           const b64 = buf.toString("base64");
           const maxCtxPct = parseInt(process.env["IMAGE_MAX_CONTEXT_PCT"] ?? "30", 10);
           const maxContext = deps.maxContext ?? 128000;
-          const imgTokens = Math.ceil(b64.length / 4);
+          const imgTokens = estimateTokensFromChars(b64.length);
           if (imgTokens <= maxContext * (maxCtxPct / 100)) {
             imageContent = { mime, base64: b64, path: msg.mediaPath };
           } else {

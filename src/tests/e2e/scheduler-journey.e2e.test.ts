@@ -18,6 +18,7 @@ import { mkdirSync, rmSync, writeFileSync, mkdtempSync, existsSync } from "node:
 import { join, dirname } from "node:path";
 import { tmpdir } from "node:os";
 import { EventEmitter } from "node:events";
+import { estimateTokensFromChars } from "../../components/transport/token-budget.js";
 
 let TEST_HOME: string;
 
@@ -638,7 +639,7 @@ describe("#1724 scheduler E2E — journey 13: complete Main-owned announcement j
         const messages = rows
           .filter(r => r.sessionId === sessionId && r.id < beforeMessageId)
           .map(r => ({ role: r.role, content: r.content }));
-        return { messages, estimatedTokens: messages.reduce((s, m) => s + m.content.length / 4, 0), sourceMessageCount: rows.length };
+        return { messages, estimatedTokens: messages.reduce((s, m) => s + estimateTokensFromChars(m.content.length), 0), sourceMessageCount: rows.length };
       }),
     };
     return { runtime, rows };
