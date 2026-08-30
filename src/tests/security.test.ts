@@ -89,7 +89,7 @@ describe("path traversal protection", () => {
 
 // ── #1354: transport.json persistence invariant ─────────────────────────────
 // The ONLY production writer of transport.json is the validated boundary in
-// transport-config.ts (writeTransportConfig / restorePrevious /
+// transport-config/writer.ts (writeTransportConfig / restorePrevious /
 // resetToDefaults, all routing through serializeTransportConfig). A textual
 // scan cannot prove runtime safety — it catches bypasses of the boundary;
 // behavioral filesystem safety is covered in transport-config-secrets.test.ts.
@@ -108,7 +108,8 @@ describe("#1354 — transport.json writer invariant", () => {
   });
 
   it("the boundary writer routes through the validated serializer", () => {
-    const tc = readFileSync(repoPath("src/components/transport-config.ts"), "utf-8");
+    // #1558: the writer boundary moved to transport-config/writer.ts (barrel re-exports only).
+    const tc = readFileSync(repoPath("src/components/transport-config/writer.ts"), "utf-8");
     // the primary write must serialize via serializeTransportConfig
     expect(tc).toContain("serializeTransportConfig(vr.config)");
     // direct JSON.stringify of the raw candidate must not reach the disk path

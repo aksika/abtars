@@ -13,7 +13,7 @@
 
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { resolveAgent, resolveHailMary, getEnvFallback, clearTransportCache, validateTransportConfig, validateRouteProvidersReady, writeTransportConfig, getModelsForProvider, computeCostDisplay } from "./transport-config.js";
-import type { TransportConfig, ModelCatalog } from "./transport-config.js";
+import type { TransportConfig, ModelCatalog, AgentAssignment } from "./transport-config.js";
 import { _setWarmedForTest, _resetForTest } from "./transport/pi-catalog.js";
 
 const MODELS: ModelCatalog = {
@@ -443,13 +443,29 @@ import { cleanDemotedModels } from "./transport-config.js";
 
 describe("resolveAgent with demotion", () => {
   it("marks demoted primary — runtime FallbackPolicy handles skipping", () => {
+    // Demotion metadata is persisted on route-local assignments (routes.acp.agents),
+    // not on top-level TransportConfig fields.
+    type DemotedAssignment = AgentAssignment & {
+      demoted: string;
+      demotedReason: "auth" | "timeout";
+    };
+    const acpRoute = TRANSPORT.routes.acp;
+    if (acpRoute === undefined) throw new Error("test fixture missing acp route");
+    const demotedMain = {
+      model: "claude-sonnet-4.6",
+      provider: "kiro-free",
+      demoted: "2026-05-22",
+      demotedReason: "auth",
+    } satisfies DemotedAssignment;
     const tc: TransportConfig = {
       ...TRANSPORT,
-      agents: {
-        ...TRANSPORT.agents,
-        main: { model: "claude-sonnet-4.6", provider: "kiro-free", demoted: "2026-05-22", demotedReason: "auth" } as any,
+      routes: {
+        ...TRANSPORT.routes,
+        acp: {
+          ...acpRoute,
+          agents: { ...acpRoute.agents, main: demotedMain },
+        },
       },
-      fallbacks: [{ model: "minimax-m2.5:cloud", provider: "ollama" }],
     };
     // resolveAgent no longer auto-promotes — FallbackPolicy handles demoted models at runtime
     const r = resolveAgent("main", tc, MODELS)!;
