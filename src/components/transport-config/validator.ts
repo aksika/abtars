@@ -31,8 +31,12 @@ export const PROVIDER_ALLOWED_FIELDS = new Set([
   "apiKeyEnv",
   "apiFormat",
   "thinking",
+  "cacheRetention",
   "defaults",
 ]);
+
+/** #1748: valid cacheRetention values (pi's CacheRetention vocabulary). */
+const CACHE_RETENTION_VALUES = new Set(["none", "short", "long"]);
 
 const TRANSPORT_ALLOWED_FIELDS = new Set([
   "schemaVersion",
@@ -243,6 +247,17 @@ export function validateTransportConfig(input: unknown): TransportValidationResu
           code: "invalid_provider_field",
           path: `providers.${provName}.apiKeyEnv`,
           message: `Provider "${provName}" apiKeyEnv must be a valid environment-variable name ([A-Z_][A-Z0-9_]*)`,
+        });
+      }
+    }
+    // #1748: cacheRetention must be one of pi's CacheRetention values. An
+    // unrecognised value is rejected here rather than forwarded to providers.
+    if (entryRecord.cacheRetention !== undefined && entryRecord.cacheRetention !== null) {
+      if (!CACHE_RETENTION_VALUES.has(String(entryRecord.cacheRetention))) {
+        issues.push({
+          code: "invalid_provider_field",
+          path: `providers.${provName}.cacheRetention`,
+          message: `Provider "${provName}" cacheRetention must be one of: none, short, long`,
         });
       }
     }

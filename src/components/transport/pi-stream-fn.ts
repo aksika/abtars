@@ -3,6 +3,7 @@ import type {
   AssistantMessage,
   AssistantMessageEvent,
   AssistantMessageEventStream,
+  CacheRetention,
   Context,
   Model,
   SimpleStreamOptions,
@@ -47,6 +48,13 @@ export interface AbtarsPiStreamFnOptions {
   /** #1297: execution-local terminal-failure channel. Fired once when the
    *  fallback loop exhausts with every candidate sticky credit-failed. */
   onTerminalFailure?: (failure: ProviderTerminalFailure) => void;
+  /** #1748: opaque per-session cache identity forwarded as pi's
+   *  `options.sessionId`. Stable across turns and candidate rotation; derived
+   *  once per transport, never per execution. */
+  cacheIdentity?: string;
+  /** #1748: explicit prompt-cache retention forwarded to pi. Pinned to
+   *  "short" by the transport unless a provider opts into "long". */
+  cacheRetention?: CacheRetention;
 }
 
 function zeroUsage(): Usage {
@@ -238,7 +246,16 @@ function wrapEventStream(source: AsyncGenerator<AssistantMessageEvent>, fallback
 
 export function createPiStreamFn(options: AbtarsPiStreamFnOptions): StreamFn {
   return (model: Model<Api>, context: Context, fnOptions: SimpleStreamOptions = {}): AssistantMessageEventStream => {
-    const signal = fnOptions.signal ?? new AbortController().signal;
+    // #1748: session-level cache options are transport-level constants, merged
+    // here once so every attempt (including candidate rotation) carries the
+    // same identity and retention. Headers are untouched — buildAttemptOptions
+    // still owns x-client-request-id per attempt.
+    const streamOptions: SimpleStreamOptions = {
+      ...fnOptions,
+      ...(options.cacheIdentity !== undefined ? { sessionId: options.cacheIdentity } : {}),
+      ...(options.cacheRetention !== undefined ? { cacheRetention: options.cacheRetention } : {}),
+    };
+    const signal = streamOptions.signal ?? new AbortController().signal;
     const outer = async function* (): AsyncGenerator<AssistantMessageEvent> {
       // Start with the policy's selected candidate, then walk the remaining
       // candidates. Rotation can select a later candidate (for example B
@@ -282,8 +299,8 @@ export function createPiStreamFn(options: AbtarsPiStreamFnOptions): StreamFn {
         while (true) {
           const providerRequestId = (options.providerRequestIdFactory ?? randomUUID)();
           const attemptOptions = isOpenAiCompatible(piModel.api)
-            ? buildAttemptOptions(fnOptions, providerRequestId)
-            : { ...fnOptions };
+            ? buildAttemptOptions(streamOptions, providerRequestId)
+            : { ...streamOptions };
 
           logDebug(TAG, `provider attempt execution=${options.executionId} request=${providerRequestId} candidate=${candidateKey(candidate.model, candidate.endpoint)}`);
 

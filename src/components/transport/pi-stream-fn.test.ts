@@ -554,6 +554,79 @@ describe("createPiStreamFn", () => {
     expect(passedOptions?.headers?.["x-client-request-id"]).toBeUndefined();
   });
 
+  // ── Cache identity + retention (#1748) ─────────────────────────────────────
+
+  it("forwards cacheIdentity as sessionId and cacheRetention to the attempt options", async () => {
+    const attemptFactory = vi.fn().mockResolvedValue(makeFakeStream([
+      { type: "done", reason: "stop", message: { role: "assistant", content: "ok", stopReason: "stop", usage: { input: 1, output: 1 } } },
+    ]));
+
+    const streamFn = createPiStreamFn({
+      policy, createPiAiAttempt: attemptFactory, executionId: "exec_1",
+      cacheIdentity: "cache-id-1", cacheRetention: "short",
+    });
+    for await (const _ev of streamFn({ id: "test", api: "openai-completions" }, { messages: [] }, {})) { /* consume */ }
+
+    const passedOptions = attemptFactory.mock.calls[0]?.[3] as SimpleStreamOptions;
+    expect(passedOptions?.sessionId).toBe("cache-id-1");
+    expect(passedOptions?.cacheRetention).toBe("short");
+  });
+
+  it("sends the same cache identity on both attempts of a candidate rotation within one turn", async () => {
+    const first = makeCandidate({ model: "first", endpoint: "https://first/v1" });
+    const second = makeCandidate({ model: "second", endpoint: "https://second/v1" });
+    const rotationPolicy = new FallbackPolicy([first, second], registry);
+    const attemptFactory = vi.fn()
+      .mockRejectedValueOnce(new Error("API error 503: overloaded"))
+      .mockResolvedValueOnce(makeFakeStream([
+        { type: "done", reason: "stop", message: { role: "assistant", content: "recovered", stopReason: "stop", usage: { input: 1, output: 1 } } },
+      ]));
+
+    const streamFn = createPiStreamFn({
+      policy: rotationPolicy, createPiAiAttempt: attemptFactory, executionId: "exec_1",
+      cacheIdentity: "rotation-stable-id",
+    });
+    for await (const _ev of streamFn({ id: "test", api: "openai-completions" }, { messages: [] }, {})) { /* consume */ }
+
+    expect(attemptFactory).toHaveBeenCalledTimes(2);
+    const opts1 = attemptFactory.mock.calls[0]?.[3] as SimpleStreamOptions;
+    const opts2 = attemptFactory.mock.calls[1]?.[3] as SimpleStreamOptions;
+    expect(opts1?.sessionId).toBe("rotation-stable-id");
+    expect(opts2?.sessionId).toBe("rotation-stable-id");
+  });
+
+  it("keeps x-client-request-id fresh per attempt while the cache identity stays stable", async () => {
+    const ids: string[] = [];
+    const requestIdFactory = vi.fn(() => {
+      const id = `req-${ids.length}`;
+      ids.push(id);
+      return id;
+    });
+    const first = makeCandidate({ model: "first", endpoint: "https://first/v1" });
+    const second = makeCandidate({ model: "second", endpoint: "https://second/v1" });
+    const rotationPolicy = new FallbackPolicy([first, second], registry);
+    const attemptFactory = vi.fn()
+      .mockRejectedValueOnce(new Error("API error 503: overloaded"))
+      .mockResolvedValueOnce(makeFakeStream([
+        { type: "done", reason: "stop", message: { role: "assistant", content: "recovered", stopReason: "stop", usage: { input: 1, output: 1 } } },
+      ]));
+
+    const streamFn = createPiStreamFn({
+      policy: rotationPolicy, createPiAiAttempt: attemptFactory, executionId: "exec_1",
+      providerRequestIdFactory: requestIdFactory,
+      cacheIdentity: "rotation-stable-id",
+    });
+    for await (const _ev of streamFn({ id: "test", api: "openai-completions" }, { messages: [] }, {})) { /* consume */ }
+
+    const opts1 = attemptFactory.mock.calls[0]?.[3] as SimpleStreamOptions;
+    const opts2 = attemptFactory.mock.calls[1]?.[3] as SimpleStreamOptions;
+    expect(opts1?.sessionId).toBe("rotation-stable-id");
+    expect(opts2?.sessionId).toBe("rotation-stable-id");
+    expect(opts1?.headers?.["x-client-request-id"]).toBe(ids[0]);
+    expect(opts2?.headers?.["x-client-request-id"]).toBe(ids[1]);
+    expect(ids[0]).not.toBe(ids[1]);
+  });
+
   // ── Conflict-recovery tests (#1472) ─────────────────────────────────────────
 
   it("retries once on thrown idempotency_conflict before commit", async () => {

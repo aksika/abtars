@@ -287,6 +287,37 @@ describe("validateTransportConfig — pure validator (#1466)", () => {
     if (result.ok) return;
     expect(result.issues.some(i => i.code === "model_provider_incompatible" && i.path.startsWith("routes.pi-ai.fallbacks"))).toBe(true);
   });
+
+  it("#1748: accepts an explicit valid cacheRetention on a provider", () => {
+    const result = validateTransportConfig(mkPi({
+      providers: { ...providers, openrouter: { ...providers.openrouter, cacheRetention: "long" } },
+    }));
+    expect(result.ok).toBe(true);
+  });
+
+  it("#1748: accepts cacheRetention none/short/long and rejects anything else at validation", () => {
+    for (const value of ["none", "short", "long"]) {
+      const okResult = validateTransportConfig(mkPi({
+        providers: { ...providers, openrouter: { ...providers.openrouter, cacheRetention: value } },
+      }));
+      expect(okResult.ok).toBe(true);
+    }
+    const bad = validateTransportConfig(mkPi({
+      providers: { ...providers, openrouter: { ...providers.openrouter, cacheRetention: "medium" } },
+    }));
+    expect(bad.ok).toBe(false);
+    if (!bad.ok) {
+      expect(bad.issues.some(i => i.code === "invalid_provider_field" && i.path === "providers.openrouter.cacheRetention")).toBe(true);
+    }
+  });
+
+  it("#1748: cacheRetention absent means short — the provider entry stays valid without it", () => {
+    const result = validateTransportConfig(mkPi());
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.config.providers["openrouter"]!.cacheRetention).toBeUndefined();
+    }
+  });
 });
 
 // ────────────────────────────────────────────────────────────────────────────

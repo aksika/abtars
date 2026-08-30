@@ -289,6 +289,8 @@ export async function buildTransport(ctx: BootCtx): Promise<PhaseResult> {
       sandboxPolicy: { allowedTools: ["*"], allowedRead: ["*"], allowedWrite: ["*"], canExecuteBash: true },
       maxPromptRounds: tc?.maxToolRounds,
       maxCandidateRounds: tc?.maxFallbackToolRounds,
+      // #1748: per-provider cache-retention preference (absent → "short").
+      cacheRetention: resolved.provider.cacheRetention,
       // #1527: late-bound holder — memory negotiates in parallel; the
       // composition point (phase-pipeline-deps) populates it afterwards.
       contextProvider: ctx.durableContextProvider,

@@ -90,6 +90,7 @@ export async function ensurePiThinkingClamp(piAiRoot?: Record<string, unknown>):
 }
 
 import { logWarn, logDebug } from "../logger.js";
+import { createHash } from "node:crypto";
 import { resolvePiInstallation, loadPiModule } from "../pi-installation.js";
 import type { PiModuleSpecifier } from "../pi-installation.js";
 import type { ReasoningEffort } from "./kiro-transport.js";
@@ -200,6 +201,27 @@ function deriveProviderId(endpoint: string): string {
   } catch {
     return "abtars-direct";
   }
+}
+
+/**
+ * #1748: opaque per-session cache identity sent to providers as
+ * `options.sessionId`.
+ *
+ * Stable across turns and across candidate rotation — rotating models
+ * legitimately changes which backend holds the cached prefix, and resetting
+ * the identity would guarantee a miss on every rotation. Reset only when the
+ * session itself resets.
+ *
+ * Derived and non-reversible: it leaves the process to third-party providers,
+ * so it must never embed a user id, chat id, platform name, or session key
+ * verbatim. The scope is hashed, hex-encoded, and the HASH is truncated (never
+ * the raw scope) to a width comfortably inside pi's
+ * `OPENAI_PROMPT_CACHE_KEY_MAX_LENGTH` (64) while keeping collision probability
+ * negligible. Making this per-turn or per-execution would break the one thing
+ * it exists for: letting the provider FIND the prior cached prefix.
+ */
+export function deriveCacheIdentity(scope: string): string {
+  return createHash("sha256").update(scope).digest("hex").slice(0, 40);
 }
 
 /**

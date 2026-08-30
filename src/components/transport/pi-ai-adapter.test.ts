@@ -9,7 +9,7 @@ import { clampThinkingLevel } from "@earendil-works/pi-ai";
 
 import {
   pickPiApi, buildPiModel, buildPiContext, resolveReasoning, resolveCandidateModel,
-  ensurePiThinkingClamp,
+  ensurePiThinkingClamp, deriveCacheIdentity,
   type PiAiCandidate, type PiAiConversation,
 } from "./pi-ai-adapter.js";
 
@@ -151,6 +151,54 @@ describe("buildPiContext", () => {
 });
 
 
+
+// ── deriveCacheIdentity (#1748) ─────────────────────────────────────────────
+
+/*
+ * TEST DEFICIENCY (2026-08-30):
+ * Missing: a deterministic test proving that `sessionId` improves the
+ * provider-side cache-read ratio on a real provider path.
+ * Reason deferred: the measured provider path (deepseek/deepseek-v4-flash via
+ * openrouter) shows a NULL delta within provider noise — see
+ * abproject/specs/1748/measurements.md. Wire-verified, pi-ai 0.84.3 gates
+ * `prompt_cache_key` on `baseUrl.includes("api.openai.com")` OR
+ * `cacheRetention === "long"` (openai-completions.js), so the plumbed
+ * "short" default is a deliberate wire-level no-op on this path, and "long"
+ * (which does send prompt_cache_key) produced no benefit on DeepSeek's
+ * automatic cache. A unit test here could only assert plumbing, which the
+ * transport tests already do.
+ * Future verification: the smallest credible path where the effect is
+ * observable is an api.openai.com-compatible endpoint (prompt_cache_key gated
+ * on retention alone) or an anthropic-messages provider (cacheSessionId feeds
+ * cache-control placement). Measure cacheRead before/after there, attributed
+ * via `cacheIdentityHash` in cache-telemetry.
+ */
+
+describe("deriveCacheIdentity", () => {
+  it("is byte-identical for an identical scope across repeated calls", () => {
+    const scope = "session_alpha";
+    expect(deriveCacheIdentity(scope)).toBe(deriveCacheIdentity(scope));
+  });
+
+  it("differs between two scopes, and still differs after clamping to 64 chars", () => {
+    const a = deriveCacheIdentity("session_alpha");
+    const b = deriveCacheIdentity("session_beta");
+    expect(a).not.toBe(b);
+    expect(a.slice(0, 64)).not.toBe(b.slice(0, 64));
+  });
+
+  it("contains no substring of a user id, chat id, or platform name built into the scope", () => {
+    const scope = "telegram:7773842843:user_qakosal";
+    const id = deriveCacheIdentity(scope);
+    for (const needle of ["telegram", "7773842843", "user_qakosal", "qakosal"]) {
+      expect(id).not.toContain(needle);
+    }
+  });
+
+  it("output length is <= 64 (OPENAI_PROMPT_CACHE_KEY_MAX_LENGTH)", () => {
+    expect(deriveCacheIdentity("x".repeat(5000)).length).toBeLessThanOrEqual(64);
+  });
+});
 
 // ── resolveCandidateModel (#1619) ──────────────────────────────────────────
 

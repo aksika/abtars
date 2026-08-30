@@ -255,6 +255,117 @@ describe("PiCoreTransport", () => {
     }));
   });
 
+  // ── Cache identity + retention (#1748) ─────────────────────────────────────
+
+  it("#1748: derives a cache identity once per transport and sends it on two turns of one session", async () => {
+    mockCreatePiStreamFn.mockClear();
+    const t = makeTransport();
+    await t.initialize();
+    await expect(t.sendPrompt("sess_1", "first")).rejects.toThrow(PiCoreContractError);
+    await expect(t.sendPrompt("sess_1", "second")).rejects.toThrow(PiCoreContractError);
+
+    expect(mockCreatePiStreamFn).toHaveBeenCalledTimes(2);
+    const firstCall = mockCreatePiStreamFn.mock.calls[0]?.[0] as { cacheIdentity?: string };
+    const secondCall = mockCreatePiStreamFn.mock.calls[1]?.[0] as { cacheIdentity?: string };
+    expect(firstCall.cacheIdentity).toMatch(/^[0-9a-f]{40}$/);
+    expect(secondCall.cacheIdentity).toBe(firstCall.cacheIdentity);
+  });
+
+  it("#1748: two transports on different sessions send different identities", async () => {
+    mockCreatePiStreamFn.mockClear();
+    const a = makeTransport();
+    const b = makeTransport();
+    await a.initialize();
+    await b.initialize();
+    await expect(a.sendPrompt("sess_a", "x")).rejects.toThrow(PiCoreContractError);
+    await expect(b.sendPrompt("sess_b", "x")).rejects.toThrow(PiCoreContractError);
+    const idA = (mockCreatePiStreamFn.mock.calls[0]?.[0] as { cacheIdentity?: string }).cacheIdentity;
+    const idB = (mockCreatePiStreamFn.mock.calls[1]?.[0] as { cacheIdentity?: string }).cacheIdentity;
+    expect(idA).not.toBe(idB);
+  });
+
+  it("#1748: Main and a subagent of the same bridge send different identities", async () => {
+    mockCreatePiStreamFn.mockClear();
+    const main = makeTransport();
+    const registry = new ModelHealthRegistry();
+    const sub = new PiCoreTransport({
+      role: "specialist",
+      systemPrompt: "You are an abtars cody agent.",
+      candidates: makeCandidates(),
+      healthRegistry: registry,
+      sandboxPolicy: { allowedTools: ["*"], allowedRead: ["*"], allowedWrite: ["*"], canExecuteBash: true },
+      cacheScope: "cody",
+    });
+    await main.initialize();
+    await sub.initialize();
+    await expect(main.sendPrompt("sess_1", "x")).rejects.toThrow(PiCoreContractError);
+    await expect(sub.sendPrompt("sess_1", "x")).rejects.toThrow(PiCoreContractError);
+    const mainId = (mockCreatePiStreamFn.mock.calls[0]?.[0] as { cacheIdentity?: string }).cacheIdentity;
+    const subId = (mockCreatePiStreamFn.mock.calls[1]?.[0] as { cacheIdentity?: string }).cacheIdentity;
+    expect(mainId).not.toBe(subId);
+  });
+
+  it("#1748: two subagent transports of the same role send the same identity", async () => {
+    mockCreatePiStreamFn.mockClear();
+    const makeSub = () => new PiCoreTransport({
+      role: "specialist",
+      systemPrompt: "You are an abtars dreamy agent.",
+      candidates: makeCandidates(),
+      healthRegistry: new ModelHealthRegistry(),
+      sandboxPolicy: { allowedTools: ["*"], allowedRead: ["*"], allowedWrite: ["*"], canExecuteBash: true },
+      cacheScope: "dreamy",
+    });
+    const a = makeSub();
+    const b = makeSub();
+    await a.initialize();
+    await b.initialize();
+    await expect(a.sendPrompt("sess_1", "x")).rejects.toThrow(PiCoreContractError);
+    await expect(b.sendPrompt("sess_1", "x")).rejects.toThrow(PiCoreContractError);
+    const idA = (mockCreatePiStreamFn.mock.calls[0]?.[0] as { cacheIdentity?: string }).cacheIdentity;
+    const idB = (mockCreatePiStreamFn.mock.calls[1]?.[0] as { cacheIdentity?: string }).cacheIdentity;
+    expect(idA).toBe(idB);
+  });
+
+  it("#1748: resetSession clears the identity so a new session derives a fresh one", async () => {
+    mockCreatePiStreamFn.mockClear();
+    const t = makeTransport();
+    await t.initialize();
+    await expect(t.sendPrompt("sess_old", "x")).rejects.toThrow(PiCoreContractError);
+    await t.resetSession("sess_old");
+    await expect(t.sendPrompt("sess_new", "x")).rejects.toThrow(PiCoreContractError);
+    const idOld = (mockCreatePiStreamFn.mock.calls[0]?.[0] as { cacheIdentity?: string }).cacheIdentity;
+    const idNew = (mockCreatePiStreamFn.mock.calls[1]?.[0] as { cacheIdentity?: string }).cacheIdentity;
+    expect(idOld).not.toBe(idNew);
+  });
+
+  it("#1748: pins cacheRetention short by default and forwards it to the streamFn", async () => {
+    mockCreatePiStreamFn.mockClear();
+    const t = makeTransport();
+    await t.initialize();
+    await expect(t.sendPrompt("sess_1", "x")).rejects.toThrow(PiCoreContractError);
+    expect(mockCreatePiStreamFn).toHaveBeenCalledWith(expect.objectContaining({
+      cacheRetention: "short",
+    }));
+  });
+
+  it("#1748: a provider opting into long retention forwards long to the streamFn", async () => {
+    mockCreatePiStreamFn.mockClear();
+    const registry = new ModelHealthRegistry();
+    const t = new PiCoreTransport({
+      role: "main",
+      systemPrompt: "You are a helpful assistant.",
+      candidates: makeCandidates(),
+      healthRegistry: registry,
+      sandboxPolicy: { allowedTools: ["*"], allowedRead: ["*"], allowedWrite: ["*"], canExecuteBash: true },
+      cacheRetention: "long",
+    });
+    await t.initialize();
+    await expect(t.sendPrompt("sess_1", "x")).rejects.toThrow(PiCoreContractError);
+    expect(mockCreatePiStreamFn).toHaveBeenCalledWith(expect.objectContaining({
+      cacheRetention: "long",
+    }));
+  });
+
   it("forwards the caller's provider inactivity allowance to Pi", async () => {
     mockCreatePiStreamFn.mockClear();
     const t = makeTransport();

@@ -45,6 +45,11 @@ export type ProviderConfig = {
     | { style: "default" }
     | { style: "effort"; default: "off" | "low" | "medium" | "high" | "xhigh" }
     | { style: "extended"; default: number };
+  /** #1748: prompt-cache retention preference. Absent → "short" (pi's
+   *  default, pinned explicitly by the transport). "long" is opt-in per
+   *  provider: Anthropic bills 1h cache writes at 2x base input, so it is
+   *  never a global default. */
+  cacheRetention?: "none" | "short" | "long";
   defaults?: Record<string, { model: string }>;
 };
 

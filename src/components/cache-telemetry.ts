@@ -32,6 +32,25 @@ export interface ContextCacheTelemetryV1 {
   cacheWrite?: number;
   stablePrefixTokens: number;
   stablePrefixDigest: string;
+  /** #1748: digest of the cache identity sent to the provider on this call.
+   *  Present only when the pi-ai path supplied a session identity. A digest,
+   *  never the raw identity — this module records digests only. Lets a
+   *  measurement run be attributed to the plumbed identity and makes a
+   *  regression (identity silently dropped) visible in telemetry rather than
+   *  only in cost. */
+  cacheIdentityHash?: string;
+  /**
+   * TEST DEFICIENCY (2026-08-30):
+   * Missing: a production call site stamping `cacheIdentityHash` onto recorded
+   * events — the ContextCacheTelemetryV1 producer itself is still unwired
+   * (#1335 context-assembly work, phase-zero gate deferred), so no production
+   * path calls recordCacheTelemetry today.
+   * Reason deferred: the producer belongs to #1335's context-assembly layer,
+   * not to the #1748 plumbing; fabricating partial events here would be lies.
+   * Future verification: when the #1335 producer lands, stamp
+   * `cacheIdentityHash: cacheIdentityHash(identity)` on each event and assert
+   * presence/absence across a rotation turn in the transport integration lane.
+   */
   priorCommonPrefixTokens?: number;
   firstChangedMessageIndex?: number;
   latencyMs: number;
@@ -213,6 +232,15 @@ export function sessionHash(sessionKey: string): string {
 
 export function candidateKeyHash(endpoint: string, model: string): string {
   return stableHash(`${endpoint}::${model}`);
+}
+
+/**
+ * #1748: digest a cache identity for telemetry attribution. Undefined in →
+ * undefined out (no identity on the call). The digest, never the raw
+ * identity, is what this module records.
+ */
+export function cacheIdentityHash(identity: string | undefined): string | undefined {
+  return identity ? stableHash(identity) : undefined;
 }
 
 /**

@@ -160,6 +160,11 @@ export async function createSubagentTransport(role: SubagentRole, registry?: imp
       sandboxPolicy: { allowedTools: ["*"], allowedRead: ["*"], allowedWrite: ["*"], canExecuteBash: true },
       maxPromptRounds: tc?.maxToolRounds,
       maxCandidateRounds: tc?.maxFallbackToolRounds,
+      // #1748: subagent cache scope = agent role name (all workers of one role
+      // share a system prompt, so repeated spawns can reuse the cached prefix).
+      cacheScope: agentName,
+      // #1748: per-provider cache-retention preference (absent → "short").
+      cacheRetention: agent.provider.cacheRetention,
       // #1527: late-bound shared provider holder from boot composition.
       contextProvider: contextProvider ?? { current: null },
       // #1552: late-bound memory-tool deps holder from boot composition.

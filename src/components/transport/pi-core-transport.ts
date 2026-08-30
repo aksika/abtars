@@ -14,7 +14,7 @@ import type { AgentMessage } from "./pi-core-types.js";
 import { createCurrentTurnMessage, PiCoreContractError } from "./pi-core-types.js";
 import type { OutputObserver } from "../session-output-feed.js";
 import type { DurableContextProviderHolder } from "./pi-core-context.js";
-import { resolveCandidateModel } from "./pi-ai-adapter.js";
+import { resolveCandidateModel, deriveCacheIdentity } from "./pi-ai-adapter.js";
 import { candidateKey } from "./model-candidates.js";
 import { PiCoreToolExecutionError, buildTerminalDiagnostic } from "./tool-failure-diagnostic.js";
 import type { ToolFailureDiagnosticV1 } from "./tool-failure-diagnostic.js";
@@ -58,6 +58,17 @@ export interface PiCoreTransportOptions {
   memoryToolDeps?: import("../memory-store-quota.js").MemoryToolDependenciesHolder;
   maxPromptRounds?: number;
   maxCandidateRounds?: number;
+  /** #1748: cache-identity scope. Main (absent) derives from the Spin session
+   *  key at first sendPrompt; subagents pass the agent role name (all workers
+   *  of one role share a system prompt, so a role-stable identity lets
+   *  repeated spawns reuse the provider's cached prefix). Never shared between
+   *  Main and subagents. */
+  cacheScope?: string;
+  /** #1748: per-provider prompt-cache retention. Absent → "short" (pi's
+   *  default, pinned explicitly so a pi uplift cannot silently change it);
+   *  "long" is opt-in per provider — Anthropic bills 1h cache writes at 2x
+   *  base input, so it is never a global default. */
+  cacheRetention?: import("@earendil-works/pi-ai").CacheRetention;
 }
 
 let executionSeq = 0;
@@ -126,6 +137,16 @@ export class PiCoreTransport implements IKiroTransport {
   private currentContextTokens: number | null = null;
   /** #1619: context window paired with the committed candidate. */
   private currentContextWindow: number | null = null;
+  /** #1748: opaque cache identity, derived once per transport from the first
+   *  session key (main) or the agent role scope (subagent). Survives candidate
+   *  rotation; cleared on resetSession so a new session derives a fresh
+   *  identity. Null means "not yet derived". */
+  private cacheIdentity: string | null = null;
+  /** #1748: explicit retention sent on every call; "short" unless a provider
+   *  opts into "long". */
+  private cacheRetention: import("@earendil-works/pi-ai").CacheRetention;
+  /** #1748: subagent cache-identity scope (agent role name). */
+  private cacheScope?: string;
 
   constructor(opts: PiCoreTransportOptions) {
     this.config = { candidates: opts.candidates, systemPrompt: opts.systemPrompt, role: opts.role };
@@ -134,6 +155,11 @@ export class PiCoreTransport implements IKiroTransport {
     this.session = opts.session;
     this._contextProvider = opts.contextProvider ?? { current: null };
     this._memoryToolDeps = opts.memoryToolDeps ?? { current: null };
+    this.cacheScope = opts.cacheScope;
+    // #1748: "short" is pinned explicitly — pi's default today, made abtars's
+    // own so a future pi uplift that changes the default cannot silently
+    // change the shipped behavior. "long" is per-provider opt-in only.
+    this.cacheRetention = opts.cacheRetention ?? "short";
     this.maxPromptRounds = opts.maxPromptRounds;
     this.maxCandidateRounds = opts.maxCandidateRounds;
     this.policy = new FallbackPolicy(opts.candidates, opts.healthRegistry);
@@ -363,6 +389,16 @@ export class PiCoreTransport implements IKiroTransport {
       // Use provided executionId or allocate a new one
       const executionId = context?.executionId ?? `${sessionKey}_${Date.now()}_${++executionSeq}`;
 
+      // #1748: cache identity — derived ONCE per transport from the first
+      // session key (main) or the agent role scope (subagent), never per
+      // turn, per execution, or on candidate rotation. Rotating models
+      // legitimately changes which backend holds the cached prefix; resetting
+      // the identity would guarantee a miss on every rotation. resetSession
+      // clears it so a new session derives a fresh identity.
+      if (this.cacheIdentity === null) {
+        this.cacheIdentity = deriveCacheIdentity(this.cacheScope ?? sessionKey);
+      }
+
       const modelForCandidate = (key: string) => {
         const candidate = this.config.candidates.find((item) => candidateKey(item.model, item.endpoint) === key);
         if (!candidate) return undefined;
@@ -420,6 +456,10 @@ export class PiCoreTransport implements IKiroTransport {
         deadlineAt,
         providerInactivityTimeoutMs: context?.providerInactivityTimeoutMs ?? 180_000,
         reasoningEffort: this.requestedEffort,
+        // #1748: the session-stable cache identity and the pinned retention
+        // reach every provider attempt through the stream options.
+        cacheIdentity: this.cacheIdentity,
+        cacheRetention: this.cacheRetention,
         onCandidateCommitted: (candidate) => {
           const successful: CandidateSpec = {
             model: candidate.model,
@@ -684,6 +724,10 @@ export class PiCoreTransport implements IKiroTransport {
     this.currentContextTokens = null;
     this.currentContextWindow = null;
     this.committedCandidate = null;
+    // #1748: the session reset invalidates the cache identity — the next
+    // sendPrompt derives a fresh one (main re-derives from the new session
+    // key; subagents re-derive the same role-stable value).
+    this.cacheIdentity = null;
   }
 
   async sendInterrupt(_reason?: string): Promise<void> {

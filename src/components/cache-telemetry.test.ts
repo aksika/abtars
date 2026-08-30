@@ -11,6 +11,7 @@ import {
   stableHash,
   sessionHash,
   candidateKeyHash,
+  cacheIdentityHash,
   firstChangedMessageIndex,
   type ContextCacheTelemetryV1,
 } from "./cache-telemetry.js";
@@ -150,6 +151,19 @@ describe("cache-telemetry", () => {
       // Prior longer than current, common range identical → no index reported
       // (overall digest equality is the caller's responsibility).
       expect(firstChangedMessageIndex(["a", "b"], ["a", "b", "c"])).toBeUndefined();
+    });
+  });
+
+  describe("cacheIdentityHash (#1748)", () => {
+    it("digests an identity deterministically and never returns the raw value", () => {
+      const id = "0123456789abcdef0123456789abcdef";
+      expect(cacheIdentityHash(id)).toBe(cacheIdentityHash(id));
+      expect(cacheIdentityHash(id)).toBe(stableHash(id));
+      expect(cacheIdentityHash(id)).not.toContain(id);
+    });
+
+    it("returns undefined when no identity was present on the call", () => {
+      expect(cacheIdentityHash(undefined)).toBeUndefined();
     });
   });
 });
