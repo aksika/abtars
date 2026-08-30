@@ -37,6 +37,10 @@ export interface ScheduledProjectScript {
   completeWorkers(): void;
   /** Fail every running worker card. */
   failWorkers(): void;
+  /** #1751: complete one worker lane by index (insertion order). */
+  completeWorker(index: number): void;
+  /** #1751: fail one worker lane by index (insertion order). */
+  failWorker(index: number): void;
   /** Insert an open review case and settle it accepted (fires card:done). */
   accept(): void;
   /** Insert an open review case and settle it blocked (fires card:failed). */
@@ -116,6 +120,13 @@ export function makeScheduledProjectFixture(
     return kanban.kanbanGetChildren(state.admittedRoot).filter(c => c.type === "W");
   };
 
+  // #1751: the produced report discloses every lane outcome — a failed
+  // optional lane is visible in the acceptance snapshot, never hidden.
+  const laneSnapshot = (): Array<{ cardId: number; status: string; goal: string | null }> =>
+    kanban.kanbanGetChildren(state.admittedRoot!)
+      .filter(c => c.type === "W")
+      .map(c => ({ cardId: c.id, status: c.status, goal: c.goal ?? null }));
+
   const reviewAndDecide = (kind: "accept" | "block", reason?: string): void => {
     const rootId = state.admittedRoot!;
     const store = new ReviewStore();
@@ -125,7 +136,10 @@ export function makeScheduledProjectFixture(
     // is driver-owned); an explicit fixture accept after that is a no-op.
     if (supervision.state === "accepted" || supervision.state === "blocked") return;
     const round = supervision.review_round + 1;
-    const snapshot = { summary: "all worker outcomes terminal" };
+    const snapshot = {
+      summary: "all worker outcomes terminal",
+      lanes: laneSnapshot(),
+    };
     const { id: caseId } = store.insertReviewCase(rootId, supervision.generation, round, snapshot, `sd_${rootId}_${round}`);
     if (kind === "accept") {
       store.settleAcceptance(rootId, caseId, { action: "accept", synthesis: "fixture acceptance" }, "fixture accepted");
@@ -179,6 +193,18 @@ export function makeScheduledProjectFixture(
         kanban.kanbanFail(child.id, "worker failed");
         terminalizeAttempts(child.id, "failed");
       }
+    },
+    completeWorker: (index) => {
+      const child = workersOfRoot()[index];
+      if (!child) throw new Error(`fixture.completeWorker: no worker lane ${index}`);
+      kanban.kanbanComplete(child.id, null, "worker complete");
+      terminalizeAttempts(child.id, "completed");
+    },
+    failWorker: (index) => {
+      const child = workersOfRoot()[index];
+      if (!child) throw new Error(`fixture.failWorker: no worker lane ${index}`);
+      kanban.kanbanFail(child.id, "worker failed");
+      terminalizeAttempts(child.id, "failed");
     },
     accept: () => {
       if (state.holdAcceptance) return;
@@ -416,7 +442,11 @@ export function makeScheduledProjectFixture(
         finish("completed");
         return;
       }
-      store.settleAcceptance(projectId, openCase.id, { action: "accept", synthesis: "orc review accept" }, "orc review accept");
+      store.settleAcceptance(projectId, openCase.id, {
+        action: "accept",
+        synthesis: "orc review accept",
+        lanes: laneSnapshot(),
+      }, "orc review accept");
       try { nerve.fire("card:done", projectId); } catch { /* best effort */ }
       state.lastTurn = "reviewed";
       finish("completed");

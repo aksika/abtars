@@ -1464,6 +1464,49 @@ describe("#1548 healthy control — long-running scheduled O project with real c
   });
 });
 
+describe("#1751 scheduler E2E — a failing optional lane still produces the report", () => {
+  it("accepts with the failed required:false lane disclosed and never writes restart_interrupted", async () => {
+    vi.useFakeTimers();
+    try {
+      const { queue, coordinator } = await makeQueueWithCoordinator();
+      const scheduler = new wakeSchedulerMod.LifecycleWakeScheduler();
+      scheduler.register(dueSourcesMod.createRunDeadlineSource(coordinator));
+      await scheduler.start();
+      // v2 root contract: c1 is required (worker lane 0), c2 is optional
+      // (worker lane 1) — the incident's contract shape.
+      const { fixture } = await makeFixture({ v2RootContract: true, workerCount: 2 });
+
+      forceDue("project-task");
+      await tick.runTaskTick(makeTickCtx(queue));
+      const { runId, rootCardId } = await waitForReachControlled(fixture, "executing");
+
+      // The optional lane fails while the required lane completes. Lane
+      // failure must not block synthesis: no restart_interrupted, no abort.
+      fixture.completeWorker(0);
+      fixture.failWorker(1);
+      await vi.advanceTimersByTimeAsync(0);
+      fixture.accept();
+      await advanceUntil(() => !stateStore.readState("project-task")?.activeRun);
+
+      const ev = events("project-task");
+      expect(ev).toHaveLength(1);
+      expect(ev[0]!.outcome).toBe("success");
+      expect(ev[0]!.runId).toBe(runId);
+      expect(ev[0]!.diagnostic?.code).not.toBe("restart_interrupted");
+      // The produced report discloses the failed optional lane.
+      const decision = new reviewStoreMod.ProjectReviewStore().getLatestDecisionForProject(rootCardId);
+      const parsed = JSON.parse(decision!.decision_json) as { action: string; lanes?: Array<{ cardId: number; status: string }> };
+      expect(parsed.action).toBe("accept");
+      expect(parsed.lanes).toContainEqual(expect.objectContaining({ status: "failed" }));
+      expect(parsed.lanes).toContainEqual(expect.objectContaining({ status: "done" }));
+      expect(queue.currentJobs).toHaveLength(0);
+      scheduler.stop();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
+
 describe("#1548 Stage-1 defect cells — current dev must fail through the custody oracle", () => {
   async function setupCell(opts: { holdAcceptance?: boolean; failOrc?: boolean; workerCount?: number } = {}) {
     vi.useFakeTimers();
