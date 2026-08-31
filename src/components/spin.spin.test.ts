@@ -984,9 +984,10 @@ describe("spin(spec) — unified session API (#1271)", () => {
       const projectSession = spin.getSessionById(r1.sessionId)!;
       expect(projectSession.orcContext).toBeDefined();
 
-      // Second: an ownerless O turn must not seize that session — it gets a
-      // fresh one and the project session's authority survives untouched.
-      const r2 = await spin.spin({ type: "O", goal: "user turn", userId: "aksika", platform: "telegram", source: "user", await: true });
+      // Second: an ownerless O turn explicitly targeting the project session
+      // must be fenced too — it gets a fresh one and the project session's
+      // authority survives untouched.
+      const r2 = await spin.spin({ type: "O", sessionId: r1.sessionId, goal: "user turn", userId: "aksika", platform: "telegram", source: "user", await: true });
       expect(r2.sessionId).not.toBe(r1.sessionId);
       expect(spin.getSessionById(r1.sessionId)!.orcContext).toBeDefined();
     });

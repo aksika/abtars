@@ -414,6 +414,7 @@ async function swapTestGeneration(
     contributionActive: false,
     openReviewCase: false,
     inputRequestsOutstanding: false,
+    ownerReadsComplete: true,
     workerOwnedChild: false,
     acceptedTerminalChildrenReady: false,
   });
@@ -2240,6 +2241,7 @@ describe("Reconciler — #1546 scheduled-root driver", () => {
       contributionActive: false,
       openReviewCase: false,
       inputRequestsOutstanding: false,
+      ownerReadsComplete: true,
       workerOwnedChild: true,
       acceptedTerminalChildrenReady: false,
     });
@@ -2276,6 +2278,7 @@ describe("Reconciler — #1546 scheduled-root driver", () => {
       contributionActive: false,
       openReviewCase: false,
       inputRequestsOutstanding: false,
+      ownerReadsComplete: true,
       workerOwnedChild: false,
       acceptedTerminalChildrenReady: false,
     });
@@ -2286,6 +2289,38 @@ describe("Reconciler — #1546 scheduled-root driver", () => {
     await flush();
 
     expect(kanbanFailMock).toHaveBeenCalledWith(1, "no scheduled Orc continuation owner after restart");
+  });
+
+  it("#1751: an incomplete owner snapshot defers instead of settling", async () => {
+    await swapTestGeneration({
+      coordinator: {
+        getStore: makeFakeRunStore,
+        scheduleProjectExecution: () => ({ kind: "not_actionable" as const, reason: "intent_not_actionable" as const }),
+      } as never,
+    });
+    setupExecutingProject({
+      children: [{ ...makeCard({ id: 2, status: "queued", type: "W" }), parent_id: 1 }],
+      attemptLifecycle: "failed",
+    });
+    readOrcProjectSnapshotMock.mockReturnValue({
+      supervisionState: "executing",
+      supervisionGeneration: 1,
+      contractExists: true,
+      projectTerminal: false,
+      contributionActive: false,
+      openReviewCase: false,
+      inputRequestsOutstanding: false,
+      ownerReadsComplete: false,
+      workerOwnedChild: false,
+      acceptedTerminalChildrenReady: false,
+    });
+
+    mod.requestReconcile(1);
+    await flush();
+    await new Promise(r => setTimeout(r, 10));
+    await flush();
+
+    expect(kanbanFailMock).not.toHaveBeenCalled();
   });
 });
 

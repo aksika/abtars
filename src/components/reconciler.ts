@@ -712,7 +712,17 @@ function claimOrcContinuation(generation: ReconcilerGeneration, projectId: numbe
       // run whose Worker card was queued for 65 ms between a failed attempt
       // and its terminal state. Re-read at the decision point: if the owner
       // has since gone terminal, the settlement below still runs.
-      const snapshot = readOrcProjectSnapshot(coordinator.getStore().db, projectId);
+      let snapshot: ReturnType<typeof readOrcProjectSnapshot>;
+      try {
+        snapshot = readOrcProjectSnapshot(coordinator.getStore().db, projectId);
+      } catch (err) {
+        logWarn(TAG, `Project ${projectId}: continuation owner snapshot unavailable — deferring: ${err instanceof Error ? err.message : String(err)}`);
+        return "owned";
+      }
+      if (!snapshot.ownerReadsComplete) {
+        logWarn(TAG, `Project ${projectId}: continuation owner snapshot incomplete — deferring to a later wake`);
+        return "owned";
+      }
       if (snapshot.workerOwnedChild || snapshot.contributionActive
           || snapshot.openReviewCase || snapshot.inputRequestsOutstanding) {
         logWarn(TAG, `Project ${projectId}: continuation not actionable — higher-priority owner active, deferring to its wake`);

@@ -684,6 +684,13 @@ export class Spin {
       session = this.sessions.allocate({ type: spec.type, userId, platform, chatId });
       if (spec.metadata) session.metadata = { ...spec.metadata };
     }
+
+    // #1751: an ownerless O turn must never resolve to a project-scoped
+    // session. This also fences explicit-session and active-session paths,
+    // which bypass getOrCreateVisibleSession above.
+    if (spec.type === "O" && !spec.orcContext && session.orcContext !== undefined) {
+      session = this.getOrCreateVisibleSession(userId, spec.type)!;
+    }
     const stepIndex = (session.messageCount >> 1) + 1;
 
     // #1691: one active O execution per reusable session. A second O call

@@ -28,6 +28,8 @@ export interface OrcProjectSnapshot {
   readonly contributionActive: boolean;
   readonly openReviewCase: boolean;
   readonly inputRequestsOutstanding: boolean;
+  /** Every higher-priority-owner query completed without a read error. */
+  readonly ownerReadsComplete: boolean;
   /** A direct child card carrying a worker contract (Worker/repair ownership). */
   readonly workerOwnedChild: boolean;
   /** #1729: every direct W child is done with a completed attempt and a result row. */
@@ -250,6 +252,7 @@ export function readOrcProjectSnapshot(db: TaskDatabase, projectCardId: number):
   let contributionActive = false;
   let openReviewCase = false;
   let inputRequestsOutstanding = false;
+  let ownerReadsComplete = true;
   let workerOwnedChild = false;
   let acceptedTerminalChildrenReady = false;
 
@@ -277,17 +280,17 @@ export function readOrcProjectSnapshot(db: TaskDatabase, projectCardId: number):
        LIMIT 1
     `).get(projectCardId);
     contributionActive = row !== undefined;
-  } catch { /* fail closed */ }
+  } catch { ownerReadsComplete = false; }
 
   try {
     const row = db.prepare(`SELECT 1 FROM project_review_cases WHERE project_card_id = ? AND status = 'open' LIMIT 1`).get(projectCardId);
     openReviewCase = row !== undefined;
-  } catch { /* fail closed */ }
+  } catch { ownerReadsComplete = false; }
 
   try {
     const row = db.prepare(`SELECT 1 FROM project_input_requests WHERE project_card_id = ? AND status IN ('pending','answered') LIMIT 1`).get(projectCardId);
     inputRequestsOutstanding = row !== undefined;
-  } catch { /* fail closed */ }
+  } catch { ownerReadsComplete = false; }
 
   try {
     const row = db.prepare(`
@@ -299,7 +302,7 @@ export function readOrcProjectSnapshot(db: TaskDatabase, projectCardId: number):
        LIMIT 1
     `).get(projectCardId);
     workerOwnedChild = row !== undefined;
-  } catch { /* fail closed */ }
+  } catch { ownerReadsComplete = false; }
 
   try {
     acceptedTerminalChildrenReady = hasAcceptedTerminalChildren(db, projectCardId);
@@ -313,6 +316,7 @@ export function readOrcProjectSnapshot(db: TaskDatabase, projectCardId: number):
     contributionActive,
     openReviewCase,
     inputRequestsOutstanding,
+    ownerReadsComplete,
     workerOwnedChild,
     acceptedTerminalChildrenReady,
   };

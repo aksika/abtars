@@ -92,6 +92,21 @@ describe("#1680 intent policy rows", () => {
     expect(execution.isActionable({ ...emptySnapshot(), supervisionState: "awaiting_contract", contractExists: false })).toBe(false);
   });
 
+  it("#1751 marks an owner read failure as incomplete evidence", () => {
+    const db = {
+      prepare: (sql: string) => ({
+        get: () => {
+          if (sql.includes("peer_contributions")) throw new Error("owner read unavailable");
+          return undefined;
+        },
+      }),
+    } as unknown as import("../tasks/kanban-board.js").TaskDatabase;
+
+    const snapshot = policyMod.readOrcProjectSnapshot(db, 1);
+    expect(snapshot.contributionActive).toBe(false);
+    expect(snapshot.ownerReadsComplete).toBe(false);
+  });
+
   it("completion postconditions re-read durable state", () => {
     const authoring = policyMod.intentPolicyFor("contract_authoring");
     expect(authoring.completion({ ...emptySnapshot(), contractExists: true, supervisionState: "executing" }).satisfied).toBe(true);
@@ -112,7 +127,9 @@ function emptySnapshot(): import("./orc-intent-policy.js").OrcProjectSnapshot {
     contributionActive: false,
     openReviewCase: false,
     inputRequestsOutstanding: false,
+    ownerReadsComplete: true,
     workerOwnedChild: false,
+    acceptedTerminalChildrenReady: false,
   };
 }
 
