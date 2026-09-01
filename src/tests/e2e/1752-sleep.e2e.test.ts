@@ -18,9 +18,12 @@ import { SealedSecretHandles } from "../../components/sealed-secret-handles.js";
 import { AbmindServiceHost, EmbeddedTransport, AbmindClient, InjectableProcessIdentity } from "abmind";
 import { PiCoreToolExecutionError } from "../../components/transport/tool-failure-diagnostic.js";
 
-const DAILY_HEREDOC = `cat > /tmp/.abmind/memory/daily/daily_2026-09-01.md << 'EOF'
+function dailyHeredoc(root: string): string {
+  const target = join(root, "memory", "daily", "daily_2026-09-01.md");
+  return `cat > ${JSON.stringify(target)} << 'EOF'
 Retrospective text mentioning sudo, rm -rf, and DROP TABLE as quoted history.
 EOF`;
+}
 
 function makeActionGate(tmp: string): ActionGate {
   const gate = new ActionGate(join(tmp, "auth"));
@@ -42,19 +45,22 @@ describe("1752 E2E — normal sleep authorization and failure/recovery truth", (
   });
 
   it("safe daily-summary heredoc executes in sleep without Telegram request", async () => {
+    mkdirSync(join(tmp, "memory", "daily"), { recursive: true });
     const handles = new SealedSecretHandles(join(tmp, "handles"));
     const svc = new HostToolService({ handles, actionGate: gate, resolveHandle: async () => null });
+    const command = dailyHeredoc(tmp);
     // No pending request before
     const pendingBefore = (gate as unknown as { pending: Map<string, unknown> }).pending?.size ?? 0;
-    const resultStr = await svc.runBash({ command: DAILY_HEREDOC }, { userId: "test", executionId: "e1", authorizationMode: "unattended-sleep" });
+    const resultStr = await svc.runBash({ command }, { userId: "test", executionId: "e1", authorizationMode: "unattended-sleep" });
     const result = JSON.parse(resultStr) as Record<string, unknown>;
-    // Should not be policy_rejected
-    expect(result["error"]).not.toBe("policy_rejected");
+    expect(result["error"]).toBeUndefined();
+    expect(result["exit_code"]).toBe(0);
+    expect(readFileSync(join(tmp, "memory", "daily", "daily_2026-09-01.md"), "utf-8")).toContain("DROP TABLE");
     // No auth request was enqueued for sleep
     const pendingAfter = (gate as unknown as { pending: Map<string, unknown> }).pending?.size ?? 0;
     expect(pendingAfter).toBe(pendingBefore);
     // Classifier must allow the heredoc
-    expect(classifyCommand(DAILY_HEREDOC)).toBe("allow");
+    expect(classifyCommand(command)).toBe("allow");
   });
 
   it("dangerous sleep command is rejected even with persistent interactive allow rule", async () => {
@@ -76,7 +82,7 @@ describe("1752 E2E — normal sleep authorization and failure/recovery truth", (
   });
 
   it("heredoc prose does not change executable classification; nested bash -c remains guarded", () => {
-    expect(classifyCommand(DAILY_HEREDOC)).toBe("allow");
+    expect(classifyCommand(dailyHeredoc("/tmp/.abmind"))).toBe("allow");
     expect(classifyCommand("bash -c 'sudo rm -rf /'")).toBe("auth-required");
     expect(classifyCommand("sqlite3 db <<EOF\nDROP TABLE foo;\nEOF")).toBe("auth-required");
     expect(classifyCommand("source /tmp/file.sh")).toBe("auth-required");
@@ -262,11 +268,10 @@ describe("1752 E2E — normal sleep authorization and failure/recovery truth", (
         expect(admission.status).toBe("rejected");
         // No Dreamy call
         expect(spin).not.toHaveBeenCalled();
-        // Exactly one lease close (bootstrap lease)
-        // Note: closeSpy may have been called once for the bootstrap lease
-        // We check that after a short delay, close was called at least once and no pending completion
+        // Exactly one lease close (the bootstrap lease); no provider pump was
+        // started, so it must not close a second lease.
         await new Promise(r => setTimeout(r, 200));
-        expect(closeSpy).toHaveBeenCalled();
+        expect(closeSpy).toHaveBeenCalledTimes(1);
         // Previous last-run report unchanged (or still idle)
         const after = await client.sleep.status();
         expect(after.last?.report).toBe(beforeReport);

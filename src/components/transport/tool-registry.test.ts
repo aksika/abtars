@@ -6,7 +6,7 @@ import { join } from "node:path";
 // #1629: mutable classify result — the boundary test needs an auth-required
 // command; every other test keeps the default "allow".
 const guardrailMocks = vi.hoisted(() => ({
-  classifyImpl: "allow" as "allow" | "auth-required",
+  classifyImpl: "allow" as "allow" | "auth-required" | "block",
 }));
 vi.mock("../guardrails.js", () => ({
   checkCommand: () => null,
@@ -691,6 +691,15 @@ describe("execute_bash — #1629 trusted authorization mode", () => {
       authorizationMode: "unattended-task",
     }, { userId: "test" });
     expect(gate.calls[0]?.options?.mode).toBeUndefined();
+  });
+
+  it("classifier blocks fail closed for sleep even when checkCommand is inactive", async () => {
+    guardrailMocks.classifyImpl = "block";
+    const result = await executeToolCall("execute_bash", { command: "rm -rf /" }, {
+      userId: "test",
+      authorizationMode: "unattended-sleep",
+    });
+    expect(JSON.parse(result)).toMatchObject({ error: "policy_rejected", exit_code: 126 });
   });
 });
 

@@ -78,6 +78,23 @@ describe('onboard command (non-interactive)', () => {
     expect(code).toBe(4);
   });
 
+  it('refuses whitespace-only provider or model values', async () => {
+    const common = {
+      nonInteractive: true,
+      acceptRisk: true,
+      instanceName: 'test',
+      userName: 'tester',
+      passphrase: 'pw',
+      telegramToken: '123:abc',
+      telegramChatId: '42',
+      force: false,
+    } as const;
+    const blankProvider = await onboard({ ...common, defaultProvider: '   ', defaultModel: 'model' });
+    expect(blankProvider).toBe(4);
+    const blankModel = await onboard({ ...common, defaultProvider: 'openrouter', defaultModel: '   ' });
+    expect(blankModel).toBe(4);
+  });
+
   it('writes config/.env with owned keys', async () => {
     const code = await onboard({
       nonInteractive: true,

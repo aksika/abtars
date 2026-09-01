@@ -69,7 +69,10 @@ function makeCtx(overrides: Partial<CommandContext> = {}): CommandContext {
     idleSave: { reset: vi.fn(), stop: vi.fn(), save: vi.fn().mockResolvedValue(undefined) } as unknown as IdleSave,
     sessionManager: new SessionManager(),
     updateCtxStart: vi.fn(),
-    startSleep: vi.fn().mockReturnValue({ status: "accepted" }),
+    startSleep: vi.fn().mockReturnValue({
+      status: "accepted",
+      admission: Promise.resolve({ status: "accepted", runId: "test-run" }),
+    }),
     ...overrides,
   };
 }
@@ -135,6 +138,15 @@ describe("/sleep commands", () => {
     expect(ctx.startSleep).toHaveBeenCalledWith({ fresh: true, resume: false });
     const reply = (ctx.reply as ReturnType<typeof vi.fn>).mock.calls[0]?.[0] as string;
     expect(reply).toContain("already running");
+  });
+
+  it("does not claim a cycle started when an accepted handle has no daemon admission", async () => {
+    const ctx = makeCtx({ startSleep: vi.fn().mockReturnValue({ status: "accepted" }) });
+    await handleCommand("/sleep now", ctx);
+    const reply = (ctx.reply as ReturnType<typeof vi.fn>).mock.calls[0]?.[0] as string;
+    expect(reply).toContain("daemon admission missing");
+    expect(reply).toContain("invalid_response");
+    expect(reply).not.toContain("Full sleep cycle started");
   });
 
   it("/sleep now reports unavailable when startSleep is not wired (sleep capability disabled)", async () => {

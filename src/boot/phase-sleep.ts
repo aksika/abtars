@@ -46,6 +46,21 @@ function registerSleepCycleDispatcher(ctx: BootCtx): void {
       return { status: "failed" as const, error: started.reason };
     }
 
+    // Local handle creation is not daemon admission. Do not wait for or report
+    // the cycle outcome until the daemon has accepted this run with a run ID.
+    let admission: Awaited<typeof started.admission>;
+    try {
+      admission = await started.admission;
+    } catch {
+      return { status: "failed" as const, error: "sleep admission failed: invalid_response" };
+    }
+    if (admission.status !== "accepted") {
+      return { status: "failed" as const, error: `sleep admission rejected: ${admission.reason} (${admission.code})` };
+    }
+    if (!admission.runId) {
+      return { status: "failed" as const, error: "sleep admission failed: invalid_response" };
+    }
+
     const outcome = await started.completion;
     const failed = outcome.failedSteps.length > 0 ? ` (failed: ${outcome.failedSteps.join(", ")})` : "";
     switch (outcome.status) {
@@ -108,12 +123,12 @@ export function composeSleep(ctx: BootCtx, client: AbmindClientLike | null): voi
       return sessionManager.allocateDreamySession(name).id;
     },
     sessionManager: {
-      spin: async (opts: { type: string; prompt: string; sessionId?: string; timeoutMs: number; deadlineAt: number; providerInactivityTimeoutMs: number; candidatePolicy: "configured-only"; await: true }) => {
+      spin: async (opts: { type: string; prompt: string; sessionId?: string; timeoutMs: number; deadlineAt: number; providerInactivityTimeoutMs: number; candidatePolicy: "configured-only"; await: true; executionOrigin?: "sleep" }) => {
         // #1611: the pump's absolute provider deadline and configured-only
         // candidate policy flow through to the transport construction.
         // #1651 v2: the awaited contract (result + outcome) passes through
         // unchanged — the pump consumes Spin's classification, never its own.
-        return sessionManager.spin({ type: opts.type as any, prompt: opts.prompt, sessionId: opts.sessionId, timeoutMs: opts.timeoutMs, deadlineAt: opts.deadlineAt, providerInactivityTimeoutMs: opts.providerInactivityTimeoutMs, candidatePolicy: opts.candidatePolicy, settlementOwner: "spin", await: true });
+        return sessionManager.spin({ type: opts.type as any, prompt: opts.prompt, sessionId: opts.sessionId, timeoutMs: opts.timeoutMs, deadlineAt: opts.deadlineAt, providerInactivityTimeoutMs: opts.providerInactivityTimeoutMs, candidatePolicy: opts.candidatePolicy, settlementOwner: "spin", await: true, executionOrigin: opts.executionOrigin });
       },
     },
     // #1611: narrow exact-session quarantine — the capability never sees the

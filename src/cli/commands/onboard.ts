@@ -222,7 +222,7 @@ async function runInteractive(existing: WizardAnswers | null): Promise<WizardAns
       { value: 'kiro', label: 'kiro — Kiro CLI' },
       { value: 'gemini', label: 'gemini — Gemini CLI' },
     ],
-    initialValue: existing?.defaultProvider ?? 'openrouter',
+    ...(existing?.defaultProvider ? { initialValue: existing.defaultProvider } : {}),
   });
   if (isCancel(defaultProvider)) { cancel('Cancelled.'); return null; }
 
@@ -375,9 +375,11 @@ function validateNonInteractive(opts: OnboardOptions): WizardAnswers | string {
   if (!opts.telegramChatId) return '--telegram-chat-id is required in non-interactive mode';
   if (!opts.userName) return '--user-name is required in non-interactive mode';
   if (!opts.passphrase) return '--passphrase is required in non-interactive mode';
-  if (!opts.defaultProvider) return '--default-provider is required in non-interactive mode';
-  if (!opts.defaultModel) return '--default-model is required in non-interactive mode';
-  const provider = opts.defaultProvider as ProviderChoice;
+  const defaultProvider = opts.defaultProvider?.trim();
+  const defaultModel = opts.defaultModel?.trim();
+  if (!defaultProvider) return '--default-provider is required in non-interactive mode';
+  if (!defaultModel) return '--default-model is required in non-interactive mode';
+  const provider = defaultProvider as ProviderChoice;
   if (!VALID_PROVIDERS.includes(provider)) {
     return `--default-provider must be one of: ${VALID_PROVIDERS.join(', ')}`;
   }
@@ -392,7 +394,7 @@ function validateNonInteractive(opts: OnboardOptions): WizardAnswers | string {
     discordAppId: '',
     discordA2aChannel: opts.discordA2aChannel ?? '',
     defaultProvider: provider,
-    defaultModel: opts.defaultModel,
+    defaultModel,
     providerApiKey: opts.apiKey ?? '',
     hailMaryModel: '',
     groqApiKey: '',
@@ -409,10 +411,10 @@ async function readExisting(envPath: string): Promise<WizardAnswers | null> {
       const m = line.match(/^([A-Z_][A-Z0-9_]*)=(.*)$/);
       if (m && m[1] !== undefined && m[2] !== undefined) kv.set(m[1], m[2]);
     }
-    const providerRaw = kv.get('DEFAULT_PROVIDER');
+    const providerRaw = kv.get('DEFAULT_PROVIDER')?.trim();
     const provider = providerRaw ? (providerRaw as ProviderChoice) : null;
     if (!provider || !VALID_PROVIDERS.includes(provider)) return null;
-    const modelRaw = kv.get('DEFAULT_MODEL');
+    const modelRaw = kv.get('DEFAULT_MODEL')?.trim();
     if (!modelRaw) return null;
     return {
       installMode: 'simple',

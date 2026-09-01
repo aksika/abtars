@@ -1,10 +1,43 @@
 import type { AbmindClientLike } from "../../components/abmind-client-contract.js";
 import { getEnv } from "../../components/env-schema.js";
-import { logInfo, logWarn, logError } from "../../components/logger.js";
+import { logInfo, logWarn, logError, redactSecrets } from "../../components/logger.js";
 import { logAndSwallow } from "../../components/log-and-swallow.js";
 import { PiCoreToolExecutionError } from "../../components/transport/tool-failure-diagnostic.js";
 
 const TAG = "sleep";
+
+const SLEEP_FAILURE_CAUSES: ReadonlySet<string> = new Set([
+  "provider_failed", "provider_timeout", "step_deadline", "invalid_response",
+  "prompt_round_limit", "candidate_round_limit", "candidate_exhausted", "policy_rejected",
+  "nonzero_exit", "spawn_error", "timeout", "aborted", "shell_syntax_error", "repeated_failure",
+  "memory_validation", "memory_not_found", "memory_conflict", "memory_unauthorized",
+  "memory_idempotency_conflict", "memory_unavailable", "memory_outcome_unknown",
+  "completion_settlement_failed", "service_failed", "unknown",
+]);
+
+type SleepFailurePayload = {
+  cause: string;
+  detail?: string;
+  commandFingerprint?: string;
+};
+
+/** Normalize provider/tool diagnostics before they cross the host boundary. */
+function boundedSleepFailure(input: unknown): SleepFailurePayload {
+  const raw = input && typeof input === "object" ? input as Record<string, unknown> : {};
+  const cause = typeof raw["cause"] === "string" && SLEEP_FAILURE_CAUSES.has(raw["cause"])
+    ? raw["cause"]
+    : "unknown";
+  const detail = typeof raw["detail"] === "string" ? redactSecrets(raw["detail"]).slice(0, 240) : undefined;
+  const commandFingerprint = typeof raw["commandFingerprint"] === "string" && /^[0-9a-f]{16}$/i.test(raw["commandFingerprint"])
+    ? raw["commandFingerprint"]
+    : undefined;
+  return {
+    cause,
+    ...(detail ? { detail } : {}),
+    ...(commandFingerprint ? { commandFingerprint } : {}),
+  };
+}
+
 import { writeSleepStatus } from "../../components/transport/bridge-lock-transport.js";
 import { startSleepCard, type SleepCard } from "./sleep-card.js";
 import type { CapabilityApi } from "../capability.js";
@@ -246,23 +279,27 @@ export function createSleepHandle(opts: SleepOpts): SleepHandle {
    * fail RPC outcome. No later completion is polled and no replacement
    * session is allocated.
    */
-  function normalizeSleepFailure(err: unknown, fallbackCode: "provider_failed" | "provider_timeout"): { cause: string; detail?: string; commandFingerprint?: string } {
+  function normalizeSleepFailure(err: unknown, fallbackCode: "provider_failed" | "provider_timeout"): SleepFailurePayload {
     let cur: unknown = err;
     const seen = new Set<unknown>();
     while (cur && !seen.has(cur)) {
       seen.add(cur);
+      const structuredFailure = (cur as { failure?: unknown })?.failure;
+      if (structuredFailure !== undefined) {
+        return boundedSleepFailure(structuredFailure);
+      }
       if (cur instanceof PiCoreToolExecutionError) {
         const d = cur.diagnostic;
         const cause = d.reason;
         const detail = (d.stderr_excerpt ?? d.command_preview ?? cur.message)?.slice(0, 240);
         const fp = d.command_fingerprint;
-        return { cause, ...(detail ? { detail } : {}), ...(fp ? { commandFingerprint: fp } : {}) };
+        return boundedSleepFailure({ cause, detail, commandFingerprint: fp });
       }
       const diag = (cur as { diagnostic?: { reason?: string; command_preview?: string; command_fingerprint?: string; stderr_excerpt?: string } })?.diagnostic;
       if (diag?.reason) {
         const cause = diag.reason;
         const detail = (diag.stderr_excerpt ?? diag.command_preview ?? (cur as Error).message)?.slice(0, 240);
-        return { cause, ...(detail ? { detail } : {}), ...(diag.command_fingerprint ? { commandFingerprint: diag.command_fingerprint } : {}) };
+        return boundedSleepFailure({ cause, detail, commandFingerprint: diag.command_fingerprint });
       }
       const next = (cur as { cause?: unknown })?.cause;
       if (next && next !== cur) { cur = next; continue; }
@@ -270,7 +307,7 @@ export function createSleepHandle(opts: SleepOpts): SleepHandle {
     }
     const msg = err instanceof Error ? err.message : String(err);
     const detail = msg.slice(0, 240);
-    return { cause: fallbackCode === "provider_timeout" ? "provider_timeout" : "unknown", detail };
+    return boundedSleepFailure({ cause: fallbackCode === "provider_timeout" ? "provider_timeout" : "unknown", detail });
   }
 
   async function terminateOnFailure(
@@ -278,21 +315,16 @@ export function createSleepHandle(opts: SleepOpts): SleepHandle {
     req: { completionId: string; runId: string; stepId: string; deadline: number },
     code: "provider_timeout" | "provider_failed",
     detail: string,
-    failureOverride?: { cause: string; detail?: string; commandFingerprint?: string },
+    failureOverride?: SleepFailurePayload,
   ): Promise<void> {
-    logWarn("sleep", `Sleep provider failure (run=${req.runId} step=${req.stepId} lease=${leaseId}): ${detail} — quarantining session, failing completion ${code}, stopping sleep`);
+    const safeDetail = redactSecrets(detail).slice(0, 240);
+    logWarn("sleep", `Sleep provider failure (run=${req.runId} step=${req.stepId} lease=${leaseId}): ${safeDetail} — quarantining session, failing completion ${code}, stopping sleep`);
     // Fence first, then give the broker failure RPC only the remaining
     // absolute deadline. A dead daemon must not keep the local pump alive.
     quarantineCurrentSession(code);
-    const failure = failureOverride ?? normalizeSleepFailure(new Error(detail), code);
-    // Ensure detail is bounded and redacted
-    const boundedFailure = {
-      cause: String(failure.cause).slice(0, 64),
-      ...(failure.detail ? { detail: String(failure.detail).slice(0, 240) } : {}),
-      ...(failure.commandFingerprint ? { commandFingerprint: String(failure.commandFingerprint).slice(0, 32) } : {}),
-    };
+    const failure = boundedSleepFailure(failureOverride ?? normalizeSleepFailure(new Error(detail), code));
     const failResult = await runUntilDeadline(
-      () => (client.sleep.runtime as unknown as { fail: (a: string, b: string, c: string, d?: unknown) => Promise<unknown> }).fail(leaseId, req.completionId, code, boundedFailure),
+      () => (client.sleep.runtime as unknown as { fail: (a: string, b: string, c: string, d?: unknown) => Promise<unknown> }).fail(leaseId, req.completionId, code, failure),
       settlementDeadlineAt(req.deadline),
     );
     if (failResult.kind !== "settled") {
@@ -536,7 +568,18 @@ export function createSleepHandle(opts: SleepOpts): SleepHandle {
       }
     };
 
-    const failureMessage = (err: unknown): string => (err instanceof Error ? err.message : String(err));
+    const failureMessage = (err: unknown): string => {
+      let raw: string;
+      try { raw = err instanceof Error ? err.message : String(err); }
+      catch { raw = "sleep admission transport error"; }
+      return redactSecrets(raw).slice(0, 240) || "sleep admission transport error";
+    };
+    const boundedAdmissionReason = (reason: unknown): string => {
+      let raw: string;
+      try { raw = typeof reason === "string" ? reason : String(reason); }
+      catch { raw = "unknown"; }
+      return redactSecrets(raw).slice(0, 240) || "unknown";
+    };
 
     const mapRejectionCode = (status: string): SleepAdmissionCode => {
       switch (status) {
@@ -592,7 +635,7 @@ export function createSleepHandle(opts: SleepOpts): SleepHandle {
         } catch (err) { logWarn("sleep", `onComplete callback threw: ${(err as Error).message}`); }
         settle(outcome);
         cleanup();
-        opts.onCycleEnd?.();
+        try { opts.onCycleEnd?.(); } catch (err) { logWarn("sleep", `onCycleEnd callback threw: ${(err as Error).message}`); }
       });
     };
 
@@ -631,9 +674,10 @@ export function createSleepHandle(opts: SleepOpts): SleepHandle {
           ? await client.sleep.resume(undefined, level)
           : await client.sleep.start(mode, level, fresh);
 
-        if (result.status !== "accepted" || !result.runId) {
-          const code = result.status === "accepted" && !result.runId ? "invalid_response" : mapRejectionCode(result.status);
-          const reason = result.reason ?? `sleep not accepted: ${result.status}`;
+        const validRunId = typeof result.runId === "string" && result.runId.length > 0 && result.runId.length <= 128;
+        if (result.status !== "accepted" || !validRunId) {
+          const code = result.status === "accepted" && !validRunId ? "invalid_response" : mapRejectionCode(result.status);
+          const reason = boundedAdmissionReason(result.reason ?? `sleep not accepted: ${result.status}`);
           settleAdmission({ status: "rejected", code, reason });
           await closeOwnedLease(leaseId);
           leaseId = undefined;
@@ -641,9 +685,10 @@ export function createSleepHandle(opts: SleepOpts): SleepHandle {
           return;
         }
 
-        settleAdmission({ status: "accepted", runId: result.runId });
+        const runId = result.runId as string;
+        settleAdmission({ status: "accepted", runId });
         leaseHandedToPump = true;
-        runAcceptedCycle(result.runId, providerPump(leaseId));
+        runAcceptedCycle(runId, providerPump(leaseId));
       } catch (err) {
         const reason = failureMessage(err);
         settleAdmission({ status: "rejected", code: "transport_error", reason });

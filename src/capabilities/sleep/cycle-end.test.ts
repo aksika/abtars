@@ -13,6 +13,7 @@ vi.mock("../../components/logger.js", () => ({
   logTrace: vi.fn(),
   logWarn: vi.fn(),
   logError: vi.fn(),
+  redactSecrets: (value: string) => value,
 }));
 
 vi.mock("../../components/transport/bridge-lock-transport.js", () => ({

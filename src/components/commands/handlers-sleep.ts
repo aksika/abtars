@@ -1,4 +1,4 @@
-import { logInfo } from "../logger.js";
+import { logInfo, redactSecrets } from "../logger.js";
 import { logAndSwallow } from "../log-and-swallow.js";
 import { readBridgeLockField } from "../transport/bridge-lock-transport.js";
 import { readEntry } from "../tasks/task-store.js";
@@ -7,6 +7,13 @@ import type { SleepStatusLike, SleepStatusLastLike } from "../abmind-client-cont
 import type { CommandContext } from "./types.js";
 
 const TAG = "cmd";
+
+function boundedAdmissionReason(reason: string | undefined, code: string | undefined): string {
+  let raw = reason ?? code ?? "unknown";
+  try { raw = redactSecrets(raw).slice(0, 240) || "unknown"; }
+  catch { raw = "unknown"; }
+  return raw;
+}
 
 /** Find the canonical schedule of the seeded sleep-cycle task entry (#1321). */
 function readSleepSchedule(): string {
@@ -81,21 +88,32 @@ export async function handleSleepSub(text: string, ctx: CommandContext): Promise
       await ctx.reply("😴 Sleep unavailable: sleep did not initialize during boot.");
       return true;
     }
-    if (r.status === "accepted" && r.admission) {
-      const admission = await r.admission as { status: string; runId?: string; reason?: string; code?: string };
-      if (admission.status === "accepted") {
+    if (r.status === "accepted") {
+      if (!r.admission) {
+        await ctx.reply("😴 Sleep resume rejected: daemon admission missing (invalid_response)");
+        logInfo(TAG, "Sleep resume rejected via /sleep resume: daemon admission missing");
+        return true;
+      }
+      let admission: { status: string; runId?: string; reason?: string; code?: string };
+      try {
+        admission = await r.admission as { status: string; runId?: string; reason?: string; code?: string };
+      } catch {
+        await ctx.reply("😴 Sleep resume rejected: daemon admission failed (invalid_response)");
+        logInfo(TAG, "Sleep resume rejected via /sleep resume: daemon admission failed");
+        return true;
+      }
+      if (admission.status === "accepted" && admission.runId) {
         await ctx.reply(`😴 Sleep resume started (run ${admission.runId})`);
         logInfo(TAG, `Sleep resume started via /sleep resume (run ${admission.runId})`);
+      } else if (admission.status === "accepted") {
+        await ctx.reply("😴 Sleep resume rejected: daemon returned no run ID (invalid_response)");
+        logInfo(TAG, "Sleep resume rejected via /sleep resume: daemon returned no run ID");
       } else {
-        await ctx.reply(`😴 Sleep resume rejected: ${admission.reason ?? admission.code ?? "unknown"} (${admission.code ?? "unknown"})`);
-        logInfo(TAG, `Sleep resume rejected via /sleep resume: ${admission.code} ${admission.reason}`);
+        await ctx.reply(`😴 Sleep resume rejected: ${boundedAdmissionReason(admission.reason, admission.code)} (${admission.code ?? "unknown"})`);
+        logInfo(TAG, `Sleep resume rejected via /sleep resume: ${admission.code ?? "unknown"} ${boundedAdmissionReason(admission.reason, admission.code)}`);
       }
     } else if (r.status === "already_running") {
       await ctx.reply("😴 Sleep already running.");
-    } else if (r.status === "accepted") {
-      // Fallback for callers without admission (tests)
-      await ctx.reply("😴 Sleep resume started");
-      logInfo(TAG, "Sleep resume started via /sleep resume");
     } else {
       await ctx.reply(`😴 Sleep unavailable: ${(r as { reason?: string }).reason}.`);
     }
@@ -108,20 +126,32 @@ export async function handleSleepSub(text: string, ctx: CommandContext): Promise
       await ctx.reply("😴 Sleep unavailable: sleep did not initialize during boot.");
       return true;
     }
-    if (r.status === "accepted" && r.admission) {
-      const admission = await r.admission as { status: string; runId?: string; reason?: string; code?: string };
-      if (admission.status === "accepted") {
+    if (r.status === "accepted") {
+      if (!r.admission) {
+        await ctx.reply("😴 Sleep start rejected: daemon admission missing (invalid_response)");
+        logInfo(TAG, "Sleep start rejected via /sleep now: daemon admission missing");
+        return true;
+      }
+      let admission: { status: string; runId?: string; reason?: string; code?: string };
+      try {
+        admission = await r.admission as { status: string; runId?: string; reason?: string; code?: string };
+      } catch {
+        await ctx.reply("😴 Sleep start rejected: daemon admission failed (invalid_response)");
+        logInfo(TAG, "Sleep start rejected via /sleep now: daemon admission failed");
+        return true;
+      }
+      if (admission.status === "accepted" && admission.runId) {
         await ctx.reply(`💤 Full sleep cycle started (run ${admission.runId})`);
         logInfo(TAG, `Fresh sleep started via /sleep now (run ${admission.runId})`);
+      } else if (admission.status === "accepted") {
+        await ctx.reply("😴 Sleep start rejected: daemon returned no run ID (invalid_response)");
+        logInfo(TAG, "Sleep start rejected via /sleep now: daemon returned no run ID");
       } else {
-        await ctx.reply(`😴 Sleep start rejected: ${admission.reason ?? admission.code ?? "unknown"} (${admission.code ?? "unknown"})`);
-        logInfo(TAG, `Sleep start rejected via /sleep now: ${admission.code} ${admission.reason}`);
+        await ctx.reply(`😴 Sleep start rejected: ${boundedAdmissionReason(admission.reason, admission.code)} (${admission.code ?? "unknown"})`);
+        logInfo(TAG, `Sleep start rejected via /sleep now: ${admission.code ?? "unknown"} ${boundedAdmissionReason(admission.reason, admission.code)}`);
       }
     } else if (r.status === "already_running") {
       await ctx.reply("😴 Sleep already running.");
-    } else if (r.status === "accepted") {
-      await ctx.reply("💤 Full sleep cycle started");
-      logInfo(TAG, "Fresh sleep started via /sleep now");
     } else {
       await ctx.reply(`😴 Sleep unavailable: ${(r as { reason?: string }).reason}.`);
     }

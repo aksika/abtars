@@ -13,6 +13,7 @@ vi.mock("../../components/logger.js", () => ({
   logTrace: vi.fn(),
   logWarn: vi.fn(),
   logError: vi.fn(),
+  redactSecrets: (value: string) => value,
 }));
 
 vi.mock("../../components/transport/bridge-lock-transport.js", () => ({
@@ -94,13 +95,14 @@ describe("createSleepHandle provider pump terminal settlement (#1517)", () => {
     await settleTicks();
 
     expect(spin).toHaveBeenCalledTimes(1);
-    const spinOpts = spin.mock.calls[0]![0] as { timeoutMs: number; deadlineAt: number; providerInactivityTimeoutMs: number; candidatePolicy: string };
+    const spinOpts = spin.mock.calls[0]![0] as { timeoutMs: number; deadlineAt: number; providerInactivityTimeoutMs: number; candidatePolicy: string; executionOrigin?: string };
     // #1611: the provider window is the broker deadline minus 30s cleanup headroom.
     expect(spinOpts.timeoutMs).toBeGreaterThan(85_000);
     expect(spinOpts.timeoutMs).toBeLessThanOrEqual(90_000);
     expect(spinOpts.deadlineAt).toBeGreaterThan(Date.now());
     expect(spinOpts.providerInactivityTimeoutMs).toBe(spinOpts.timeoutMs);
     expect(spinOpts.candidatePolicy, "sleep must never inherit a fallback chain").toBe("configured-only");
+    expect(spinOpts.executionOrigin, "sleep must carry its trusted authorization origin").toBe("sleep");
     expect(client.sleep.runtime.complete).toHaveBeenCalledWith("lease-1", "c1", "done");
   });
 
@@ -213,6 +215,39 @@ describe("createSleepHandle provider pump terminal settlement (#1517)", () => {
     expect(client.sleep.runtime.fail).toHaveBeenCalledWith("lease-1", "c1", "provider_failed", expect.objectContaining({ cause: expect.any(String) }));
     expect(client.sleep.runtime.complete, "a rejected generation must never settle as complete('')").not.toHaveBeenCalled();
     expect(client.sleep.runtime.close).toHaveBeenCalledWith("lease-1");
+  });
+
+  it("#1752: bounds and validates structured failure metadata before the fail RPC", async () => {
+    const client = makeFakeClient();
+    client.sleep.start.mockResolvedValue({ status: "accepted", runId: "run-1" });
+    client.sleep.runtime.open.mockResolvedValue({ status: "ok", leaseId: "lease-1" });
+    client.sleep.runtime.next.mockImplementation(nextSequence(makeRequest(120_000)));
+    client.sleep.runtime.fail.mockResolvedValue({ status: "ok" });
+    const error = Object.assign(new Error("provider trace"), {
+      failure: {
+        cause: "forged_cause",
+        detail: "x".repeat(300),
+        commandFingerprint: "not-a-fingerprint",
+      },
+    });
+    const spin = vi.fn().mockRejectedValue(error);
+
+    const handle = createSleepHandle({
+      client,
+      memoryEnabled: true,
+      onComplete: vi.fn(),
+      onCycleEnd: vi.fn(),
+      sessionManager: { spin },
+      bufferSystemEvent: vi.fn(),
+      bufferAgentNotice: vi.fn(),
+    });
+    handle.startScheduled();
+    await settleTicks();
+
+    const failure = client.sleep.runtime.fail.mock.calls[0]?.[3] as { cause: string; detail?: string; commandFingerprint?: string };
+    expect(failure.cause).toBe("unknown");
+    expect(failure.detail).toHaveLength(240);
+    expect(failure.commandFingerprint).toBeUndefined();
   });
 
   it("#1611: a spin settling without a semantic result is a provider failure, never complete(\"\")", async () => {

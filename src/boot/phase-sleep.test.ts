@@ -13,6 +13,7 @@ const mockCreateSleepHandle = vi.hoisted(() => vi.fn(() => ({
   progress: null,
   startScheduled: vi.fn(() => ({
     status: "accepted" as const,
+    admission: Promise.resolve({ status: "accepted" as const, runId: "run-1" }),
     completion: Promise.resolve({ status: "completed" as const, failedSteps: [] as string[], report: "test report" }),
   })),
   startManual: vi.fn(() => ({ status: "accepted" })),
@@ -62,6 +63,7 @@ describe("phaseSleep — #1429 precedence and construction", () => {
       progress: null,
       startScheduled: vi.fn(() => ({
         status: "accepted" as const,
+        admission: Promise.resolve({ status: "accepted" as const, runId: "run-1" }),
         completion: Promise.resolve({ status: "completed" as const, failedSteps: [] as string[], report: "test report" }),
       })),
       startManual: vi.fn(() => ({ status: "accepted" })),
@@ -136,6 +138,12 @@ describe("phaseSleep — #1429 precedence and construction", () => {
     expect(ctx.sleepHandle).not.toBeNull();
     expect(mockCreateSleepHandle).toHaveBeenCalledTimes(1);
     expect(mockCreateSleepHandle.mock.calls[0]?.[0]?.client).toBe(ctx.client);
+
+    const sleepOpts = mockCreateSleepHandle.mock.calls[0]?.[0] as {
+      sessionManager: { spin: (opts: Record<string, unknown>) => Promise<unknown> };
+    };
+    await sleepOpts.sessionManager.spin({ type: "D", prompt: "test", executionOrigin: "sleep" });
+    expect(fakeSessionManager.spin).toHaveBeenCalledWith(expect.objectContaining({ executionOrigin: "sleep" }));
   });
 
   it("memory disabled takes precedence over missing client", async () => {
@@ -197,6 +205,7 @@ describe("phaseSleep — #1429 precedence and construction", () => {
       progress: null,
       startScheduled: vi.fn(() => ({
         status: "accepted" as const,
+        admission: Promise.resolve({ status: "accepted" as const, runId: "run-1" }),
         completion: Promise.resolve({ status: "failed" as const, failedSteps: ["retro-derive"] as string[], report: "report" }),
       })),
       startManual: vi.fn(() => ({ status: "accepted" })),
@@ -223,6 +232,34 @@ describe("phaseSleep — #1429 precedence and construction", () => {
     expect(result.status).toBe("failed");
     if (result.status === "failed") expect(result.error).toContain("retro-derive");
   });
+
+  it("does not wait for or report a cycle before daemon admission", async () => {
+    mockCreateSleepHandle.mockImplementationOnce(() => ({
+      isActive: false,
+      progress: null,
+      startScheduled: vi.fn(() => ({
+        status: "accepted" as const,
+        admission: Promise.resolve({ status: "rejected" as const, code: "not_found" as const, reason: "No resumable run found" }),
+        completion: new Promise(() => {}),
+      })),
+      startManual: vi.fn(() => ({ status: "accepted" })),
+    }));
+    const ctx = createBootCtx({
+      memoryConfig: { memoryEnabled: true, memoryDir: "/tmp" } as any,
+      client: makeFakeClient(),
+      sendSystemMessage: vi.fn(),
+      sessionManager: { spin: vi.fn(), allocateDreamySession: vi.fn() } as any,
+    });
+    const { phaseSleep } = await import("./phase-sleep.js");
+    await phaseSleep(ctx);
+
+    const registry = (await import("../components/tasks/system-task-registry.js")).getSystemTaskRegistry();
+    const result = await registry.dispatch(
+      { id: "sleep-cycle", kind: "system", action: "sleep-cycle", schedule: "0 2 * * *", enabled: true, priority: "medium", delivery: "silent" },
+      { progress: vi.fn(), signal: new AbortController().signal },
+    );
+    expect(result).toEqual({ status: "failed", error: "sleep admission rejected: No resumable run found (not_found)" });
+  });
 });
 
 describe("#1706 late composition", () => {
@@ -239,6 +276,7 @@ describe("#1706 late composition", () => {
       progress: null,
       startScheduled: vi.fn(() => ({
         status: "accepted" as const,
+        admission: Promise.resolve({ status: "accepted" as const, runId: "run-1" }),
         completion: Promise.resolve({ status: "completed" as const, failedSteps: [] as string[], report: "test report" }),
       })),
       startManual: vi.fn(() => ({ status: "accepted" })),

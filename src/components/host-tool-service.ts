@@ -198,9 +198,11 @@ export class HostToolService {
     const tier = classifyCommand(cmd);
     if (tier === "block") {
       const blockMsg = checkCommand(cmd);
-      if (blockMsg) {
+      // Sleep is unattended even when the process-wide guardrail mode is off:
+      // a classifier-level block must never reach the shell in that origin.
+      if (blockMsg || ctx.authorizationMode === "unattended-sleep") {
         logWarn("host-tool-service", `Guardrails blocked [${fingerprintCommand(cmd)}]: ${previewCommand(cmd)}`);
-        return policyRejected(cmd, blockMsg);
+        return policyRejected(cmd, blockMsg ?? "Command blocked by sleep guardrails.");
       }
     }
 

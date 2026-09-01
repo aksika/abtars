@@ -307,9 +307,11 @@ function runBash(cmd: string, timeout = defaultBashTimeoutMs(), signal?: AbortSi
   const tier = classifyCommand(cmd);
   if (tier === "block") {
     const cmdBlock = checkCommand(cmd);
-    if (cmdBlock) {
+    // Sleep is unattended even when process-wide guardrails are off: a
+    // classifier-level block must not reach the shell in that origin.
+    if (cmdBlock || authorizationMode === "unattended-sleep") {
       logWarn("tool-registry", `Guardrails blocked [${fingerprintCommand(cmd)}]: ${previewCommand(cmd)}`);
-      return Promise.resolve(JSON.stringify({ error: "policy_rejected", stderr: cmdBlock, exit_code: 126, command_fingerprint: fingerprintCommand(cmd), command_preview: previewCommand(cmd) }));
+      return Promise.resolve(JSON.stringify({ error: "policy_rejected", stderr: cmdBlock ?? "Command blocked by sleep guardrails.", exit_code: 126, command_fingerprint: fingerprintCommand(cmd), command_preview: previewCommand(cmd) }));
     }
   }
 

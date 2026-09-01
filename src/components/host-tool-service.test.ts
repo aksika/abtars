@@ -48,6 +48,25 @@ describe("HostToolService input validation", () => {
     const notHandle = await service.runBash({ command: "echo $ABTARS_SECRET_TOKEN", secretEnv: { ABTARS_SECRET_TOKEN: "not-a-handle" } }, ctx);
     expect(JSON.parse(notHandle)).toMatchObject({ error: "policy_rejected" });
   });
+
+  it("fails closed on classifier blocks during sleep even when guardrails are off", async () => {
+    const env = await import("./env-schema.js");
+    const original = process.env["SECURITY_MODE"];
+    process.env["SECURITY_MODE"] = "off";
+    env._resetEnv();
+    try {
+      const { service } = makeService();
+      const result = await service.runBash(
+        { command: "rm -rf /" },
+        { userId: "u1", executionId: "sleep-block", authorizationMode: "unattended-sleep" },
+      );
+      expect(JSON.parse(result)).toMatchObject({ error: "policy_rejected", exit_code: 126 });
+    } finally {
+      if (original === undefined) delete process.env["SECURITY_MODE"];
+      else process.env["SECURITY_MODE"] = original;
+      env._resetEnv();
+    }
+  });
 });
 
 describe("HostToolService secret_env execution", () => {
