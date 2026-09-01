@@ -33,6 +33,14 @@ export type ExecutionRoute = "pi-ai" | "acp";
 export type AgentAssignment = {
   model: string;
   provider: string;
+  /** #1744: auto-demotion metadata, persisted on the assignment itself.
+   *  WARNING: the validator rejects any field name ending in "auth" as a
+   *  plaintext credential (isNestedRawSecretField, validator.ts) — never
+   *  rename demotedReason (or these siblings) to a *auth form; it would
+   *  break config load with plaintext_secret_field. */
+  demoted?: string; // ISO timestamp set by demoteModel()
+  demotedReason?: "auth" | "timeout"; // union pinned by demoteModel()'s param
+  demotedModel?: string; // the demoted model's own id, for diagnostics
 };
 
 export type ProviderConfig = {
@@ -60,7 +68,7 @@ export type TransportDefaults = {
 
 export type RouteAssignments = {
   agents: Record<string, AgentAssignment>;
-  fallbacks?: Array<{ model: string; provider: string }>;
+  fallbacks?: AgentAssignment[];
 };
 
 export type HailMaryConfig = {

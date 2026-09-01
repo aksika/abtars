@@ -157,12 +157,12 @@ export function cleanDemotedModels(tc: TransportConfig, chosenModel?: string, ex
     const ra = tc.routes[r];
     if (!ra) continue;
     for (const agent of Object.values(ra.agents)) {
-      if ((agent as any).demoted) {
-        if (agent.model === chosenModel) { delete (agent as any).demoted; delete (agent as any).demotedReason; delete (agent as any).demotedModel; }
+      if (agent.demoted) {
+        if (agent.model === chosenModel) { delete agent.demoted; delete agent.demotedReason; delete agent.demotedModel; }
       }
     }
     for (const fb of ra.fallbacks ?? []) {
-      if ((fb as any).demoted && fb.model === chosenModel) { delete (fb as any).demoted; delete (fb as any).demotedReason; delete (fb as any).demotedModel; }
+      if (fb.demoted && fb.model === chosenModel) { delete fb.demoted; delete fb.demotedReason; delete fb.demotedModel; }
     }
   }
 }
@@ -178,17 +178,17 @@ export function demoteModel(model: string, reason: "auth" | "timeout"): void {
   if (activeRa) {
     for (const agent of Object.values(activeRa.agents)) {
       const all = [agent, ...(activeRa.fallbacks ?? [])];
-      const healthy = all.filter((m: any) => !m.demoted);
-      if (healthy.length <= 1 && healthy.some((m: any) => m.model === model)) return;
+      const healthy = all.filter(m => !m.demoted);
+      if (healthy.length <= 1 && healthy.some(m => m.model === model)) return;
     }
   }
   let found = false;
   if (activeRa) {
     for (const agent of Object.values(activeRa.agents)) {
-      if (agent.model === model) { (agent as any).demoted = new Date().toISOString(); (agent as any).demotedReason = reason; (agent as any).demotedModel = model; found = true; }
+      if (agent.model === model) { agent.demoted = new Date().toISOString(); agent.demotedReason = reason; agent.demotedModel = model; found = true; }
     }
     for (const fb of activeRa.fallbacks ?? []) {
-      if (fb.model === model) { (fb as any).demoted = new Date().toISOString(); (fb as any).demotedReason = reason; (fb as any).demotedModel = model; found = true; }
+      if (fb.model === model) { fb.demoted = new Date().toISOString(); fb.demotedReason = reason; fb.demotedModel = model; found = true; }
     }
   }
   if (found) writeTransportConfig(candidate, `auto-demote ${model} (${reason})`);

@@ -497,10 +497,7 @@ describe("resolveAgent with demotion", () => {
   it("marks demoted primary — runtime FallbackPolicy handles skipping", () => {
     // Demotion metadata is persisted on route-local assignments (routes.acp.agents),
     // not on top-level TransportConfig fields.
-    type DemotedAssignment = AgentAssignment & {
-      demoted: string;
-      demotedReason: "auth" | "timeout";
-    };
+    type DemotedAssignment = AgentAssignment & Required<Pick<AgentAssignment, "demoted" | "demotedReason">>;
     const acpRoute = TRANSPORT.routes.acp;
     if (acpRoute === undefined) throw new Error("test fixture missing acp route");
     const demotedMain = {
@@ -533,7 +530,7 @@ describe("resolveAgent with demotion", () => {
         acp: {
           agents: { main: { model: "claude-sonnet-4.6", provider: "kiro-free" }, dreamy: { model: "minimax-m2.5:cloud", provider: "ollama" } },
           fallbacks: [
-            { model: "minimax-m2.5:cloud", provider: "ollama", demoted: "2026-05-22" } as any,
+            { model: "minimax-m2.5:cloud", provider: "ollama", demoted: "2026-05-22" },
           ],
         },
       },
@@ -549,11 +546,11 @@ describe("resolveAgent with demotion", () => {
       routes: {
         acp: {
           agents: {
-            main: { model: "claude-sonnet-4.6", provider: "kiro-free", demoted: "2026-05-22" } as any,
+            main: { model: "claude-sonnet-4.6", provider: "kiro-free", demoted: "2026-05-22" },
             dreamy: { model: "minimax-m2.5:cloud", provider: "ollama" },
           },
           fallbacks: [
-            { model: "minimax-m2.5:cloud", provider: "ollama", demoted: "2026-05-22" } as any,
+            { model: "minimax-m2.5:cloud", provider: "ollama", demoted: "2026-05-22" },
           ],
         },
       },
@@ -564,7 +561,7 @@ describe("resolveAgent with demotion", () => {
 });
 
 describe("cleanDemotedModels", () => {
-  const ra = { agents: { main: { model: "claude-sonnet-4.6", provider: "kiro-free" }, dreamy: { model: "minimax-m2.5:cloud", provider: "ollama" } }, fallbacks: [{ model: "minimax-m2.5:cloud", provider: "ollama", demoted: "2026-05-22" } as any] };
+  const ra = { agents: { main: { model: "claude-sonnet-4.6", provider: "kiro-free" }, dreamy: { model: "minimax-m2.5:cloud", provider: "ollama" } }, fallbacks: [{ model: "minimax-m2.5:cloud", provider: "ollama", demoted: "2026-05-22" }] };
 
   it("keeps demoted fallbacks but does not remove them", () => {
     const tc: TransportConfig = { ...TRANSPORT, routes: { acp: { ...ra } } };
@@ -580,7 +577,7 @@ describe("cleanDemotedModels", () => {
       routes: {
         acp: {
           agents: {
-            main: { model: "claude-sonnet-4.6", provider: "kiro-free", demoted: "2026-05-22", demotedReason: "auth" } as any,
+            main: { model: "claude-sonnet-4.6", provider: "kiro-free", demoted: "2026-05-22", demotedReason: "auth" },
             dreamy: { model: "minimax-m2.5:cloud", provider: "ollama" },
           },
           fallbacks: [],
@@ -589,8 +586,10 @@ describe("cleanDemotedModels", () => {
     };
     cleanDemotedModels(tc, "claude-sonnet-4.6");
     const tcRa = tc.routes["acp"]!;
-    expect((tcRa.agents["main"] as any).demoted).toBeUndefined();
-    expect((tcRa.agents["main"] as any).demotedReason).toBeUndefined();
+    const mainAfter = tcRa.agents["main"];
+    if (mainAfter === undefined) throw new Error("test fixture missing main agent");
+    expect(mainAfter.demoted).toBeUndefined();
+    expect(mainAfter.demotedReason).toBeUndefined();
   });
 
   it("keeps all fallbacks — demoted and non-demoted", () => {
@@ -601,7 +600,7 @@ describe("cleanDemotedModels", () => {
           agents: { main: { model: "claude-sonnet-4.6", provider: "kiro-free" }, dreamy: { model: "minimax-m2.5:cloud", provider: "ollama" } },
           fallbacks: [
             { model: "minimax-m2.5:cloud", provider: "ollama" },
-            { model: "dead-model", provider: "ollama", demoted: "2026-05-22" } as any,
+            { model: "dead-model", provider: "ollama", demoted: "2026-05-22" },
           ],
         },
       },

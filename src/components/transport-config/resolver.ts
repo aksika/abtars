@@ -97,8 +97,7 @@ export function resolveAgent(role: string, transport?: TransportConfig | null, m
 
   // Append route-local fallbacks, filtering demoted and self-duplicates
   for (const fb of ra.fallbacks ?? []) {
-    const fbAny = fb as any;
-    if (fbAny.demoted || fb.model === effectiveModel) continue;
+    if (fb.demoted || fb.model === effectiveModel) continue;
     const key = `${fb.model}@${fb.provider}`;
     if (seen.has(key)) continue;
     seen.add(key);

@@ -385,7 +385,7 @@ export async function handleModels(text: string, ctx: CommandContext): Promise<b
     if (a === "main") {
       const ra = tc ? routeAssignments(tc) : null;
       const fbLines = (ra?.fallbacks ?? []).map((f, i) => {
-        if ((f as any).demoted) return null;
+        if (f.demoted) return null;
         return `    ↳ fb${i + 1}: ${f.model} (${f.provider})`;
       }).filter(Boolean).join("\n");
       if (fbLines) line += "\n" + fbLines;
