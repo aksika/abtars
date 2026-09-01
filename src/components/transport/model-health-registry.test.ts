@@ -103,6 +103,38 @@ describe("classifyError", () => {
   it("500 → transient", () => { expect(classifyError(500)).toBe("transient"); });
 });
 
+describe("classifyError quota exhaustion (#1753)", () => {
+  it("429 + insufficient_quota → credits (exhausted billing is not retried forever)", () => {
+    expect(classifyError(429, "429 insufficient_quota: You exceeded your current quota")).toBe("credits");
+  });
+
+  it("0 + quota text → credits (unparseable status from parseErrorStatus)", () => {
+    expect(classifyError(0, "insufficient_quota: billing quota exceeded")).toBe("credits");
+  });
+
+  it("429 + plain rate-limit text → rate_limit (genuine throttling stays drainable)", () => {
+    expect(classifyError(429, "Rate limit exceeded, please retry after 60s")).toBe("rate_limit");
+  });
+
+  it("500 + text mentioning billing → not credits (status gate guards healthy model)", () => {
+    expect(classifyError(500, "billing service temporarily unavailable")).not.toBe("credits");
+    expect(classifyError(500, "billing service temporarily unavailable")).toBe("transient");
+  });
+
+  it("402 + quota text → credits via quota branch", () => {
+    expect(classifyError(402, "quota exceeded for this account")).toBe("credits");
+  });
+
+  it("429 + out of budget → credits", () => {
+    expect(classifyError(429, "You are out of budget, please add funds")).toBe("credits");
+  });
+
+  it("429 without message → rate_limit (no quota string, no behavior change)", () => {
+    expect(classifyError(429)).toBe("rate_limit");
+    expect(classifyError(429, "")).toBe("rate_limit");
+  });
+});
+
 describe("ModelHealthRegistry demotion (#567)", () => {
   it("auth error fires onDemote immediately", () => {
     const reg = new ModelHealthRegistry();
