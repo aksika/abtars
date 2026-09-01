@@ -13,7 +13,7 @@
  */
 
 import { SupervisedPiRpcClient } from "./pi-rpc-client.js";
-import { buildChildEnv, buildTrustArgs, resolveAndValidateWorkspace, validatePersistedSession, validateSessionFile, type PiExecutorConfig, type SessionProof } from "./config.js";
+import { buildChildEnv, buildSessionDirArgs, buildTrustArgs, resolveAndValidateWorkspace, validatePersistedSession, validateSessionFile, type PiExecutorConfig, type SessionProof } from "./config.js";
 import { basename } from "node:path";
 import { accessSync, constants, lstatSync } from "node:fs";
 import { logAndSwallow } from "../log-and-swallow.js";
@@ -138,6 +138,7 @@ export class PiRuntimeHost {
       ...extensionPaths.flatMap((path) => ["--extension", path] as const),
       "--mode", "rpc",
       ...buildTrustArgs(this.config_, input.workspaceAlias),
+      ...buildSessionDirArgs(this.config_),
     ];
     const env = buildChildEnv(this.config_, input.envIdentity, input.memoryMode ?? "abmind");
 

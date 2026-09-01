@@ -130,6 +130,16 @@ export function buildTrustArgs(config: PiExecutorConfig, workspaceAlias?: string
   return trust === "always" ? ["--approve"] : ["--no-approve"];
 }
 
+/** #1755: pi writes sessions to its own default dir unless told otherwise, but
+ *  validatePersistedSession and findSessionFileBySuffix both require them
+ *  inside sessionStorageRoot. Every launch path MUST pass this or resume
+ *  silently breaks with "escapes session storage root". Executor-owned —
+ *  blocklisted in fixedArgs so an operator cannot relocate the containment
+ *  root out from under the proof. */
+export function buildSessionDirArgs(config: PiExecutorConfig): readonly string[] {
+  return ["--session-dir", config.sessionStorageRoot];
+}
+
 /**
  * Validate fixed args against the published Pi CLI flags. Returns an array of
  * error messages for each rejected or conflicting argument. The caller should
@@ -143,8 +153,7 @@ export function validateFixedArgs(fixedArgs: readonly string[]): string[] {
   const errors: string[] = [];
   const FORBIDDEN_FLAGS = new Set([
     "--mode", "--approve", "--no-approve", "--extension",
-    "--provider", "--model", "--session-storage-root",
-    "--rpc-version",
+    "--provider", "--model", "--session-dir",
   ]);
   for (const arg of fixedArgs) {
     if (FORBIDDEN_FLAGS.has(arg)) {

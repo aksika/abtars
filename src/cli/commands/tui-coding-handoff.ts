@@ -18,6 +18,7 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { spawn, type ChildProcess } from "node:child_process";
 import type { NativeCodingHandoffInfo } from "../../platforms/tui/tui-protocol.js";
+import { buildSessionDirArgs, type PiExecutorConfig } from "../../components/pi-executor/config.js";
 
 /** #1635 Phase 2 — local pi-executor.json projection for the handoff args. */
 export interface ClientPiConfig {
@@ -97,7 +98,7 @@ export function trustFor(config: ClientPiConfig, alias: string): "always" | "nev
 export function buildNativeHandoffArgs(handoff: NativeCodingHandoffInfo, config: ClientPiConfig): string[] {
   const args = [...config.fixedArgs];
   args.push(trustFor(config, handoff.workspaceAlias) === "always" ? "--approve" : "--no-approve");
-  args.push("--session-dir", handoff.sessionStorageRoot);
+  args.push(...buildSessionDirArgs({ sessionStorageRoot: handoff.sessionStorageRoot } as unknown as PiExecutorConfig));
   if (handoff.piSessionFile) {
     args.push("--session", handoff.piSessionFile);
   } else if (handoff.newPiSessionId) {

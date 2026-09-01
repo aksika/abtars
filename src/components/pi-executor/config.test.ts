@@ -4,7 +4,7 @@
 
 import { describe, it, expect, vi, beforeAll, afterAll, beforeEach, afterEach } from "vitest";
 import { posix, win32 } from "node:path";
-import { buildTrustArgs, isPathWithinRoot, resolveAndValidateWorkspace, validatePiWorkspaceAliases, type PiExecutorConfig, loadPiConfig } from "./config.js";
+import { buildSessionDirArgs, buildTrustArgs, isPathWithinRoot, resolveAndValidateWorkspace, validateFixedArgs, validatePiWorkspaceAliases, type PiExecutorConfig, loadPiConfig } from "./config.js";
 import { mkdtempSync, writeFileSync, rmSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir, homedir } from "node:os";
@@ -421,5 +421,32 @@ describe("validatePersistedSession (#1647)", () => {
     const result = validatePersistedSession({ sessionStorageRoot: sessionRoot, expectedSessionId: "s", sessionFile: file });
     expect(result.ok).toBe(false);
     expect(JSON.stringify(result)).not.toContain("private-conversation-data");
+  });
+});
+
+// ── #1755: session-dir containment ───────────────────────────────────
+
+describe("buildSessionDirArgs (#1755)", () => {
+  it("returns --session-dir plus the configured root", () => {
+    const cfg = { sessionStorageRoot: "/state/pi" } as PiExecutorConfig;
+    expect(buildSessionDirArgs(cfg)).toEqual(["--session-dir", "/state/pi"]);
+  });
+});
+
+describe("validateFixedArgs (#1755)", () => {
+  it("rejects --session-dir (executor-owned)", () => {
+    const errors = validateFixedArgs(["--session-dir"]);
+    expect(errors.some((e) => e.includes("--session-dir"))).toBe(true);
+  });
+
+  it("no longer rejects dead flags --session-storage-root and --rpc-version", () => {
+    expect(validateFixedArgs(["--session-storage-root"])).toEqual([]);
+    expect(validateFixedArgs(["--rpc-version"])).toEqual([]);
+  });
+
+  it("still rejects other executor-owned flags", () => {
+    expect(validateFixedArgs(["--mode"]).length).toBeGreaterThan(0);
+    expect(validateFixedArgs(["--extension"]).length).toBeGreaterThan(0);
+    expect(validateFixedArgs(["--provider"]).length).toBeGreaterThan(0);
   });
 });
