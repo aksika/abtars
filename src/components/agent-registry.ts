@@ -32,7 +32,6 @@ const AGENT_ROLES: Record<string, AgentRoleConfig> = {
 
 function resolveModel(role: string): string | undefined {
   switch (role) {
-    case "dreamy": return getEnv().sleepModel;
     case "browsie": return getEnv().browsingAgent;
     case "coding": case "cody": return getEnv().codingModel;
     default: return undefined;

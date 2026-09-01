@@ -45,7 +45,7 @@ export type NotifyFn = (text: string, buttons: Array<{ text: string; data: strin
  * receive unattended grants or non-idempotent scheduled-delivery access. The
  * model can never supply or override the mode.
  */
-export type ToolAuthorizationMode = "interactive" | "unattended-task" | "unverified";
+export type ToolAuthorizationMode = "interactive" | "unattended-task" | "unattended-sleep" | "unverified";
 
 export interface AuthRequestOptions {
   /** Defaults to interactive behavior when omitted or invalid. */

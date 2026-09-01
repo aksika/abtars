@@ -3,7 +3,6 @@
  * startup warnings, readiness probes, picker helpers, and display formatting.
  */
 
-import { readEnvWithDefault } from "../env.js";
 import { getEnv } from "../env-schema.js";
 import { logWarn } from "../logger.js";
 import { resolveModelMeta, mapProviderName, isWarmed, getWarmedModels } from "../transport/pi-catalog.js";
@@ -119,9 +118,12 @@ export function resolveAgent(role: string, transport?: TransportConfig | null, m
 // ── Fallback from .env ──────────────────────────────────────────────────────
 
 export function getEnvFallback(): EnvFallback {
-  const providerName = readEnvWithDefault("DEFAULT_PROVIDER", "openrouter", "default LLM provider");
+  const providerName = process.env["DEFAULT_PROVIDER"]?.trim();
+  const model = process.env["DEFAULT_MODEL"]?.trim();
+  if (!providerName || !model) {
+    throw new Error("DEFAULT_PROVIDER and DEFAULT_MODEL must be set in .env when no explicit transport.json route supplies a model/provider");
+  }
   const transport = getEnv().defaultTransport as "api" | "acp" | "tmux";
-  const model = readEnvWithDefault("DEFAULT_MODEL", "minimax/minimax-m2.5", "default LLM model");
 
   const provider: ProviderConfig = { transport };
   if (transport === "api") {

@@ -355,6 +355,9 @@ export interface SpinSessionSpec {
 
   // Progress hook (partial-result reporting — sleep, workers)
   onStepComplete?: (event: StepEvent) => void | Promise<void>;
+
+  // #1752: host-owned sleep execution origin — only the sleep capability may set it; never from model/prompt
+  executionOrigin?: "sleep";
 }
 
 /** #1651 v2: truthful step event — success carries the settled result and its

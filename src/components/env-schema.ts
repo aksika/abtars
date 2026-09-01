@@ -95,7 +95,6 @@ const SCHEMA: readonly EnvVarDef[] = [
   { env: "COMPACTION_LLM_ENABLED", type: "bool", default: "false", description: "LLM refinement for middle-tier rendering (#348 Phase 2)" },
 
   // ── Sleep ──
-  { env: "SLEEP_MODEL", type: "string", description: "Model override for Dreamy sleep agent" },
   { env: "SLEEP_QUALITY", type: "string", description: "Sleep quality override" },
 
   // ── Voice ──
@@ -198,8 +197,7 @@ export interface EnvConfig {
   activeMemory: boolean;
   primingModelTopics: boolean;
 
-  // Sleep (scheduling is owned by tasks.json #1321; only model/quality remain)
-  sleepModel: string | undefined;
+  // Sleep (scheduling is owned by tasks.json #1321; only quality remains; sleep model removed per #1752)
   sleepQuality: string | undefined;
 
   // Voice
@@ -365,7 +363,6 @@ export function initEnv(): Readonly<EnvConfig> {
     memory: readOr("MEMORY", "auto"),
     primingModelTopics: read("PRIMING_MODEL_TOPICS") !== "false",
 
-    sleepModel: read("SLEEP_MODEL"),
     sleepQuality: read("SLEEP_QUALITY"),
 
     sttEnabled: parseBool(readOr("STT_ENABLED", "false")),

@@ -2,6 +2,7 @@ import type { AbmindClientLike } from "../../components/abmind-client-contract.j
 import { getEnv } from "../../components/env-schema.js";
 import { logInfo, logWarn, logError } from "../../components/logger.js";
 import { logAndSwallow } from "../../components/log-and-swallow.js";
+import { PiCoreToolExecutionError } from "../../components/transport/tool-failure-diagnostic.js";
 
 const TAG = "sleep";
 import { writeSleepStatus } from "../../components/transport/bridge-lock-transport.js";
@@ -38,7 +39,7 @@ export interface SleepOpts {
    * consumes Spin's classification; it never recomputes one from the raw
    * string.
    */
-  sessionManager: { spin: (opts: { type: string; prompt: string; sessionId?: string; timeoutMs: number; deadlineAt: number; providerInactivityTimeoutMs: number; candidatePolicy: "configured-only"; settlementOwner: "spin" | "caller"; await: true }) => Promise<import("../../components/spin-types.js").AwaitedSpinResult> };
+  sessionManager: { spin: (opts: { type: string; prompt: string; sessionId?: string; timeoutMs: number; deadlineAt: number; providerInactivityTimeoutMs: number; candidatePolicy: "configured-only"; settlementOwner: "spin" | "caller"; await: true; executionOrigin?: "sleep" }) => Promise<import("../../components/spin-types.js").AwaitedSpinResult> };
   /**
    * #1611: narrow exact-session quarantine callback. Fences the session by
    * exact id, cancels the active execution, releases the persistent
@@ -80,8 +81,26 @@ export interface SleepStartOptions {
   signal?: AbortSignal;
 }
 
+export type SleepAdmissionCode =
+  | "runtime_open_failed"
+  | "cancelled"
+  | "transport_error"
+  | "not_found"
+  | "not_resumable"
+  | "already_running"
+  | "unavailable"
+  | "invalid_response";
+
+export type SleepAdmission =
+  | { status: "accepted"; runId: string }
+  | {
+      status: "rejected";
+      code: SleepAdmissionCode;
+      reason: string;
+    };
+
 export type SleepStartResult =
-  | { status: "accepted"; completion: Promise<SleepCycleOutcome> }
+  | { status: "accepted"; admission: Promise<SleepAdmission>; completion: Promise<SleepCycleOutcome> }
   | { status: "already_running" }
   | SleepUnavailable;
 
@@ -227,18 +246,53 @@ export function createSleepHandle(opts: SleepOpts): SleepHandle {
    * fail RPC outcome. No later completion is polled and no replacement
    * session is allocated.
    */
+  function normalizeSleepFailure(err: unknown, fallbackCode: "provider_failed" | "provider_timeout"): { cause: string; detail?: string; commandFingerprint?: string } {
+    let cur: unknown = err;
+    const seen = new Set<unknown>();
+    while (cur && !seen.has(cur)) {
+      seen.add(cur);
+      if (cur instanceof PiCoreToolExecutionError) {
+        const d = cur.diagnostic;
+        const cause = d.reason;
+        const detail = (d.stderr_excerpt ?? d.command_preview ?? cur.message)?.slice(0, 240);
+        const fp = d.command_fingerprint;
+        return { cause, ...(detail ? { detail } : {}), ...(fp ? { commandFingerprint: fp } : {}) };
+      }
+      const diag = (cur as { diagnostic?: { reason?: string; command_preview?: string; command_fingerprint?: string; stderr_excerpt?: string } })?.diagnostic;
+      if (diag?.reason) {
+        const cause = diag.reason;
+        const detail = (diag.stderr_excerpt ?? diag.command_preview ?? (cur as Error).message)?.slice(0, 240);
+        return { cause, ...(detail ? { detail } : {}), ...(diag.command_fingerprint ? { commandFingerprint: diag.command_fingerprint } : {}) };
+      }
+      const next = (cur as { cause?: unknown })?.cause;
+      if (next && next !== cur) { cur = next; continue; }
+      break;
+    }
+    const msg = err instanceof Error ? err.message : String(err);
+    const detail = msg.slice(0, 240);
+    return { cause: fallbackCode === "provider_timeout" ? "provider_timeout" : "unknown", detail };
+  }
+
   async function terminateOnFailure(
     leaseId: string,
     req: { completionId: string; runId: string; stepId: string; deadline: number },
     code: "provider_timeout" | "provider_failed",
     detail: string,
+    failureOverride?: { cause: string; detail?: string; commandFingerprint?: string },
   ): Promise<void> {
     logWarn("sleep", `Sleep provider failure (run=${req.runId} step=${req.stepId} lease=${leaseId}): ${detail} — quarantining session, failing completion ${code}, stopping sleep`);
     // Fence first, then give the broker failure RPC only the remaining
     // absolute deadline. A dead daemon must not keep the local pump alive.
     quarantineCurrentSession(code);
+    const failure = failureOverride ?? normalizeSleepFailure(new Error(detail), code);
+    // Ensure detail is bounded and redacted
+    const boundedFailure = {
+      cause: String(failure.cause).slice(0, 64),
+      ...(failure.detail ? { detail: String(failure.detail).slice(0, 240) } : {}),
+      ...(failure.commandFingerprint ? { commandFingerprint: String(failure.commandFingerprint).slice(0, 32) } : {}),
+    };
     const failResult = await runUntilDeadline(
-      () => client.sleep.runtime.fail(leaseId, req.completionId, code),
+      () => (client.sleep.runtime as unknown as { fail: (a: string, b: string, c: string, d?: unknown) => Promise<unknown> }).fail(leaseId, req.completionId, code, boundedFailure),
       settlementDeadlineAt(req.deadline),
     );
     if (failResult.kind !== "settled") {
@@ -297,21 +351,22 @@ export function createSleepHandle(opts: SleepOpts): SleepHandle {
               candidatePolicy: "configured-only",
               settlementOwner: "spin",
               await: true,
+              executionOrigin: "sleep",
             }),
             providerRemainingMs,
           );
         } catch (err) {
           // spin() itself rejected before/while opening the transport —
           // terminal for the logical step.
-          await terminateOnFailure(leaseId, req, "provider_failed", (err as Error).message);
+          await terminateOnFailure(leaseId, req, "provider_failed", (err as Error).message, normalizeSleepFailure(err, "provider_failed"));
           break;
         }
         if (spinResult.kind === "timed_out") {
-          await terminateOnFailure(leaseId, req, "provider_timeout", "deadline reached while awaiting the model");
+          await terminateOnFailure(leaseId, req, "provider_timeout", "deadline reached while awaiting the model", { cause: "provider_timeout", detail: "deadline reached while awaiting the model" });
           break;
         }
         if (spinResult.kind === "failed") {
-          await terminateOnFailure(leaseId, req, "provider_failed", spinResult.error.message);
+          await terminateOnFailure(leaseId, req, "provider_failed", spinResult.error.message, normalizeSleepFailure(spinResult.error, "provider_failed"));
           break;
         }
         if (spinResult.value.sessionId && !nightSessionId) nightSessionId = spinResult.value.sessionId;
@@ -321,7 +376,7 @@ export function createSleepHandle(opts: SleepOpts): SleepHandle {
         // defensive check at this external boundary even though the typed
         // facade requires the field.
         if (spinResult.value.result === undefined) {
-          await terminateOnFailure(leaseId, req, "provider_failed", "spin settled without a semantic result");
+          await terminateOnFailure(leaseId, req, "provider_failed", "spin settled without a semantic result", { cause: "invalid_response", detail: "spin settled without a semantic result" });
           break;
         }
         // #1651 v2 narrows #1611: rejection, timeout and a missing result field
@@ -342,11 +397,11 @@ export function createSleepHandle(opts: SleepOpts): SleepHandle {
           settlementDeadlineAt(req.deadline),
         );
         if (completeResult.kind === "timed_out") {
-          await terminateOnFailure(leaseId, req, "provider_timeout", "completion settlement reached the broker deadline");
+          await terminateOnFailure(leaseId, req, "provider_timeout", "completion settlement reached the broker deadline", { cause: "completion_settlement_failed", detail: "completion settlement reached the broker deadline" });
           break;
         }
         if (completeResult.kind === "failed") {
-          await terminateOnFailure(leaseId, req, "provider_failed", completeResult.error.message);
+          await terminateOnFailure(leaseId, req, "provider_failed", completeResult.error.message, normalizeSleepFailure(completeResult.error, "provider_failed"));
           break;
         }
         if (completeResult.value.status !== "ok") {
@@ -452,6 +507,15 @@ export function createSleepHandle(opts: SleepOpts): SleepHandle {
       settleCompletion(outcome);
     };
 
+    let admissionResolve: (v: SleepAdmission) => void = () => {};
+    const admission = new Promise<SleepAdmission>((resolve) => { admissionResolve = resolve; });
+    let admissionSettled = false;
+    const settleAdmission = (v: SleepAdmission): void => {
+      if (admissionSettled) return;
+      admissionSettled = true;
+      admissionResolve(v);
+    };
+
     /** #1681: pre-handoff failure/cancellation cleanup — settle the local
      *  outcome truthfully, restore sleep state, finalize the session, and
      *  fire onCycleEnd exactly once. Never starts a daemon run. */
@@ -473,6 +537,16 @@ export function createSleepHandle(opts: SleepOpts): SleepHandle {
     };
 
     const failureMessage = (err: unknown): string => (err instanceof Error ? err.message : String(err));
+
+    const mapRejectionCode = (status: string): SleepAdmissionCode => {
+      switch (status) {
+        case "already_running": return "already_running";
+        case "not_found": return "not_found";
+        case "not_resumable": return "not_resumable";
+        case "unavailable": return "unavailable";
+        default: return "transport_error";
+      }
+    };
 
     /** #1681: the accepted cycle starts its event poller and provider pump
      *  together, as before; the pump now owns a lease that was already opened
@@ -534,7 +608,9 @@ export function createSleepHandle(opts: SleepOpts): SleepHandle {
       try {
         const opened = await client.sleep.runtime.open("abtars");
         if (opened.status !== "ok" || !opened.leaseId) {
-          finishBeforeRun("unknown", `runtime open failed: ${opened.status}`);
+          const reason = `runtime open failed: ${opened.status}`;
+          settleAdmission({ status: "rejected", code: "runtime_open_failed", reason });
+          finishBeforeRun("unknown", reason);
           return;
         }
         leaseId = opened.leaseId;
@@ -545,7 +621,9 @@ export function createSleepHandle(opts: SleepOpts): SleepHandle {
         if (abortController.signal.aborted) {
           await closeOwnedLease(leaseId);
           leaseId = undefined;
-          finishBeforeRun("cancelled", "cancelled before daemon start");
+          const reason = "cancelled before daemon start";
+          settleAdmission({ status: "rejected", code: "cancelled", reason });
+          finishBeforeRun("cancelled", reason);
           return;
         }
 
@@ -554,23 +632,29 @@ export function createSleepHandle(opts: SleepOpts): SleepHandle {
           : await client.sleep.start(mode, level, fresh);
 
         if (result.status !== "accepted" || !result.runId) {
+          const code = result.status === "accepted" && !result.runId ? "invalid_response" : mapRejectionCode(result.status);
+          const reason = result.reason ?? `sleep not accepted: ${result.status}`;
+          settleAdmission({ status: "rejected", code, reason });
           await closeOwnedLease(leaseId);
           leaseId = undefined;
-          finishBeforeRun("unknown", `sleep not accepted: ${result.status}${result.reason ? ": " + result.reason : ""}`);
+          finishBeforeRun("unknown", reason);
           return;
         }
 
+        settleAdmission({ status: "accepted", runId: result.runId });
         leaseHandedToPump = true;
         runAcceptedCycle(result.runId, providerPump(leaseId));
       } catch (err) {
+        const reason = failureMessage(err);
+        settleAdmission({ status: "rejected", code: "transport_error", reason });
         if (leaseId && !leaseHandedToPump) await closeOwnedLease(leaseId);
-        finishBeforeRun("unknown", failureMessage(err));
+        finishBeforeRun("unknown", reason);
       }
     };
 
     void bootstrap();
 
-    return { status: "accepted", completion };
+    return { status: "accepted", admission, completion };
   }
 
   return {

@@ -303,26 +303,14 @@ function defaultBashTimeoutMs(): number {
 }
 
 function runBash(cmd: string, timeout = defaultBashTimeoutMs(), signal?: AbortSignal, executionScope?: ToolExecutionScope, authorizationMode?: import("../action-gate.js").ToolAuthorizationMode): Promise<string> {
-  // Guardrails: command check
-  const cmdBlock = checkCommand(cmd);
-  if (cmdBlock) {
-    logWarn("tool-registry", `Guardrails blocked [${fingerprintCommand(cmd)}]: ${previewCommand(cmd)}`);
-    return Promise.resolve(JSON.stringify({ error: "policy_rejected", stderr: cmdBlock, exit_code: 126, command_fingerprint: fingerprintCommand(cmd), command_preview: previewCommand(cmd) }));
-  }
-
-  // Action gate: auth-required commands
+  // Single deterministic policy result for guardrail/auth/audit (#1752)
   const tier = classifyCommand(cmd);
-  if (tier === "auth-required" && _actionGate) {
-    // #1629: the trusted mode comes from the execution context, never from
-    // the command text or tool arguments. ActionGate applies persistent rules
-    // first, then its bash-only unattended fallback.
-    return _actionGate.requestAuth("bash-auth", cmd, { mode: authorizationMode }).then((granted) => {
-      if (!granted) {
-        logWarn("tool-registry", `Auth denied [${fingerprintCommand(cmd)}]: ${previewCommand(cmd)}`);
-        return JSON.stringify({ error: "policy_rejected", stderr: "Command requires authorization. Master denied or timed out.", exit_code: 126, command_fingerprint: fingerprintCommand(cmd), command_preview: previewCommand(cmd) });
-      }
-      return executeBash(cmd, timeout, signal, executionScope);
-    });
+  if (tier === "block") {
+    const cmdBlock = checkCommand(cmd);
+    if (cmdBlock) {
+      logWarn("tool-registry", `Guardrails blocked [${fingerprintCommand(cmd)}]: ${previewCommand(cmd)}`);
+      return Promise.resolve(JSON.stringify({ error: "policy_rejected", stderr: cmdBlock, exit_code: 126, command_fingerprint: fingerprintCommand(cmd), command_preview: previewCommand(cmd) }));
+    }
   }
 
   if (isBridgeSpawnCommand(cmd)) {
@@ -345,6 +333,27 @@ function runBash(cmd: string, timeout = defaultBashTimeoutMs(), signal?: AbortSi
       command_preview: previewCommand(cmd),
     }));
   }
+
+  // #1752: sleep fails closed before ActionGate
+  if (authorizationMode === "unattended-sleep" && tier === "auth-required") {
+    logWarn("tool-registry", `Sleep policy rejected [${fingerprintCommand(cmd)}]: ${previewCommand(cmd)}`);
+    return Promise.resolve(JSON.stringify({ error: "policy_rejected", stderr: "Command requires authorization but sleep does not wait for Telegram — rejected.", exit_code: 126, command_fingerprint: fingerprintCommand(cmd), command_preview: previewCommand(cmd) }));
+  }
+
+  // Action gate: auth-required commands for non-sleep modes
+  if (tier === "auth-required" && _actionGate) {
+    // #1629: the trusted mode comes from the execution context, never from
+    // the command text or tool arguments. ActionGate applies persistent rules
+    // first, then its bash-only unattended fallback.
+    return _actionGate.requestAuth("bash-auth", cmd, { mode: authorizationMode }).then((granted) => {
+      if (!granted) {
+        logWarn("tool-registry", `Auth denied [${fingerprintCommand(cmd)}]: ${previewCommand(cmd)}`);
+        return JSON.stringify({ error: "policy_rejected", stderr: "Command requires authorization. Master denied or timed out.", exit_code: 126, command_fingerprint: fingerprintCommand(cmd), command_preview: previewCommand(cmd) });
+      }
+      return executeBash(cmd, timeout, signal, executionScope);
+    });
+  }
+
   return executeBash(cmd, timeout, signal, executionScope);
 }
 

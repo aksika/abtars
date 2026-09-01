@@ -84,11 +84,32 @@ describe("resolveAgent", () => {
 });
 
 describe("getEnvFallback", () => {
-  it("returns openrouter defaults", () => {
-    const fb = getEnvFallback();
-    expect(fb.providerName).toBe("openrouter");
-    expect(fb.provider.transport).toBe("api");
-    expect(fb.model).toBe("minimax/minimax-m2.5");
+  it("returns configured provider/model from env", () => {
+    const origProvider = process.env["DEFAULT_PROVIDER"];
+    const origModel = process.env["DEFAULT_MODEL"];
+    process.env["DEFAULT_PROVIDER"] = "openrouter";
+    process.env["DEFAULT_MODEL"] = "minimax/minimax-m2.5";
+    try {
+      const fb = getEnvFallback();
+      expect(fb.providerName).toBe("openrouter");
+      expect(fb.provider.transport).toBe("api");
+      expect(fb.model).toBe("minimax/minimax-m2.5");
+    } finally {
+      if (origProvider !== undefined) process.env["DEFAULT_PROVIDER"] = origProvider; else delete process.env["DEFAULT_PROVIDER"];
+      if (origModel !== undefined) process.env["DEFAULT_MODEL"] = origModel; else delete process.env["DEFAULT_MODEL"];
+    }
+  });
+  it("throws when DEFAULT_PROVIDER or DEFAULT_MODEL missing", () => {
+    const origProvider = process.env["DEFAULT_PROVIDER"];
+    const origModel = process.env["DEFAULT_MODEL"];
+    delete process.env["DEFAULT_PROVIDER"];
+    delete process.env["DEFAULT_MODEL"];
+    try {
+      expect(() => getEnvFallback()).toThrow(/DEFAULT_PROVIDER and DEFAULT_MODEL must be set/);
+    } finally {
+      if (origProvider !== undefined) process.env["DEFAULT_PROVIDER"] = origProvider;
+      if (origModel !== undefined) process.env["DEFAULT_MODEL"] = origModel;
+    }
   });
 });
 

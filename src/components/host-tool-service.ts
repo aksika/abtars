@@ -194,14 +194,17 @@ export class HostToolService {
       return JSON.stringify(result);
     }
 
-    // Guardrails.
-    const cmdBlock = checkCommand(cmd);
-    if (cmdBlock) {
-      logWarn("host-tool-service", `Guardrails blocked [${fingerprintCommand(cmd)}]: ${previewCommand(cmd)}`);
-      return policyRejected(cmd, cmdBlock);
+    // Guardrails — single deterministic policy result for classifier, guardrail, auth, and audit
+    const tier = classifyCommand(cmd);
+    if (tier === "block") {
+      const blockMsg = checkCommand(cmd);
+      if (blockMsg) {
+        logWarn("host-tool-service", `Guardrails blocked [${fingerprintCommand(cmd)}]: ${previewCommand(cmd)}`);
+        return policyRejected(cmd, blockMsg);
+      }
     }
 
-    // Bridge self-protection.
+    // Bridge self-protection — checked before auth, same result for audit
     if (isBridgeSpawnCommand(cmd)) {
       return policyRejected(cmd, "Command blocked: this would spawn/restart a bridge or watchdog process. The bridge is already running under launchd+watchdog supervision.");
     }
@@ -209,9 +212,14 @@ export class HostToolService {
       return policyRejected(cmd, "Command blocked: this would kill the bridge process (yourself). Ask the user to send /restart for a session reset.");
     }
 
+    // #1752: sleep fails closed before ActionGate — never wait for Telegram, never honor persistent allow rules
+    if (ctx.authorizationMode === "unattended-sleep" && tier === "auth-required") {
+      logWarn("host-tool-service", `Sleep policy rejected [${fingerprintCommand(cmd)}]: ${previewCommand(cmd)}`);
+      return policyRejected(cmd, "Command requires authorization but sleep does not wait for Telegram — rejected.");
+    }
+
     // ActionGate: only command + variable names reach the authorization
     // surface — never handle values (and never plaintext at this point).
-    const tier = classifyCommand(cmd);
     if (tier === "auth-required" && this.deps.actionGate) {
       const granted = await this.deps.actionGate.requestAuth("bash-auth", cmd, { mode: ctx.authorizationMode });
       if (!granted) {

@@ -58,14 +58,7 @@ const PROVIDER_TRANSPORT_NAME: Record<ProviderChoice, string> = {
   kiro: 'kiro',
   gemini: 'gemini',
 };
-const DEFAULT_MODELS: Record<ProviderChoice, string> = {
-  openrouter: 'deepseek/deepseek-v4-flash',
-  anthropic: 'claude-sonnet-4-5-20250929',
-  openai: 'gpt-4o',
-  ollama: 'kimi-k2.5:cloud',
-  kiro: 'claude-sonnet-4.6',
-  gemini: 'gemini-2.5-flash',
-};
+
 
 /** Providers that use an API key + HTTP endpoint (can validate via /v1/models). */
 const API_PROVIDERS: ReadonlySet<ProviderChoice> = new Set(['openrouter', 'anthropic', 'openai', 'ollama']);
@@ -233,14 +226,16 @@ async function runInteractive(existing: WizardAnswers | null): Promise<WizardAns
   });
   if (isCancel(defaultProvider)) { cancel('Cancelled.'); return null; }
 
-  // 10. Main model (prefilled per provider)
+  // 10. Main model — explicit, no hidden default map
   const defaultModel = await text({
     message: 'Main model',
-    placeholder: DEFAULT_MODELS[defaultProvider],
-    initialValue: existing?.defaultModel ?? DEFAULT_MODELS[defaultProvider],
+    placeholder: 'e.g. deepseek/deepseek-v4-flash or claude-sonnet-4-5-20250929',
+    initialValue: existing?.defaultModel ?? '',
+    validate: (v) => v?.trim() ? undefined : 'Model is required — enter an explicit model identifier',
   });
   if (isCancel(defaultModel)) { cancel('Cancelled.'); return null; }
-  const modelStr = String(defaultModel ?? '').trim() || DEFAULT_MODELS[defaultProvider];
+  const modelStr = String(defaultModel ?? '').trim();
+  if (!modelStr) { cancel('Model is required.'); return null; }
 
   // 11. API key — required + validated for OpenRouter, optional for others
   const apiKeyEnv = PROVIDER_API_KEY_ENV[defaultProvider];
@@ -380,7 +375,9 @@ function validateNonInteractive(opts: OnboardOptions): WizardAnswers | string {
   if (!opts.telegramChatId) return '--telegram-chat-id is required in non-interactive mode';
   if (!opts.userName) return '--user-name is required in non-interactive mode';
   if (!opts.passphrase) return '--passphrase is required in non-interactive mode';
-  const provider = (opts.defaultProvider ?? 'openrouter') as ProviderChoice;
+  if (!opts.defaultProvider) return '--default-provider is required in non-interactive mode';
+  if (!opts.defaultModel) return '--default-model is required in non-interactive mode';
+  const provider = opts.defaultProvider as ProviderChoice;
   if (!VALID_PROVIDERS.includes(provider)) {
     return `--default-provider must be one of: ${VALID_PROVIDERS.join(', ')}`;
   }
@@ -395,7 +392,7 @@ function validateNonInteractive(opts: OnboardOptions): WizardAnswers | string {
     discordAppId: '',
     discordA2aChannel: opts.discordA2aChannel ?? '',
     defaultProvider: provider,
-    defaultModel: opts.defaultModel ?? DEFAULT_MODELS[provider],
+    defaultModel: opts.defaultModel,
     providerApiKey: opts.apiKey ?? '',
     hailMaryModel: '',
     groqApiKey: '',
@@ -412,8 +409,11 @@ async function readExisting(envPath: string): Promise<WizardAnswers | null> {
       const m = line.match(/^([A-Z_][A-Z0-9_]*)=(.*)$/);
       if (m && m[1] !== undefined && m[2] !== undefined) kv.set(m[1], m[2]);
     }
-    const provider = (kv.get('DEFAULT_PROVIDER') ?? 'openrouter') as ProviderChoice;
-    if (!VALID_PROVIDERS.includes(provider)) return null;
+    const providerRaw = kv.get('DEFAULT_PROVIDER');
+    const provider = providerRaw ? (providerRaw as ProviderChoice) : null;
+    if (!provider || !VALID_PROVIDERS.includes(provider)) return null;
+    const modelRaw = kv.get('DEFAULT_MODEL');
+    if (!modelRaw) return null;
     return {
       installMode: 'simple',
       userName: kv.get('USER_DISPLAY_NAME') ?? '',
@@ -427,7 +427,7 @@ async function readExisting(envPath: string): Promise<WizardAnswers | null> {
       discordAppId: kv.get('DISCORD_APP_ID') ?? '',
       discordA2aChannel: kv.get('DISCORD_A2A_CHANNEL_ID') ?? '',
       defaultProvider: provider,
-      defaultModel: kv.get('DEFAULT_MODEL') ?? DEFAULT_MODELS[provider],
+      defaultModel: modelRaw,
       providerApiKey: '',
       hailMaryModel: '',
       groqApiKey: '',

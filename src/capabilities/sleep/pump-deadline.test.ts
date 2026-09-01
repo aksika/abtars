@@ -130,7 +130,7 @@ describe("createSleepHandle provider pump terminal settlement (#1517)", () => {
     // provider_timeout code, and the pump terminates — the next request is
     // never served.
     expect(spin).not.toHaveBeenCalled();
-    expect(client.sleep.runtime.fail).toHaveBeenCalledWith("lease-1", "c1", "provider_timeout");
+    expect(client.sleep.runtime.fail).toHaveBeenCalledWith("lease-1", "c1", "provider_timeout", expect.objectContaining({ cause: expect.any(String) }));
     expect(client.sleep.runtime.next).toHaveBeenCalledTimes(1);
     expect(client.sleep.runtime.close).toHaveBeenCalledWith("lease-1");
   });
@@ -174,7 +174,7 @@ describe("createSleepHandle provider pump terminal settlement (#1517)", () => {
       expect(spin).toHaveBeenCalledTimes(1);
       expect(quarantineSession).toHaveBeenCalledTimes(1);
       expect(quarantineSession).toHaveBeenCalledWith("d-night-1", "provider_timeout");
-      expect(client.sleep.runtime.fail).toHaveBeenCalledWith("lease-1", "c1", "provider_timeout");
+      expect(client.sleep.runtime.fail).toHaveBeenCalledWith("lease-1", "c1", "provider_timeout", expect.objectContaining({ cause: expect.any(String) }));
       expect(client.sleep.runtime.complete, "a timed-out generation must never complete a broker request").not.toHaveBeenCalled();
       expect(client.sleep.runtime.close).toHaveBeenCalledWith("lease-1");
       expect(handle.isActive).toBe(false);
@@ -210,7 +210,7 @@ describe("createSleepHandle provider pump terminal settlement (#1517)", () => {
     expect(spin).toHaveBeenCalledTimes(1);
     expect(quarantineSession).toHaveBeenCalledTimes(1);
     expect(quarantineSession).toHaveBeenCalledWith("d-night-1", "provider_failed");
-    expect(client.sleep.runtime.fail).toHaveBeenCalledWith("lease-1", "c1", "provider_failed");
+    expect(client.sleep.runtime.fail).toHaveBeenCalledWith("lease-1", "c1", "provider_failed", expect.objectContaining({ cause: expect.any(String) }));
     expect(client.sleep.runtime.complete, "a rejected generation must never settle as complete('')").not.toHaveBeenCalled();
     expect(client.sleep.runtime.close).toHaveBeenCalledWith("lease-1");
   });
@@ -238,7 +238,7 @@ describe("createSleepHandle provider pump terminal settlement (#1517)", () => {
     handle.startScheduled();
     await settleTicks();
 
-    expect(client.sleep.runtime.fail).toHaveBeenCalledWith("lease-1", "c1", "provider_failed");
+    expect(client.sleep.runtime.fail).toHaveBeenCalledWith("lease-1", "c1", "provider_failed", expect.objectContaining({ cause: expect.any(String) }));
     expect(client.sleep.runtime.complete).not.toHaveBeenCalled();
     expect(client.sleep.runtime.close).toHaveBeenCalledWith("lease-1");
   });
@@ -351,7 +351,7 @@ describe("createSleepHandle provider pump terminal settlement (#1517)", () => {
     await settleTicks();
 
     expect(spin).not.toHaveBeenCalled();
-    expect(client.sleep.runtime.fail).toHaveBeenCalledWith("lease-1", "c1", "provider_timeout");
+    expect(client.sleep.runtime.fail).toHaveBeenCalledWith("lease-1", "c1", "provider_timeout", expect.objectContaining({ cause: expect.any(String) }));
     // Even a rejected fail RPC cannot keep the pump alive — it terminates.
     expect(client.sleep.runtime.next).toHaveBeenCalledTimes(1);
     expect(client.sleep.runtime.close).toHaveBeenCalledWith("lease-1");
@@ -412,7 +412,7 @@ describe("createSleepHandle provider pump terminal settlement (#1517)", () => {
       await vi.advanceTimersByTimeAsync(0);
 
       expect(quarantineSession).toHaveBeenCalledWith("d-night-1", "provider_failed");
-      expect(client.sleep.runtime.fail).toHaveBeenCalledWith("lease-1", "c1", "provider_failed");
+      expect(client.sleep.runtime.fail).toHaveBeenCalledWith("lease-1", "c1", "provider_failed", expect.objectContaining({ cause: expect.any(String) }));
 
       // Failure settlement is capped at the reserved 30s cleanup window,
       // rather than waiting for the whole logical 120s completion deadline.
@@ -479,7 +479,7 @@ describe("createSleepHandle provider pump terminal settlement (#1517)", () => {
     await settleTicks();
 
     expect(quarantineSession).toHaveBeenCalledWith("d-night-1", "provider_failed");
-    expect(client.sleep.runtime.fail).toHaveBeenCalledWith("lease-1", "c1", "provider_failed");
+    expect(client.sleep.runtime.fail).toHaveBeenCalledWith("lease-1", "c1", "provider_failed", expect.objectContaining({ cause: expect.any(String) }));
     expect(spin).toHaveBeenCalledTimes(1);
     expect(client.sleep.runtime.next).toHaveBeenCalledTimes(1);
     expect(client.sleep.runtime.close).toHaveBeenCalledWith("lease-1");
@@ -619,7 +619,7 @@ describe("createSleepHandle provider pump terminal settlement (#1517)", () => {
     await vi.advanceTimersByTimeAsync(70_000);
     await vi.advanceTimersByTimeAsync(0);
 
-    expect(client.sleep.runtime.fail).toHaveBeenCalledWith("lease-1", "c1", "provider_timeout");
+    expect(client.sleep.runtime.fail).toHaveBeenCalledWith("lease-1", "c1", "provider_timeout", expect.objectContaining({ cause: expect.any(String) }));
     expect(quarantineSession).toHaveBeenCalledWith("d-night-1", "provider_timeout");
     expect(client.sleep.runtime.close).toHaveBeenCalledWith("lease-1");
     expect(handle.isActive).toBe(false);
@@ -805,7 +805,7 @@ describe("createSleepHandle provider pump terminal settlement (#1517)", () => {
       expect(runtime.session, "exactly one configured-only transport attempt — no fallback").toHaveBeenCalledTimes(1);
       expect(runtime.session.mock.calls[0]![2]).toEqual({ candidatePolicy: "configured-only" });
       expect(session.status, "the exact Dreamy session is quarantined").toBe("ended");
-      expect(client.sleep.runtime.fail).toHaveBeenCalledWith("lease-1", "c1", "provider_timeout");
+      expect(client.sleep.runtime.fail).toHaveBeenCalledWith("lease-1", "c1", "provider_timeout", expect.objectContaining({ cause: expect.any(String) }));
       expect(client.sleep.runtime.complete).not.toHaveBeenCalled();
       expect(handle.isActive).toBe(false);
 

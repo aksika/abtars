@@ -764,7 +764,10 @@ export class Spin {
     // whose own cards are agent-sourced; missing/cyclic/unreadable ancestry
     // fails closed to interactive. The mode lives only on the contexts built
     // below — never on the reusable session.
-    const authorizationMode = resolveToolAuthorizationMode(cardId);
+    // #1752: sleep origin takes precedence — a D spin from the sleep capability is unattended-sleep regardless of card provenance
+    const authorizationMode = spec.executionOrigin === "sleep"
+      ? "unattended-sleep" as const
+      : resolveToolAuthorizationMode(cardId);
 
     // #1319: Track card association and publish execution.started for Orc
     if (cardId !== undefined && spec.type === "O") {

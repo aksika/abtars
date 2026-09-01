@@ -260,7 +260,22 @@ export class AbtarsSignedWssClient implements AbmindClientLike {
         open: (id, key) => this.call("sleep.runtime.open", { providerInstanceId: id }, key) as Promise<{ status: string; leaseId?: string; expiresAt?: number }>,
         next: (leaseId, waitMs) => this.call("sleep.runtime.next", { leaseId, waitMs }) as Promise<{ status: string; heartbeat?: true; completionRequest?: { completionId: string; runId: string; stepId: string; prompt: string; deadline: number } }>,
         complete: (leaseId, completionId, text, key) => this.call("sleep.runtime.complete", { leaseId, completionId, text }, key) as Promise<{ status: string }>,
-        fail: (leaseId, completionId, code, key) => this.call("sleep.runtime.fail", { leaseId, completionId, code }, key) as Promise<{ status: string }>,
+        fail: (leaseId: string, completionId: string, code: string, failure?: unknown, key?: string) => {
+          // Support both legacy fail(leaseId, completionId, code, key) and new fail(..., failure, key)
+          let actualFailure: unknown;
+          let actualKey: string | undefined;
+          if (typeof failure === "string") {
+            actualKey = failure;
+          } else if (failure && typeof failure === "object") {
+            actualFailure = failure;
+            actualKey = key;
+          } else if (failure === undefined) {
+            actualKey = key;
+          }
+          const payload: Record<string, unknown> = { leaseId, completionId, code };
+          if (actualFailure) payload["failure"] = actualFailure;
+          return this.call("sleep.runtime.fail", payload, actualKey) as Promise<{ status: string }>;
+        },
         close: (leaseId, key) => this.call("sleep.runtime.close", { leaseId }, key) as Promise<{ status: string }>,
       },
     };
