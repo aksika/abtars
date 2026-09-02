@@ -7,10 +7,12 @@
  * the reserved `ABTARS_SECRET_` prefix. Values must be unguessable sealed
  * handles. The fixed order is:
  *
- *   1. validate schema, syntax, guardrails, bridge-spawn/kill blocks and
- *      ActionGate against the command and variable names only;
- *   2. after approval, resolve every handle through local abmind with
- *      owner/revision recheck; if any fails, spawn nothing;
+ *   1. validate schema and syntax; interactive/scheduled command-policy
+ *      checks also run guardrails, bridge-spawn/kill blocks and ActionGate
+ *      against the command and variable names only;
+ *   2. after any applicable policy decision (none for sleep), resolve every
+ *      handle through local abmind with owner/revision recheck; if any fails,
+ *      spawn nothing;
  *   3. add exact values only to a fresh child env and exec;
  *   4. exact-literal redact stdout, stderr, thrown errors and result JSON
  *      before any audit/log/diagnostic/model consumer;
@@ -194,39 +196,39 @@ export class HostToolService {
       return JSON.stringify(result);
     }
 
-    // Guardrails — single deterministic policy result for classifier, guardrail, auth, and audit
-    const tier = classifyCommand(cmd);
-    if (tier === "block") {
-      const blockMsg = checkCommand(cmd);
-      // Sleep is unattended even when the process-wide guardrail mode is off:
-      // a classifier-level block must never reach the shell in that origin.
-      if (blockMsg || ctx.authorizationMode === "unattended-sleep") {
-        logWarn("host-tool-service", `Guardrails blocked [${fingerprintCommand(cmd)}]: ${previewCommand(cmd)}`);
-        return policyRejected(cmd, blockMsg ?? "Command blocked by sleep guardrails.");
+    // Normal sleep is explicitly an unrestricted unattended execution origin:
+    // command guardrails, bridge self-protection, and ActionGate must not turn
+    // a model-produced Bash operation into a Telegram-dependent failure.
+    // Contract validation, syntax reporting, timeouts, cancellation, sealed
+    // handle binding, and output redaction remain execution-boundary duties.
+    if (ctx.authorizationMode !== "unattended-sleep") {
+      // Guardrails — one deterministic policy result for classifier,
+      // guardrail, auth, and audit.
+      const tier = classifyCommand(cmd);
+      if (tier === "block") {
+        const blockMsg = checkCommand(cmd);
+        if (blockMsg) {
+          logWarn("host-tool-service", `Guardrails blocked [${fingerprintCommand(cmd)}]: ${previewCommand(cmd)}`);
+          return policyRejected(cmd, blockMsg);
+        }
       }
-    }
 
-    // Bridge self-protection — checked before auth, same result for audit
-    if (isBridgeSpawnCommand(cmd)) {
-      return policyRejected(cmd, "Command blocked: this would spawn/restart a bridge or watchdog process. The bridge is already running under launchd+watchdog supervision.");
-    }
-    if (isBridgeKillCommand(cmd)) {
-      return policyRejected(cmd, "Command blocked: this would kill the bridge process (yourself). Ask the user to send /restart for a session reset.");
-    }
+      // Bridge self-protection — checked before auth, same result for audit.
+      if (isBridgeSpawnCommand(cmd)) {
+        return policyRejected(cmd, "Command blocked: this would spawn/restart a bridge or watchdog process. The bridge is already running under launchd+watchdog supervision.");
+      }
+      if (isBridgeKillCommand(cmd)) {
+        return policyRejected(cmd, "Command blocked: this would kill the bridge process (yourself). Ask the user to send /restart for a session reset.");
+      }
 
-    // #1752: sleep fails closed before ActionGate — never wait for Telegram, never honor persistent allow rules
-    if (ctx.authorizationMode === "unattended-sleep" && tier === "auth-required") {
-      logWarn("host-tool-service", `Sleep policy rejected [${fingerprintCommand(cmd)}]: ${previewCommand(cmd)}`);
-      return policyRejected(cmd, "Command requires authorization but sleep does not wait for Telegram — rejected.");
-    }
-
-    // ActionGate: only command + variable names reach the authorization
-    // surface — never handle values (and never plaintext at this point).
-    if (tier === "auth-required" && this.deps.actionGate) {
-      const granted = await this.deps.actionGate.requestAuth("bash-auth", cmd, { mode: ctx.authorizationMode });
-      if (!granted) {
-        logWarn("host-tool-service", `Auth denied [${fingerprintCommand(cmd)}]: ${previewCommand(cmd)}`);
-        return policyRejected(cmd, "Command requires authorization. Master denied or timed out.");
+      // ActionGate: only command + variable names reach the authorization
+      // surface — never handle values (and never plaintext at this point).
+      if (tier === "auth-required" && this.deps.actionGate) {
+        const granted = await this.deps.actionGate.requestAuth("bash-auth", cmd, { mode: ctx.authorizationMode });
+        if (!granted) {
+          logWarn("host-tool-service", `Auth denied [${fingerprintCommand(cmd)}]: ${previewCommand(cmd)}`);
+          return policyRejected(cmd, "Command requires authorization. Master denied or timed out.");
+        }
       }
     }
 

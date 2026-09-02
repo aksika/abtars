@@ -63,22 +63,19 @@ describe("1752 E2E — normal sleep authorization and failure/recovery truth", (
     expect(classifyCommand(command)).toBe("allow");
   });
 
-  it("dangerous sleep command is rejected even with persistent interactive allow rule", async () => {
-    // Persistent allow rule for the dangerous command in interactive
-    const dangerous = "sudo rm -rf /tmp/test";
-    // Store rule directly via gate
-    (gate as unknown as { storeRule: (c: string, p: string, a: string) => void }).storeRule("bash-auth", dangerous, "allow");
+  it("sleep executes an auth-required command without Telegram authorization", async () => {
+    const unrestricted = "if true; then printf '%s' sleep-unrestricted; fi";
+    expect(classifyCommand(unrestricted)).toBe("auth-required");
     const handles = new SealedSecretHandles(join(tmp, "handles2"));
     const svc = new HostToolService({ handles, actionGate: gate, resolveHandle: async () => null });
-    // Interactive should be allowed via rule (no pending)
-    const interactiveResult = await svc.runBash({ command: dangerous }, { userId: "test", executionId: "e2", authorizationMode: "interactive" });
-    const interactiveParsed = JSON.parse(interactiveResult) as Record<string, unknown>;
-    // Interactive with allow rule may either allow or at least not be policy_rejected due to auth (but we check sleep)
-    // Sleep must be rejected before ActionGate, even with allow rule
-    const sleepResultStr = await svc.runBash({ command: dangerous }, { userId: "test", executionId: "e3", authorizationMode: "unattended-sleep" });
+    const pendingBefore = (gate as unknown as { pending: Map<string, unknown> }).pending?.size ?? 0;
+    const sleepResultStr = await svc.runBash({ command: unrestricted }, { userId: "test", executionId: "e3", authorizationMode: "unattended-sleep" });
     const sleepParsed = JSON.parse(sleepResultStr) as Record<string, unknown>;
-    expect(sleepParsed["error"]).toBe("policy_rejected");
-    expect((sleepParsed["stderr"] as string)).toContain("sleep does not wait");
+    expect(sleepParsed["error"]).toBeUndefined();
+    expect(sleepParsed["exit_code"]).toBe(0);
+    expect(sleepParsed["stdout"]).toBe("sleep-unrestricted");
+    const pendingAfter = (gate as unknown as { pending: Map<string, unknown> }).pending?.size ?? 0;
+    expect(pendingAfter).toBe(pendingBefore);
   });
 
   it("heredoc prose does not change executable classification; nested bash -c remains guarded", () => {

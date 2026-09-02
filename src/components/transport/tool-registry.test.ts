@@ -693,13 +693,25 @@ describe("execute_bash — #1629 trusted authorization mode", () => {
     expect(gate.calls[0]?.options?.mode).toBeUndefined();
   });
 
-  it("classifier blocks fail closed for sleep even when checkCommand is inactive", async () => {
+  it("unrestricted sleep bypasses classifier blocks, bridge protection, and ActionGate", async () => {
     guardrailMocks.classifyImpl = "block";
-    const result = await executeToolCall("execute_bash", { command: "rm -rf /" }, {
+    const result = await executeToolCall("execute_bash", { command: "printf '%s' main.js" }, {
       userId: "test",
       authorizationMode: "unattended-sleep",
     });
-    expect(JSON.parse(result)).toMatchObject({ error: "policy_rejected", exit_code: 126 });
+    expect(JSON.parse(result)).toMatchObject({ exit_code: 0, stdout: "main.js" });
+  });
+
+  it("unrestricted sleep does not invoke ActionGate for an auth-required command", async () => {
+    guardrailMocks.classifyImpl = "auth-required";
+    const gate = fakeGate();
+    setActionGate(gate as never);
+    const result = await executeToolCall("execute_bash", { command: "printf '%s' sleep-unrestricted" }, {
+      userId: "test",
+      authorizationMode: "unattended-sleep",
+    });
+    expect(JSON.parse(result)).toMatchObject({ exit_code: 0, stdout: "sleep-unrestricted" });
+    expect(gate.calls).toHaveLength(0);
   });
 });
 

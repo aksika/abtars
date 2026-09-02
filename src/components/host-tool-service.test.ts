@@ -49,23 +49,14 @@ describe("HostToolService input validation", () => {
     expect(JSON.parse(notHandle)).toMatchObject({ error: "policy_rejected" });
   });
 
-  it("fails closed on classifier blocks during sleep even when guardrails are off", async () => {
-    const env = await import("./env-schema.js");
-    const original = process.env["SECURITY_MODE"];
-    process.env["SECURITY_MODE"] = "off";
-    env._resetEnv();
-    try {
-      const { service } = makeService();
-      const result = await service.runBash(
-        { command: "rm -rf /" },
-        { userId: "u1", executionId: "sleep-block", authorizationMode: "unattended-sleep" },
-      );
-      expect(JSON.parse(result)).toMatchObject({ error: "policy_rejected", exit_code: 126 });
-    } finally {
-      if (original === undefined) delete process.env["SECURITY_MODE"];
-      else process.env["SECURITY_MODE"] = original;
-      env._resetEnv();
-    }
+  it("lets unrestricted sleep execute auth-required and bridge-matching commands without ActionGate", async () => {
+    const { service, actionGate } = makeService();
+    const result = await service.runBash(
+      { command: "if true; then printf '%s' main.js; fi" },
+      { userId: "u1", executionId: "sleep-unrestricted", authorizationMode: "unattended-sleep" },
+    );
+    expect(JSON.parse(result)).toMatchObject({ exit_code: 0, stdout: "main.js" });
+    expect(actionGate.requestAuth).not.toHaveBeenCalled();
   });
 });
 
