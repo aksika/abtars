@@ -225,6 +225,48 @@ describe("deployActivation — health unhealthy (Linux)", () => {
   });
 });
 
+describe("deployActivation — in-cgroup watchdog recovery (Linux)", () => {
+  it("starts the watchdog after the bridge handoff instead of assuming it is alive", { timeout: TIMEOUT }, async () => {
+    const startCalls: number[] = [];
+    const healthMock = makeHealthMock();
+
+    const code = await deployActivation(
+      { staged, channel: "npm", repoRoot: tmp },
+      undefined,
+      healthMock.fn,
+      () => {
+        startCalls.push(1);
+        return { ok: true };
+      },
+      () => {},
+      () => true,
+    );
+
+    expect(code).toBe(0);
+    expect(startCalls).toHaveLength(1);
+    expect(healthMock.calls).toHaveLength(1);
+  });
+
+  it("fails before the health wait when the watchdog cannot be started", { timeout: TIMEOUT }, async () => {
+    const healthMock = makeHealthMock();
+
+    const code = await deployActivation(
+      { staged, channel: "npm", repoRoot: tmp },
+      undefined,
+      healthMock.fn,
+      () => ({ ok: false, error: "start watchdog unit: unit failed to start" }),
+      () => {},
+      () => true,
+    );
+
+    expect(code).toBe(1);
+    expect(healthMock.calls).toHaveLength(0);
+    const state = JSON.parse(readFileSync(join(tmp, "deploy.state"), "utf-8")) as Record<string, unknown>;
+    expect(state.status).toBe("failed");
+    expect(state.error).toBe("start watchdog unit: unit failed to start");
+  });
+});
+
 // ── Skill dependency preparation during activation (#1542) ─────────────────
 
 const FAKE_NPM = `#!/usr/bin/env node

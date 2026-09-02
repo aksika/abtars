@@ -270,6 +270,7 @@ export async function deployActivation(
       try { execSync("systemctl --user stop abtars-watchdog", { stdio: ["ignore", "pipe", "pipe"], timeout: 5000 }); } catch (err) { if (!isExpectedWatchdogAbsence(err)) throw err; }
     }
   },
+  inWatchdogServiceCgroupFn: () => boolean = inWatchdogServiceCgroup,
 ): Promise<number> {
   const { staged, channel, repoRoot } = args;
   const paths = packagePaths("abtars");
@@ -381,19 +382,20 @@ export async function deployActivation(
   // ── Step 7 + 8: Stop + respawn (FROZEN — abtars.md watchdog; #1299) ───
   // CGROUP DIVERGENCE (#1299): when this deploy process is inside the
   // abtars-watchdog.service cgroup (the `/update dev` bridge path — spawned
-  // detached but same cgroup, KillMode=control-group), stopping the service or
-  // killing the watchdog would SIGTERM THIS process before it finishes. So on
-  // that path we touch NEITHER the service NOR the watchdog: we kill only the
-  // bridge PID and let the live L3 watchdog (abtars-watchdog.sh poll loop)
-  // detect process-gone and respawn the bridge from the freshly-repointed app/
-  // symlink. Consequence: a changed abtars-watchdog.sh is NOT picked up on this
-  // path — use scripts/emergency-update.sh (runs OUTSIDE the cgroup) or a manual
-  // `abtars update --dev` for a full watchdog refresh.
+  // detached but same cgroup), stopping the service or killing the watchdog
+  // would SIGTERM THIS process before it finishes. So on that path we do not
+  // stop or kill the service: we kill only the bridge PID, then explicitly
+  // start the service and let its L3 poll loop respawn the bridge from the
+  // freshly-repointed app/ symlink. Starting is safe from inside the cgroup;
+  // it also repairs the case where a previous failed update already left the
+  // watchdog service dead. Consequence: a changed abtars-watchdog.sh is NOT
+  // picked up on this path — use scripts/emergency-update.sh (runs OUTSIDE the
+  // cgroup) or a manual `abtars update --dev` for a full watchdog refresh.
   // The out-of-cgroup CLI/emergency path and macOS keep the full stop → kill →
   // respawn sequence below (instant, and refreshes the watchdog).
   // DO NOT re-add `systemctl stop`/watchdog-kill to the in-cgroup branch — it
   // reintroduces the cgroup-suicide bug.
-  const inCgroup = inWatchdogServiceCgroup();
+  const inCgroup = inWatchdogServiceCgroupFn();
 
   // Capture old PID before any kill (health probe needs the pre-kill PID as
   // reference to detect that a new bridge has started).
@@ -495,8 +497,18 @@ export async function deployActivation(
 
   if (mode === "daemon") {
     if (inCgroup) {
-      // Nothing to start — the live L3 watchdog respawns the bridge from the
-      // new app/ symlink after the process-gone kill above.
+      // Starting (unlike stopping) the service does not tear down this
+      // deploy process. Do this even when the service is normally expected to
+      // be alive: a previous failed update may have left it inactive, and
+      // assuming a live watchdog bricks the host after the bridge is killed.
+      const startResult = systemdStartFn();
+      if (!startResult.ok) {
+        process.stderr.write(`x ${startResult.error}\n`);
+        writeFileSync(join(paths.home, "deploy.state"), JSON.stringify({ status: "failed", version: staged.version, error: startResult.error.slice(-300), completedAt: new Date().toISOString() }) + "\n");
+        return 1;
+      }
+      // The watchdog respawns the bridge from the new app/ symlink after the
+      // process-gone kill above.
       process.stdout.write(`  Bridge killed — L3 watchdog respawning from new release\n`);
     } else {
       // 8.1 Restart daemon service. The pending update command survives the
