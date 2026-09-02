@@ -232,7 +232,8 @@ export class HostToolService {
       }
     }
 
-    // Resolve every handle after approval; spawn nothing on any failure.
+    // Resolve every handle after applicable policy checks; sleep has no
+    // command-policy approval step. Spawn nothing on any resolution failure.
     const resolvedEnv: Array<{ name: string; value: string }> = [];
     try {
       if (input.secretEnv) {
