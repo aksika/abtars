@@ -181,7 +181,7 @@ describe("ReviewCaseAssembler coverage read-model (#1604)", () => {
       card_id: lane1,
       contract_id: lane1Contract.id,
       ordinal: 1,
-      executor_kind: "agent",
+      executor_kind: "agent" as const,
       executor_id: "spin",
       status: "settled",
       started_at: new Date().toISOString(),
@@ -282,18 +282,18 @@ describe("projectReviewBrief decision-ready projection (#1620)", () => {
       criterion_inputs: [
         {
           criterion_id: "c_orc", description: "Orc synthesis", required: true, execution_owner: "orc", evidence_expectation: "synthesis",
-          mapped_child_contract_ids: [], observed_evidence_ids: [], worker_claim_ids: [], failed_or_inconclusive_check_ids: [],
+          mapped_child_contract_ids: [], successful_mapped_child_contract_ids: [], unsuccessful_mapped_child_contract_ids: [], observed_evidence_ids: [], worker_claim_ids: [], failed_or_inconclusive_check_ids: [],
           artifact_observation_ids: [], retry_lineage_ids: [], coverage_hint: "orc_owned",
         },
         {
           criterion_id: "c_sup", description: "Delegated supported", required: true, execution_owner: "delegated", evidence_expectation: "observed",
-          mapped_child_contract_ids: ["cc_1"], observed_evidence_ids: ["chk_1"], worker_claim_ids: ["claim_1"],
+          mapped_child_contract_ids: ["cc_1"], successful_mapped_child_contract_ids: ["cc_1"], unsuccessful_mapped_child_contract_ids: [], observed_evidence_ids: ["chk_1"], worker_claim_ids: ["claim_1"],
           failed_or_inconclusive_check_ids: ["chk_fail"], artifact_observation_ids: ["art_1"], retry_lineage_ids: ["card_1_2_attempts"],
           coverage_hint: "supported",
         },
         {
           criterion_id: "c_gap", description: "Delegated gap", required: true, execution_owner: "delegated", evidence_expectation: "observed",
-          mapped_child_contract_ids: [], observed_evidence_ids: [], worker_claim_ids: [], failed_or_inconclusive_check_ids: [],
+          mapped_child_contract_ids: [], successful_mapped_child_contract_ids: [], unsuccessful_mapped_child_contract_ids: [], observed_evidence_ids: [], worker_claim_ids: [], failed_or_inconclusive_check_ids: [],
           artifact_observation_ids: [], retry_lineage_ids: [], coverage_hint: "gap",
         },
       ],

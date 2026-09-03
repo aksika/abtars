@@ -11,8 +11,8 @@ let ProjectReviewValidator: typeof import("./project-review-validator.js").Proje
 let ProjectReviewStore: typeof import("./project-review-store.js").ProjectReviewStore;
 
 describe("ProjectReviewValidator", () => {
-  let validator: ProjectReviewValidator;
-  let store: ProjectReviewStore;
+  let validator: InstanceType<typeof ProjectReviewValidator>;
+  let store: InstanceType<typeof ProjectReviewStore>;
   let seq = 0;
   let testSeq = 0;
 
@@ -75,6 +75,7 @@ describe("ProjectReviewValidator", () => {
       contradictions: [],
       residual_risks: [],
       synthesis: "The feature is complete and all criteria are satisfied.",
+      authored_at: new Date().toISOString(),
       ...overrides,
     };
   }
@@ -262,7 +263,7 @@ describe("ProjectReviewValidator", () => {
 
     // #1605: required vs optional and ownership-aware acceptance
 
-    function snapshotWithCriteria(pid: number, criteria: Array<{ id: string; required: boolean; execution_owner: "delegated" | "orc"; coverage_hint: string }>): ReviewCaseSnapshot {
+    function snapshotWithCriteria(pid: number, criteria: Array<{ id: string; required: boolean; execution_owner: "delegated" | "orc"; coverage_hint: "supported" | "conflicting" | "gap" | "orc_owned" | "failed" }>): ReviewCaseSnapshot {
       const snap = makeSnapshot(pid);
       return {
         ...snap,
@@ -497,7 +498,7 @@ describe("ProjectReviewValidator", () => {
         action: "repair",
         repair: {
           items: [
-            { id: "r1", affected_criterion_ids: ["c1"], required_evidence: "", strategy: "", do_not_repeat: [], capabilities: [], budget: {} },
+            { id: "r1", source_contract_id: "pc_child_c1", affected_criterion_ids: ["c1"], required_evidence: "", strategy: "", do_not_repeat: [], capabilities: [], budget: {} },
           ],
           rationale: "Fix it",
         },
@@ -642,8 +643,8 @@ describe("ProjectReviewValidator", () => {
 });
 
 describe("ProjectReviewValidator #1656 positive provenance on accept", () => {
-  let validator: ProjectReviewValidator;
-  let store: ProjectReviewStore;
+  let validator: InstanceType<typeof ProjectReviewValidator>;
+  let store: InstanceType<typeof ProjectReviewStore>;
   let seq = 0;
 
   function snapshotWith(inputs: Array<{

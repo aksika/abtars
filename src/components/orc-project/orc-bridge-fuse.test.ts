@@ -38,7 +38,7 @@ function seedProject(cardId: number): void {
   reviewStore.insertContract({
     schema_version: 1, id: `ct_${cardId}`, digest: `dg_${cardId}`, project_card_id: cardId, goal: "work",
     criteria: [{ id: "c1", description: "done", required: true, evidence_expectation: "synthesis" }],
-    required_outputs: [], constraints: [], limits: {},
+    required_outputs: [], constraints: [], limits: { max_review_rounds: 1, max_repair_rounds: 1 },
     provenance: { requested_by: "t", authored_by: "orc", created_at: new Date().toISOString() },
   });
   reviewStore.initializeSupervision(cardId, `ct_${cardId}`, "executing");

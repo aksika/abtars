@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { vi } from "vitest";
 import type { ReviewCaseSnapshot } from "../project-acceptance/project-review-case.js";
+import type { ProjectAcceptanceContractV2 } from "../project-acceptance/project-contract.js";
 import { getOrcTools } from "../transport/orc-tools.js";
 
 let TEST_HOME: string;
@@ -35,8 +36,8 @@ function makeOrcOnlySnapshot(pid: number): ReviewCaseSnapshot {
       limits: { hard_deadline_at: undefined, max_tokens: 100000, max_cost: undefined, max_review_rounds: 5, max_repair_rounds: 3 },
     },
     criterion_inputs: [
-      { criterion_id: "synth1", description: "Synthesize findings", required: true, execution_owner: "orc", evidence_expectation: "synthesis", mapped_child_contract_ids: [], observed_evidence_ids: [], worker_claim_ids: [], failed_or_inconclusive_check_ids: [], artifact_observation_ids: [], retry_lineage_ids: [], coverage_hint: "orc_owned" },
-      { criterion_id: "synth2", description: "Quality gate", required: true, execution_owner: "orc", evidence_expectation: "synthesis", mapped_child_contract_ids: [], observed_evidence_ids: [], worker_claim_ids: [], failed_or_inconclusive_check_ids: [], artifact_observation_ids: [], retry_lineage_ids: [], coverage_hint: "orc_owned" },
+      { criterion_id: "synth1", description: "Synthesize findings", required: true, execution_owner: "orc", evidence_expectation: "synthesis", mapped_child_contract_ids: [], successful_mapped_child_contract_ids: [], unsuccessful_mapped_child_contract_ids: [], observed_evidence_ids: [], worker_claim_ids: [], failed_or_inconclusive_check_ids: [], artifact_observation_ids: [], retry_lineage_ids: [], coverage_hint: "orc_owned" },
+      { criterion_id: "synth2", description: "Quality gate", required: true, execution_owner: "orc", evidence_expectation: "synthesis", mapped_child_contract_ids: [], successful_mapped_child_contract_ids: [], unsuccessful_mapped_child_contract_ids: [], observed_evidence_ids: [], worker_claim_ids: [], failed_or_inconclusive_check_ids: [], artifact_observation_ids: [], retry_lineage_ids: [], coverage_hint: "orc_owned" },
     ],
     contradiction_candidates: [],
     uncovered_criteria: [],
@@ -68,8 +69,8 @@ function makeDelegatedSnapshot(pid: number): ReviewCaseSnapshot {
       limits: { hard_deadline_at: undefined, max_tokens: 100000, max_cost: undefined, max_review_rounds: 5, max_repair_rounds: 3 },
     },
     criterion_inputs: [
-      { criterion_id: "c1", description: "Peer contribution received", required: true, execution_owner: "delegated", evidence_expectation: "observed", mapped_child_contract_ids: [], observed_evidence_ids: ["chk_1"], worker_claim_ids: ["claim_1"], failed_or_inconclusive_check_ids: [], artifact_observation_ids: [], retry_lineage_ids: [], coverage_hint: "supported" },
-      { criterion_id: "c2", description: "Uncovered delegated criterion", required: true, execution_owner: "delegated", evidence_expectation: "observed", mapped_child_contract_ids: [], observed_evidence_ids: [], worker_claim_ids: [], failed_or_inconclusive_check_ids: [], artifact_observation_ids: [], retry_lineage_ids: [], coverage_hint: "gap" },
+      { criterion_id: "c1", description: "Peer contribution received", required: true, execution_owner: "delegated", evidence_expectation: "observed", mapped_child_contract_ids: [], successful_mapped_child_contract_ids: [], unsuccessful_mapped_child_contract_ids: [], observed_evidence_ids: ["chk_1"], worker_claim_ids: ["claim_1"], failed_or_inconclusive_check_ids: [], artifact_observation_ids: [], retry_lineage_ids: [], coverage_hint: "supported" },
+      { criterion_id: "c2", description: "Uncovered delegated criterion", required: true, execution_owner: "delegated", evidence_expectation: "observed", mapped_child_contract_ids: [], successful_mapped_child_contract_ids: [], unsuccessful_mapped_child_contract_ids: [], observed_evidence_ids: [], worker_claim_ids: [], failed_or_inconclusive_check_ids: [], artifact_observation_ids: [], retry_lineage_ids: [], coverage_hint: "gap" },
     ],
     contradiction_candidates: [],
     uncovered_criteria: ["c2"],
@@ -83,8 +84,8 @@ function makeDelegatedSnapshot(pid: number): ReviewCaseSnapshot {
   };
 }
 
-async function setupCase(pid: number, snapshot: ReviewCaseSnapshot, contract: Record<string, unknown>): Promise<{ pid: number; caseId: string }> {
-  store.insertContract(contract as never);
+async function setupCase(pid: number, snapshot: ReviewCaseSnapshot, contract: ProjectAcceptanceContractV2): Promise<{ pid: number; caseId: string }> {
+  store.insertContract(contract);
   store.initializeSupervision(pid, String(contract.id), "executing");
   // #1626: settlement requires a live kanban card — the real projection must
   // apply from a legal live status inside the settlement transaction.
@@ -176,7 +177,7 @@ function acceptDecision(pid: number, caseId: string): Record<string, unknown> {
   };
 }
 
-const orcOnlyContract = (pid: number) => ({
+const orcOnlyContract = (pid: number): ProjectAcceptanceContractV2 => ({
   schema_version: 2,
   id: `pc_${pid}`,
   digest: `d_${pid}`,
@@ -250,7 +251,7 @@ describe("Orc review tools against a real isolated TaskDatabase (#1620)", () => 
 
     it("labels peer contributions as claims and supplies no fabricated compatible evidence", async () => {
       const pid = uniquePid();
-      const delegatedContract = {
+      const delegatedContract: ProjectAcceptanceContractV2 = {
         schema_version: 2,
         id: `pc_${pid}`,
         digest: `d_${pid}`,
@@ -310,7 +311,7 @@ describe("Orc review tools against a real isolated TaskDatabase (#1620)", () => 
 
     it("settles a blocked decision with the authored reason (KP 24 shape — not protocol exhaustion)", async () => {
       const pid = uniquePid();
-      const delegatedContract = {
+      const delegatedContract: ProjectAcceptanceContractV2 = {
         schema_version: 2,
         id: `pc_${pid}`,
         digest: `d_${pid}`,

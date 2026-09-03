@@ -4,14 +4,14 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { vi } from "vitest";
 import type { ProjectAcceptanceContractV1 } from "./project-contract.js";
+import type { ProjectState } from "./project-review-store.js";
 
 let TEST_HOME: string;
 let ProjectReviewStore: typeof import("./project-review-store.js").ProjectReviewStore;
 let projectStateToKanban: typeof import("./project-review-store.js").projectStateToKanban;
-let ProjectState: any;
 
 describe("ProjectReviewStore", () => {
-  let store: ProjectReviewStore;
+  let store: InstanceType<typeof ProjectReviewStore>;
   let _cardSeq = 0;
 
   function uniqueCardId(): number {
@@ -50,7 +50,7 @@ describe("ProjectReviewStore", () => {
     };
   }
 
-  function setupProject(cardId?: number): { store: ProjectReviewStore; contract: ProjectAcceptanceContractV1; cardId: number } {
+  function setupProject(cardId?: number): { store: InstanceType<typeof ProjectReviewStore>; contract: ProjectAcceptanceContractV1; cardId: number } {
     const s = new ProjectReviewStore();
     const c = makeContract(cardId);
     s.insertContract(c);
@@ -59,21 +59,21 @@ describe("ProjectReviewStore", () => {
   }
 
   /** Real kanban_board row so settlement's mandatory Kanban CAS can apply. */
-  function insertKanbanCard(s: ProjectReviewStore, cardId: number, status: string, extra: Record<string, string | number | null> = {}): void {
+  function insertKanbanCard(s: InstanceType<typeof ProjectReviewStore>, cardId: number, status: string, extra: Record<string, string | number | null> = {}): void {
     const cols = ["id", "title", "source", "status", "type", "goal", "created_at", "updated_at", ...Object.keys(extra)];
     const vals: unknown[] = [cardId, `p${cardId}`, "agent", status, "O", "goal", new Date().toISOString().replace("T", " ").slice(0, 19), new Date().toISOString().replace("T", " ").slice(0, 19), ...Object.values(extra)];
     s.db.prepare(`INSERT INTO kanban_board (${cols.join(", ")}) VALUES (${cols.map(() => "?").join(", ")})`).run(...vals);
   }
 
   /** #1680: a peer-origin root card with a durable source_peer. */
-  function insertPeerKanbanCard(s: ProjectReviewStore, cardId: number, status: string, extra: Record<string, string | number | null> = {}, sourcePeer = "kp"): void {
+  function insertPeerKanbanCard(s: InstanceType<typeof ProjectReviewStore>, cardId: number, status: string, extra: Record<string, string | number | null> = {}, sourcePeer = "kp"): void {
     const cols = ["id", "title", "source", "source_peer", "status", "type", "goal", "created_at", "updated_at", ...Object.keys(extra)];
     const vals: unknown[] = [cardId, `p${cardId}`, "peer", sourcePeer, status, "O", "goal", new Date().toISOString().replace("T", " ").slice(0, 19), new Date().toISOString().replace("T", " ").slice(0, 19), ...Object.values(extra)];
     s.db.prepare(`INSERT INTO kanban_board (${cols.join(", ")}) VALUES (${cols.map(() => "?").join(", ")})`).run(...vals);
   }
 
   /** #1680: migrate the receiver help ledger so the identity resolver has a home. */
-  function migratePeerHelpTable(s: ProjectReviewStore): void {
+  function migratePeerHelpTable(s: InstanceType<typeof ProjectReviewStore>): void {
     s.db.exec(`
       CREATE TABLE IF NOT EXISTS peer_help_requests (
         origin_peer TEXT NOT NULL,
@@ -94,7 +94,7 @@ describe("ProjectReviewStore", () => {
   }
 
   /** #1680: seed the accepted receiver help identity keyed by the local card. */
-  function seedPeerHelp(s: ProjectReviewStore, cardId: number, originPeer: string, requestId: string, contributionRef: string): void {
+  function seedPeerHelp(s: InstanceType<typeof ProjectReviewStore>, cardId: number, originPeer: string, requestId: string, contributionRef: string): void {
     s.db.prepare(`
       INSERT INTO peer_help_requests (origin_peer, request_id, request_hash, state, contribution_ref, local_card_id, response_json, created_at, updated_at)
       VALUES (?, ?, ?, 'accepted', ?, ?, '{}', datetime('now'), datetime('now'))

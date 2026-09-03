@@ -28,6 +28,7 @@ let policyMod: typeof import("./orc-intent-policy.js");
 let piCoreToolsMod: typeof import("../transport/pi-core-tools.js");
 let piCoreSafetyMod: typeof import("../transport/pi-core-safety.js");
 let fallbackPolicyMod: typeof import("../transport/fallback-policy.js");
+let healthRegistryMod: typeof import("../transport/model-health-registry.js");
 
 let activeHandle: import("../reconciler.js").ReconcilerHandle | null = null;
 let wakeScheduler: import("../lifecycle-wake-scheduler.js").LifecycleWakeScheduler | null = null;
@@ -57,6 +58,7 @@ beforeEach(async () => {
   piCoreToolsMod = await import("../transport/pi-core-tools.js");
   piCoreSafetyMod = await import("../transport/pi-core-safety.js");
   fallbackPolicyMod = await import("../transport/fallback-policy.js");
+  healthRegistryMod = await import("../transport/model-health-registry.js");
   const { setUserRegistryOverride } = await import("../user-registry.js");
   setUserRegistryOverride({
     users: [{ userId: "kp", role: "master", maxClass: 3, tools: ["all"], platforms: { telegram: 1 } }],
@@ -198,7 +200,8 @@ describe("#1680 escaped turn boundary (real Spin/coordinator/stores/tools)", () 
       // 2a. schema presentation: the authoring surface must not expose the
       // broad second tool.
       const safety = piCoreSafetyMod.createPiExecutionSafetyController(
-        new fallbackPolicyMod.FallbackPolicy([] as never),
+        new fallbackPolicyMod.FallbackPolicy([] as never, new healthRegistryMod.ModelHealthRegistry()),
+        undefined,
       );
       const tools = piCoreToolsMod.createPiAgentTools({
         executionId: "exec_1",
@@ -385,6 +388,7 @@ describe("#1680 escaped turn boundary (real Spin/coordinator/stores/tools)", () 
       startPort: async () => {},
     }).scheduleProjectExecution(rootId, "resume from durable state");
     expect(again.kind).toBe("idempotent");
+    if (again.kind !== "idempotent" && again.kind !== "claimed") throw new Error("expected a claim result with context");
     expect(again.context.runId).toBe(claim.context.runId);
     expect(runStore.getRunsForProject(rootId).filter(r => r.intent_kind === "contract_authoring")).toHaveLength(0);
     expect(runStore.getRunsForProject(rootId).filter(r => r.intent_kind === "project_execution")).toHaveLength(1);
@@ -451,7 +455,7 @@ describe("#1680 escaped turn boundary (real Spin/coordinator/stores/tools)", () 
       },
     } as never);
 
-    const execCtx = {
+    const execCtx: import("../transport/tool-registry.js").ToolExecutionContext = {
       userId: "kp",
       orcContext: spec.context,
       orcTurnControl: spec.turnControl,

@@ -2,16 +2,17 @@ import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { mkdirSync, rmSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { vi } from "vitest";
+import { vi, type Mock } from "vitest";
 import type { ReviewCaseSnapshot } from "./project-review-case.js";
 import type { ProjectReviewDecisionV1 } from "./project-review-validator.js";
 import type { WorkerAcceptanceContractV1 } from "../worker-contract.js";
+import type { ProjectAcceptanceContractV2 } from "./project-contract.js";
 
 // #1618: acceptance-outbox drain tests drive a fake broker. Hoisted so the
 // module factory can reference it; tests that never call the drain are
 // unaffected.
 const { testBroker } = vi.hoisted(() => ({
-  testBroker: { sendRequest: async () => { throw new Error("no broker configured"); } },
+  testBroker: { sendRequest: async (...args: unknown[]) => { throw new Error("no broker configured"); } },
 }));
 vi.mock("../peer-transport/peer-ws-broker.js", () => ({
   getPeerWsBroker: () => testBroker,
@@ -22,17 +23,17 @@ let ProjectReviewStore: typeof import("./project-review-store.js").ProjectReview
 let ProjectReviewService: typeof import("./project-review-service.js").ProjectReviewService;
 
 describe("ProjectReviewService — full outcome matrix", () => {
-  let service: ProjectReviewService;
-  let store: ProjectReviewStore;
+  let service: InstanceType<typeof ProjectReviewService>;
+  let store: InstanceType<typeof ProjectReviewStore>;
   let _seq = 0;
 
   function uniquePid(): number {
     return 8000 + (++_seq);
   }
 
-  function makeContract(cardId: number) {
+  function makeContract(cardId: number): ProjectAcceptanceContractV2 {
     return {
-      schema_version: 1,
+      schema_version: 2,
       id: `pc_svc_${cardId}`,
       digest: `digest_${cardId}`,
       project_card_id: cardId,
@@ -62,16 +63,15 @@ describe("ProjectReviewService — full outcome matrix", () => {
       digest: `digest_${contractId}_${childCardId}`,
       goal: `lane ${contractId}`,
       criteria: [{ id: "w1", description: "fetch the lane" }],
-      expected_artifacts: [{ id: "a1", kind: "file", ref: "lane1-x-handoff.md", required: true, criterion_ids: ["w1"] }],
+      expected_artifacts: overrides?.missingArtifacts
+        ? []
+        : [{ id: "a1", kind: "file", ref: "lane1-x-handoff.md", required: true, criterion_ids: ["w1"] }],
       verification_commands: [],
       required_capabilities: [],
       supports_root_criteria: supportsRootCriteria,
       limits: {},
       provenance: { root_card_id: overrides?.provenanceRoot ?? rootCardId, card_id: 0, authored_by: "orc", created_at: new Date().toISOString() },
     };
-    if (overrides?.missingArtifacts) {
-      base.expected_artifacts = [];
-    }
     if (overrides?.corrupted) {
       workerStore.db.prepare(`INSERT INTO worker_contracts (id, card_id, revision, root_contract_id, parent_contract_id, source_attempt_id, schema_version, contract_json, contract_digest, created_at) VALUES (?, ?, 1, ?, NULL, NULL, 1, ?, 'dd', datetime('now'))`)
         .run(contractId, childCardId, contractId, "not json {{{");
@@ -80,7 +80,7 @@ describe("ProjectReviewService — full outcome matrix", () => {
     workerStore.insertContract(base, childCardId);
   }
 
-  async function setupCase(pid?: number): Promise<{ cardId: number; caseId: string; store: ProjectReviewStore }> {
+  async function setupCase(pid?: number): Promise<{ cardId: number; caseId: string; store: InstanceType<typeof ProjectReviewStore> }> {
     const cardId = pid ?? uniquePid();
     const contract = makeContract(cardId);
     const s = new ProjectReviewStore();
@@ -104,15 +104,14 @@ describe("ProjectReviewService — full outcome matrix", () => {
         required_outputs: contract.required_outputs as ReviewCaseSnapshot["root_contract"]["required_outputs"],
         limits: contract.limits,
       },
-      criterion_inputs: [{ criterion_id: "c1", description: "Works", evidence_expectation: "synthesis", mapped_child_contract_ids: [`pc_child_${cardId}`], successful_mapped_child_contract_ids: [`pc_child_${cardId}`], unsuccessful_mapped_child_contract_ids: [], observed_evidence_ids: ["e1"], worker_claim_ids: [], failed_or_inconclusive_check_ids: [], artifact_observation_ids: [], retry_lineage_ids: [], coverage_hint: "supported" }],
+      criterion_inputs: [{ criterion_id: "c1", description: "Works", required: true, execution_owner: "orc", evidence_expectation: "synthesis", mapped_child_contract_ids: [`pc_child_${cardId}`], successful_mapped_child_contract_ids: [`pc_child_${cardId}`], unsuccessful_mapped_child_contract_ids: [], observed_evidence_ids: ["e1"], worker_claim_ids: [], failed_or_inconclusive_check_ids: [], artifact_observation_ids: [], retry_lineage_ids: [], coverage_hint: "supported" }],
       contradiction_candidates: [],
       uncovered_criteria: [],
       child_summaries: [],
       peer_contributions: [],
-      budgets: { total_cost: undefined, total_tokens: 1000, wall_clock_ms: 60000 },
-      executor_risk: { unknown_changes: false, worker_drift: 0, evidence_age_ms: 0, executor_separation: "same" },
-      complete_graph: { attempts: [], retry_chain_ids: [] },
-      outcome_summaries: { exhausted: [], cancelled: [], blocked: [] },
+      budgets: { total_cost: undefined, total_tokens: 1000, wall_clock_ms: 60000, review_round: 1, repair_round: 0 },
+      evidence_ref_count: 0,
+      contradiction_count: 0,
     };
     const caseRow = s.insertReviewCase(cardId, 1, 1, snapshot, `digest_${cardId}`);
     s.insertReviewRequest(cardId, caseRow.id, 1);
@@ -183,7 +182,9 @@ describe("ProjectReviewService — full outcome matrix", () => {
     });
     const result = service.processDecision(decision);
     expect(result.kind).toBe("repair");
-    expect(typeof result.decisionId).toBe("string");
+    if (result.kind === "repair") {
+      expect(typeof result.decisionId).toBe("string");
+    }
 
     const sup = store.getSupervision(cardId);
     expect(sup?.state).toBe("repair_planned");
@@ -288,10 +289,15 @@ describe("ProjectReviewService — full outcome matrix", () => {
     const decision = makeValidDecision(cardId, caseId, {
       action: "repair",
       repair: {
-        items: [{ id: "r1", affected_criterion_ids: ["c1"], required_evidence: "observed", strategy: "rework", do_not_repeat: [], capabilities: [], budget: {} }],
+        items: [{ id: "r1", source_contract_id: `pc_child_${cardId}`, affected_criterion_ids: ["c1"], required_evidence: "observed", strategy: "rework", do_not_repeat: [], capabilities: [], budget: {} }],
         rationale: "Legacy",
       },
     });
+    // #1686: legacy payloads predate source_contract_id; drop it at runtime to
+    // exercise the missing-field rejection path the validator guards.
+    const firstItem = decision.repair?.items[0];
+    if (firstItem === undefined) throw new Error("expected a repair item");
+    delete (firstItem as { source_contract_id?: string }).source_contract_id;
     const result = service.processDecision(decision);
     expect(result.kind).toBe("invalid");
     if (result.kind === "invalid") {
@@ -329,7 +335,9 @@ describe("ProjectReviewService — full outcome matrix", () => {
     });
     const result = service.processDecision(decision);
     expect(result.kind).toBe("needs_input");
-    expect(typeof result.decisionId).toBe("string");
+    if (result.kind === "needs_input") {
+      expect(typeof result.decisionId).toBe("string");
+    }
 
     const sup = store.getSupervision(cardId);
     expect(sup?.state).toBe("needs_input");
@@ -421,17 +429,16 @@ describe("renderAcceptedSynthesis (#1605)", () => {
       },
       criterion_inputs: [
         { criterion_id: "lane1", description: "Lane 1", required: true, execution_owner: "delegated", evidence_expectation: "artifact", mapped_child_contract_ids: ["pc_child_lane1"], successful_mapped_child_contract_ids: ["pc_child_lane1"], unsuccessful_mapped_child_contract_ids: [], observed_evidence_ids: ["e1"], worker_claim_ids: [], failed_or_inconclusive_check_ids: [], artifact_observation_ids: [], retry_lineage_ids: [], coverage_hint: "supported" },
-        { criterion_id: "lane3", description: "Lane 3", required: false, execution_owner: "delegated", evidence_expectation: "artifact", mapped_child_contract_ids: [], observed_evidence_ids: [], worker_claim_ids: [], failed_or_inconclusive_check_ids: [], artifact_observation_ids: [], retry_lineage_ids: [], coverage_hint: "gap" },
-        { criterion_id: "synthesis", description: "Synthesis", required: true, execution_owner: "orc", evidence_expectation: "synthesis", mapped_child_contract_ids: [], observed_evidence_ids: [], worker_claim_ids: [], failed_or_inconclusive_check_ids: [], artifact_observation_ids: [], retry_lineage_ids: [], coverage_hint: "orc_owned" },
+        { criterion_id: "lane3", description: "Lane 3", required: false, execution_owner: "delegated", evidence_expectation: "artifact", mapped_child_contract_ids: [], successful_mapped_child_contract_ids: [], unsuccessful_mapped_child_contract_ids: [], observed_evidence_ids: [], worker_claim_ids: [], failed_or_inconclusive_check_ids: [], artifact_observation_ids: [], retry_lineage_ids: [], coverage_hint: "gap" },
+        { criterion_id: "synthesis", description: "Synthesis", required: true, execution_owner: "orc", evidence_expectation: "synthesis", mapped_child_contract_ids: [], successful_mapped_child_contract_ids: [], unsuccessful_mapped_child_contract_ids: [], observed_evidence_ids: [], worker_claim_ids: [], failed_or_inconclusive_check_ids: [], artifact_observation_ids: [], retry_lineage_ids: [], coverage_hint: "orc_owned" },
       ],
       contradiction_candidates: [],
       uncovered_criteria: ["lane3"],
       child_summaries: [],
       peer_contributions: [],
-      budgets: { total_cost: undefined, total_tokens: 1000, wall_clock_ms: 60000 },
-      executor_risk: { unknown_changes: false, worker_drift: 0, evidence_age_ms: 0, executor_separation: "same" },
-      complete_graph: { attempts: [], retry_chain_ids: [] },
-      outcome_summaries: { exhausted: [], cancelled: [], blocked: [] },
+      budgets: { total_cost: undefined, total_tokens: 1000, wall_clock_ms: 60000, review_round: 1, repair_round: 0 },
+      evidence_ref_count: 0,
+      contradiction_count: 0,
     };
   }
 
@@ -510,6 +517,8 @@ describe("renderAcceptedSynthesis (#1605)", () => {
           execution_owner: "delegated" as const,
           evidence_expectation: "artifact" as const,
           mapped_child_contract_ids: [],
+          successful_mapped_child_contract_ids: [],
+          unsuccessful_mapped_child_contract_ids: [],
           observed_evidence_ids: [],
           worker_claim_ids: [],
           failed_or_inconclusive_check_ids: [],
@@ -531,8 +540,8 @@ describe("renderAcceptedSynthesis (#1605)", () => {
 });
 
 describe("ProjectReviewService — #1620 severity, correction budget, truthful exhaustion", () => {
-  let service: ProjectReviewService;
-  let store: ProjectReviewStore;
+  let service: InstanceType<typeof ProjectReviewService>;
+  let store: InstanceType<typeof ProjectReviewStore>;
   let seq = 0;
 
   function uniquePid(): number {
@@ -541,8 +550,8 @@ describe("ProjectReviewService — #1620 severity, correction budget, truthful e
 
   async function setupCase(pid?: number): Promise<{ cardId: number; caseId: string }> {
     const cardId = pid ?? uniquePid();
-    const contract = {
-      schema_version: 1,
+    const contract: ProjectAcceptanceContractV2 = {
+      schema_version: 2,
       id: `pc_sv2_${cardId}`,
       digest: `digest_${cardId}`,
       project_card_id: cardId,
@@ -572,12 +581,14 @@ describe("ProjectReviewService — #1620 severity, correction budget, truthful e
         required_outputs: contract.required_outputs as ReviewCaseSnapshot["root_contract"]["required_outputs"],
         limits: contract.limits,
       },
-      criterion_inputs: [{ criterion_id: "c1", description: "Works", evidence_expectation: "synthesis", mapped_child_contract_ids: [`pc_child_${cardId}`], successful_mapped_child_contract_ids: [`pc_child_${cardId}`], unsuccessful_mapped_child_contract_ids: [], observed_evidence_ids: ["e1"], worker_claim_ids: [], failed_or_inconclusive_check_ids: [], artifact_observation_ids: [], retry_lineage_ids: [], coverage_hint: "supported" }],
+      criterion_inputs: [{ criterion_id: "c1", description: "Works", required: true, execution_owner: "orc", evidence_expectation: "synthesis", mapped_child_contract_ids: [`pc_child_${cardId}`], successful_mapped_child_contract_ids: [`pc_child_${cardId}`], unsuccessful_mapped_child_contract_ids: [], observed_evidence_ids: ["e1"], worker_claim_ids: [], failed_or_inconclusive_check_ids: [], artifact_observation_ids: [], retry_lineage_ids: [], coverage_hint: "supported" }],
       contradiction_candidates: [],
       uncovered_criteria: [],
       child_summaries: [],
       peer_contributions: [],
       budgets: { total_cost: undefined, total_tokens: 1000, wall_clock_ms: 60000, review_round: 1, repair_round: 0 },
+      evidence_ref_count: 0,
+      contradiction_count: 0,
     };
     const caseRow = s.insertReviewCase(cardId, 1, 1, snapshot, `digest_${cardId}`);
     s.insertReviewRequest(cardId, caseRow.id, 1);
@@ -750,8 +761,8 @@ describe("ProjectReviewService — #1620 severity, correction budget, truthful e
 });
 
 describe("#1618 acceptance outbox drain retry", () => {
-  let store: ProjectReviewStore;
-  let broker: { sendRequest: ReturnType<typeof vi.fn> };
+  let store: InstanceType<typeof ProjectReviewStore>;
+  let broker: { sendRequest: Mock };
 
   beforeEach(async () => {
     TEST_HOME = join(tmpdir(), `ab-review-drain-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`);

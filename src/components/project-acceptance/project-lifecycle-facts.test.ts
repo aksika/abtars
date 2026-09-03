@@ -168,19 +168,24 @@ describe("project-lifecycle-facts", () => {
   it("populates all fact fields from a realistic row set", () => {
     const db = makeDb() as unknown as TaskDatabase & { __tables: Record<string, unknown[]> };
     const t = (db as unknown as { __tables: Record<string, unknown[]> }).__tables;
-    t.kanban_board.push({ id: 1, status: "running", type: "O", parent_id: null, source: "task", source_id: "run-1", goal: "goal", next_retry_at: null, tokens_used: null, max_tokens: null });
-    t.project_supervision.push({ project_card_id: 1, state: "executing", generation: 1, repair_round: 0 });
-    t.project_contracts.push({ project_card_id: 1, contract_json: '{"schema_version":2,"criteria":[{"id":"c1","description":"d","required":true,"execution_owner":"delegated","evidence_expectation":"observed"}],"limits":{"hard_deadline_at":"2099-01-01T00:00:00.000Z"}}' });
-    t.kanban_board.push({ id: 2, status: "done", type: "W", parent_id: 1, source: "task", source_id: null });
-    t.worker_contracts.push({ card_id: 2 });
-    t.worker_attempts.push({ id: "a1", card_id: 2, ordinal: 1, lifecycle: "completed" });
-    t.worker_results.push({ attempt_id: "a1" });
-    t.project_review_cases.push({ id: "rc1", project_card_id: 1, generation: 1, status: "open" });
-    t.project_review_requests.push({ id: "rr1", review_case_id: "rc1", status: "pending", attempts: 0 });
-    t.project_input_requests.push({ id: "ir1", project_card_id: 1, status: "pending" });
-    t.project_review_decisions.push({ id: "d1", review_case_id: "rc1", decision_json: '{"repair":{"items":[{"id":"x"}]}}', created_at: "2026-01-01T00:00:00.000Z" });
-    t.orc_project_runs.push({ id: "or1", project_card_id: 1, project_generation: 1, ownership_generation: 1, intent_kind: "project_execution", state: "running", task_run_id: "run-1", salvage_for_run_id: null, started_at: "2026-01-01T00:00:00.000Z", outcome: null, created_at: "2026-01-01T00:00:00.000Z", failure_code: null, goal: "g" });
-    t.task_runs.push({ run_id: "run-1", finished_at: null });
+    const table = (name: string): unknown[] => {
+      const rows = t[name];
+      if (rows === undefined) throw new Error(`table ${name} not initialized`);
+      return rows;
+    };
+    table("kanban_board").push({ id: 1, status: "running", type: "O", parent_id: null, source: "task", source_id: "run-1", goal: "goal", next_retry_at: null, tokens_used: null, max_tokens: null });
+    table("project_supervision").push({ project_card_id: 1, state: "executing", generation: 1, repair_round: 0 });
+    table("project_contracts").push({ project_card_id: 1, contract_json: '{"schema_version":2,"criteria":[{"id":"c1","description":"d","required":true,"execution_owner":"delegated","evidence_expectation":"observed"}],"limits":{"hard_deadline_at":"2099-01-01T00:00:00.000Z"}}' });
+    table("kanban_board").push({ id: 2, status: "done", type: "W", parent_id: 1, source: "task", source_id: null });
+    table("worker_contracts").push({ card_id: 2 });
+    table("worker_attempts").push({ id: "a1", card_id: 2, ordinal: 1, lifecycle: "completed" });
+    table("worker_results").push({ attempt_id: "a1" });
+    table("project_review_cases").push({ id: "rc1", project_card_id: 1, generation: 1, status: "open" });
+    table("project_review_requests").push({ id: "rr1", review_case_id: "rc1", status: "pending", attempts: 0 });
+    table("project_input_requests").push({ id: "ir1", project_card_id: 1, status: "pending" });
+    table("project_review_decisions").push({ id: "d1", review_case_id: "rc1", decision_json: '{"repair":{"items":[{"id":"x"}]}}', created_at: "2026-01-01T00:00:00.000Z" });
+    table("orc_project_runs").push({ id: "or1", project_card_id: 1, project_generation: 1, ownership_generation: 1, intent_kind: "project_execution", state: "running", task_run_id: "run-1", salvage_for_run_id: null, started_at: "2026-01-01T00:00:00.000Z", outcome: null, created_at: "2026-01-01T00:00:00.000Z", failure_code: null, goal: "g" });
+    table("task_runs").push({ run_id: "run-1", finished_at: null });
 
     const result = gatherProjectLifecycleFacts(db, 1);
     expect("facts" in result).toBe(true);

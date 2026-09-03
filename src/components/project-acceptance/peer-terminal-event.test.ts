@@ -117,6 +117,7 @@ describe("buildPeerTerminalEvent (#1680 pure builder)", () => {
     expect(parsed.ok).toBe(true);
     if (parsed.ok) {
       expect(parsed.value.projection!.summary.length).toBeGreaterThan(0);
+      if (parsed.value.summary === undefined) throw new Error("summary undefined");
       expect(parsed.value.summary.length).toBeGreaterThan(0);
     }
   });
@@ -141,6 +142,7 @@ describe("readPeerTerminalIdentity (#1680 durable receiver identity)", () => {
       },
       exec(sql: string) { raw.exec(sql); },
       transaction<T>(fn: () => T): T { return raw.transaction(fn)(); },
+      transactionImmediate<T>(fn: () => T): T { return raw.transaction(fn)(); },
     };
     const { ensureKanbanBoardSchema } = await import("../tasks/kanban-board.js");
     ensureKanbanBoardSchema(raw);

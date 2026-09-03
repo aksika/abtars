@@ -26,7 +26,7 @@ afterAll(() => {
   cleanHome(TEST_HOME);
 });
 
-const makeInput = (overrides?: Record<string, unknown>) => ({
+const makeInput = (overrides?: Partial<import("./orc-project-contracts.js").OrcClaimInput>): import("./orc-project-contracts.js").OrcClaimInput => ({
   projectCardId: 1,
   intentKind: "contract_authoring",
   goal: "Define acceptance contract for project #1",
@@ -314,7 +314,7 @@ describe("OrcProjectRunStore", () => {
 // ── #1628: authoring attempt counts ───────────────────────────────────────────
 
 describe("OrcProjectRunStore authoring counts (#1628)", () => {
-  function seedAuthoringRun(store: typeof OrcProjectRunStoreType extends new (...args: never[]) => infer _I ? OrcProjectRunStoreType : never, cardId: number, generation: number, opts: { started?: boolean; state?: string; createdAt?: string; intent?: string; outcome?: string; ownershipGeneration?: number } = {}): string {
+  function seedAuthoringRun(store: InstanceType<typeof OrcProjectRunStoreType>, cardId: number, generation: number, opts: { started?: boolean; state?: string; createdAt?: string; intent?: string; outcome?: string; ownershipGeneration?: number } = {}): string {
     const now = new Date().toISOString();
     const runId = `or_count_${cardId}_${Math.random().toString(36).slice(2, 10)}`;
     const ownershipGeneration = opts.ownershipGeneration ?? Math.floor(Math.random() * 1_000_000) + 1;

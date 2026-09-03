@@ -34,7 +34,7 @@ function seedProject(state: "executing" | "blocked"): number {
   rs.insertContract({
     schema_version: 1, id: `ct_${id}`, digest: `dg_${id}`, project_card_id: id, goal: "w",
     criteria: [{ id: "c1", description: "d", required: true, evidence_expectation: "synthesis" }],
-    required_outputs: [], constraints: [], limits: {},
+    required_outputs: [], constraints: [], limits: { max_review_rounds: 1, max_repair_rounds: 1 },
     provenance: { requested_by: "t", authored_by: "orc", created_at: new Date().toISOString() },
   });
   rs.initializeSupervision(id, `ct_${id}`, state);

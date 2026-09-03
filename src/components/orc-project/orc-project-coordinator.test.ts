@@ -85,7 +85,7 @@ interface Harness {
 
 function makeHarness(): Harness {
   const starts: Array<{ spec: OrcTurnSpec }> = [];
-  let rootIdentity = { source: "agent", sourcePeer: null };
+  let rootIdentity: { source: string; sourcePeer: string | null } = { source: "agent", sourcePeer: null };
   const coordinator = new CoordinatorType({
     ownerPeer: "kp",
     ownerInstanceId: "inst_1",
@@ -340,9 +340,10 @@ describe("classifyFailedRelease (#1671)", () => {
   it("classifies a missing run as run_unknown", () => {
     const h = makeHarness();
     const failure = classifyFailedRelease(h.store, {
-      version: 1,
+      version: 2,
       runId: "or_nope",
       intentKey: "contract:999:1",
+      intentKind: "contract_authoring",
       projectCardId: 999,
       projectGeneration: 1,
       ownershipGeneration: 1,

@@ -51,11 +51,11 @@ describe("review_project nested schema preservation (#1620)", () => {
     const criteria = properties["criteria"] as Record<string, unknown>;
     expect(criteria.type).toBe("array");
     expect(criteria.items).toBeDefined();
-    const criterionItems = criteria.items as { properties: Record<string, unknown>; required: string[] };
+    const criterionItems = criteria.items as { properties: Record<string, unknown>; required: string[]; additionalProperties?: boolean };
     const verdict = criterionItems.properties["verdict"] as { enum?: unknown[] };
     expect(verdict.enum).toEqual([...CRITERION_VERDICTS]);
     expect(criterionItems.required).toEqual(["criterion_id", "verdict", "evidence_ids", "rationale"]);
-    expect((criterionItems as { additionalProperties: boolean }).additionalProperties).toBe(false);
+    expect(criterionItems.additionalProperties).toBe(false);
 
     const outputs = properties["outputs"] as Record<string, unknown>;
     const outputItems = outputs.items as { properties: Record<string, unknown>; required: string[] };
