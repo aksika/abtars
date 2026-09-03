@@ -174,6 +174,7 @@ async function initDb(): Promise<void> {
     },
     exec(sql: string) { _rawDb.exec(sql); },
     transaction<T>(fn: () => T): T { return _rawDb.transaction(fn)(); },
+    transactionImmediate<T>(fn: () => T): T { return _rawDb.transaction(fn)(); },
   };
 }
 
@@ -1017,12 +1018,14 @@ describe("Swarm acceptance — production contract shape (#1605)", () => {
     });
     store.lifecycleTransition(attemptId, ["pending"], "running", { settled_at: null });
     if (outcome === "completed") {
-      const env = makeEnvelope(repairChild!.id, parsed.id, "lane3-web");
-      // #1686: the envelope must name the DERIVED contract's real digest and
-      // its OWN criteria ids (copied from the source) — acceptance is
-      // exact-contract (id + digest + criterion set).
-      env.attempt.contract_digest = parsed.digest;
-      env.criteria = parsed.criteria.map((c: any) => ({ criterion_id: c.id, status: "passed", evidence_ids: [`chk_${repairChild!.id}`] }));
+      const env = {
+        ...makeEnvelope(repairChild!.id, parsed.id, "lane3-web"),
+        // #1686: the envelope must name the DERIVED contract's real digest and
+        // its OWN criteria ids (copied from the source) — acceptance is
+        // exact-contract (id + digest + criterion set).
+        attempt: { ...makeEnvelope(repairChild!.id, parsed.id, "lane3-web").attempt, contract_digest: parsed.digest },
+        criteria: parsed.criteria.map((c: any) => ({ criterion_id: c.id, status: "passed" as const, evidence_ids: [`chk_${repairChild!.id}`] })),
+      };
       store.completeAttempt(attemptId);
       store.insertResult(attemptId, env);
       const card = cards.get(repairChild!.id);
@@ -1272,8 +1275,11 @@ describe("Swarm acceptance — Scenario B: one remote contribution (#927)", () =
       kanbanComplete: (id: number, _result: string | null, summary: string) =>
         kb.kanbanComplete(id, _result, summary),
       kanbanFail: (id: number, error: string) => kb.kanbanFail(id, error),
+      kanbanEnqueue: () => undefined as number | undefined,
+      kanbanList: () => [] as Array<{ id: number; status: string }>,
     };
 
+    if (_overrideDb === null) throw new Error("override db not initialized");
     contributionStore = new ContributionStore(_overrideDb, kanbanMock);
     const peerHelpStore = new PeerHelpStore(_rawDb, kanbanMock, { fire: vi.fn() });
     peerHelpService = new PeerHelpService(peerHelpStore, () => []);

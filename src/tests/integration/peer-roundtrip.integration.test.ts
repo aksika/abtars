@@ -31,6 +31,7 @@ vi.mock("../../components/peer-config.js", () => ({
 // #1631: real production board schema + transition CAS, so the fixture can
 // never drift from the production DDL again.
 import { ensureKanbanBoardSchema, kanbanTransition } from "../../components/tasks/kanban-board.js";
+import type { PeerHelpRequestV1 } from "../../components/peer-help/contract.js";
 
 async function getDbCtor(): Promise<any> {
   const mod = await import("../../utils/lazy-require.js");
@@ -66,6 +67,7 @@ function makeSide(name: string, rawDb: Db): Side {
       rawDb.prepare(`UPDATE kanban_board SET ${sets}, updated_at = datetime('now') WHERE id = ?`).run(...Object.values(updates), id);
     },
     kanbanList: (status: string) => rawDb.prepare("SELECT id, type, status, notes, source, source_peer FROM kanban_board WHERE status = ?").all(status) as any[],
+    kanbanEnqueue: () => undefined as number | undefined,
     kanbanComplete: (id: number, _result: string | null, summary: string) => {
       rawDb.prepare(`UPDATE kanban_board SET status = 'done', result_summary = ?, completed_at = datetime('now'), updated_at = datetime('now') WHERE id = ?`).run(summary.slice(0, 4000), id);
     },
@@ -112,7 +114,7 @@ describe("Peer round trip — production-shaped two-node (#1618)", () => {
     reviewStore = new prs.ProjectReviewStore(receiver.taskDb);
     receiverStore = new phStoreMod.PeerHelpStore(
       receiver.taskDb,
-      { kanbanGetCard: receiver.kanban.kanbanGetCard, kanbanUpdate: receiver.kanban.kanbanUpdate, kanbanComplete: receiver.kanban.kanbanComplete, kanbanFail: receiver.kanban.kanbanFail },
+      { kanbanGetCard: receiver.kanban.kanbanGetCard, kanbanUpdate: receiver.kanban.kanbanUpdate, kanbanComplete: receiver.kanban.kanbanComplete, kanbanFail: receiver.kanban.kanbanFail, kanbanEnqueue: receiver.kanban.kanbanEnqueue, kanbanList: receiver.kanban.kanbanList },
       receiver.nerve,
       { ensureAwaitingContract: (id: number) => reviewStore.ensureAwaitingContract(id) },
     );
@@ -357,7 +359,7 @@ describe("Peer round trip — production-shaped two-node (#1618)", () => {
   });
 
   it("recovers from restart from durable non-terminal state without duplicates", async () => {
-    const request = {
+    const request: PeerHelpRequestV1 = {
       version: 1, request_id: "r4", created_at: new Date().toISOString(),
       expires_at: new Date(Date.now() + 300_000).toISOString(),
       goal: "g4", priority: "MEDIUM", required_capabilities: [],

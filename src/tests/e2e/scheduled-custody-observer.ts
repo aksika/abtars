@@ -82,7 +82,7 @@ export interface ObserverStores {
   supervision(rootCardId: number): { state: ProjectState; generation?: number } | undefined;
   /** #1546: a matching live Orc claim is a named durable continuation (owner `orc-coordinator`). */
   liveOrcRun?(rootCardId: number): { runId: string; projectGeneration: number } | undefined;
-  latestReviewCase(rootCardId: number): { id: number; status: string } | undefined;
+  latestReviewCase(rootCardId: number): { id: string; status: string } | undefined;
   pendingInputRequests(rootCardId: number): Array<{ id: string }>;
   currentJobs(): Array<{ runId: string }>;
   now(): number;

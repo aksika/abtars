@@ -12,7 +12,7 @@ import { describe, it, expect, afterAll, beforeAll } from "vitest";
 import { join } from "node:path";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
-import type Database from "better-sqlite3";
+import type { Database as BetterSqlite3Database } from "better-sqlite3";
 import { AbmindClient } from "abmind";
 import { MemoryManager } from "abmind";
 import { AbmindService } from "abmind";
@@ -24,13 +24,13 @@ import { parseToolResultToDiagnostic } from "../../components/transport/tool-fai
 import { MemoryStoreQuota } from "../../components/memory-store-quota.js";
 import type { MemoryToolDependenciesHolder } from "../../components/memory-store-quota.js";
 import { setUserRegistryOverride } from "../../components/user-registry.js";
-import type { MemoryConfig } from "abmind";
+import type { MemoryConfig, InstantStoreParams } from "abmind";
 import { MEMORY_CONFIG_DEFAULTS } from "abmind";
 
 describe("#1659 memory mutation recovery integration", () => {
   let tmpDir: string;
   let manager: MemoryManager;
-  let db: Database.Database;
+  let db: BetterSqlite3Database;
   let service: AbmindService;
   let endpoint: LocalEndpointServer;
   let transport: LocalTransport;
@@ -50,7 +50,9 @@ describe("#1659 memory mutation recovery integration", () => {
     const config: MemoryConfig = { ...MEMORY_CONFIG_DEFAULTS, memoryDir: join(tmpDir, "memory") };
     manager = new MemoryManager(config);
     await manager.initialize();
-    db = (manager as unknown as { db: Database.Database | null }).db!;
+    const rawDb = (manager as unknown as { db: BetterSqlite3Database | null }).db;
+    if (rawDb === null) throw new Error("manager database not initialized");
+    db = rawDb;
 
     service = new AbmindService({
       serverInstanceId: "integration", mode: "daemon", manager,
@@ -156,7 +158,7 @@ describe("#1659 memory mutation recovery integration", () => {
     const { AbmindClientError } = await import("abmind");
     // Real replay path: same key twice on the real ledger executes once.
     const key = `integration-replay-${Date.now()}`;
-    const payload = {
+    const payload: InstantStoreParams = {
       userId: "local-user",
       contentEn: `Replay probe ${Date.now()}`,
       contentOriginal: `Replay probe ${Date.now()}`,

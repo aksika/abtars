@@ -31,6 +31,7 @@ function inMemoryDb(): TaskDatabase {
     },
     exec(sql: string) { raw.exec(sql); },
     transaction<T>(fn: () => T): T { return raw.transaction(fn)(); },
+    transactionImmediate<T>(fn: () => T): T { return raw.transaction(fn)(); },
   };
 }
 
@@ -39,6 +40,7 @@ function brokenDb(): TaskDatabase {
     prepare() { throw new Error("database unavailable"); },
     exec() { throw new Error("database unavailable"); },
     transaction<T>() { throw new Error("database unavailable"); },
+    transactionImmediate<T>() { throw new Error("database unavailable"); },
   };
 }
 
@@ -135,6 +137,7 @@ describe("PeerNonceStore restart persistence", () => {
       },
       exec(sql: string) { raw.exec(sql); },
       transaction<T>(fn: () => T): T { return raw.transaction(fn)(); },
+      transactionImmediate<T>(fn: () => T): T { return raw.transaction(fn)(); },
     };
   }
 

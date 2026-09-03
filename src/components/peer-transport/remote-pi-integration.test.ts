@@ -11,7 +11,7 @@ import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { resolveNativeDep } from "../../utils/lazy-require.js";
 
-type SqliteDb = { prepare(sql: string): any; exec(sql: string): void; pragma(s: string): void; transaction<T>(fn: () => T): () => T };
+type SqliteDb = { prepare(sql: string): any; exec(sql: string): void; pragma(s: string): void; transaction<T>(fn: () => T): () => T; close(): void };
 
 import { RemotePiEventProducer, buildPublicProjection } from "./remote-pi-event-producer.js";
 import { RemotePiControlHandler } from "./remote-pi-control-handler.js";
@@ -73,7 +73,7 @@ describe("Remote Pi Integration (#1358)", () => {
   let controlHandler: RemotePiControlHandler;
 
   beforeEach(() => {
-    const Database = resolveNativeDep("better-sqlite3") as typeof import("better-sqlite3");
+    const Database = resolveNativeDep("better-sqlite3") as new (p: string) => import("better-sqlite3").Database;
     db = new Database(":memory:");
     taskDb = createTaskDatabase(db);
     store = new PiRunStore({ db: taskDb, sessionStorageRoot: "/tmp/sessions" });
@@ -124,6 +124,7 @@ describe("Remote Pi Integration (#1358)", () => {
       },
       exec(sql: string) { db.exec(sql); },
       transaction<T>(fn: () => T): T { return db.transaction(fn)() as T; },
+      transactionImmediate<T>(fn: () => T): T { return db.transaction(fn)() as T; },
     };
   }
 
@@ -267,7 +268,9 @@ describe("Remote Pi Integration (#1358)", () => {
 
       // Verify the stored event builds a valid envelope
       const events = store.getEventsAfter({ runId: run.id, afterSequence: 0, limit: 1 });
-      const envelope = producer.buildEventEnvelope(events[0]);
+      const first = events[0];
+      if (first === undefined) throw new Error("expected a stored event");
+      const envelope = producer.buildEventEnvelope(first);
       expect(() => validateEventV1(envelope)).not.toThrow();
       expect(envelope.remote_card_id).toBe(42);
     });
@@ -309,7 +312,9 @@ describe("Remote Pi Integration (#1358)", () => {
       }
       const events = store.getEventsAfter({ runId, afterSequence: 2, limit: 10 });
       expect(events).toHaveLength(3);
-      expect(events[0].sequence).toBe(3);
+      const first = events[0];
+      if (first === undefined) throw new Error("expected event");
+      expect(first.sequence).toBe(3);
     });
   });
 
@@ -593,7 +598,9 @@ describe("Remote Pi Integration (#1358)", () => {
       // Build envelope for delivery
       const events = store.getEventsAfter({ runId: run.id, afterSequence: 0, limit: 10 });
       expect(events).toHaveLength(1);
-      const envelope = producer.buildEventEnvelope(events[0]);
+      const first = events[0];
+      if (first === undefined) throw new Error("expected a stored event");
+      const envelope = producer.buildEventEnvelope(first);
 
       // Origin reduces
       expect(originReducer.reduce(envelope)).toBe(true);
@@ -653,7 +660,9 @@ describe("Remote Pi Integration (#1358)", () => {
 
       // Build the envelope and verify the projection has progress, NOT result_summary
       const events = store.getEventsAfter({ runId: run.id, afterSequence: 0, limit: 1 });
-      const envelope = producer.buildEventEnvelope(events[0]);
+      const first = events[0];
+      if (first === undefined) throw new Error("expected a stored event");
+      const envelope = producer.buildEventEnvelope(first);
       expect(envelope.projection.progress).toBeDefined();
       expect(envelope.projection.progress?.step).toBe("running tests");
       expect(envelope.projection.progress?.message).toBe("all green");
@@ -703,7 +712,9 @@ describe("Remote Pi Integration (#1358)", () => {
       expect(result).not.toBeNull();
 
       const events = store.getEventsAfter({ runId: run.id, afterSequence: 0, limit: 1 });
-      const envelope = producer.buildEventEnvelope(events[0]);
+      const first = events[0];
+      if (first === undefined) throw new Error("expected a stored event");
+      const envelope = producer.buildEventEnvelope(first);
       expect(envelope.projection.pending_input).toBeDefined();
       expect(envelope.projection.pending_input?.request_id).toBe("ui-req-1");
       expect(envelope.projection.pending_input?.type).toBe("select");
@@ -888,7 +899,9 @@ describe("Remote Pi Integration (#1358)", () => {
 
       await deliveryManager.drainPeer("origin-peer");
       expect(sent.length).toBeGreaterThanOrEqual(1);
-      expect(sent[0].method).toBe("pi.lifecycle.v1");
+      const first = sent[0];
+      if (first === undefined) throw new Error("expected a pushed message");
+      expect(first.method).toBe("pi.lifecycle.v1");
     });
   });
 
@@ -1050,7 +1063,7 @@ describe("Remote Pi Integration (#1358)", () => {
 
       // First push through the production handler
       const r1 = await handlePushLifecycleEvent({ originReducer, localPeerName: "origin-peer" }, "some-owner", event);
-      expect(r1.success).toBe(true);
+      if (!r1.success) throw new Error(`push failed: ${r1.error}`);
       expect(r1.runId).toBe(runId);
       expect(r1.sequence).toBe(1);
       expect("duplicate" in r1 ? r1.duplicate : false).toBe(false);
@@ -1073,7 +1086,7 @@ describe("Remote Pi Integration (#1358)", () => {
       // Handler must return success with duplicate:true so the caller
       // re-sends the cumulative ack.
       const r2 = await handlePushLifecycleEvent({ originReducer, localPeerName: "origin-peer" }, "some-owner", event);
-      expect(r2.success).toBe(true);
+      if (!r2.success) throw new Error(`push failed: ${r2.error}`);
       expect("duplicate" in r2 ? r2.duplicate : false).toBe(true);
       expect(r2.runId).toBe(runId);
       expect(r2.sequence).toBe(1);
@@ -1113,7 +1126,7 @@ describe("Remote Pi Integration (#1358)", () => {
 
       // Seq 1: first push succeeds
       const r1 = await handlePushLifecycleEvent({ originReducer, localPeerName: "origin-peer" }, "some-owner", e1);
-      expect(r1.success).toBe(true);
+      if (!r1.success) throw new Error(`push failed: ${r1.error}`);
       expect(r1.sequence).toBe(1);
 
       // Seq 3 before seq 2: detected as gap
@@ -1123,12 +1136,12 @@ describe("Remote Pi Integration (#1358)", () => {
 
       // Seq 2 fills the gap
       const r2 = await handlePushLifecycleEvent({ originReducer, localPeerName: "origin-peer" }, "some-owner", e2);
-      expect(r2.success).toBe(true);
+      if (!r2.success) throw new Error(`push failed: ${r2.error}`);
       expect(r2.sequence).toBe(2);
 
       // Now seq 3 succeeds (no longer a gap)
       const r3b = await handlePushLifecycleEvent({ originReducer, localPeerName: "origin-peer" }, "some-owner", e3);
-      expect(r3b.success).toBe(true);
+      if (!r3b.success) throw new Error(`push failed: ${r3b.error}`);
       expect(r3b.sequence).toBe(3);
     });
   });
@@ -1199,7 +1212,7 @@ describe("Remote Pi Integration (#1358)", () => {
       const resume = store.queueResumeGeneration({
         runId, expectedGeneration: 1, newSessionId: "s2",
       });
-      expect(resume.committed).toBe(true);
+      if (!resume.committed) throw new Error("expected resume to commit");
       expect(resume.newGeneration).toBe(2);
 
       // Every transient fact is durable in order; none can be reconstructed

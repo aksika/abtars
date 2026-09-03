@@ -46,7 +46,7 @@ describe("1752 E2E — normal sleep authorization and failure/recovery truth", (
 
   it("safe daily-summary heredoc executes in sleep without Telegram request", async () => {
     mkdirSync(join(tmp, "memory", "daily"), { recursive: true });
-    const handles = new SealedSecretHandles(join(tmp, "handles"));
+    const handles = new SealedSecretHandles();
     const svc = new HostToolService({ handles, actionGate: gate, resolveHandle: async () => null });
     const command = dailyHeredoc(tmp);
     // No pending request before
@@ -66,7 +66,7 @@ describe("1752 E2E — normal sleep authorization and failure/recovery truth", (
   it("sleep executes an auth-required command without Telegram authorization", async () => {
     const unrestricted = "if true; then printf '%s' sleep-unrestricted; fi";
     expect(classifyCommand(unrestricted)).toBe("auth-required");
-    const handles = new SealedSecretHandles(join(tmp, "handles2"));
+    const handles = new SealedSecretHandles();
     const svc = new HostToolService({ handles, actionGate: gate, resolveHandle: async () => null });
     const pendingBefore = (gate as unknown as { pending: Map<string, unknown> }).pending?.size ?? 0;
     const sleepResultStr = await svc.runBash({ command: unrestricted }, { userId: "test", executionId: "e3", authorizationMode: "unattended-sleep" });

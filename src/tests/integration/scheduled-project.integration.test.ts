@@ -9,7 +9,7 @@ describe("scheduled project orchestration (#1516)", () => {
   let deliverCard: typeof import("../../components/tasks/kanban-delivery.js").deliverCard;
   let CronQueue: typeof import("../../components/tasks/task-queue.js").CronQueue;
   let reconciler: typeof import("../../components/reconciler.js");
-  let nerve: import("node:events").EventEmitter;
+  let nerve: typeof import("../../components/nerve.js").nerve;
   let reviewStoreMod: typeof import("../../components/project-acceptance/project-review-store.js");
   let projectRunnerMod: typeof import("../../components/tasks/scheduled-project-runner.js");
   let ScheduledRunCoordinator: typeof import("../../components/tasks/scheduled-run-coordinator.js").ScheduledRunCoordinator;
@@ -347,13 +347,13 @@ async function startGeneration(coordinator: unknown): Promise<void> {
     const rootId = board.kanbanEnqueue("Recovery Project", "task", run.runId, { type: "O", goal: "supervised work", maxAgents: 2 });
     stateStore.updateActiveRun(ENTRY.id, run.runId, { cardId: rootId });
     const store = new reviewStoreMod.ProjectReviewStore();
-    const contract = {
+    const contract: import("../../components/project-acceptance/project-contract.js").ProjectAcceptanceContractV1 = {
       schema_version: 1, id: `ct_${rootId}`, digest: `dg_${rootId}`, project_card_id: rootId,
       goal: "supervised work",
       criteria: [{ id: "c1", description: "goal met", required: true, evidence_expectation: "synthesis" }],
-      required_outputs: [], constraints: [], limits: {},
+      required_outputs: [], constraints: [], limits: { max_review_rounds: 3, max_repair_rounds: 2 },
       provenance: { requested_by: "scheduler", authored_by: "orc", created_at: new Date().toISOString() },
-    } as import("../../components/project-acceptance/project-contract.js").ProjectAcceptanceContractV1;
+    };
     store.insertContract(contract);
     store.initializeSupervision(rootId, `ct_${rootId}`, "executing" as never);
     board.kanbanRunning(rootId);

@@ -3,7 +3,7 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
-import { mkdtempSync, rmSync, existsSync } from "node:fs";
+import { mkdtempSync, rmSync, existsSync, readdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { WsOutboxStore } from "./ws-outbox-store.js";
@@ -157,7 +157,7 @@ describe("WsOutboxStore", () => {
     expect(store.length).toBe(0);
     expect(store.isDegraded).toBe(true);
     // Corrupt file should have been renamed
-    const dirFiles = require("node:fs").readdirSync(tmpDir);
+    const dirFiles = readdirSync(tmpDir);
     expect(dirFiles.some(f => f.includes(".corrupt"))).toBe(true);
   });
 
@@ -406,6 +406,7 @@ describe("WsPeerClient state machine", () => {
       expect(client.currentState).toBe("waiting");
 
       const delay = expectedDelays[step];
+      if (delay === undefined) throw new Error("expectedDelays exhausted");
 
       // One tick before the deadline: no new dial yet.
       vi.advanceTimersByTime(delay - 1);

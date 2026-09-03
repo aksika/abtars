@@ -46,6 +46,7 @@ vi.mock("../../components/logger.js", async () => {
 
 import type { ScheduledTask } from "../../components/tasks/task-types.js";
 import type { TaskFailureDiagnosticV1 } from "../../components/tasks/task-failure.js";
+import type { ProjectReviewDecisionV1 } from "../../components/project-acceptance/project-review-validator.js";
 
 
 // ── State store / module handles (real modules, loaded per test) ────────────
@@ -178,7 +179,7 @@ function fakeAgentRunner(request: import("../../components/spin-types.js").SpinR
   // type/delivery/chat identity (#1724 makes those fields route delivery).
   const cardId = board.kanbanEnqueue(request.title ?? entryId, "task", request.goal?.slice(0, 80), {
     type: request.type,
-    deliveryMode: request.delivery,
+    delivery: request.delivery,
     chatId: request.chatId,
   });
   // Report tasks: the provider writes the declared artifact before settling.
@@ -288,7 +289,7 @@ async function makeQueue(): Promise<import("../../components/tasks/task-queue.js
 }
 
 /** #1539: coordinator + queue pair so journeys can drive deadlines/cancel. */
-async function makeQueueWithCoordinator(): Promise<{ queue: import("../../components/tasks/task-queue.js").CronQueue; coordinator: CoordinatorClass }> {
+async function makeQueueWithCoordinator(): Promise<{ queue: import("../../components/tasks/task-queue.js").CronQueue; coordinator: InstanceType<typeof CoordinatorClass> }> {
   const { CronQueue } = await import("../../components/tasks/task-queue.js");
   const coordinator = new CoordinatorClass({
     onTaskPaused: (chatId, title, reason) => { doubles.pausedNotifications.push(`${chatId}:${title}:${reason}`); },
@@ -383,7 +384,7 @@ function advanceAdmissionDeferral(taskId: string): void {
   }
 }
 
-function events(taskId: string): Array<{ outcome: string; runId?: string; groupId?: string; detail?: string; deliveryText?: string; kanbanCardId?: number; diagnostic?: { category: string; code: string } }> {
+function events(taskId: string): import("../../components/tasks/task-history-store.js").TaskRunEvent[] {
   return historyStore.recentRuns(taskId, 50);
 }
 
@@ -1117,6 +1118,7 @@ describe("#1520 scheduler E2E — journey 9: removed surfaces, canonical probes,
     const ok = preflight.preflightTask({
       id: "probe-task", kind: "agent", prompt: "p", agent: "task", interaction: { mode: "oneshot" },
       schedule: "* * * * *", enabled: true, priority: "medium", delivery: "report", chatId: "1",
+      orchestration: { maxAgents: 1 },
       report: { artifact: join(TEST_HOME, "workspace", "probe-task", "r.md"), requiredSections: ["## X"], minBytes: 100, requires: { files: [], executables: ["curl"], tools: ["execute_bash"] } },
     }, scope, { getToolDescriptor: toolRegistry.getToolDescriptor });
     expect(ok.ok).toBe(true);
@@ -1124,6 +1126,7 @@ describe("#1520 scheduler E2E — journey 9: removed surfaces, canonical probes,
     const removedTool = preflight.preflightTask({
       id: "removed-tool-task", kind: "agent", prompt: "p", agent: "task", interaction: { mode: "oneshot" },
       schedule: "* * * * *", enabled: true, priority: "medium", delivery: "report", chatId: "1",
+      orchestration: { maxAgents: 1 },
       report: { artifact: join(TEST_HOME, "workspace", "removed-tool-task", "r.md"), requiredSections: ["## X"], minBytes: 100, requires: { files: [], executables: [], tools: ["web_browse"] } },
     }, scope, { getToolDescriptor: toolRegistry.getToolDescriptor });
     expect(removedTool.ok).toBe(false);
@@ -1135,6 +1138,7 @@ describe("#1520 scheduler E2E — journey 9: removed surfaces, canonical probes,
     const missing = preflight.preflightTask({
       id: "probe-task", kind: "agent", prompt: "p", agent: "task", interaction: { mode: "oneshot" },
       schedule: "* * * * *", enabled: true, priority: "medium", delivery: "report", chatId: "1",
+      orchestration: { maxAgents: 1 },
       report: { artifact: join(TEST_HOME, "workspace", "probe-task", "r.md"), requiredSections: ["## X"], minBytes: 100, requires: { files: [], executables: ["definitely-not-a-real-exe-xyz"], tools: [] } },
     }, scope, undefined);
     expect(missing.ok).toBe(false);
@@ -1143,9 +1147,9 @@ describe("#1520 scheduler E2E — journey 9: removed surfaces, canonical probes,
     }
 
     // Local O/Orc cannot reach peer transport.
-    const peerOut = await executeToolCall("peer_doorbell", { peer_name: "O" }, {});
+    const peerOut = await executeToolCall("peer_doorbell", { peer_name: "O" }, { userId: "master" });
     expect(JSON.parse(peerOut).code).toBe("local_session_not_peer");
-    const orcOut = await executeToolCall("peer_session", { peer_name: "Orc", message: "hi" }, {});
+    const orcOut = await executeToolCall("peer_session", { peer_name: "Orc", message: "hi" }, { userId: "master" });
     expect(JSON.parse(orcOut).code).toBe("local_session_not_peer");
   });
 });
@@ -1168,7 +1172,7 @@ describe("#1539 scheduler E2E — journey 10: due-time retry wake with no unrela
 
       const { queue, coordinator } = await makeQueueWithCoordinator();
       const scheduler = new wakeSchedulerMod.LifecycleWakeScheduler();
-      scheduler.register(dueSourcesMod.createTaskAdmissionSource(() => tick.runTaskTick(makeTickCtx(queue))));
+      scheduler.register(dueSourcesMod.createTaskAdmissionSource(async () => { await tick.runTaskTick(makeTickCtx(queue)); }));
       scheduler.register(dueSourcesMod.createRunDeadlineSource(coordinator));
       stateStore.setTaskDueChangedHook(() => scheduler.sourceChanged("task-admission"));
       await scheduler.start();
@@ -1395,7 +1399,7 @@ async function waitForReach(fixture: Awaited<ReturnType<typeof makeFixture>>["fi
 }
 
 /** #1548: same as waitForReach but for controlled-time journeys (no real sleeps). */
-async function waitForReachControlled(fixture: Awaited<ReturnType<typeof makeFixture>>["fixture"], state: "executing" | "awaiting_contract"): Promise<{ runId: string; rootCardId: number }> {
+async function waitForReachControlled(fixture: Awaited<ReturnType<typeof makeFixture>>["fixture"], state: "executing" | "awaiting_contract" | "review_requested" | "needs_input"): Promise<{ runId: string; rootCardId: number }> {
   for (let i = 0; i < 400; i++) {
     try {
       return await fixture.reach(state);
@@ -1776,7 +1780,7 @@ describe("#1548 Stage-1 defect cells — current dev must fail through the custo
   });
 });
 
-function observerStores(queue: import("../../components/tasks/task-queue.js").CronQueue, _coordinator: CoordinatorClass, runId: string) {
+function observerStores(queue: import("../../components/tasks/task-queue.js").CronQueue, _coordinator: InstanceType<typeof CoordinatorClass>, runId: string) {
   return {
     readRun: (taskId: string) => stateStore.readState(taskId)?.activeRun,
     historyOutcome: (rid: string) => events("project-task").find(e => e.runId === rid)?.outcome,
@@ -1793,7 +1797,7 @@ function observerStores(queue: import("../../components/tasks/task-queue.js").Cr
     pendingInputRequests: (rid: number) => new reviewStoreMod.ProjectReviewStore().getPendingInputRequestsForProject(rid),
     currentJobs: () => queue.currentJobs,
     now: () => Date.now(),
-    onCardEvent: (cb) => {
+    onCardEvent: (cb: (cardId: number) => void) => {
       const n = nerveMod.nerve;
       n.on("card:done", cb);
       n.on("card:failed", cb);
@@ -1941,7 +1945,7 @@ describe("#1548 Task-6 coverage — dispatcher-owned review and external input w
       // #1554: the driver owns the repair continuation — the review turn
       // settles the repair decision AND creates the repair worker, and the
       // driver advances repair_planned -> repairing within the pass.
-      await waitForReachControlled(fixture, "repairing");
+      await advanceUntil(() => new reviewStoreMod.ProjectReviewStore().getSupervision(rootCardId)?.state === "repairing");
       observer.checkpoint();
       await vi.advanceTimersByTimeAsync(500);
       const snapRepair = observer.sample();
@@ -2214,7 +2218,7 @@ describe("#1656 E2E — truthful worker evidence and fail-closed parent acceptan
 
     // The Orc submits the #1656 shape: satisfied c1 citing the failed child's
     // artifact evidence. The validator must reject it.
-    const decision = {
+    const decision: ProjectReviewDecisionV1 = {
       schema_version: 1,
       id: `rd_e2e_a_${Date.now()}`,
       project_card_id: rootCardId,
@@ -2235,6 +2239,7 @@ describe("#1656 E2E — truthful worker evidence and fail-closed parent acceptan
     };
     const outcome = service.processDecision(decision);
     expect(outcome.kind).toBe("invalid");
+    if (outcome.kind !== "invalid") throw new Error("expected invalid decision outcome");
     expect(outcome.errors.some(e => /no successful mapped child/.test(e))).toBe(true);
 
     // Fail-closed parent: not accepted, not done, not delivery-ready, no
@@ -2271,7 +2276,7 @@ describe("#1656 E2E — truthful worker evidence and fail-closed parent acceptan
     const { ProjectReviewService } = await import("../../components/project-acceptance/project-review-service.js");
     const service = new ProjectReviewService();
 
-    const decision = {
+    const decision: ProjectReviewDecisionV1 = {
       schema_version: 1,
       id: `rd_e2e_b_${Date.now()}`,
       project_card_id: rootCardId,
@@ -2334,7 +2339,7 @@ describe("#1656 E2E — truthful worker evidence and fail-closed parent acceptan
     const { ProjectReviewService } = await import("../../components/project-acceptance/project-review-service.js");
     const service = new ProjectReviewService();
 
-    const decision = {
+    const decision: ProjectReviewDecisionV1 = {
       schema_version: 1,
       id: `rd_e2e_c_${Date.now()}`,
       project_card_id: rootCardId,
@@ -2391,7 +2396,7 @@ describe("#1688 SHA incident workflow E2E — settler → coordinator → Kanban
   let shaWs: string;
   let shaStore: typeof import("../../components/sha/sha-incident-store.js");
   let shaCoordinator: import("../../components/sha/sha-incident-coordinator.js").ShaIncidentCoordinator;
-  let shaSupervision: WorkerSupervisionStoreClass;
+  let shaSupervision: InstanceType<typeof WorkerSupervisionStoreClass>;
   let shaNotices: string[];
 
   type ShaIncidentCoordinatorClass = import("../../components/sha/sha-incident-coordinator.js").ShaIncidentCoordinator;
@@ -2471,7 +2476,7 @@ describe("#1688 SHA incident workflow E2E — settler → coordinator → Kanban
       writeFileSync(join(shaWs, "sha/verification.json"), JSON.stringify({ commands: [], exit: 0 }, null, 2));
     }
     shaSupervision.insertResult(attempt.id, envelope);
-    board.kanbanTransition({ cardId, from: ["queued", "running"], to: "done", actor: "e2e", reason: "stage complete" });
+    board.kanbanTransition({ cardId, from: ["queued", "running"], to: "done", actor: "pi_run_settle", reason: "stage complete" });
   }
 
   it("full mode: one root, sequential RCA/design/solution stages, accepted review, dedupe, evidence, cleanup", { timeout: 120_000 }, async () => {
@@ -2512,7 +2517,7 @@ describe("#1688 SHA incident workflow E2E — settler → coordinator → Kanban
     // 3. Solution completes → review → accepted root.
     await completeStage(stages[2]!, "sha-solution-patch", "sha/solution.patch", "d-sol");
     await vi.waitFor(() => expect(new shaStore.ShaIncidentStore(board.requireTaskDatabase()).findById(incident.id)!.state).toBe("review"), { timeout: 10_000 });
-    board.kanbanTransition({ cardId: root.id, from: ["queued", "running"], to: "done", actor: "e2e", reason: "final review accepted" });
+    board.kanbanTransition({ cardId: root.id, from: ["queued", "running"], to: "done", actor: "project_acceptance", reason: "final review accepted" });
     await vi.waitFor(() => expect(new shaStore.ShaIncidentStore(board.requireTaskDatabase()).findById(incident.id)!.state).toBe("accepted"), { timeout: 10_000 });
 
     // 4. Evidence copied privately; disposable workspace restored to baseline;
@@ -2578,7 +2583,7 @@ describe("#1688 SHA incident workflow E2E — settler → coordinator → Kanban
     await vi.waitFor(() => expect(new shaStore.ShaIncidentStore(board.requireTaskDatabase()).findById(incident.id)!.state).toBe("design"), { timeout: 10_000 });
     await completeStage(stages[1]!, "sha-design-md", "sha/design.md", "d-design");
     await vi.waitFor(() => expect(new shaStore.ShaIncidentStore(board.requireTaskDatabase()).findById(incident.id)!.state).toBe("review"), { timeout: 10_000 });
-    board.kanbanTransition({ cardId: root.id, from: ["queued", "running"], to: "done", actor: "e2e", reason: "accepted" });
+    board.kanbanTransition({ cardId: root.id, from: ["queued", "running"], to: "done", actor: "project_acceptance", reason: "accepted" });
     await vi.waitFor(() => expect(new shaStore.ShaIncidentStore(board.requireTaskDatabase()).findById(incident.id)!.state).toBe("investigation_complete"), { timeout: 10_000 });
     const status = (await import("node:child_process")).execFileSync("git", ["status", "--porcelain"], { cwd: shaWs, encoding: "utf-8" });
     expect(status.trim()).toBe("");
@@ -2605,7 +2610,7 @@ describe("#1688 SHA incident workflow E2E — settler → coordinator → Kanban
     const incident = new shaStore.ShaIncidentStore(board.requireTaskDatabase()).listNonTerminal()[0]!;
     const stages = stageCardIds(incident.rootCardId!);
     // Simulate a timed-out RCA worker: the stage card fails without an envelope.
-    board.kanbanTransition({ cardId: stages[0]!, from: ["queued", "running"], to: "failed", actor: "e2e", reason: "stage timed out" });
+    board.kanbanTransition({ cardId: stages[0]!, from: ["queued", "running"], to: "failed", actor: "pi_run_settle", reason: "stage timed out" });
     await vi.waitFor(() => {
       const i = new shaStore.ShaIncidentStore(board.requireTaskDatabase()).findById(incident.id)!;
       expect(i.state).toBe("blocked");

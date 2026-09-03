@@ -13,6 +13,9 @@ import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import type { IKiroTransport } from "../../components/transport/kiro-transport.js";
+import { createDisabledRuntime } from "../../components/memory-runtime.js";
+import { ConversationBuffer } from "../../components/conversation-buffer.js";
+import { IdleSave } from "../../components/idle-save.js";
 import type { PlatformAdapter, InboundMessage } from "../../types/platform.js";
 
 describe("#1432 K interactive skill journey", () => {
@@ -121,10 +124,10 @@ describe("#1432 K interactive skill journey", () => {
       transport: makeFakeTransport(),
       config: { workingDir: home },
       startedAt: Date.now(),
-      memoryRuntime: null,
+      memoryRuntime: createDisabledRuntime(),
       memoryConfig: { memoryEnabled: false, memoryDir: home },
-      conversationBuffer: { push: vi.fn(), drain: () => null, clear: vi.fn() },
-      idleSave: { reset: vi.fn(), save: vi.fn(), getTimers: () => new Map(), clearAll: vi.fn() },
+      conversationBuffer: new ConversationBuffer(50),
+      idleSave: new IdleSave(makeFakeTransport(), home, false),
       nlmConfig: { enabled: false },
       sttConfig: null,
       ttsConfig: null,

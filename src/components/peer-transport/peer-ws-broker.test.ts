@@ -709,7 +709,8 @@ describe("PeerWsBroker", () => {
     await vi.advanceTimersByTimeAsync(31_000);
     const err = await reqPromise;
     expect(err).toBeInstanceOf(Error);
-    expect(String(err.message)).toContain("timeout");
+    if (!(err instanceof Error)) throw new Error("expected request to time out");
+    expect(err.message).toContain("timeout");
 
     // The same outbox entry must remain retryable — not silently dropped.
     const outbox = broker._getOutbox("kp");

@@ -51,13 +51,14 @@ describe("scheduled report acceptance (#1502 Task 12)", () => {
       });
       board.kanbanRunning(cardId);
       writeFileSync(artifactPath, "# Report\n" + `${canary} report line\n`.repeat(20));
-      return { cardId, result: `${canary} report line\n`.repeat(20) };
+      return { cardId, result: `${canary} report line\n`.repeat(20), outcome: "text" as const };
     });
     const queue = new CronQueue(new ScheduledRunCoordinator({ agentRunner: modelBoundary }));
     queue.enqueue({
       id: "report-task", kind: "agent", prompt: `${canary} produce report`,
       agent: "task", interaction: { mode: "oneshot" }, delivery: "report", at: new Date().toISOString(),
       enabled: true, priority: "medium", chatId: "42",
+      orchestration: { maxAgents: 1 },
       report: {
         artifact: artifactPath,
         requiredSections: ["# Report"],
@@ -69,8 +70,10 @@ describe("scheduled report acceptance (#1502 Task 12)", () => {
     await waitForIdle(queue);
     expect(modelBoundary).toHaveBeenCalledOnce();
     const request = modelBoundary.mock.calls[0]![0];
-    expect(request.executionScope?.cwd).toBe(join(home, "workspace", "report-task"));
-    expect(request.executionScope?.env.WORKSPACE).toBe(request.executionScope.cwd);
+    const scope = request.executionScope;
+    if (scope === undefined) throw new Error("expected execution scope");
+    expect(scope.cwd).toBe(join(home, "workspace", "report-task"));
+    expect(scope.env.WORKSPACE).toBe(scope.cwd);
     expect(process.env.WORKSPACE).toBeUndefined();
 
     const done = board.kanbanList("done");
@@ -108,13 +111,14 @@ describe("scheduled report acceptance (#1502 Task 12)", () => {
         type: request.type, delivery: request.delivery,
       });
       board.kanbanRunning(cardId);
-      return { cardId, result: "too short" };
+      return { cardId, result: "too short", outcome: "text" as const };
     });
     const queue = new CronQueue(new ScheduledRunCoordinator({ agentRunner: modelBoundary }));
     queue.enqueue({
       id: "short-task", kind: "agent", prompt: "produce report",
       agent: "task", interaction: { mode: "oneshot" }, delivery: "report", at: new Date().toISOString(),
       enabled: true, priority: "medium",
+      orchestration: { maxAgents: 1 },
       report: {
         artifact: join(home, "workspace", "short-task", "report.md"),
         requiredSections: ["# test"],
@@ -139,12 +143,13 @@ describe("scheduled report acceptance (#1502 Task 12)", () => {
       writeFileSync(artifact, "# Verified report\n" + "content\n".repeat(30));
       const cardId = board.kanbanEnqueue(request.title ?? "scheduled report", "task", "dod-task", { type: request.type, delivery: request.delivery });
       board.kanbanRunning(cardId);
-      return { cardId, result: "ok" };
+      return { cardId, result: "ok", outcome: "text" as const };
     });
     const queue = new CronQueue(new ScheduledRunCoordinator({ agentRunner: modelBoundary }));
     queue.enqueue({
       id: "dod-task", kind: "agent", prompt: "produce report",
       agent: "task", interaction: { mode: "oneshot" }, delivery: "report", at: new Date().toISOString(), enabled: true, priority: "medium",
+      orchestration: { maxAgents: 1 },
       report: {
         artifact,
         requiredSections: ["# Verified report"],

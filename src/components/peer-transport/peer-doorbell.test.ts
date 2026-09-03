@@ -174,7 +174,7 @@ describe("PeerDoorbellService — receiver side (query → ack)", () => {
   });
 
   afterEach(async () => {
-    Math.random.mockRestore();
+    vi.restoreAllMocks();
     await svc.stop();
   });
 

@@ -1,9 +1,9 @@
 import { describe, it, expect } from "vitest";
-import { generateKeyPairSync, createPublicKey } from "node:crypto";
+import { generateKeyPairSync, createPrivateKey, createPublicKey } from "node:crypto";
 
 function deriveVerifyKeyForTest(signingKey: string): string {
-  const pub = createPublicKey({ key: Buffer.from(signingKey, "base64"), format: "der", type: "pkcs8" });
-  return pub.export({ type: "spki", format: "der" }).toString("base64");
+  const priv = createPrivateKey({ key: Buffer.from(signingKey, "base64"), format: "der", type: "pkcs8" });
+  return createPublicKey(priv).export({ type: "spki", format: "der" }).toString("base64");
 }
 
 function makeKey(): { signingKey: string; verifyKey: string } {

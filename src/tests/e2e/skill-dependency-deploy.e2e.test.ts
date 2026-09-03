@@ -22,6 +22,7 @@ import http from "node:http";
 import { createHash } from "node:crypto";
 import { spawnSync } from "node:child_process";
 import { deployActivation } from "../../cli/deploy-lib/deploy.js";
+import { healthProbe } from "../../cli/deploy-lib/releases.js";
 import type { StagedRelease } from "../../cli/update-sources/types.js";
 
 const TIMEOUT = 180_000;
@@ -40,11 +41,11 @@ function npmAvailable(): boolean {
 }
 
 /** Local static npm registry serving packuments + tarballs on loopback. */
-function startRegistry(packages: RegistryPackage[]): {
+async function startRegistry(packages: RegistryPackage[]): Promise<{
   url: string;
   close: () => void;
   hits: () => string[];
-} {
+}> {
   const hits: string[] = [];
   const server = http.createServer((req, res) => {
     const url = new URL(req.url ?? "/", "http://127.0.0.1");
@@ -58,6 +59,8 @@ function startRegistry(packages: RegistryPackage[]): {
           versions: {},
         };
         const versions = packument["versions"] as Record<string, unknown>;
+        const addr = server.address();
+        if (addr === null || typeof addr === "string") throw new Error("registry not listening on a TCP port");
         for (const [version, tarball] of pkg.versions) {
           const data = readFileSync(tarball);
           const sha1 = createHash("sha1").update(data).digest("hex");
@@ -65,7 +68,7 @@ function startRegistry(packages: RegistryPackage[]): {
             name: pkg.name,
             version,
             dist: {
-              tarball: `http://127.0.0.1:${server.address()!.port}/${pkg.name}/-/${pkg.name}-${version}.tgz`,
+              tarball: `http://127.0.0.1:${addr.port}/${pkg.name}/-/${pkg.name}-${version}.tgz`,
               shasum: sha1,
             },
           };
@@ -76,25 +79,30 @@ function startRegistry(packages: RegistryPackage[]): {
       }
       const tarballMatch = path.match(/^\/[^/]+\/-\/(.+)\.tgz$/);
       if (tarballMatch) {
-        const fileName = `${tarballMatch[1]}.tgz`;
-        const version = tarballMatch[1].replace(`${pkg.name}-`, "");
-        const tarball = pkg.versions.get(version);
-        if (tarball && basename(tarball) === fileName) {
-          hits.push(`tarball:${pkg.name}@${version}`);
-          res.setHeader("content-type", "application/octet-stream");
-          res.end(readFileSync(tarball));
-          return;
+        const fileNameRaw = tarballMatch[1];
+        if (fileNameRaw !== undefined) {
+          const fileName = `${fileNameRaw}.tgz`;
+          const version = fileNameRaw.replace(`${pkg.name}-`, "");
+          const tarball = pkg.versions.get(version);
+          if (tarball && basename(tarball) === fileName) {
+            hits.push(`tarball:${pkg.name}@${version}`);
+            res.setHeader("content-type", "application/octet-stream");
+            res.end(readFileSync(tarball));
+            return;
+          }
         }
       }
     }
     res.statusCode = 404;
     res.end("not found: " + path);
   });
-  return new Promise((resolve, reject) => {
+  return await new Promise<{ url: string; close: () => void; hits: () => string[] }>((resolve, reject) => {
     server.on("error", reject);
     server.listen(0, "127.0.0.1", () => {
+      const addr = server.address();
+      if (addr === null || typeof addr === "string") throw new Error("registry not listening on a TCP port");
       resolve({
-        url: `http://127.0.0.1:${server.address()!.port}`,
+        url: `http://127.0.0.1:${addr.port}`,
         close: () => server.close(),
         hits: () => [...hits],
       });
@@ -183,14 +191,14 @@ describe.skipIf(!npmAvailable())("Epic 23 E2E — skill dependency deploy (#1542
   let root: string;
   let home: string;
   let releasesTmp: string;
-  let registry: ReturnType<typeof startRegistry>;
+  let registry: Awaited<ReturnType<typeof startRegistry>>;
   let staged: StagedFixture;
   let npmLog: string;
   let npmWrapper: string;
   let healthCalls: Array<{ home: string; since: number; timeout: number }>;
 
-  const healthMock = (h: string, since: number, timeout: number) => {
-    healthCalls.push({ home: h, since, timeout });
+  const healthMock: typeof healthProbe = (h, since, timeoutMs = 180_000) => {
+    healthCalls.push({ home: h, since, timeout: timeoutMs });
     return Promise.resolve({ healthy: true, pid: 9999, heartbeat: Date.now() });
   };
 

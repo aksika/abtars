@@ -26,6 +26,8 @@ import { ModelHealthRegistry } from "../../components/transport/model-health-reg
 import type { DurableContextProviderHolder } from "../../components/transport/pi-core-context.js";
 import type { AbtarsMemoryRuntime } from "../../components/memory-runtime.js";
 import type { BootNode } from "../../boot/boot-graph.js";
+import type { Config } from "../../types/index.js";
+import { MEMORY_CONFIG_DEFAULTS } from "abmind";
 
 const FAKE_USER_ID = "e2e-sentinel-user";
 
@@ -58,7 +60,7 @@ async function makeTransport(ctx: BootCtx): Promise<PiCoreTransport> {
     systemPrompt: "",
     candidates: [],
     healthRegistry: new ModelHealthRegistry(undefined),
-    sandboxPolicy: { trustedCommands: new Set(), allowBash: false, allowedPaths: [] },
+    sandboxPolicy: { allowedTools: [], allowedRead: [], allowedWrite: [], canExecuteBash: false },
     contextProvider: ctx.durableContextProvider,
   });
 }
@@ -67,6 +69,24 @@ interface SentinelResult {
   transportHolder: DurableContextProviderHolder;
   composedCurrent: unknown;
 }
+
+const SENTINEL_CONFIG: Config = {
+  mainChatId: "1",
+  telegram: { botToken: "", allowedUserIds: new Set<number>(), pollTimeoutS: 30 },
+  discord: { enabled: false },
+  transport: {
+    agentCliPath: "node",
+    workingDir: "/tmp/sentinel-work",
+    trustMode: true,
+    permissionTimeoutMs: 60_000,
+    tmuxSession: "kiro",
+    tmuxCaptureDelaySec: 1,
+    tmuxMaxWaitSec: 60,
+  },
+  voice: { sttEnabled: false, groqApiKey: "", sttModel: "whisper-large-v3", ttsEnabled: true, ttsVoice: "en-US-AndrewMultilingualNeural" },
+  logLevel: "low",
+  mcpDaemon: false,
+};
 
 /**
  * Run the production composition graph with the given completion schedule.
@@ -131,18 +151,8 @@ async function runSchedule(order: "memory-first" | "transport-first"): Promise<S
   const ctx = createBootCtx({
     // phaseConfig normally populates these; the sentinel focuses on the
     // memory/transport/pipelineDeps composition only.
-    memoryConfig: { memoryEnabled: true, memoryDir: "/tmp/sentinel-memory" },
-    config: {
-      transport: {
-        agentCliPath: "node",
-        workingDir: "/tmp/sentinel-work",
-        trustMode: true,
-        permissionTimeoutMs: 60_000,
-        tmuxSession: "kiro",
-        tmuxCaptureDelaySec: 1,
-        tmuxMaxWaitSec: 60,
-      },
-    } as unknown as Parameters<typeof createBootCtx>[0]["config"],
+    memoryConfig: { ...MEMORY_CONFIG_DEFAULTS, memoryDir: "/tmp/sentinel-memory" },
+    config: SENTINEL_CONFIG,
   });
   const bootPromise = bootGraph(nodes, ctx);
 

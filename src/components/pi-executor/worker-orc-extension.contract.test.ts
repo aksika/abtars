@@ -21,7 +21,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { mkdtempSync, readdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { Check } from "typebox/value";
-import type { RegisteredTool } from "@earendil-works/pi-coding-agent";
+import type { Extension, LoadExtensionsResult, RegisteredTool } from "@earendil-works/pi-coding-agent";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const ARTIFACT = join(__dirname, "..", "..", "..", "templates", "pi-extensions", "worker-orc-v1.ts");
@@ -38,7 +38,7 @@ interface InputRequest {
 }
 
 async function loadTools(): Promise<Map<string, RegisteredTool>> {
-  const { loadExtensions } = await import(LOADER_URL) as typeof import("@earendil-works/pi-coding-agent");
+  const { loadExtensions } = await import(LOADER_URL) as { loadExtensions: (paths: string[], cwd: string) => Promise<LoadExtensionsResult> };
   const result = await loadExtensions([ARTIFACT], dirname(ARTIFACT));
   expect(result.errors).toEqual([]);
   expect(result.extensions).toHaveLength(1);
@@ -98,7 +98,9 @@ describe("worker-orc-v1.ts extension contract (#1643)", () => {
     const tools = await loadTools();
     const { definition } = tools.get("tell_orc")!;
     const toolResult = await definition.execute("tc-space", { message: "   " }, undefined, undefined, {} as never);
-    expect(toolResult.isError).toBe(true);
+    // #1766 — filed: the artifact still returns isError:true but AgentToolResult
+    // removed it; no host reads it. Rejection is asserted via details + content.
+    expect(toolResult.content[0]).toEqual({ type: "text", text: "Error: message must contain non-whitespace text within 1000 characters." });
     expect(toolResult.details).toEqual({ protocol: 1, kind: "tell_orc", submitted: false });
   });
 
@@ -135,7 +137,8 @@ describe("worker-orc-v1.ts extension contract (#1643)", () => {
       { ui: { input: async () => { inputCalls += 1; return "never"; } } } as never,
     );
     expect(inputCalls).toBe(0);
-    expect(toolResult.isError).toBe(true);
+    // #1766 — filed: artifact emits isError:true; AgentToolResult removed it.
+    expect(toolResult.content[0]).toEqual({ type: "text", text: "Error: question must contain non-whitespace text within 4000 characters." });
     expect(toolResult.details).toEqual({ protocol: 1, kind: "ask_orc", submitted: false });
   });
 });

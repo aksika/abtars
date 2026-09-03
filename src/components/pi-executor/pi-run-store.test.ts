@@ -3,13 +3,13 @@ import { createRequire } from "node:module";
 import { join } from "node:path";
 import { homedir, tmpdir } from "node:os";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { PiRunStore } from "./pi-run-store.js";
+import { PiRunStore, type CreatePiRunInput } from "./pi-run-store.js";
 import type { TaskDatabase } from "../tasks/kanban-board.js";
 import { ensureKanbanBoardSchema } from "../tasks/kanban-board.js";
 
 const _require = createRequire(import.meta.url);
 const sharedPath = join(homedir(), ".local", "lib", "node_modules", "better-sqlite3");
-const Database: typeof import("better-sqlite3") = _require(sharedPath);
+const Database: new (p: string) => import("better-sqlite3").Database = _require(sharedPath);
 
 function createTestDb(): TaskDatabase {
   const raw = new Database(":memory:");
@@ -47,6 +47,7 @@ function createTestDb(): TaskDatabase {
     },
     exec(sql: string) { raw.exec(sql); },
     transaction<T>(fn: () => T): T { return raw.transaction(fn)(); },
+    transactionImmediate<T>(fn: () => T): T { return raw.transaction(fn)(); },
   };
 }
 
@@ -323,7 +324,7 @@ describe("PiRunStore — #1395 UI claim/restore/setPending", () => {
   });
 
   describe("createPiCardAndRun", () => {
-    function makeInput(overrides: Record<string, unknown> = {}) {
+    function makeInput(overrides: Record<string, unknown> = {}): CreatePiRunInput {
       return {
         runId: "test-run-1",
         sessionId: "spin-sess-1",
@@ -340,7 +341,7 @@ describe("PiRunStore — #1395 UI claim/restore/setPending", () => {
         modelId: undefined,
         thinking: undefined,
         ...overrides,
-      };
+      } as CreatePiRunInput;
     }
 
     it("creates a card and run with no idempotency", () => {
@@ -606,6 +607,7 @@ describe("PiRunStore — #1395 UI claim/restore/setPending", () => {
       store.claimSupervisedGeneration({ runId: holder, expectedGeneration: 1, canonicalPath: "/canon/shared" });
       const claim = store.claimQueuedGeneration(7702, "/canon/shared");
       expect(claim.claimed).toBe(false);
+      if (claim.claimed) throw new Error("expected claim to be denied");
       expect(claim.reason).toBe("busy");
       expect(store.get(waiter)?.status).toBe("queued");
       const db = (store as any).db as TaskDatabase;
@@ -766,7 +768,7 @@ describe("PiRunStore — #1395 UI claim/restore/setPending", () => {
         db.prepare(`UPDATE kanban_board SET status = 'failed' WHERE id = 7911`).run();
 
         const commit = store.queueResumeGeneration({ runId, expectedGeneration: 1, newSessionId: "new-c-sess" });
-        expect(commit.committed).toBe(true);
+        if (!commit.committed) throw new Error("expected resume commit");
         expect(commit.newGeneration).toBe(2);
         const run = store.get(runId)!;
         expect(run.status).toBe("queued");
@@ -810,6 +812,7 @@ describe("PiRunStore — #1395 UI claim/restore/setPending", () => {
 
           const commit = store.queueResumeGeneration({ runId, expectedGeneration: 1, newSessionId: "x" });
           expect(commit.committed).toBe(false);
+          if (commit.committed) throw new Error("expected refusal");
           expect(commit.reason).toBe(cases[i]!.cap === "never_started" ? "not_resumable" : "session_missing");
           // Nothing changed: run and card stay exactly as they were.
           const run = store.get(runId)!;
@@ -830,6 +833,7 @@ describe("PiRunStore — #1395 UI claim/restore/setPending", () => {
         // Card is 'running' — not a legal failed|done -> queued source.
         const commit = store.queueResumeGeneration({ runId, expectedGeneration: 1, newSessionId: "x" });
         expect(commit.committed).toBe(false);
+        if (commit.committed) throw new Error("expected refusal");
         expect(commit.reason).toBe("card_mismatch");
         const run = store.get(runId)!;
         expect(run.executionGeneration).toBe(1);
@@ -846,7 +850,9 @@ describe("PiRunStore — #1395 UI claim/restore/setPending", () => {
         const runId = "res-stale";
         seedActive(store, 7932, runId, { status: "interrupted", piSessionId: "sess-3", piSessionFile: file, resumeCapability: "available" });
         expect(store.queueResumeGeneration({ runId, expectedGeneration: 99, newSessionId: "x" }).committed).toBe(false);
-        expect(store.queueResumeGeneration({ runId, expectedGeneration: 1, newSessionId: "x" }).reason).toBe("card_mismatch");
+        const denied = store.queueResumeGeneration({ runId, expectedGeneration: 1, newSessionId: "x" });
+        if (denied.committed) throw new Error("expected refusal");
+        expect(denied.reason).toBe("card_mismatch");
       } finally { cleanup(); }
     });
 
@@ -960,6 +966,7 @@ describe("PiRunStore — #1395 UI claim/restore/setPending", () => {
         db.prepare(`UPDATE kanban_board SET status = 'queued' WHERE id = 7943`).run();
         const lost = store.interruptGeneration({ runId: standalone, generation: 1, continuity: { ok: false, capability: "session_missing", reason: "x" } });
         expect(lost.committed).toBe(false);
+        if (lost.committed) throw new Error("expected refusal");
         expect(lost.reason).toBe("card_mismatch");
         expect(store.get(standalone)!.status).toBe("running");
 
@@ -968,6 +975,7 @@ describe("PiRunStore — #1395 UI claim/restore/setPending", () => {
         seedActive(store, 7944, supervised, { origin: "supervised" });
         const refused = store.interruptGeneration({ runId: supervised, generation: 1, continuity: { ok: false, capability: "session_missing", reason: "x" } });
         expect(refused.committed).toBe(false);
+        if (refused.committed) throw new Error("expected refusal");
         expect(refused.reason).toBe("supervised");
         expect(store.get(supervised)!.status).toBe("running");
       } finally { cleanup(); }
@@ -981,6 +989,7 @@ describe("PiRunStore — #1395 UI claim/restore/setPending", () => {
         seedActive(store, 7945, runId, { piSessionId: "sess-i2", piSessionFile: file, resumeCapability: "available" });
         const stale = store.interruptGeneration({ runId, generation: 99, continuity: { ok: true, sessionId: "sess-i2", canonicalFile: file } });
         expect(stale.committed).toBe(false);
+        if (stale.committed) throw new Error("expected refusal");
         expect(stale.reason).toBe("stale_generation");
         expect(store.get(runId)!.status).toBe("running");
 
@@ -988,6 +997,7 @@ describe("PiRunStore — #1395 UI claim/restore/setPending", () => {
         expect(first.committed).toBe(true);
         const duplicate = store.interruptGeneration({ runId, generation: 1, continuity: { ok: true, sessionId: "sess-i2", canonicalFile: file } });
         expect(duplicate.committed).toBe(false);
+        if (duplicate.committed) throw new Error("expected refusal");
         expect(duplicate.reason).toBe("wrong_status");
       } finally { cleanup(); }
     });
@@ -1001,6 +1011,7 @@ describe("PiRunStore — #1395 UI claim/restore/setPending", () => {
         db.prepare(`UPDATE kanban_board SET status = 'queued' WHERE id = 7946`).run();
         const lost = store.settleTerminal({ runId, generation: 1, expectedStatuses: ["running"], outcome: "failed", metadata: { error: "x" } });
         expect(lost.committed).toBe(false);
+        if (lost.committed) throw new Error("expected refusal");
         expect(lost.reason).toBe("card_mismatch");
         expect(store.get(runId)!.status).toBe("running");
         expect(cardStatus(store, 7946)).toBe("queued");

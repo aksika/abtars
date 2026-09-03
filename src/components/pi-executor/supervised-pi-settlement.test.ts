@@ -21,7 +21,7 @@ import type { TaskDatabase } from "../tasks/kanban-board.js";
 
 const _require = createRequire(import.meta.url);
 const sharedPath = join(homedir(), ".local", "lib", "node_modules", "better-sqlite3");
-const Database: typeof import("better-sqlite3") = _require(sharedPath);
+const Database: new (p: string) => import("better-sqlite3").Database = _require(sharedPath);
 
 let TEST_HOME: string;
 let mod: any;
@@ -54,6 +54,7 @@ function createTestDb(): TaskDatabase {
     },
     exec(sql: string) { raw.exec(sql); },
     transaction<T>(fn: () => T): T { return raw.transaction(fn)(); },
+    transactionImmediate<T>(fn: () => T): T { return raw.transaction(fn)(); },
   };
 }
 
