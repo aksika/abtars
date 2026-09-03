@@ -413,11 +413,39 @@ function quarantineStore(generation: ReconcilerGeneration): ReconcileQuarantineS
   return generation.deps.getQuarantineStore();
 }
 
+type QuarantineStoreDiagnostic = "lookup" | "record" | "clear";
+const quarantineStoreDiagnostics = new Set<QuarantineStoreDiagnostic>();
+
+/**
+ * Store failures are secondary containment failures. Keep the first one for
+ * each operation visible with its card attribution, but do not let a broken
+ * store turn every wake into another log line.
+ */
+function logQuarantineStoreDiagnosticOnce(
+  kind: QuarantineStoreDiagnostic,
+  cardId: number,
+  message: string,
+  err: unknown,
+): void {
+  if (quarantineStoreDiagnostics.has(kind)) return;
+  quarantineStoreDiagnostics.add(kind);
+  try {
+    logError(TAG, message, err);
+  } catch (loggingError) {
+    emergencyContainmentLog(cardId, loggingError);
+  }
+}
+
 function safeIsQuarantined(generation: ReconcilerGeneration, cardId: number): boolean {
   try {
     return quarantineStore(generation).isQuarantined(cardId);
   } catch (err) {
-    logError(TAG, `Quarantine lookup failed for card ${cardId} — failing open, bridge stays alive`, err);
+    logQuarantineStoreDiagnosticOnce(
+      "lookup",
+      cardId,
+      `Quarantine lookup failed for card ${cardId} — failing open, bridge stays alive`,
+      err,
+    );
     return false;
   }
 }
@@ -430,7 +458,12 @@ function safeRecordReconcileFailure(generation: ReconcilerGeneration, cardId: nu
       logError(TAG, `Card ${cardId}: quarantined after ${row.failureCount} consecutive reconcile failures (${row.errorSignature})`);
     }
   } catch (storeErr) {
-    logError(TAG, `Card ${cardId}: failed to record reconcile failure — quarantine unavailable, bridge stays alive`, storeErr);
+    logQuarantineStoreDiagnosticOnce(
+      "record",
+      cardId,
+      `Card ${cardId}: failed to record reconcile failure — quarantine unavailable, bridge stays alive`,
+      storeErr,
+    );
   }
 }
 
@@ -438,7 +471,12 @@ function safeClearFailures(generation: ReconcilerGeneration, cardId: number): vo
   try {
     quarantineStore(generation).clearFailures(cardId);
   } catch (err) {
-    logError(TAG, `Card ${cardId}: failed to clear quarantine record after successful pass`, err);
+    logQuarantineStoreDiagnosticOnce(
+      "clear",
+      cardId,
+      `Card ${cardId}: failed to clear quarantine record after successful pass`,
+      err,
+    );
   }
 }
 
@@ -496,7 +534,11 @@ function wakeCard(generation: ReconcilerGeneration, cardId: number): boolean {
 function runReconcileBehindBoundary(generation: ReconcilerGeneration, cardId: number): Promise<void> {
   return reconcileCard(generation, cardId)
     .then(
-      () => safeClearFailures(generation, cardId),
+      () => {
+        // A normal return during the closing transition means the pass was
+        // cancelled before deriveAction ran; it is not a successful pass.
+        if (isActive(generation)) safeClearFailures(generation, cardId);
+      },
       (err: unknown) => safeRecordReconcileFailure(generation, cardId, err),
     );
 }
@@ -756,40 +798,43 @@ function settleProjectLastResortFor(generation: ReconcilerGeneration, projectId:
   // The freeze must not prevent the exactly-once settle: even if a child
   // cancellation rejects, the occurrence still settles through the settler.
   void abortProject(generation, projectId, children, reason, { skipRootFail: true })
-    .catch((err) => logWarn(TAG, `last-resort abort for project ${projectId} failed — ${err instanceof Error ? err.message : String(err)}`))
+    .catch((err) => {
+      logError(TAG, `Last-resort abort for project ${projectId} failed`, err);
+    })
     .then(() => {
-    if (!matched) {
-      // There is no run row to settle, but the root still needs terminal
-      // evidence. Freeze the supervision row WITHOUT the run-correlated
-      // authority: an orphaned scheduled root (source_id with no task_runs
-      // row) has no live run to protect, so the gate would reject the block
-      // with run_mismatch and leave the row stuck in 'executing' forever.
-      const reviewStore = new ProjectReviewStore();
-      if (reviewStore.getSupervision(projectId)) {
-        // Use the same compatibility boundary as the coverage gate. Besides
-        // keeping the terminalization shape identical, this lets injected
-        // recovery stores that predate blockProject still fail closed through
-        // their state-transition implementation.
-        blockProjectWithInvalidation(reviewStore, projectId, `aborted: ${reason}`, undefined, { failCard: false });
+      if (!matched) {
+        // There is no run row to settle, but the root still needs terminal
+        // evidence. Freeze the supervision row WITHOUT the run-correlated
+        // authority: an orphaned scheduled root (source_id with no task_runs
+        // row) has no live run to protect, so the gate would reject the block
+        // with run_mismatch and leave the row stuck in 'executing' forever.
+        const reviewStore = new ProjectReviewStore();
+        if (reviewStore.getSupervision(projectId)) {
+          // Use the same compatibility boundary as the coverage gate. Besides
+          // keeping the terminalization shape identical, this lets injected
+          // recovery stores that predate blockProject still fail closed through
+          // their state-transition implementation.
+          blockProjectWithInvalidation(reviewStore, projectId, `aborted: ${reason}`, undefined, { failCard: false });
+        }
+        kanbanFail(projectId, reason);
+        return;
       }
-      kanbanFail(projectId, reason);
-      return;
-    }
-    try {
-      settleRunOnce({
-        entry: matched.entry,
-        run: matched.run,
-        outcome: "failed",
-        diagnostic: makeTaskFailure("interruption", "restart_interrupted", "executing", "scheduled project continuation unavailable after restart", "none"),
-        detail: "reconcileProject: no durable owner and no claimable scheduled Orc continuation",
-        cardId: projectId,
-        onFailure: generation.deps.failureCascade,
-      });
-      logInfo(TAG, `Project ${projectId}: settled run ${matched.run.runId} as restart_interrupted (last resort)`);
-    } catch (err) {
-      logWarn(TAG, `Project ${projectId}: last-resort settlement failed — ${err instanceof Error ? err.message : String(err)}`);
-    }
-  });
+      try {
+        settleRunOnce({
+          entry: matched.entry,
+          run: matched.run,
+          outcome: "failed",
+          diagnostic: makeTaskFailure("interruption", "restart_interrupted", "executing", "scheduled project continuation unavailable after restart", "none"),
+          detail: "reconcileProject: no durable owner and no claimable scheduled Orc continuation",
+          cardId: projectId,
+          onFailure: generation.deps.failureCascade,
+        });
+        logInfo(TAG, `Project ${projectId}: settled run ${matched.run.runId} as restart_interrupted (last resort)`);
+      } catch (err) {
+        logWarn(TAG, `Project ${projectId}: last-resort settlement failed — ${err instanceof Error ? err.message : String(err)}`);
+      }
+    })
+    .catch((err: unknown) => emergencyContainmentLog(projectId, err));
 }
 
 /** #1554: public last-resort boundary — fail closed without a running generation. */

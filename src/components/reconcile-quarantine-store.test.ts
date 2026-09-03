@@ -146,6 +146,23 @@ describe("reconcileErrorSignature", () => {
     expect(sig).toContain("REDACTED");
   });
 
+  it("redacts and bounds custom Error names and direct store signatures", () => {
+    const secret = "Bearer " + "b".repeat(24);
+    const err = new Error("failure");
+    err.name = `${secret}-${"x".repeat(300)}`;
+
+    const signature = reconcileErrorSignature(err);
+    expect(signature).not.toContain(secret);
+    expect(signature).toContain("REDACTED");
+    expect(signature.length).toBeLessThanOrEqual(180 + 6);
+
+    const store = new ReconcileQuarantineStore(db());
+    const stored = store.recordFailure(64, `${secret}-${"y".repeat(300)}`, "2026-08-16T10:00:00.000Z");
+    expect(stored.errorSignature).not.toContain(secret);
+    expect(stored.errorSignature).toContain("REDACTED");
+    expect(stored.errorSignature.length).toBeLessThanOrEqual(180 + 6);
+  });
+
   it("bounds the stored signature length", () => {
     const sig = reconcileErrorSignature(new Error("x".repeat(500)));
     expect(sig.length).toBeLessThanOrEqual(180 + 6); // name prefix + separator

@@ -52,6 +52,19 @@ describe("logger buffered writes", () => {
     const lines = content.trim().split("\n");
     expect(lines.length).toBeGreaterThanOrEqual(3);
   });
+
+  it("persists a redacted full error stack", () => {
+    const secret = "sk-" + "a".repeat(24);
+    const err = new Error(`failure ${secret}`);
+    err.stack = `CustomError: failure ${secret}\n    at stack-sentinel (reconciler.ts:1:1)`;
+
+    logError("test", "reconcile failed", err);
+    flushLogs();
+
+    const content = readFileSync(getLogFile(), "utf-8");
+    expect(content).toContain("stack-sentinel");
+    expect(content).not.toContain(secret);
+  });
 });
 
 describe("logger console/TTY redaction (#1354)", () => {

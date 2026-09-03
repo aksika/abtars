@@ -1092,8 +1092,8 @@ export class ProjectReviewStore {
 
       const now = new Date().toISOString();
       if (request.invalid_proposals >= maxInvalidProposals) {
-        this.settleBlockedInTransaction(cardId, reviewCaseId, decision, blockerClass, recipe, decisionId, now, authority);
-        return { kind: "blocked", total: request.invalid_proposals, requestId: request.id, decisionId };
+        const settledId = this.settleBlockedInTransaction(cardId, reviewCaseId, decision, blockerClass, recipe, decisionId, now, authority);
+        return { kind: "blocked", total: request.invalid_proposals, requestId: request.id, decisionId: settledId };
       }
       const incremented = this.db.prepare(`
         UPDATE project_review_requests
@@ -1111,8 +1111,8 @@ export class ProjectReviewStore {
         return { kind: "counted", total: updated.invalid_proposals, requestId: request.id };
       }
 
-      this.settleBlockedInTransaction(cardId, reviewCaseId, decision, blockerClass, recipe, decisionId, now, authority);
-      return { kind: "blocked", total: updated.invalid_proposals, requestId: request.id, decisionId };
+      const settledId = this.settleBlockedInTransaction(cardId, reviewCaseId, decision, blockerClass, recipe, decisionId, now, authority);
+      return { kind: "blocked", total: updated.invalid_proposals, requestId: request.id, decisionId: settledId };
     });
 
     if (result.kind === "blocked") {
@@ -1165,7 +1165,7 @@ export class ProjectReviewStore {
       if (updated.invalid_contract_proposals < maxInvalidProposals) {
         return { kind: "counted", total: updated.invalid_contract_proposals, requestId: "" };
       }
-      this.settleBlockedInTransaction(
+      const settledId = this.settleBlockedInTransaction(
         cardId,
         "contract_admission",
         decision,
@@ -1175,7 +1175,7 @@ export class ProjectReviewStore {
         now,
         authority,
       );
-      return { kind: "blocked", total: updated.invalid_contract_proposals, requestId: "", decisionId };
+      return { kind: "blocked", total: updated.invalid_contract_proposals, requestId: "", decisionId: settledId };
     });
     if (result.kind === "blocked") {
       logSwarmTrace({ event: "project_blocked", project: cardId, decision: result.decisionId, reason: blockerClass });
@@ -1536,10 +1536,12 @@ export class ProjectReviewStore {
     decisionId?: string,
     authority?: ProjectMutationAuthority,
   ): { decisionId: string } {
-    const settledId = decisionId ?? `rd_block_${cardId}_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+    let settledId = decisionId ?? `rd_block_${cardId}_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
     const now = new Date().toISOString();
 
-    this.db.transaction(() => this.settleBlockedInTransaction(cardId, reviewCaseId, decision, blockerClass, recipe, settledId, now, authority));
+    this.db.transaction(() => {
+      settledId = this.settleBlockedInTransaction(cardId, reviewCaseId, decision, blockerClass, recipe, settledId, now, authority);
+    });
 
     logSwarmTrace({ event: "project_blocked", project: cardId, reviewCase: reviewCaseId, decision: settledId, reason: blockerClass });
 
@@ -1634,7 +1636,7 @@ export class ProjectReviewStore {
     settledId: string,
     now: string,
     authority?: ProjectMutationAuthority,
-  ): void {
+  ): string {
     this.assertReviewMutationAuthorityInTransaction(cardId, reviewCaseId, authority);
     const decisionDigest = `sd_blk_${cardId}_${reviewCaseId}_${Date.now()}`;
     settledId = this.persistReviewDecisionInTransaction(reviewCaseId, decision, decisionDigest, now, settledId);
@@ -1714,6 +1716,7 @@ export class ProjectReviewStore {
     if (event) {
       this.insertAcceptanceOutboxInTransaction(cardId, settledId, event, now);
     }
+    return settledId;
   }
 
   /** Atomically persist a repair decision, advance its generation, and close the review turn. */

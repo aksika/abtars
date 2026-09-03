@@ -133,6 +133,22 @@ function formatLine(level: string, tag: string, msg: string): string {
   return `${ts()} ${level.toUpperCase().padEnd(5)} [${tag}] ${msg}`;
 }
 
+function serializeError(err: unknown): string {
+  try {
+    if (err instanceof Error) return err.stack ?? err.message;
+    if (typeof err === "object" && err !== null) {
+      return JSON.stringify(err) ?? "<unserializable error>";
+    }
+    return String(err ?? "");
+  } catch {
+    return "<unserializable error>";
+  }
+}
+
+function formatErrorDetail(err: unknown): string {
+  return serializeError(err).replace(/\r?\n/g, "\\n");
+}
+
 /** LOW: operational milestones — startup, connections, errors */
 export function logInfo(tag: string, msg: string): void {
   if (!shouldLog("low")) return;
@@ -154,11 +170,11 @@ export function logWarn(tag: string, msg: string): void {
 /** LOW: errors (always shown unless OFF) */
 export function logError(tag: string, msg: string, err?: unknown): void {
   if (!shouldLog("low")) return;
-  const errStr = err instanceof Error ? err.message : (typeof err === "object" && err !== null ? JSON.stringify(err) : String(err ?? ""));
+  const errStr = err === undefined ? "" : formatErrorDetail(err);
   const fullMsg = errStr ? `${msg} — ${errStr}` : msg;
   const safe = redactSecrets(fullMsg);
   const line = formatLine("error", tag, safe);
-  if (err) { if (process.stdout.isTTY) console.error(`[${tag}] ${redactSecrets(msg)}`, redactSecrets(String(err))); }
+  if (err !== undefined) { if (process.stdout.isTTY) console.error(`[${tag}] ${redactSecrets(msg)}`, redactSecrets(errStr)); }
   else { if (process.stdout.isTTY) console.error(`[${tag}] ${safe}`); }
   writeToFile(line);
 }

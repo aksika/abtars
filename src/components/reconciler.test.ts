@@ -11,6 +11,12 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 
 // ── Mocks ──────────────────────────────────────────────────────────────────────
 
+const { logErrorMock } = vi.hoisted(() => ({ logErrorMock: vi.fn() }));
+vi.mock("./logger.js", async () => {
+  const actual = await vi.importActual<typeof import("./logger.js")>("./logger.js");
+  return { ...actual, logError: logErrorMock };
+});
+
 // #1628: fake run store with zeroed authoring counters — the reconciler's
 // ceilings read through getStore() before every authoring claim.
 function makeFakeRunStore() {
@@ -2398,6 +2404,23 @@ describe("Reconciler — #1664 error boundary", () => {
 
     expect(unhandled).toBe(false);
     expect(dispatchMock).toHaveBeenCalledWith(expect.objectContaining({ type: "W", cardId: 2 }));
+    const lookupDiagnostics = logErrorMock.mock.calls.filter(([, message]) =>
+      typeof message === "string" && message.startsWith("Quarantine lookup failed for card "),
+    );
+    expect(lookupDiagnostics).toHaveLength(1);
+    expect(lookupDiagnostics[0]?.[1]).toContain("card 1");
+  });
+
+  it("contains a throwing last-resort settlement callback", async () => {
+    await healthyChildDispatchScenario();
+    kanbanGetCardMock.mockReturnValue(makeCard({ id: 1, status: "running", type: "O", parent_id: null }));
+    kanbanGetChildrenMock.mockReturnValue([]);
+    reviewStoreMock.getSupervision.mockReturnValue({ generation: 1 });
+    kanbanFailMock.mockImplementation(() => { throw new Error("root fail projection failed"); });
+
+    const unhandled = await expectNoUnhandledRejection(() => mod.settleProjectLastResort(1));
+
+    expect(unhandled).toBe(false);
   });
 
   it("recordFailure failure is contained: original throw logged, healthy card still runs", async () => {
@@ -2423,6 +2446,16 @@ describe("Reconciler — #1664 error boundary", () => {
 
     expect(unhandled).toBe(false);
     expect(dispatchMock).toHaveBeenCalledWith(expect.objectContaining({ type: "W", cardId: 2 }));
+  });
+
+  it("does not clear failures when shutdown cancels a queued wake", async () => {
+    quarantineState.recorded.push({ cardId: 2, signature: "Error:prior", now: "2026-08-16T10:00:00.000Z" });
+    mod.requestReconcile(2);
+
+    await activeTestHandle!.stop();
+    activeTestHandle = null;
+
+    expect(quarantineState.cleared).not.toContain(2);
   });
 
   it("store construction failure fails open — a wake still reconciles behind the boundary", async () => {

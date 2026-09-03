@@ -678,9 +678,11 @@ describe("ProjectReviewService — #1620 severity, correction budget, truthful e
   it("fifth error settles exactly once with review_protocol_exhausted and no accepted decision", () => {
     const bad = makeDecision(cardId, caseId, { outputs: [] });
     const outcomes: string[] = [];
+    let settledDecisionId: string | undefined;
     for (let i = 0; i < 5; i++) {
       const r = service.processDecision(bad);
       outcomes.push(r.kind);
+      if (r.kind === "blocked_invalid") settledDecisionId = r.decisionId;
     }
     expect(outcomes.filter(k => k === "invalid")).toHaveLength(4);
     expect(outcomes.filter(k => k === "blocked_invalid")).toHaveLength(1);
@@ -690,8 +692,9 @@ describe("ProjectReviewService — #1620 severity, correction budget, truthful e
     expect(sup.blocked_reason).toBe("review_protocol_exhausted");
 
     // exactly one terminal decision row, and the durable blocker carries the count
-    const decisions = store.db.prepare("SELECT decision_json FROM project_review_decisions WHERE review_case_id = ?").all(caseId) as Array<{ decision_json: string }>;
+    const decisions = store.db.prepare("SELECT id, decision_json FROM project_review_decisions WHERE review_case_id = ?").all(caseId) as Array<{ id: string; decision_json: string }>;
     expect(decisions).toHaveLength(1);
+    expect(settledDecisionId).toBe(decisions[0]!.id);
     const blocker = JSON.parse(decisions[0]!.decision_json) as { blocker_class: string; invalid_proposals: number };
     expect(blocker.blocker_class).toBe("review_protocol_exhausted");
     expect(blocker.invalid_proposals).toBe(5);

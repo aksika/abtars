@@ -179,10 +179,11 @@ describe("ProjectReviewStore", () => {
       // blocked settlement throw (unhandled rejection crashed the whole
       // bridge in the live two-node runs). The settlement reuses the existing
       // decision and still converges the supervision and card to terminal.
-      s.insertDecision("case-double", { action: "blocked", reason: "first" }, "digest-1");
-      expect(() => s.settleBlocked(cid, "case-double", { action: "blocked", reason: "second" }, "blocker")).not.toThrow();
+      const existing = s.insertDecision("case-double", { action: "blocked", reason: "first" }, "digest-1");
+      const result = s.settleBlocked(cid, "case-double", { action: "blocked", reason: "second" }, "blocker");
+      expect(result.decisionId).toBe(existing.id);
       expect(s.getSupervision(cid)!.state).toBe("blocked");
-      expect(s.getSupervision(cid)!.accepted_decision_id).toBeTruthy();
+      expect(s.getSupervision(cid)!.accepted_decision_id).toBe(existing.id);
     });
 
     it("settleAcceptance is idempotent per review case", () => {

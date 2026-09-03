@@ -21,6 +21,17 @@ export interface ReconcileFailureRow {
 
 export const QUARANTINE_THRESHOLD = 3;
 
+const MAX_ERROR_MESSAGE_LENGTH = 180;
+const MAX_ERROR_SIGNATURE_LENGTH = MAX_ERROR_MESSAGE_LENGTH + "Error:".length;
+
+/** Keep every value that reaches an operator-visible signature safe and bounded. */
+function normalizeSignatureText(value: string, maxLength: number): string {
+  return redactSecrets(value)
+    .replace(/[0-9]+/g, "#")
+    .replace(/\s+/g, " ")
+    .slice(0, maxLength);
+}
+
 /**
  * Stable, readable, redacted error identity. Digits are stripped so
  * per-project ids and timestamps do not make every occurrence look like a new
@@ -28,9 +39,12 @@ export const QUARANTINE_THRESHOLD = 3;
  * can reach an operator surface.
  */
 export function reconcileErrorSignature(err: unknown): string {
-  const name = err instanceof Error ? err.name : typeof err;
-  const message = err instanceof Error ? err.message : String(err);
-  return `${name}:${redactSecrets(message).replace(/[0-9]+/g, "#").slice(0, 180)}`;
+  const name = normalizeSignatureText(err instanceof Error ? err.name : typeof err, 64);
+  const message = normalizeSignatureText(
+    err instanceof Error ? err.message : String(err),
+    MAX_ERROR_MESSAGE_LENGTH,
+  );
+  return `${name}:${message}`.slice(0, MAX_ERROR_SIGNATURE_LENGTH);
 }
 
 export class ReconcileQuarantineStore {
@@ -63,10 +77,11 @@ export class ReconcileQuarantineStore {
    * the write.
    */
   recordFailure(cardId: number, signature: string, now: string): ReconcileFailureRow {
+    const safeSignature = normalizeSignatureText(signature, MAX_ERROR_SIGNATURE_LENGTH);
     const existing = this.db.prepare(
       `SELECT failure_count, error_signature FROM reconcile_quarantine WHERE card_id = ?`,
     ).get(cardId) as { failure_count: number; error_signature: string } | undefined;
-    const failureCount = existing && existing.error_signature === signature ? existing.failure_count + 1 : 1;
+    const failureCount = existing && existing.error_signature === safeSignature ? existing.failure_count + 1 : 1;
     const quarantinedAt = failureCount >= QUARANTINE_THRESHOLD ? now : null;
     this.db.prepare(`
       INSERT INTO reconcile_quarantine (card_id, failure_count, error_signature, last_error_at, quarantined_at)
@@ -76,8 +91,8 @@ export class ReconcileQuarantineStore {
         error_signature = excluded.error_signature,
         last_error_at = excluded.last_error_at,
         quarantined_at = excluded.quarantined_at
-    `).run(cardId, failureCount, signature, now, quarantinedAt);
-    return { cardId, failureCount, errorSignature: signature, lastErrorAt: now, quarantinedAt };
+    `).run(cardId, failureCount, safeSignature, now, quarantinedAt);
+    return { cardId, failureCount, errorSignature: safeSignature, lastErrorAt: now, quarantinedAt };
   }
 
   /** Clears the row for a card after a successful pass. Idempotent. */
