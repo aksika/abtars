@@ -98,10 +98,10 @@ describe("worker-orc-v1.ts extension contract (#1643)", () => {
     const tools = await loadTools();
     const { definition } = tools.get("tell_orc")!;
     const toolResult = await definition.execute("tc-space", { message: "   " }, undefined, undefined, {} as never);
-    // #1766 — filed: the artifact still returns isError:true but AgentToolResult
-    // removed it; no host reads it. Rejection is asserted via details + content.
+    // #1766: rejection is signaled via details + content (AgentToolResult has no isError).
     expect(toolResult.content[0]).toEqual({ type: "text", text: "Error: message must contain non-whitespace text within 1000 characters." });
     expect(toolResult.details).toEqual({ protocol: 1, kind: "tell_orc", submitted: false });
+    expect(toolResult).not.toHaveProperty("isError");
   });
 
   it("ask_orc emits exactly one input request titled Ask Orc with NO timeout", async () => {
@@ -137,8 +137,9 @@ describe("worker-orc-v1.ts extension contract (#1643)", () => {
       { ui: { input: async () => { inputCalls += 1; return "never"; } } } as never,
     );
     expect(inputCalls).toBe(0);
-    // #1766 — filed: artifact emits isError:true; AgentToolResult removed it.
+    // #1766: rejection is signaled via details + content (AgentToolResult has no isError).
     expect(toolResult.content[0]).toEqual({ type: "text", text: "Error: question must contain non-whitespace text within 4000 characters." });
     expect(toolResult.details).toEqual({ protocol: 1, kind: "ask_orc", submitted: false });
+    expect(toolResult).not.toHaveProperty("isError");
   });
 });

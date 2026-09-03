@@ -46,7 +46,6 @@ export default function workerOrcExtension(pi: ExtensionAPI): void {
         return {
           content: [{ type: "text", text: "Error: message must contain non-whitespace text within 1000 characters." }],
           details: { protocol: PROTOCOL, kind: "tell_orc", submitted: false },
-          isError: true,
         };
       }
       return {
@@ -75,7 +74,6 @@ export default function workerOrcExtension(pi: ExtensionAPI): void {
         return {
           content: [{ type: "text", text: "Error: question must contain non-whitespace text within 4000 characters." }],
           details: { protocol: PROTOCOL, kind: "ask_orc", submitted: false },
-          isError: true,
         };
       }
       // No timeout is deliberate: the supervised host settles the run through

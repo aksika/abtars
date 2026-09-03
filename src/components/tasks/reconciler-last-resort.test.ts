@@ -270,7 +270,6 @@ describe("reconciler #1546 last-resort and claim ordering (real stores)", () => 
     expect(runStore.getLiveRuns()).toHaveLength(1);
     expect(kanban.kanbanGetCard(rootId)!.status).toBe("running");
     expect(kanban.kanbanGetCard(rootId)!.next_retry_at).toBeNull();
-    // #1760 — filed: KanbanCard omits retry_count; production promotes preserving it but the interface does not expose it yet.
   });
 
   it("never settles on a busy/foreign live row and never creates a second run", async () => {

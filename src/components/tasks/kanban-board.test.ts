@@ -277,9 +277,11 @@ describe("kanbanRetryOrFail (#1411)", () => {
     const result = mod.kanbanRetryOrFail(id, "token budget exceeded");
     expect(result).toBe("retrying");
     const card = mod.kanbanList("*")[0]!;
-    expect((card as any).retry_count).toBe(1);
-    expect((card as any).next_retry_at).toBeTruthy();
-    expect(new Date((card as any).next_retry_at).getTime()).toBeGreaterThan(Date.now());
+    expect(card.retry_count).toBe(1);
+    const retryAt = card.next_retry_at;
+    expect(retryAt).toBeTruthy();
+    if (retryAt === null) throw new Error("expected next_retry_at to be set");
+    expect(new Date(retryAt).getTime()).toBeGreaterThan(Date.now());
     expect(card.status).toBe("queued");
   });
 
@@ -288,13 +290,17 @@ describe("kanbanRetryOrFail (#1411)", () => {
     mod.kanbanRunning(id);
     mod.kanbanRetryOrFail(id, "first");
     const c1 = mod.kanbanList("*")[0]!;
-    const d1 = new Date((c1 as any).next_retry_at).getTime();
+    const d1raw = c1.next_retry_at;
+    if (d1raw === null) throw new Error("expected next_retry_at to be set");
+    const d1 = new Date(d1raw).getTime();
     // Run again
     mod.kanbanRunning(id);
     mod.kanbanRetryOrFail(id, "second");
     const c2 = mod.kanbanList("*")[0]!;
-    const d2 = new Date((c2 as any).next_retry_at).getTime();
-    expect((c2 as any).retry_count).toBe(2);
+    const d2raw = c2.next_retry_at;
+    if (d2raw === null) throw new Error("expected next_retry_at to be set");
+    const d2 = new Date(d2raw).getTime();
+    expect(c2.retry_count).toBe(2);
     expect(d2 - d1).toBeGreaterThanOrEqual(9_000); // 10s backoff vs 20s backoff
   });
 
@@ -324,9 +330,11 @@ describe("kanbanRetryOrFail (#1411)", () => {
     vi.doMock("../../paths.js", () => ({ abtarsHome: () => TEST_HOME }));
     const mod2 = await import("./kanban-board.js");
     const card = mod2.kanbanList("*")[0]!;
-    expect((card as any).retry_count).toBe(1);
-    expect((card as any).next_retry_at).toBeTruthy();
-    expect(new Date((card as any).next_retry_at).getTime()).toBeGreaterThan(Date.now());
+    expect(card.retry_count).toBe(1);
+    const reopenRetryAt = card.next_retry_at;
+    expect(reopenRetryAt).toBeTruthy();
+    if (reopenRetryAt === null) throw new Error("expected next_retry_at to survive reopen");
+    expect(new Date(reopenRetryAt).getTime()).toBeGreaterThan(Date.now());
   });
 });
 
@@ -342,7 +350,7 @@ describe("kanbanPromoteDueRetry (#1546)", () => {
     const card = mod.kanbanGetCard(id)!;
     expect(card.status).toBe("running");
     expect(card.next_retry_at).toBeNull();
-    // #1760 — filed: KanbanCard omits retry_count; production preserves it but the interface does not expose it yet.
+    expect(card.retry_count).toBe(before.retry_count); // #1546: promotion clears only the marker
     expect(card.error).toBe(before.error); // preserved
   });
 

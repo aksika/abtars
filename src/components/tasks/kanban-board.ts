@@ -92,6 +92,8 @@ export interface KanbanCard {
   delivery_ready: number;
   /** #1516: total agent budget (1 Orc + workers) for scheduled projects. */
   max_agents: number | null;
+  /** #1539: durable retry counter; written by kanbanRetryOrFail, preserved by kanbanPromoteDueRetry. */
+  retry_count: number;
   /** #1539: durable retry backoff marker; only cleared by the promotion helper. */
   next_retry_at: string | null;
 }
