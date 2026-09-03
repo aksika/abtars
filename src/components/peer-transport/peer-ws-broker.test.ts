@@ -542,10 +542,14 @@ describe("PeerWsBroker", () => {
       p1.client.close();
       p1.serverConn.close();
       p1.server.close();
-      await new Promise(r => setTimeout(r, 200));
 
-      // Verify gen 1 is fully gone before attaching gen 2
-      expect(broker._getOutbox("kp")).toBeUndefined();
+      // Verify gen 1 is fully gone before attaching gen 2. Quiescent peer-state
+      // deletion runs inside the broker's close handler, which fires only after
+      // the handshake round trip — poll instead of sleeping.
+      await vi.waitFor(
+        () => expect(broker._getOutbox("kp")).toBeUndefined(),
+        { timeout: 5_000, interval: 20 },
+      );
 
       // Attach gen 2
       const p2 = await connectedPair();
@@ -675,7 +679,12 @@ describe("PeerWsBroker", () => {
     // Close the OLD socket. Its close handler is scoped to its own generation and
     // must not remove the newer (still open) registration.
     pairA.client.close();
-    await new Promise(r => setTimeout(r, 100));
+    // The broker's close handler is registered inside attachSocket — before
+    // this test's listener — and ws sockets are EventEmitters, so listener
+    // invocation order guarantees detachSocket has run when this await resolves.
+    // Attaching .once synchronously after close() is safe: the close event can
+    // only fire asynchronously after the handshake round trip.
+    await new Promise<void>((resolve) => pairA.client.once("close", () => resolve()));
 
     expect(broker.hasRoute("kp")).toBe(true);
     expect(broker.getConnectedPeers()).toEqual(["kp"]);
@@ -756,13 +765,16 @@ describe("PeerWsBroker", () => {
 
     const { server, client } = await connectedPair();
     broker.attachSocket({ peer: "kp", direction: "outbound", socket: client });
-    await new Promise(r => setTimeout(r, 50));
+    // attach emits inline — no wait needed for the available event
     expect(listener).toHaveBeenCalledWith({ type: "available", peer: "kp" });
 
-    // Close the socket — should emit unavailable
+    // Close the socket — should emit unavailable. The close event fires only
+    // after the handshake round trip, so poll instead of sleeping.
     client.close();
-    await new Promise(r => setTimeout(r, 100));
-    expect(listener).toHaveBeenCalledWith({ type: "unavailable", peer: "kp" });
+    await vi.waitFor(
+      () => expect(listener).toHaveBeenCalledWith({ type: "unavailable", peer: "kp" }),
+      { timeout: 5_000, interval: 20 },
+    );
     server.close();
   });
 
