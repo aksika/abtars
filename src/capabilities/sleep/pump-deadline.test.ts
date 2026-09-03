@@ -310,7 +310,7 @@ describe("createSleepHandle provider pump terminal settlement (#1517)", () => {
     handle.startScheduled();
     await settleTicks();
 
-    expect(client.sleep.runtime.complete).toHaveBeenCalledWith("lease-1", "c1", "");
+    expect(client.sleep.runtime.complete).toHaveBeenCalledWith("lease-1", "c1", "", "empty");
     expect(client.sleep.runtime.fail).not.toHaveBeenCalled();
     // cycle_end quarantine is normal teardown; a provider-failure quarantine is not.
     expect(quarantineSession).not.toHaveBeenCalledWith("d-night-1", "provider_failed");
@@ -337,7 +337,7 @@ describe("createSleepHandle provider pump terminal settlement (#1517)", () => {
     handle.startScheduled();
     await settleTicks();
 
-    expect(client.sleep.runtime.complete).toHaveBeenCalledWith("lease-1", "c1", "");
+    expect(client.sleep.runtime.complete).toHaveBeenCalledWith("lease-1", "c1", "", "no_reply");
   });
 
   it("#1651 v2: a reaction-only turn is a chat control signal, not curation content — settled as an empty completion", async () => {
@@ -361,7 +361,7 @@ describe("createSleepHandle provider pump terminal settlement (#1517)", () => {
     handle.startScheduled();
     await settleTicks();
 
-    expect(client.sleep.runtime.complete).toHaveBeenCalledWith("lease-1", "c1", "");
+    expect(client.sleep.runtime.complete).toHaveBeenCalledWith("lease-1", "c1", "", "reaction");
     expect(client.sleep.runtime.fail).not.toHaveBeenCalled();
   });
 

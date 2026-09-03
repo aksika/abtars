@@ -259,7 +259,19 @@ export class AbtarsSignedWssClient implements AbmindClientLike {
       runtime: {
         open: (id, key) => this.call("sleep.runtime.open", { providerInstanceId: id }, key) as Promise<{ status: string; leaseId?: string; expiresAt?: number }>,
         next: (leaseId, waitMs) => this.call("sleep.runtime.next", { leaseId, waitMs }) as Promise<{ status: string; heartbeat?: true; completionRequest?: { completionId: string; runId: string; stepId: string; prompt: string; deadline: number } }>,
-        complete: (leaseId, completionId, text, key) => this.call("sleep.runtime.complete", { leaseId, completionId, text }, key) as Promise<{ status: string }>,
+        complete: (leaseId: string, completionId: string, text: string, outcomeOrKey?: string, key?: string) => {
+          let outcome: string | undefined;
+          let actualKey: string | undefined;
+          if (outcomeOrKey && ["text", "reaction", "no_reply", "empty"].includes(outcomeOrKey)) {
+            outcome = outcomeOrKey;
+            actualKey = key;
+          } else {
+            actualKey = outcomeOrKey;
+          }
+          const payload: Record<string, unknown> = { leaseId, completionId, text };
+          if (outcome) payload["outcome"] = outcome;
+          return this.call("sleep.runtime.complete", payload, actualKey) as Promise<{ status: string }>;
+        },
         fail: (leaseId: string, completionId: string, code: string, failure?: unknown, key?: string) => {
           // Support both legacy fail(leaseId, completionId, code, key) and new fail(..., failure, key)
           let actualFailure: unknown;

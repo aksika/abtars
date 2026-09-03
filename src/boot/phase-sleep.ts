@@ -62,7 +62,13 @@ function registerSleepCycleDispatcher(ctx: BootCtx): void {
     }
 
     const outcome = await started.completion;
+    // #1752 R11: essential vs non-essential failures must be reported distinctly
+    const ESSENTIAL_STEPS = new Set(["daily-summary", "retrospective", "extract-memories"]);
+    const essentialFailed = outcome.failedSteps.filter(s => ESSENTIAL_STEPS.has(s));
+    const nonEssentialFailed = outcome.failedSteps.filter(s => !ESSENTIAL_STEPS.has(s));
     const failed = outcome.failedSteps.length > 0 ? ` (failed: ${outcome.failedSteps.join(", ")})` : "";
+    const essentialFailedStr = essentialFailed.length > 0 ? ` (failed: ${essentialFailed.join(", ")})` : "";
+    const nonEssentialFailedStr = nonEssentialFailed.length > 0 ? ` (failed: ${nonEssentialFailed.join(", ")})` : "";
     switch (outcome.status) {
       case "completed":
         return { status: "ok" as const, detail: "sleep cycle completed" };
@@ -72,8 +78,18 @@ function registerSleepCycleDispatcher(ctx: BootCtx): void {
         return { status: "noop" as const, detail: "no messages since last sleep" };
       case "cancelled":
         return { status: "failed" as const, error: `sleep cycle cancelled${failed}` };
-      case "failed":
-        return { status: "failed" as const, error: `essential sleep steps failed${failed}` };
+      case "failed": {
+        if (essentialFailed.length > 0 && nonEssentialFailed.length > 0) {
+          return { status: "failed" as const, error: `sleep steps failed (essential: ${essentialFailed.join(", ")}; non-essential: ${nonEssentialFailed.join(", ")})` };
+        }
+        if (essentialFailed.length > 0) {
+          return { status: "failed" as const, error: `essential sleep steps failed${essentialFailedStr}` };
+        }
+        if (nonEssentialFailed.length > 0) {
+          return { status: "failed" as const, error: `non-essential sleep steps failed${nonEssentialFailedStr}` };
+        }
+        return { status: "failed" as const, error: `sleep steps failed${failed}` };
+      }
       default:
         return { status: "failed" as const, error: `sleep cycle outcome could not be observed${failed}` };
     }

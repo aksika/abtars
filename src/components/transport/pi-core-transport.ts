@@ -16,7 +16,7 @@ import type { OutputObserver } from "../session-output-feed.js";
 import type { DurableContextProviderHolder } from "./pi-core-context.js";
 import { resolveCandidateModel, deriveCacheIdentity } from "./pi-ai-adapter.js";
 import { candidateKey } from "./model-candidates.js";
-import { PiCoreToolExecutionError, buildTerminalDiagnostic } from "./tool-failure-diagnostic.js";
+import { PiCoreToolExecutionError, buildTerminalDiagnostic, TERMINAL_TOOL_REASONS } from "./tool-failure-diagnostic.js";
 import type { ToolFailureDiagnosticV1 } from "./tool-failure-diagnostic.js";
 import { ProviderExecutionError } from "./provider-failure.js";
 import type { ProviderTerminalFailure } from "./provider-failure.js";
@@ -690,9 +690,20 @@ export class PiCoreTransport implements IKiroTransport {
           return responseText;
         }
 
-        if (this._lastToolFailure) {
-          logInfo(TAG, `sendPrompt: empty response with terminal tool failure — throwing diagnostic`);
-          throw new PiCoreToolExecutionError(this._lastToolFailure);
+        // #1752 R8: only a genuinely terminal tool class may promote an
+        // empty final response into a thrown turn failure. A plain
+        // nonzero_exit (or policy_rejected / shell_syntax_error) was already
+        // returned to the model as content; the model saw it and chose to
+        // stop — that is not a transport failure.
+        const lastFailure: ToolFailureDiagnosticV1 | null = this._lastToolFailure;
+        if (lastFailure) {
+          const reason = (lastFailure as ToolFailureDiagnosticV1).reason;
+          const terminal = (TERMINAL_TOOL_REASONS as ReadonlySet<string>).has(reason);
+          if (terminal) {
+            logInfo(TAG, `sendPrompt: empty response with terminal tool failure (${reason}) — throwing diagnostic`);
+            throw new PiCoreToolExecutionError(lastFailure);
+          }
+          logInfo(TAG, `sendPrompt: empty response with non-terminal tool failure (${reason}) — returning "" (recording preserved)`);
         }
 
         // #1297: a committed successful output and a terminal tool failure

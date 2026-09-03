@@ -48,6 +48,20 @@ export type ToolFailureReason =
   | "peer_sandbox"
   | "unknown";
 
+/**
+ * #1752 R8: which recorded tool diagnostics may promote an empty final
+ * assistant response into a thrown terminal turn failure. A plain
+ * `nonzero_exit` (and likewise `policy_rejected` / `shell_syntax_error`,
+ * both returned to the model as content) was already surfaced — the model
+ * saw it and chose to stop — so it must not terminate the turn.
+ */
+export const TERMINAL_TOOL_REASONS: ReadonlySet<ToolFailureReason> = new Set([
+  "repeated_failure",
+  "spawn_error",
+  "timeout",
+  "aborted",
+]);
+
 const MEMORY_FAILURE_REASONS: ReadonlySet<string> = new Set([
   "memory_validation", "memory_not_found", "memory_conflict",
   "memory_unauthorized", "memory_idempotency_conflict",

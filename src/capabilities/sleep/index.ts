@@ -419,13 +419,17 @@ export function createSleepHandle(opts: SleepOpts): SleepHandle {
         // curation content; a reaction is a chat control signal, never sleep
         // domain output. The outcome is Spin's own classification — the pump
         // never recomputes one from the raw string.
-        const completion = spinResult.value.outcome === "text" ? spinResult.value.result : "";
-        if (spinResult.value.outcome !== "text") {
-          logWarn("sleep", `Step ${req.stepId} produced no text content (${spinResult.value.outcome}) — settling as an empty completion for abmind's domain retry`);
+        const outcome = spinResult.value.outcome;
+        const completion = outcome === "text" ? spinResult.value.result : "";
+        if (outcome !== "text") {
+          logWarn("sleep", `Step ${req.stepId} produced no text content (${outcome}) — settling as an empty completion for abmind's domain retry`);
         }
 
         const completeResult = await runUntilDeadline(
-          () => client.sleep.runtime.complete(leaseId, req.completionId, completion),
+          () => {
+            const c = client.sleep.runtime.complete as unknown as (a: string, b: string, c: string, d?: string, e?: string) => Promise<{ status: string }>;
+            return outcome === "text" ? c(leaseId, req.completionId, completion) : c(leaseId, req.completionId, completion, outcome);
+          },
           settlementDeadlineAt(req.deadline),
         );
         if (completeResult.kind === "timed_out") {

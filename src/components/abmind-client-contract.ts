@@ -102,7 +102,7 @@ export interface SleepEventsResultLike {
 export interface AbmindSleepRuntimeLike {
   open(providerInstanceId: string, idempotencyKey?: string): Promise<SleepStartResultLike & { leaseId?: string; expiresAt?: number }>;
   next(leaseId: string, waitMs?: number): Promise<SleepRuntimeNextLike>;
-  complete(leaseId: string, completionId: string, text: string, idempotencyKey?: string): Promise<{ status: string }>;
+  complete(leaseId: string, completionId: string, text: string, outcomeOrKey?: string, idempotencyKey?: string): Promise<{ status: string }>;
   fail(leaseId: string, completionId: string, code: string, failure?: { cause: string; detail?: string; commandFingerprint?: string }, idempotencyKey?: string): Promise<{ status: string }>;
   close(leaseId: string, idempotencyKey?: string): Promise<{ status: string }>;
 }
