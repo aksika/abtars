@@ -60,7 +60,9 @@ function cardFor(runId: string, cardId: number): KanbanCard {
     delivery_receipt: null,
     delivery_ready: 1,
     max_agents: null,
+    retry_count: 0,
     next_retry_at: null,
+    progress: null,
   };
 }
 
@@ -230,7 +232,9 @@ describe("scheduled-occurrence-gate four-state", () => {
       delivery_receipt: null,
       delivery_ready: 1,
       max_agents: null,
+      retry_count: 0,
       next_retry_at: null,
+      progress: null,
     };
     expect(gate.inspectScheduledOccurrence(card).state).toBe("not_scheduled");
     expect(gate.scheduledOccurrenceState(card)).toBe("not_scheduled");

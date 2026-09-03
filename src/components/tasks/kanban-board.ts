@@ -96,6 +96,8 @@ export interface KanbanCard {
   retry_count: number;
   /** #1539: durable retry backoff marker; only cleared by the promotion helper. */
   next_retry_at: string | null;
+  /** #907: debounced worker-progress snapshot (JSON string); written by kanbanProgress, read by nobody. */
+  progress: string | null;
 }
 
 let _db: SqliteDb | null = null;
