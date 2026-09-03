@@ -61,7 +61,7 @@ async function startGeneration(coordinator: unknown): Promise<void> {
   await scheduler.start();
 }
 
-async function fakeCoordinator(): Promise<Array<{ projectCardId: number; goal: string }>> {
+async function fakeCoordinator(): Promise<Array<{ projectCardId: number; goal: string; intentKind: "contract_authoring" | "project_execution" }>> {
   const claims: Array<{ projectCardId: number; goal: string; intentKind: "contract_authoring" | "project_execution" }> = [];
   await startGeneration({
     getStore: () => ({ countStartedAuthoringTurns: () => 0, countConsecutiveUnstartableAuthoringTurns: () => 0, lastAuthoringClaimAt: () => null, lastAuthoringFailureCode: () => null }),
@@ -259,7 +259,7 @@ describe("scheduled-project-runner #1516", () => {
 
     const err = await pending.catch((e: unknown) => e);
     expect(err).toBeInstanceOf(mod.SupervisedProjectFailure);
-    const failure = err as mod.SupervisedProjectFailure;
+    const failure = err as InstanceType<typeof mod.SupervisedProjectFailure>;
     expect(failure.diagnostic.category).toBe("supervision");
     expect(failure.diagnostic.code).toBe("lane_late_completion");
     const lane = failure.diagnostic.context!.lanes[0]!;
@@ -316,7 +316,7 @@ describe("scheduled-project-runner #1516", () => {
 
     const err = await pending.catch((e: unknown) => e);
     expect(err).toBeInstanceOf(mod.SupervisedProjectFailure);
-    const failure = err as mod.SupervisedProjectFailure;
+    const failure = err as InstanceType<typeof mod.SupervisedProjectFailure>;
     expect(failure.diagnostic.category).toBe("supervision");
     expect(failure.diagnostic.code).toBe("criterion_unevidenced");
     expect(failure.diagnostic.context!.lanes[0]!.missingEvidence).toContain("c1");
@@ -489,7 +489,7 @@ describe("scheduled-project-runner #1516", () => {
 
     const err = await pending.catch((e: unknown) => e);
     expect(err).toBeInstanceOf(mod.SupervisedProjectFailure);
-    const failure = err as mod.SupervisedProjectFailure;
+    const failure = err as InstanceType<typeof mod.SupervisedProjectFailure>;
     expect(failure.diagnostic.category).toBe("supervision");
     expect(failure.diagnostic.code).toBe("contract_uncovered");
     expect(failure.diagnostic.message).toContain("c4");
@@ -536,7 +536,7 @@ describe("scheduled-project-runner #1516", () => {
 
     const err = await pending.catch((e: unknown) => e);
     expect(err).toBeInstanceOf(mod.SupervisedProjectFailure);
-    const failure = err as mod.SupervisedProjectFailure;
+    const failure = err as InstanceType<typeof mod.SupervisedProjectFailure>;
     expect(failure.diagnostic.category).toBe("supervision");
     expect(failure.diagnostic.code).toBe("lane_late_completion");
   });
@@ -581,7 +581,7 @@ describe("scheduled-project-runner #1516", () => {
 
     const err = await pending.catch((e: unknown) => e);
     expect(err).toBeInstanceOf(mod.SupervisedProjectFailure);
-    const failure = err as mod.SupervisedProjectFailure;
+    const failure = err as InstanceType<typeof mod.SupervisedProjectFailure>;
     expect(failure.diagnostic.category).toBe("supervision");
     expect(failure.diagnostic.code).toBe("lane_late_completion");
   });
@@ -627,7 +627,7 @@ describe("scheduled-project-runner #1516", () => {
 
     const err = await pending.catch((e: unknown) => e);
     expect(err).toBeInstanceOf(mod.SupervisedProjectFailure);
-    const failure = err as mod.SupervisedProjectFailure;
+    const failure = err as InstanceType<typeof mod.SupervisedProjectFailure>;
     expect(failure.diagnostic.category).toBe("supervision");
     expect(failure.diagnostic.code).toBe("project_blocked");
     expect(failure.diagnostic.message).toContain("coverage_undeterminable");
@@ -709,7 +709,7 @@ describe("scheduled-project-runner #1516", () => {
 
     const err = await pending.catch((e: unknown) => e);
     expect(err).toBeInstanceOf(mod.SupervisedProjectFailure);
-    const failure = err as mod.SupervisedProjectFailure;
+    const failure = err as InstanceType<typeof mod.SupervisedProjectFailure>;
     expect(failure.diagnostic.code).toBe("project_blocked");
     expect(failure.diagnostic.message).toContain("insufficient_evidence");
     expect(failure.diagnostic.code).not.toBe("contract_uncovered");
@@ -730,7 +730,7 @@ describe("scheduled-project-runner #1516", () => {
 
     const err = await pending.catch((e: unknown) => e);
     expect(err).toBeInstanceOf(mod.SupervisedProjectFailure);
-    const failure = err as mod.SupervisedProjectFailure;
+    const failure = err as InstanceType<typeof mod.SupervisedProjectFailure>;
     // no Orc decision with action=blocked → legacy coverage/lane selection still applies
     expect(failure.diagnostic.code).toBe("contract_uncovered");
   });
@@ -739,13 +739,13 @@ describe("scheduled-project-runner #1516", () => {
 describe("scheduled-project-runner #1546 reattach routing", () => {
   // #1554: seed FIRST, start the generation after — the boot scan must not
   // observe the fixture (the runner's wake owns the claim timing).
-  async function seedExecutingReattach(overrides: Record<string, unknown> = {}): Promise<{ root: number; store: reviewStoreMod.ProjectReviewStore; claims: Array<{ projectCardId: number; goal: string }> }> {
+  async function seedExecutingReattach(overrides: Record<string, unknown> = {}): Promise<{ root: number; store: InstanceType<typeof reviewStoreMod.ProjectReviewStore>; claims: Array<{ projectCardId: number; goal: string }> }> {
     const { root, store } = await seedReattach({ state: "executing", ...overrides });
     const claims = await fakeCoordinator();
     return { root, store, claims };
   }
 
-  async function seedReattach(opts: { state?: string; cardStatus?: string; retryMarker?: string | null }): Promise<{ root: number; store: reviewStoreMod.ProjectReviewStore }> {
+  async function seedReattach(opts: { state?: string; cardStatus?: string; retryMarker?: string | null }): Promise<{ root: number; store: InstanceType<typeof reviewStoreMod.ProjectReviewStore> }> {
     const root = kanban.kanbanEnqueue("Daily Ai", "task", "daily-ai_1", { type: "O", maxAgents: 4 });
     const store = new reviewStoreMod.ProjectReviewStore();
     if (opts.state) {
@@ -910,7 +910,7 @@ describe("scheduled-project-runner #1546 reattach routing", () => {
     expect(card.status).toBe("queued");
     expect(card.next_retry_at).not.toBeNull();
 
-    control.signalCancel("test");
+    control.signalCancel("operator");
     await expect(pending).rejects.toThrow(/cancelled/);
   });
 });

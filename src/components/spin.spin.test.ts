@@ -108,7 +108,7 @@ vi.mock("./tasks/kanban-channel.js", () => ({
 // real cards into the production DB, which the running bridge reconciler then delivers to
 // Telegram as `Task "X" complete.` spam (boom×60, first×60, init×140, …).
 let _nextId = 1;
-interface MockCard { id: number; title: string; source: string; status: string; type: string; [key: string]: unknown; }
+interface MockCard { id: number; title: string; source: string; status: string; type: string; next_retry_at?: string | null; [key: string]: unknown; }
 const _cards = new Map<number, MockCard>();
 // #1629: configurable root resolution — defaults to identity (card is its own
 // root). Provenance tests install a parent-chain walker or a failure stub.
@@ -358,7 +358,7 @@ describe("spin(spec) — unified session API (#1271)", () => {
   describe("defensive guards (Layer A in spin) — #1327", () => {
     it("spin with unknown type returns a fail-soft SpinResult (no crash, no unhandled rejection)", async () => {
       spin.setRuntime(makeRuntime() as any);
-      const r = await spin.spin({ type: "bug" as any, prompt: "anything", await: true, userId: "aksika", platform: "telegram", source: "user" });
+      const r = await spin.spin({ settlementOwner: "spin", type: "bug" as any, prompt: "anything", await: true, userId: "aksika", platform: "telegram", source: "user" });
       expect(r.sessionId).toBe("");
       expect(r.result).toMatch(/\[SYSTEM BUG\] invalid type for Spin dispatch: "bug" is not a SessionType/);
     });
@@ -369,14 +369,14 @@ describe("spin(spec) — unified session API (#1271)", () => {
       // we re-mutate to simulate the real-world "type=bug" card that was the trigger).
       const cardId = kanbanEnqueue("stale card", "agent");
       _cards.get(cardId)!.type = "bug";
-      const r = await spin.spin({ type: "bug" as any, goal: "stale", cardId, await: true });
+      const r = await spin.spin({ settlementOwner: "spin", type: "bug" as any, goal: "stale", cardId, await: true });
       expect(r.result).toMatch(/invalid type for Spin dispatch/);
       expect(_cards.get(cardId)!.status).toBe("failed");
     });
 
     it("spin with valid type still works (regression guard)", async () => {
       spin.setRuntime(makeRuntime() as any);
-      const r = await spin.spin({ type: "A", prompt: "hi", await: true, userId: "aksika", platform: "telegram", source: "user" });
+      const r = await spin.spin({ settlementOwner: "spin", type: "A", prompt: "hi", await: true, userId: "aksika", platform: "telegram", source: "user" });
       expect(r.sessionId).toBeTruthy();
       expect(r.result).not.toMatch(/\[SYSTEM BUG\]/);
     });
@@ -385,7 +385,7 @@ describe("spin(spec) — unified session API (#1271)", () => {
   describe("session resolution (no type branches)", () => {
     it("A resolves to active session (auto-create Main)", async () => {
       spin.setRuntime(makeRuntime() as any);
-      const r = await spin.spin({ type: "A", prompt: "hi", userId: "aksika", platform: "telegram", await: true });
+      const r = await spin.spin({ settlementOwner: "spin", type: "A", prompt: "hi", userId: "aksika", platform: "telegram", await: true });
       expect(r.sessionId).toBeTruthy();
       const usedSession = spin.getSessionById(r.sessionId);
       expect(usedSession).toBeDefined();
@@ -395,8 +395,8 @@ describe("spin(spec) — unified session API (#1271)", () => {
 
     it("A persists across turns — same active session id, not response-terminated (#1287)", async () => {
       spin.setRuntime(makeRuntime() as any);
-      const r1 = await spin.spin({ type: "A", prompt: "turn 1", userId: "aksika", platform: "telegram", await: true });
-      const r2 = await spin.spin({ type: "A", prompt: "turn 2", userId: "aksika", platform: "telegram", await: true });
+      const r1 = await spin.spin({ settlementOwner: "spin", type: "A", prompt: "turn 1", userId: "aksika", platform: "telegram", await: true });
+      const r2 = await spin.spin({ settlementOwner: "spin", type: "A", prompt: "turn 2", userId: "aksika", platform: "telegram", await: true });
       // A is external-terminated: the Main session survives a completed turn, so the
       // second turn reuses the SAME session (stable id → continuous conversation context).
       expect(r2.sessionId).toBe(r1.sessionId);
@@ -411,15 +411,15 @@ describe("spin(spec) — unified session API (#1271)", () => {
 
     it("O reuses the one visible Orc session (singleton)", async () => {
       spin.setRuntime(makeRuntime() as any);
-      const r1 = await spin.spin({ type: "O", prompt: "task 1", await: true });
-      const r2 = await spin.spin({ type: "O", prompt: "task 2", await: true });
+      const r1 = await spin.spin({ settlementOwner: "spin", type: "O", prompt: "task 1", await: true });
+      const r2 = await spin.spin({ settlementOwner: "spin", type: "O", prompt: "task 2", await: true });
       expect(r1.sessionId).toBe(r2.sessionId);
     });
 
     it("S creates fresh session each time (transient)", async () => {
       spin.setRuntime(makeRuntime() as any);
-      const r1 = await spin.spin({ type: "S", prompt: "x", await: true });
-      const r2 = await spin.spin({ type: "S", prompt: "y", await: true });
+      const r1 = await spin.spin({ settlementOwner: "spin", type: "S", prompt: "x", await: true });
+      const r2 = await spin.spin({ settlementOwner: "spin", type: "S", prompt: "y", await: true });
       expect(r1.sessionId).not.toBe(r2.sessionId);
       // S should be deleted from Map after call
       expect(spin.getSessionById(r1.sessionId)).toBeUndefined();
@@ -438,8 +438,8 @@ describe("spin(spec) — unified session API (#1271)", () => {
 
       spin.setRuntime(runtime as any);
 
-      const r1 = await spin.spin({ type: "D", sessionId: dSession.id, prompt: "step1", await: true });
-      const r2 = await spin.spin({ type: "D", sessionId: dSession.id, prompt: "step2", await: true });
+      const r1 = await spin.spin({ settlementOwner: "spin", type: "D", sessionId: dSession.id, prompt: "step1", await: true });
+      const r2 = await spin.spin({ settlementOwner: "spin", type: "D", sessionId: dSession.id, prompt: "step2", await: true });
       expect(r1.sessionId).toBe(dSession.id);
       expect(r2.sessionId).toBe(dSession.id);
       // Persistent send uses session.transport.sendPrompt, not runtime.complete
@@ -455,7 +455,7 @@ describe("spin(spec) — unified session API (#1271)", () => {
       spin.setRuntime(runtime as any);
 
       const intent = { mode: "required_unavailable" as const, reason: "record_failed" as const };
-      const r = await spin.spin({ type: "D", sessionId: dSession.id, prompt: "step1", durableContextIntent: intent, await: true });
+      const r = await spin.spin({ settlementOwner: "spin", type: "D", sessionId: dSession.id, prompt: "step1", durableContextIntent: intent, await: true });
       expect(r.sessionId).toBe(dSession.id);
       const context = (transport.sendPrompt as any).mock.calls[0]?.[3];
       expect(context.durableContextIntent).toEqual(intent);
@@ -469,7 +469,7 @@ describe("spin(spec) — unified session API (#1271)", () => {
       // Register master session (sets user-keyed transport on the A session)
       spin.registerMasterSession({ userId: "aksika", chatId: 111, platform: "telegram", transport: userKeyedTransport });
 
-      const r = await spin.spin({ type: "A", prompt: "hi", userId: "aksika", platform: "telegram", await: true });
+      const r = await spin.spin({ settlementOwner: "spin", type: "A", prompt: "hi", userId: "aksika", platform: "telegram", await: true });
       // The session used by spin() must have kept the user-keyed transport
       const usedSession = spin.getSessionById(r.sessionId)!;
       expect(usedSession.transport).toBe(userKeyedTransport);
@@ -481,8 +481,8 @@ describe("spin(spec) — unified session API (#1271)", () => {
   describe("kanban card lifecycle", () => {
     it("goal creates a card; prompt-only does not", async () => {
       spin.setRuntime(makeRuntime() as any);
-      const withGoal = await spin.spin({ type: "T", goal: "do something", userId: "aksika", platform: "telegram", source: "user", await: true });
-      const noGoal = await spin.spin({ type: "S", prompt: "background", await: true });
+      const withGoal = await spin.spin({ settlementOwner: "spin", type: "T", goal: "do something", userId: "aksika", platform: "telegram", source: "user", await: true });
+      const noGoal = await spin.spin({ settlementOwner: "spin", type: "S", prompt: "background", await: true });
       expect(withGoal.cardId).toBeDefined();
       expect(noGoal.cardId).toBeUndefined();
     });
@@ -524,7 +524,7 @@ describe("spin(spec) — unified session API (#1271)", () => {
       projectSupervision.set(cardId, { state: "executing" });
       spin.setRuntime(makeRuntime({ completeResponse: "worker finished" }) as any);
 
-      await spin.spin({ type: "O", cardId, prompt: "run project", callbackPeer: "kp", await: true });
+      await spin.spin({ settlementOwner: "spin", type: "O", cardId, prompt: "run project", callbackPeer: "kp", await: true });
       await new Promise(resolve => setTimeout(resolve, 0));
 
       const card = (await import("./tasks/kanban-board.js") as any)._kanbanGetCardRaw(cardId);
@@ -537,7 +537,7 @@ describe("spin(spec) — unified session API (#1271)", () => {
       projectStoreReadFails = true;
       spin.setRuntime(makeRuntime({ completeResponse: "worker finished" }) as any);
 
-      await spin.spin({ type: "O", cardId, prompt: "run project", callbackPeer: "kp", await: true });
+      await spin.spin({ settlementOwner: "spin", type: "O", cardId, prompt: "run project", callbackPeer: "kp", await: true });
       await new Promise(resolve => setTimeout(resolve, 0));
 
       const card = (await import("./tasks/kanban-board.js") as any)._kanbanGetCardRaw(cardId);
@@ -547,7 +547,7 @@ describe("spin(spec) — unified session API (#1271)", () => {
   });
 
   describe("#1599 — worker criteria outcome decides card status", () => {
-    function makeEnvelope(criteria: Array<{ status: string }>): any {
+    function makeEnvelope(criteria: Array<{ criterion_id: string; status: string; evidence_ids: string[] }>): any {
       return {
         schema_version: 1,
         attempt: { id: "a_1", ordinal: 1, contract_id: "c_1", contract_digest: "d", executor_kind: "agent", executor_id: "e", started_at: "", finished_at: "" },
@@ -575,7 +575,7 @@ describe("spin(spec) — unified session API (#1271)", () => {
       const ctrl = { generation: 1, markTerminal: () => {}, requestCancel: () => Promise.resolve("cancelled" as const), setCardId: () => {}, bind: () => {}, cancelled: false, terminal: false, terminalOutcome: undefined } as never;
       spin.setRuntime(makeRuntime({ completeResponse: "worker finished" }) as any);
 
-      await spin.spin({ type: "W", cardId, contractId: "c_1", attemptId: "a_1", executionControl: ctrl, goal: "run lane", callbackPeer: "kp", await: true });
+      await spin.spin({ settlementOwner: "spin", type: "W", cardId, contractId: "c_1", attemptId: "a_1", executionControl: ctrl, goal: "run lane", callbackPeer: "kp", await: true });
       await new Promise(resolve => setTimeout(resolve, 0));
 
       const card = (await import("./tasks/kanban-board.js") as any)._kanbanGetCardRaw(cardId);
@@ -595,7 +595,7 @@ describe("spin(spec) — unified session API (#1271)", () => {
       const ctrl = { generation: 1, markTerminal: () => {}, requestCancel: () => Promise.resolve("cancelled" as const), setCardId: () => {}, bind: () => {}, cancelled: false, terminal: false, terminalOutcome: undefined } as never;
       spin.setRuntime(makeRuntime({ completeResponse: "worker finished" }) as any);
 
-      await spin.spin({ type: "W", cardId, contractId: "c_1", attemptId: "a_1", executionControl: ctrl, goal: "run lane", await: true });
+      await spin.spin({ settlementOwner: "spin", type: "W", cardId, contractId: "c_1", attemptId: "a_1", executionControl: ctrl, goal: "run lane", await: true });
       await new Promise(resolve => setTimeout(resolve, 0));
 
       const card = (await import("./tasks/kanban-board.js") as any)._kanbanGetCardRaw(cardId);
@@ -618,7 +618,7 @@ describe("spin(spec) — unified session API (#1271)", () => {
       const ctrl = { generation: 1, markTerminal: () => {}, requestCancel: () => Promise.resolve("cancelled" as const), setCardId: () => {}, bind: () => {}, cancelled: false, terminal: false, terminalOutcome: undefined } as never;
       spin.setRuntime(makeRuntime({ completeResponse: "worker finished" }) as any);
 
-      await spin.spin({ type: "W", cardId, contractId: "c_1", attemptId: "a_1", executionControl: ctrl, goal: "run lane", await: true });
+      await spin.spin({ settlementOwner: "spin", type: "W", cardId, contractId: "c_1", attemptId: "a_1", executionControl: ctrl, goal: "run lane", await: true });
       await new Promise(resolve => setTimeout(resolve, 0));
 
       const card = (await import("./tasks/kanban-board.js") as any)._kanbanGetCardRaw(cardId);
@@ -639,7 +639,7 @@ describe("spin(spec) — unified session API (#1271)", () => {
       const ctrl = { generation: 1, markTerminal: () => {}, requestCancel: () => Promise.resolve("cancelled" as const), setCardId: () => {}, bind: () => {}, cancelled: false, terminal: false, terminalOutcome: undefined } as never;
       spin.setRuntime(makeRuntime({ completeResponse: "worker finished" }) as any);
 
-      await spin.spin({ type: "W", cardId, contractId: "c_1", attemptId: "a_1", executionControl: ctrl, goal: "run lane", await: true });
+      await spin.spin({ settlementOwner: "spin", type: "W", cardId, contractId: "c_1", attemptId: "a_1", executionControl: ctrl, goal: "run lane", await: true });
       await new Promise(resolve => setTimeout(resolve, 0));
 
       const card = (await import("./tasks/kanban-board.js") as any)._kanbanGetCardRaw(cardId);
@@ -651,7 +651,7 @@ describe("spin(spec) — unified session API (#1271)", () => {
       const cardId = kanbanEnqueue("plain lane", "peer");
       spin.setRuntime(makeRuntime({ completeResponse: "worker finished" }) as any);
 
-      await spin.spin({ type: "W", cardId, goal: "run lane", await: true });
+      await spin.spin({ settlementOwner: "spin", type: "W", cardId, goal: "run lane", await: true });
       await new Promise(resolve => setTimeout(resolve, 0));
 
       const card = (await import("./tasks/kanban-board.js") as any)._kanbanGetCardRaw(cardId);
@@ -663,7 +663,7 @@ describe("spin(spec) — unified session API (#1271)", () => {
       const cardId = kanbanEnqueue("unreadable lane", "peer");
       spin.setRuntime(makeRuntime({ completeResponse: "worker finished" }) as any);
 
-      await spin.spin({ type: "W", cardId, contractId: "c_1", goal: "run lane", callbackPeer: "kp", await: true });
+      await spin.spin({ settlementOwner: "spin", type: "W", cardId, contractId: "c_1", goal: "run lane", callbackPeer: "kp", await: true });
       await new Promise(resolve => setTimeout(resolve, 0));
 
       const card = (await import("./tasks/kanban-board.js") as any)._kanbanGetCardRaw(cardId);
@@ -685,7 +685,7 @@ describe("spin(spec) — unified session API (#1271)", () => {
     it("returns an empty provider response verbatim, never a placeholder", async () => {
       spin.setRuntime(makeRuntime({ sendPromptImpl: async () => "" }) as any);
 
-      const r = await spin.spin({ type: "A", prompt: "hi", userId: "aksika", platform: "telegram", await: true });
+      const r = await spin.spin({ settlementOwner: "spin", type: "A", prompt: "hi", userId: "aksika", platform: "telegram", await: true });
 
       expect(r.result).toBe("");
       expect(r.outcome).toBe("empty");
@@ -694,7 +694,7 @@ describe("spin(spec) — unified session API (#1271)", () => {
     it("reports a deliberate [NO_REPLY] as no_reply, not as empty", async () => {
       spin.setRuntime(makeRuntime({ sendPromptImpl: async () => "[NO_REPLY]" }) as any);
 
-      const r = await spin.spin({ type: "A", prompt: "hi", userId: "aksika", platform: "telegram", await: true });
+      const r = await spin.spin({ settlementOwner: "spin", type: "A", prompt: "hi", userId: "aksika", platform: "telegram", await: true });
 
       expect(r.outcome).toBe("no_reply");
     });
@@ -702,7 +702,7 @@ describe("spin(spec) — unified session API (#1271)", () => {
     it("#1651 v2: reports a reaction-only turn as reaction, not as text content", async () => {
       spin.setRuntime(makeRuntime({ sendPromptImpl: async () => "[REACT:👋]" }) as any);
 
-      const r = await spin.spin({ type: "A", prompt: "hi", userId: "aksika", platform: "telegram", await: true });
+      const r = await spin.spin({ settlementOwner: "spin", type: "A", prompt: "hi", userId: "aksika", platform: "telegram", await: true });
 
       expect(r.result).toBe("[REACT:👋]");
       expect(r.outcome).toBe("reaction");
@@ -713,7 +713,7 @@ describe("spin(spec) — unified session API (#1271)", () => {
       spin.setMemory({ recordMessage });
       spin.setRuntime(makeRuntime({ sendPromptImpl: async () => "[REACT:👋]" }) as any);
 
-      await spin.spin({ type: "A", prompt: "hi", userId: "aksika", platform: "telegram", await: true });
+      await spin.spin({ settlementOwner: "spin", type: "A", prompt: "hi", userId: "aksika", platform: "telegram", await: true });
 
       expect(recordMessage).not.toHaveBeenCalled();
     });
@@ -723,7 +723,7 @@ describe("spin(spec) — unified session API (#1271)", () => {
       const cardId = kanbanEnqueue("reaction lane", "peer");
       spin.setRuntime(makeRuntime({ sendPromptImpl: async () => "[REACT:👋]" }) as any);
 
-      await spin.spin({ type: "W", cardId, goal: "run lane", callbackPeer: "kp", await: true });
+      await spin.spin({ settlementOwner: "spin", type: "W", cardId, goal: "run lane", callbackPeer: "kp", await: true });
       await new Promise(resolve => setTimeout(resolve, 0));
 
       const card = (await import("./tasks/kanban-board.js") as any)._kanbanGetCardRaw(cardId);
@@ -738,7 +738,7 @@ describe("spin(spec) — unified session API (#1271)", () => {
       spin.setMemory({ recordMessage });
       spin.setRuntime(makeRuntime({ sendPromptImpl: async () => "" }) as any);
 
-      await spin.spin({ type: "A", prompt: "hi", userId: "aksika", platform: "telegram", await: true });
+      await spin.spin({ settlementOwner: "spin", type: "A", prompt: "hi", userId: "aksika", platform: "telegram", await: true });
 
       expect(recordMessage).not.toHaveBeenCalled();
     });
@@ -748,7 +748,7 @@ describe("spin(spec) — unified session API (#1271)", () => {
       spin.setMemory({ recordMessage });
       spin.setRuntime(makeRuntime({ sendPromptImpl: async () => "real answer" }) as any);
 
-      await spin.spin({ type: "A", prompt: "hi", userId: "aksika", platform: "telegram", await: true });
+      await spin.spin({ settlementOwner: "spin", type: "A", prompt: "hi", userId: "aksika", platform: "telegram", await: true });
 
       expect(recordMessage).toHaveBeenCalledWith(expect.objectContaining({ role: "assistant", content: "real answer" }));
     });
@@ -758,7 +758,7 @@ describe("spin(spec) — unified session API (#1271)", () => {
       const cardId = kanbanEnqueue("empty lane", "peer");
       spin.setRuntime(makeRuntime({ sendPromptImpl: async () => "" }) as any);
 
-      await spin.spin({ type: "W", cardId, goal: "run lane", callbackPeer: "kp", await: true });
+      await spin.spin({ settlementOwner: "spin", type: "W", cardId, goal: "run lane", callbackPeer: "kp", await: true });
       await new Promise(resolve => setTimeout(resolve, 0));
 
       const card = (await import("./tasks/kanban-board.js") as any)._kanbanGetCardRaw(cardId);
@@ -772,7 +772,7 @@ describe("spin(spec) — unified session API (#1271)", () => {
       spin.setRuntime(makeRuntime({ sendPromptImpl: async () => "" }) as any);
       const events: any[] = [];
 
-      await spin.spin({ type: "S", prompt: "x", await: true, onStepComplete: e => events.push(e) });
+      await spin.spin({ settlementOwner: "spin", type: "S", prompt: "x", await: true, onStepComplete: e => { events.push(e); } });
 
       expect(events[0].result).toBe("");
       expect(events[0].outcome).toBe("empty");
@@ -783,8 +783,8 @@ describe("spin(spec) — unified session API (#1271)", () => {
     it("fires with correct stepIndex on success", async () => {
       spin.setRuntime(makeRuntime({ completeResponse: "ok" }) as any);
       const events: any[] = [];
-      const r1 = await spin.spin({ type: "S", prompt: "x", await: true, onStepComplete: e => events.push(e) });
-      const r2 = await spin.spin({ type: "S", prompt: "y", await: true, onStepComplete: e => events.push(e) });
+      const r1 = await spin.spin({ settlementOwner: "spin", type: "S", prompt: "x", await: true, onStepComplete: e => { events.push(e); } });
+      const r2 = await spin.spin({ settlementOwner: "spin", type: "S", prompt: "y", await: true, onStepComplete: e => { events.push(e); } });
       expect(events.length).toBe(2);
       expect(events[0].result).toBe("ok");
       expect(events[0].durationMs).toBeGreaterThanOrEqual(0);
@@ -802,9 +802,9 @@ describe("spin(spec) — unified session API (#1271)", () => {
       }));
       spin.setRuntime(runtime as any);
       const events: any[] = [];
-      await expect(spin.spin({
+      await expect(spin.spin({ settlementOwner: "spin",
         type: "S", prompt: "x", await: true,
-        onStepComplete: e => events.push(e),
+        onStepComplete: e => { events.push(e); },
       })).rejects.toThrow("boom");
       expect(events.length).toBe(1);
       expect(events[0].error).toBeInstanceOf(Error);
@@ -817,7 +817,7 @@ describe("spin(spec) — unified session API (#1271)", () => {
       const transport = mockTransport();
       // First spin: transient D allocation with metadata → session.metadata set
       spin.setRuntime(makeRuntime() as any);
-      const r1 = await spin.spin({
+      const r1 = await spin.spin({ settlementOwner: "spin",
         type: "D",
         prompt: "init",
         userId: "aksika",
@@ -831,7 +831,7 @@ describe("spin(spec) — unified session API (#1271)", () => {
 
       // Reuse with new metadata → session.metadata must NOT change
       dSession.transport = transport;
-      await spin.spin({ type: "D", sessionId: dSession.id, prompt: "s2", userId: "aksika", platform: "telegram", metadata: { stepName: "shouldBeIgnored" }, await: true });
+      await spin.spin({ settlementOwner: "spin", type: "D", sessionId: dSession.id, prompt: "s2", userId: "aksika", platform: "telegram", metadata: { stepName: "shouldBeIgnored" }, await: true });
       expect(dSession.metadata).toEqual({ sleepNight: "2026-07-01" });
     });
   });
@@ -880,7 +880,7 @@ describe("spin(spec) — unified session API (#1271)", () => {
 
     it("sets setActiveOrcCard before, clears after (success path)", async () => {
       spin.setRuntime(makeRuntime() as any);
-      const r = await spin.spin({ type: "O", goal: "plan this", userId: "aksika", platform: "telegram", source: "user", await: true });
+      const r = await spin.spin({ settlementOwner: "spin", type: "O", goal: "plan this", userId: "aksika", platform: "telegram", source: "user", await: true });
       expect(activeOrcCardUpdates).toHaveLength(0);
       expect(r.cardId).toBeDefined();
     });
@@ -892,12 +892,12 @@ describe("spin(spec) — unified session API (#1271)", () => {
       const runtime = makeRuntime();
       spin.setRuntime(runtime as any);
       // Trigger initial create — this will get a working transport
-      const r1 = await spin.spin({ type: "O", goal: "init", userId: "aksika", platform: "telegram", source: "user", await: true });
+      const r1 = await spin.spin({ settlementOwner: "spin", type: "O", goal: "init", userId: "aksika", platform: "telegram", source: "user", await: true });
       // Now make the visible O session's transport throw on next call
       const orcSession = spin.getSessionById(r1.sessionId)!;
       orcSession.transport = transport;
 
-      await expect(spin.spin({ type: "O", goal: "fail", userId: "aksika", platform: "telegram", source: "user", await: true })).rejects.toThrow("transport died");
+      await expect(spin.spin({ settlementOwner: "spin", type: "O", goal: "fail", userId: "aksika", platform: "telegram", source: "user", await: true })).rejects.toThrow("transport died");
       // Project authority is no longer held in module-global active-card state.
       expect(activeOrcCardUpdates).toHaveLength(0);
     });
@@ -932,14 +932,14 @@ describe("spin(spec) — unified session API (#1271)", () => {
         ownershipGeneration: 1,
         ownerPeer: "kp",
         ownerInstanceId: "kp-1",
-        origin: { kind: "scheduled" as const, peer: "kp" },
+        origin: { kind: "local" as const, peer: "kp" },
       };
       const turnControl = {
         runId: "run-1751",
         complete: () => true,
         completed: { kind: "intent_satisfied" as const, code: "project_execution_handed_off" },
       };
-      const thrown: unknown = await spin.spin({
+      const thrown: unknown = await spin.spin({ settlementOwner: "spin",
         type: "O", cardId, orcContext, orcTurnControl: turnControl as never,
         goal: "hand off the project", await: true,
       }).catch((e: unknown) => e);
@@ -969,7 +969,7 @@ describe("spin(spec) — unified session API (#1271)", () => {
         ownershipGeneration: 1,
         ownerPeer: "kp",
         ownerInstanceId: "kp-1",
-        origin: { kind: "scheduled" as const, peer: "kp" },
+        origin: { kind: "local" as const, peer: "kp" },
       };
       const turnControl = {
         runId: "run-1751-b",
@@ -977,7 +977,7 @@ describe("spin(spec) — unified session API (#1271)", () => {
         completed: null,
       };
       // First: a project-scoped O turn binds its session to the project.
-      const r1 = await spin.spin({
+      const r1 = await spin.spin({ settlementOwner: "spin",
         type: "O", orcContext, orcTurnControl: turnControl as never,
         goal: "project work", await: true,
       });
@@ -987,7 +987,7 @@ describe("spin(spec) — unified session API (#1271)", () => {
       // Second: an ownerless O turn explicitly targeting the project session
       // must be fenced too — it gets a fresh one and the project session's
       // authority survives untouched.
-      const r2 = await spin.spin({ type: "O", sessionId: r1.sessionId, goal: "user turn", userId: "aksika", platform: "telegram", source: "user", await: true });
+      const r2 = await spin.spin({ settlementOwner: "spin", type: "O", sessionId: r1.sessionId, goal: "user turn", userId: "aksika", platform: "telegram", source: "user", await: true });
       expect(r2.sessionId).not.toBe(r1.sessionId);
       expect(spin.getSessionById(r1.sessionId)!.orcContext).toBeDefined();
     });
@@ -1001,13 +1001,13 @@ describe("spin(spec) — unified session API (#1271)", () => {
       });
       spin.setRuntime(makeRuntime() as any);
       // Trigger create so O session has transport
-      await spin.spin({ type: "O", goal: "init", userId: "aksika", platform: "telegram", source: "user", await: true });
+      await spin.spin({ settlementOwner: "spin", type: "O", goal: "init", userId: "aksika", platform: "telegram", source: "user", await: true });
       // Replace the O session's transport with a captor
       const sessions = spin.listAllSessions();
       const orcSession = sessions.find(s => s.id.includes("_O_"))!;
       orcSession.transport = transport;
       // Send another prompt
-      await spin.spin({ type: "O", sessionId: orcSession.id, goal: "do the work", userId: "aksika", platform: "telegram", source: "user", await: true });
+      await spin.spin({ settlementOwner: "spin", type: "O", sessionId: orcSession.id, goal: "do the work", userId: "aksika", platform: "telegram", source: "user", await: true });
       // Check the prompt that was sent
       const lastCall = (transport.sendPrompt as any).mock.calls[0];
       const sentPrompt: string = lastCall[1];
@@ -1047,7 +1047,7 @@ describe("spin(spec) — unified session API (#1271)", () => {
       };
       try {
         spin.setRuntime(makeRuntime({ completeResponse: "fake-type response" }) as any);
-        const r = await spin.spin({ type: "X" as any, prompt: "test", await: true });
+        const r = await spin.spin({ settlementOwner: "spin", type: "X" as any, prompt: "test", await: true });
         expect(r.result).toBe("fake-type response");
         // X is call-terminate: deleted from Map
         expect(spin.getSessionById(r.sessionId)).toBeUndefined();
@@ -1066,13 +1066,13 @@ describe("spin(spec) — unified session API (#1271)", () => {
       (SESSION_PROFILES["T"] as any).beforePrompt = async () => { throw new Error("beforePrompt kaboom"); };
       spin.setRuntime(makeRuntime() as any);
       try {
-        await spin.spin({ type: "T", goal: "first", source: "user", await: true });
+        await spin.spin({ settlementOwner: "spin", type: "T", goal: "first", source: "user", await: true });
       } catch { /* expected */ } finally {
         (SESSION_PROFILES["T"] as any).beforePrompt = orig;
       }
       // Slot must be free — a second T dispatch completes
       spin.setRuntime(makeRuntime({ completeResponse: "ok" }) as any);
-      const r = await spin.spin({ type: "T", goal: "second", source: "user", await: true });
+      const r = await spin.spin({ settlementOwner: "spin", type: "T", goal: "second", source: "user", await: true });
       expect(r.result).toBe("ok");
     });
 
@@ -1082,12 +1082,12 @@ describe("spin(spec) — unified session API (#1271)", () => {
       spin.setRuntime(makeRuntime() as any);
       let threw = false;
       try {
-        await spin.spin({ type: "S", goal: "boom", source: "user", await: true });
+        await spin.spin({ settlementOwner: "spin", type: "S", goal: "boom", source: "user", await: true });
       } catch { threw = true; } finally {
         (SESSION_PROFILES["S"] as any).decorators = orig;
       }
       expect(threw).toBe(true);
-      const r = await spin.spin({ type: "S", goal: "ok", source: "user", await: true });
+      const r = await spin.spin({ settlementOwner: "spin", type: "S", goal: "ok", source: "user", await: true });
       expect(r.sessionId).toBeTruthy();
     });
 
@@ -1099,7 +1099,7 @@ describe("spin(spec) — unified session API (#1271)", () => {
       const handler = () => { unhandled = true; };
       process.on("unhandledRejection", handler);
       try {
-        spin.dispatch({ type: "T", goal: "bg task", source: "user" });
+        spin.dispatch({ type: "T", goal: "bg task", source: "user", settlementOwner: "spin" });
         await new Promise(r => setTimeout(r, 50));
       } finally {
         (SESSION_PROFILES["T"] as any).beforePrompt = orig;
@@ -1184,7 +1184,7 @@ describe("spin(spec) — unified session API (#1271)", () => {
       });
       const oSession = spin.createSession("aksika", "background", "O") as import("./spin-types.js").ManagedSession;
       oSession.transport = heldTransport;
-      const first = spin.spin({ type: "O", sessionId: oSession.id, prompt: "first turn", await: true });
+      const first = spin.spin({ settlementOwner: "spin", type: "O", sessionId: oSession.id, prompt: "first turn", await: true });
       await vi.waitFor(() => expect(oSession.activeExecutionId).toBeDefined());
 
       const cardId = kanbanEnqueue("legacy O child", "agent");
@@ -1244,12 +1244,12 @@ describe("spin(spec) — unified session API (#1271)", () => {
       const transport = mockTransport();
       const runtime = makeRuntime();
       spin.setRuntime(runtime as any);
-      const r1 = await spin.spin({ type: "D", prompt: "step1", userId: "aksika", platform: "telegram", await: true });
+      const r1 = await spin.spin({ settlementOwner: "spin", type: "D", prompt: "step1", userId: "aksika", platform: "telegram", await: true });
       const s = spin.getSessionById(r1.sessionId)!;
       s.transport = transport;
       s.status = "ended";
       await expect(
-        spin.spin({ type: "D", sessionId: r1.sessionId, prompt: "step2", await: true }),
+        spin.spin({ settlementOwner: "spin", type: "D", sessionId: r1.sessionId, prompt: "step2", await: true }),
       ).rejects.toThrow(/is ended/);
       expect(transport.sendPrompt).not.toHaveBeenCalled();
     });
@@ -1261,7 +1261,7 @@ describe("spin(spec) — unified session API (#1271)", () => {
       spin.setRuntime(runtime as any);
 
       // Allocate a reusable session (D is persistent/external).
-      const first = await spin.spin({ type: "D", prompt: "step1", await: true });
+      const first = await spin.spin({ settlementOwner: "spin", type: "D", prompt: "step1", await: true });
       const sessionId = first.sessionId;
 
       // A non-terminal control is already bound to that session (simulating
@@ -1275,7 +1275,7 @@ describe("spin(spec) — unified session API (#1271)", () => {
       const second = spin.executionSupervisor.open({ executionRef: "gen-2", type: "T" });
       expect(spin.executionSupervisor.bindSession("gen-2", sessionId)).toBe(false);
       await expect(
-        spin.spin({
+        spin.spin({ settlementOwner: "spin",
           type: "D",
           sessionId,
           prompt: "step2",
@@ -1284,7 +1284,7 @@ describe("spin(spec) — unified session API (#1271)", () => {
         }),
       ).rejects.toMatchObject({ code: "execution_bind_rejected" });
       await expect(
-        spin.spin({
+        spin.spin({ settlementOwner: "spin",
           type: "D",
           sessionId,
           prompt: "step3",
@@ -1321,7 +1321,7 @@ describe("spin(spec) — unified session API (#1271)", () => {
       const oSession = spin.createSession("aksika", "background", "O") as import("./spin-types.js").ManagedSession;
       oSession.transport = heldTransport;
 
-      const first = spin.spin({ type: "O", sessionId: oSession.id, prompt: "first turn", await: true });
+      const first = spin.spin({ settlementOwner: "spin", type: "O", sessionId: oSession.id, prompt: "first turn", await: true });
       await vi.waitFor(() => expect(sendCalls).toHaveLength(1));
       const firstExecutionId = oSession.activeExecutionId;
       expect(firstExecutionId).toBeDefined();
@@ -1331,7 +1331,7 @@ describe("spin(spec) — unified session API (#1271)", () => {
       // admission error BEFORE it can overwrite the session's active execution
       // id, orc fields, or transport state — it never reaches sendPrompt.
       await expect(
-        spin.spin({ type: "O", sessionId: oSession.id, prompt: "second turn", await: true }),
+        spin.spin({ settlementOwner: "spin", type: "O", sessionId: oSession.id, prompt: "second turn", await: true }),
       ).rejects.toMatchObject({ name: "SpinDispatchAdmissionError", code: "type_busy" });
       expect(sendCalls).toHaveLength(1);
       expect(oSession.activeExecutionId).toBeDefined();
@@ -1350,8 +1350,8 @@ describe("spin(spec) — unified session API (#1271)", () => {
       const oSession = spin.createSession("aksika", "background", "O") as import("./spin-types.js").ManagedSession;
       oSession.transport = transport;
 
-      const r1 = await spin.spin({ type: "O", sessionId: oSession.id, prompt: "turn 1", await: true });
-      const r2 = await spin.spin({ type: "O", sessionId: oSession.id, prompt: "turn 2", await: true });
+      const r1 = await spin.spin({ settlementOwner: "spin", type: "O", sessionId: oSession.id, prompt: "turn 1", await: true });
+      const r2 = await spin.spin({ settlementOwner: "spin", type: "O", sessionId: oSession.id, prompt: "turn 2", await: true });
       expect(r1.sessionId).toBe(oSession.id);
       expect(r2.sessionId).toBe(oSession.id);
       expect((transport.sendPrompt as ReturnType<typeof vi.fn>).mock.calls).toHaveLength(2);
@@ -1374,7 +1374,7 @@ describe("spin(spec) — unified session API (#1271)", () => {
       const runtime = makeRuntime();
       spin.setRuntime(runtime as any);
       fillSessions(spin, MAX);
-      const result = spin.dispatch({ type: "W", goal: "overflow", source: "user" });
+      const result = spin.dispatch({ type: "W", goal: "overflow", source: "user", settlementOwner: "spin" });
       expect(result.cardId).toBeGreaterThan(0);
       await new Promise(r => setTimeout(r, 30));
       expect(runtime.complete).not.toHaveBeenCalled();
@@ -1385,7 +1385,7 @@ describe("spin(spec) — unified session API (#1271)", () => {
       spin.setRuntime(makeRuntime() as any);
       fillSessions(spin, MAX);
       await expect(
-        spin.dispatchAwait({ type: "W", goal: "overflow", source: "user" }),
+        spin.dispatchAwait({ type: "W", goal: "overflow", source: "user", settlementOwner: "spin" }),
       ).rejects.toThrow(/System busy/);
     });
   });
@@ -1417,7 +1417,7 @@ describe("spin() — #1629 tool authorization provenance", () => {
   it("task-sourced root card → unattended-task on the prompt context", async () => {
     const contexts = captureRuntime();
     const cardId = kanbanEnqueue("scheduled direct task", "task");
-    const r = await spin1629.spin({ type: "T", cardId, prompt: "run it", source: "task", await: true, userId: "aksika", platform: "background" });
+    const r = await spin1629.spin({ settlementOwner: "spin", type: "T", cardId, prompt: "run it", source: "task", await: true, userId: "aksika", platform: "background" });
     expect(r.result).toBe("ok");
     expect(contexts[0]?.authorizationMode).toBe("unattended-task");
   });
@@ -1428,7 +1428,7 @@ describe("spin() — #1629 tool authorization provenance", () => {
     const rootId = kanbanEnqueue("daily-ai project", "task");
     const workerId = kanbanEnqueue("lane 3", "agent");
     _cards.get(workerId)!.parent_id = rootId;
-    const r = await spin1629.spin({ type: "W", cardId: workerId, prompt: "run lane", await: true, userId: "aksika", platform: "background" });
+    const r = await spin1629.spin({ settlementOwner: "spin", type: "W", cardId: workerId, prompt: "run lane", await: true, userId: "aksika", platform: "background" });
     expect(r.result).toBe("ok");
     expect(contexts[0]?.authorizationMode).toBe("unattended-task");
   });
@@ -1436,16 +1436,16 @@ describe("spin() — #1629 tool authorization provenance", () => {
   it("user/agent-sourced roots → interactive", async () => {
     const contexts = captureRuntime();
     const agentCard = kanbanEnqueue("manual agent work", "agent");
-    await spin1629.spin({ type: "T", cardId: agentCard, prompt: "run", await: true, userId: "aksika", platform: "background" });
+    await spin1629.spin({ settlementOwner: "spin", type: "T", cardId: agentCard, prompt: "run", await: true, userId: "aksika", platform: "background" });
     const userCard = kanbanEnqueue("manual user work", "user");
-    await spin1629.spin({ type: "T", cardId: userCard, prompt: "run", await: true, userId: "aksika", platform: "background" });
+    await spin1629.spin({ settlementOwner: "spin", type: "T", cardId: userCard, prompt: "run", await: true, userId: "aksika", platform: "background" });
     expect(contexts[0]?.authorizationMode).toBe("interactive");
     expect(contexts[1]?.authorizationMode).toBe("interactive");
   });
 
   it("no card (prompt-only spin) → interactive", async () => {
     const contexts = captureRuntime();
-    await spin1629.spin({ type: "S", prompt: "one-shot", await: true, userId: "aksika", platform: "background" });
+    await spin1629.spin({ settlementOwner: "spin", type: "S", prompt: "one-shot", await: true, userId: "aksika", platform: "background" });
     expect(contexts[0]?.authorizationMode).toBe("interactive");
   });
 
@@ -1453,7 +1453,7 @@ describe("spin() — #1629 tool authorization provenance", () => {
     const contexts = captureRuntime();
     const cardId = kanbanEnqueue("ghost card", "task");
     _cards.delete(cardId); // root unreadable
-    await spin1629.spin({ type: "T", cardId, prompt: "run", await: true, userId: "aksika", platform: "background" });
+    await spin1629.spin({ settlementOwner: "spin", type: "T", cardId, prompt: "run", await: true, userId: "aksika", platform: "background" });
     expect(contexts[0]?.authorizationMode).toBe("unverified");
   });
 
@@ -1461,7 +1461,7 @@ describe("spin() — #1629 tool authorization provenance", () => {
     const contexts = captureRuntime();
     resolveRootImpl = () => undefined;
     const cardId = kanbanEnqueue("cyclic card", "task");
-    await spin1629.spin({ type: "T", cardId, prompt: "run", await: true, userId: "aksika", platform: "background" });
+    await spin1629.spin({ settlementOwner: "spin", type: "T", cardId, prompt: "run", await: true, userId: "aksika", platform: "background" });
     expect(contexts[0]?.authorizationMode).toBe("unverified");
   });
 
@@ -1469,22 +1469,22 @@ describe("spin() — #1629 tool authorization provenance", () => {
     const contexts = captureRuntime();
     resolveRootImpl = () => { throw new Error("kanban read failed"); };
     const cardId = kanbanEnqueue("unreadable card", "task");
-    await spin1629.spin({ type: "T", cardId, prompt: "run", await: true, userId: "aksika", platform: "background" });
+    await spin1629.spin({ settlementOwner: "spin", type: "T", cardId, prompt: "run", await: true, userId: "aksika", platform: "background" });
     expect(contexts[0]?.authorizationMode).toBe("unverified");
   });
 
   it("unknown root source → interactive", async () => {
     const contexts = captureRuntime();
     const cardId = kanbanEnqueue("peer work", "peer");
-    await spin1629.spin({ type: "T", cardId, prompt: "run", await: true, userId: "aksika", platform: "background" });
+    await spin1629.spin({ settlementOwner: "spin", type: "T", cardId, prompt: "run", await: true, userId: "aksika", platform: "background" });
     expect(contexts[0]?.authorizationMode).toBe("interactive");
   });
 
   it("a reused session recomputes the mode from the current card, never retaining the prior value", async () => {
     const contexts = captureRuntime();
-    const first = await spin1629.spin({ type: "D", goal: "step one", source: "task", await: true, userId: "aksika", platform: "background" });
+    const first = await spin1629.spin({ settlementOwner: "spin", type: "D", goal: "step one", source: "task", await: true, userId: "aksika", platform: "background" });
     expect(contexts[0]?.authorizationMode).toBe("unattended-task");
-    const second = await spin1629.spin({ type: "D", sessionId: first.sessionId, goal: "step two", source: "user", await: true, userId: "aksika", platform: "background" });
+    const second = await spin1629.spin({ settlementOwner: "spin", type: "D", sessionId: first.sessionId, goal: "step two", source: "user", await: true, userId: "aksika", platform: "background" });
     expect(second.sessionId).toBe(first.sessionId); // same reused session
     expect(contexts[1]?.authorizationMode).toBe("interactive");
   });
@@ -1496,7 +1496,7 @@ import { SessionOutputFeed, type SessionOutputEvent } from "./session-output-fee
 
 class RecordingFeed extends SessionOutputFeed {
   events: SessionOutputEvent[] = [];
-  publish(e: SessionOutputEvent): void {
+  override publish(e: SessionOutputEvent): void {
     this.events.push(e);
     super.publish(e);
   }
@@ -1518,7 +1518,7 @@ describe("spin() — #1338 output mirroring", () => {
     setUserRegistryOverride(makeRegistry([makeUser("aksika", "master", 111)]));
     spin2.setRuntime(runtime as any);
     spin2.setSessionOutputFeed(feed);
-    const r = await spin2.spin({ type: "A", prompt: "hi", await: true, userId: "aksika", platform: "telegram", source: "user" });
+    const r = await spin2.spin({ settlementOwner: "spin", type: "A", prompt: "hi", await: true, userId: "aksika", platform: "telegram", source: "user" });
 
     const types = feed.events.map((e) => e.type);
     expect(types).toContain("start");
@@ -1551,7 +1551,7 @@ describe("spin() — #1338 output mirroring", () => {
     setUserRegistryOverride(makeRegistry([makeUser("aksika", "master", 111)]));
     spin2.setRuntime(runtime as any);
     spin2.setSessionOutputFeed(feed);
-    await spin2.spin({ type: "S", prompt: "x", await: true, userId: "aksika", platform: "telegram" });
+    await spin2.spin({ settlementOwner: "spin", type: "S", prompt: "x", await: true, userId: "aksika", platform: "telegram" });
 
     const delta = feed.events.find((e) => e.type === "delta") as Extract<SessionOutputEvent, { type: "delta" }>;
     expect(delta?.text).toBe("one-shot text");
@@ -1563,7 +1563,7 @@ describe("spin() — #1338 output mirroring", () => {
     setUserRegistryOverride(makeRegistry([makeUser("aksika", "master", 111)]));
     spin2.setRuntime(runtime as any);
     // No setSessionOutputFeed — must not throw and must still return the result.
-    const r = await spin2.spin({ type: "A", prompt: "hi", await: true, userId: "aksika", platform: "telegram", source: "user" });
+    const r = await spin2.spin({ settlementOwner: "spin", type: "A", prompt: "hi", await: true, userId: "aksika", platform: "telegram", source: "user" });
     expect(r.result).toBe("ok");
   });
 });

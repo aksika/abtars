@@ -453,7 +453,7 @@ describe("#1628 Orc authoring recovery (real stores)", () => {
       criteria: [{ id: "c1", description: "goal met", required: true, evidence_expectation: "synthesis" }],
       required_outputs: [],
       constraints: [],
-      limits: {},
+      limits: { max_review_rounds: 1, max_repair_rounds: 1 },
       provenance: { requested_by: "user", authored_by: "orc", created_at: new Date().toISOString() },
     });
 
@@ -485,7 +485,7 @@ describe("#1628 Orc authoring recovery (real stores)", () => {
       criteria: [{ id: "c1", description: "goal met", required: true, evidence_expectation: "synthesis" }],
       required_outputs: [],
       constraints: [],
-      limits: {},
+      limits: { max_review_rounds: 1, max_repair_rounds: 1 },
       provenance: { requested_by: "user", authored_by: "orc", created_at: new Date().toISOString() },
     });
     await startGeneration(makeCoordinator(async () => {}));
