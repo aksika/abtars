@@ -16,6 +16,7 @@ import { mkdirSync, realpathSync } from "node:fs";
 import { kanbanEnqueue, kanbanRunning, kanbanGetCard, kanbanGetChildren } from "./kanban-board.js";
 import { readState, advanceRun } from "./task-state-store.js";
 import { ProjectReviewStore } from "../project-acceptance/project-review-store.js";
+import { MAX_STARTED_CONTRACT_AUTHORING_TURNS, MAX_CONSECUTIVE_UNSTARTABLE_AUTHORING_TURNS } from "../orc-project/orc-project-contracts.js";
 import { abortProjectById, getActiveOrcCoordinator, requestReconcileForProject } from "../reconciler.js";
 import { WorkerSupervisionStore } from "../worker-supervision-store.js";
 import { makeTaskFailure } from "./task-failure.js";
@@ -127,12 +128,30 @@ export async function scheduledProjectRunner(request: ScheduledProjectRequest): 
       // over a generic Reconciler authoring wake for the same card.
       const coordinator = getActiveOrcCoordinator();
       if (!coordinator) throw new Error("scheduled project admission failed: Orc coordinator unavailable");
-      const claim = coordinator.scheduleContractAuthoring(rootCardId, goal);
-      if (claim.kind === "conflict" || claim.kind === "not_actionable") {
-        throw new Error(`scheduled project admission failed: ${claim.reason}`);
+      // #1628 review (P1): the bounded authoring policy applies to restart
+      // reattach too — the raw claim below enforces no ceiling and no claim
+      // interval, so a project that already spent its authoring budget would
+      // take another turn here. Spend is read from the same durable counters
+      // the Reconciler driver uses; when the budget is gone the driver owns
+      // the exhaustion settlement, never a fourth claim. The synchronous
+      // goal-bearing claim still wins whenever the budget allows, preserving
+      // the #1546 R5 precedence over generic reconciler wakes.
+      const reattachGeneration = reviewStore.getSupervision(rootCardId)?.generation ?? 1;
+      const authoringRunStore = coordinator.getStore();
+      const authoringBudgetSpent =
+        authoringRunStore.countStartedAuthoringTurns(rootCardId, reattachGeneration) >= MAX_STARTED_CONTRACT_AUTHORING_TURNS ||
+        authoringRunStore.countConsecutiveUnstartableAuthoringTurns(rootCardId, reattachGeneration) >= MAX_CONSECUTIVE_UNSTARTABLE_AUTHORING_TURNS;
+      if (authoringBudgetSpent) {
+        logInfo(TAG, `Scheduled project #${rootCardId} reattached with authoring budget spent — waking the shared Reconciler driver to settle`);
+        requestReconcileForProject(rootCardId);
+      } else {
+        const claim = coordinator.scheduleContractAuthoring(rootCardId, goal);
+        if (claim.kind === "conflict" || claim.kind === "not_actionable") {
+          throw new Error(`scheduled project admission failed: ${claim.reason}`);
+        }
+        const currentCard = kanbanGetCard(rootCardId);
+        if (currentCard?.status === "queued") kanbanRunning(rootCardId);
       }
-      const currentCard = kanbanGetCard(rootCardId);
-      if (currentCard?.status === "queued") kanbanRunning(rootCardId);
     } else {
       // #1546 R5: any other non-terminal reattach state does not author a new
       // contract and is never promoted directly. The shared driver owns the

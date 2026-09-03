@@ -88,7 +88,7 @@ async function seedProject(opts: SeedOpts = {}): Promise<number> {
 function seedRun(
   cardId: number,
   generation: number,
-  opts: { started?: boolean; state?: string; createdAt?: string; ownerInstance?: string } = {},
+  opts: { started?: boolean; state?: string; createdAt?: string; ownerInstance?: string; sessionId?: string; executionId?: string } = {},
 ): void {
   const store = new runStoreMod.OrcProjectRunStore();
   const now = new Date().toISOString();
@@ -97,8 +97,9 @@ function seedRun(
     INSERT INTO orc_project_runs
       (id, intent_key, intent_kind, intent_ref, goal, project_card_id,
        project_generation, ownership_generation, owner_peer, owner_instance_id,
-       origin_kind, origin_peer, state, outcome, failure_code, created_at, started_at, released_at, updated_at)
-    VALUES (?, ?, 'contract_authoring', NULL, 'seeded goal', ?, ?, ?, 'kp', ?, 'local', NULL, ?, ?, ?, ?, ?, ?, ?)
+       origin_kind, origin_peer, state, outcome, failure_code, created_at, started_at, released_at, updated_at,
+       session_id, execution_id)
+    VALUES (?, ?, 'contract_authoring', NULL, 'seeded goal', ?, ?, ?, 'kp', ?, 'local', NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `).run(
     runId,
     `contract:${cardId}:${generation}`,
@@ -112,6 +113,8 @@ function seedRun(
     opts.started ? now : null,
     opts.started ? now : null,
     now,
+    opts.sessionId ?? null,
+    opts.executionId ?? null,
   );
 }
 
@@ -316,11 +319,15 @@ describe("#1628 Orc authoring recovery (real stores)", () => {
 
   it("exhaustion: three started unsuccessful turns settle blocked once with no fourth turn", async () => {
     const rootId = await seedProject({ cardStatus: "queued" });
-    await startGeneration(makeCoordinator(async () => {}));
     const old = new Date(Date.now() - 600_000).toISOString();
     seedRun(rootId, 1, { started: true, createdAt: old });
     seedRun(rootId, 1, { started: true, createdAt: old });
     seedRun(rootId, 1, { started: true, createdAt: old });
+    // Seeds precede the generation: the boot sweep observes the spent budget
+    // (no racy mid-test claim can go live first), settles exhaustion, and the
+    // explicit wake below is a no-op on the terminal project.
+    await startGeneration(makeCoordinator(async () => {}));
+    await flush();
     const runStore = new runStoreMod.OrcProjectRunStore();
     const before = runStore.getRunsForProject(rootId).length;
 
@@ -338,10 +345,12 @@ describe("#1628 Orc authoring recovery (real stores)", () => {
 
   it("unstartable: three consecutive pre-start failures settle blocked and terminate the wake loop", async () => {
     const rootId = await seedProject({ cardStatus: "queued" });
+    seedRun(rootId, 1, { started: false });
+    seedRun(rootId, 1, { started: false });
+    seedRun(rootId, 1, { started: false });
+    // Seeds precede the generation (see exhaustion): the boot sweep settles.
     await startGeneration(makeCoordinator(async () => {}));
-    seedRun(rootId, 1, { started: false });
-    seedRun(rootId, 1, { started: false });
-    seedRun(rootId, 1, { started: false });
+    await flush();
     const runStore = new runStoreMod.OrcProjectRunStore();
     const before = runStore.getRunsForProject(rootId).length;
 
@@ -391,11 +400,14 @@ describe("#1628 Orc authoring recovery (real stores)", () => {
       INSERT INTO peer_help_requests (origin_peer, request_id, request_hash, state, contribution_ref, local_card_id, response_json, created_at, updated_at)
       VALUES ('kp', 'req_peer_1', 'hash_peer_1', 'accepted', 'ref_peer_1', ?, '{}', datetime('now'), datetime('now'))
     `).run(rootId);
-    await startGeneration(makeCoordinator(async () => {}));
     const old = new Date(Date.now() - 600_000).toISOString();
     seedRun(rootId, 1, { started: true, createdAt: old });
     seedRun(rootId, 1, { started: true, createdAt: old });
     seedRun(rootId, 1, { started: true, createdAt: old });
+    // Seeds precede the generation (see exhaustion): the boot sweep settles
+    // once, and the duplicate wake below must not emit a second event.
+    await startGeneration(makeCoordinator(async () => {}));
+    await flush();
 
     reconciler.requestReconcile(rootId);
     await flush();
@@ -528,4 +540,65 @@ describe("#1628 Orc authoring recovery (real stores)", () => {
     expect(supervision.state).toBe("awaiting_contract");
     expect(supervision.blocked_reason).toBeNull();
   });
+
+  it("#1628 review: a wake during a live third authoring run never settles exhausted", async () => {
+    const rootId = await seedProject({ cardStatus: "running" });
+    const old = new Date(Date.now() - 600_000).toISOString();
+    seedRun(rootId, 1, { started: true, createdAt: old });
+    seedRun(rootId, 1, { started: true, createdAt: old });
+    // The third turn is still live (started, never released). The
+    // started-turn counter counts live runs, so evaluating the ceilings
+    // before the live-run guard settled exhausted here and invalidated the
+    // active run. Seeds precede the generation so no racy mid-test claim can
+    // exist beside the seeded live run. The seeded run carries this
+    // instance's ownership plus a session binding, so boot recovery keeps it
+    // live (foreign or unbound rows are superseded as stale); the wake then
+    // takes the idempotent re-entry path with no promotion side effects on
+    // the assertions below.
+    seedRun(rootId, 1, { started: true, createdAt: old, state: "running", sessionId: "sess_live_3", executionId: "exec_live_3" });
+    await startGeneration(makeCoordinator(async () => {}));
+    await flush();
+    const runStore = new runStoreMod.OrcProjectRunStore();
+    const before = runStore.getRunsForProject(rootId).length;
+
+    reconciler.requestReconcile(rootId);
+    await flush();
+    await flush();
+
+    const supervision = new reviewStoreMod.ProjectReviewStore().getSupervision(rootId)!;
+    expect(supervision.state).toBe("awaiting_contract");
+    expect(supervision.blocked_reason).toBeNull();
+    expect(runStore.getRunsForProject(rootId)).toHaveLength(before);
+    expect(kanban.kanbanGetCard(rootId)!.status).toBe("running");
+  });
+
+  it("#1628 review: a fast start-port failure retries on the release event, not the resync", async () => {
+    let starts = 0;
+    const coordinator = makeCoordinator(async () => { starts += 1; throw new Error("start port down"); });
+    // The project is seeded BEFORE the generation exists, so the boot sweep
+    // (not an explicit wake) owns the first claim with a FRESH created_at —
+    // no backdating: the 5s claim interval binds on the release-driven wake.
+    // Backdated claims skip this path, which is why the old suite never
+    // exercised it.
+    const rootId = await seedProject({ cardStatus: "running" });
+    await startGeneration(coordinator);
+    await flush();
+    await flush();
+    await flush();
+    const runStore = new runStoreMod.OrcProjectRunStore();
+    expect(starts).toBe(1);
+    expect(runStore.getRunsForProject(rootId)).toHaveLength(1);
+
+    // The release-driven wake is interval-deferred, but the one-shot re-wake
+    // fires at interval expiry. No periodic resync runs in this environment,
+    // so a second start below proves the event-driven retry.
+    await new Promise(r => setTimeout(r, 5_800));
+    await flush();
+    await flush();
+
+    expect(starts).toBeGreaterThanOrEqual(2);
+    expect(runStore.getRunsForProject(rootId).length).toBeGreaterThanOrEqual(2);
+    const supervision = new reviewStoreMod.ProjectReviewStore().getSupervision(rootId)!;
+    expect(supervision.state).toBe("awaiting_contract");
+  }, 15_000);
 });

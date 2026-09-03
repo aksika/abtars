@@ -61,10 +61,18 @@ async function startGeneration(coordinator: unknown): Promise<void> {
   await scheduler.start();
 }
 
-async function fakeCoordinator(): Promise<Array<{ projectCardId: number; goal: string; intentKind: "contract_authoring" | "project_execution" }>> {
+/** #1628 review: authoring-budget reads for the reattach path. Defaults to the
+ * zero-budget stub (claim always allowed); tests can inject the real store. */
+type AuthoringBudgetStore = {
+  countStartedAuthoringTurns: (cardId: number, generation: number) => number;
+  countConsecutiveUnstartableAuthoringTurns: (cardId: number, generation: number) => number;
+  lastAuthoringClaimAt: (cardId: number, generation: number) => string | null;
+  lastAuthoringFailureCode: (cardId: number, generation: number) => string | null;
+};
+async function fakeCoordinator(storeFactory?: () => AuthoringBudgetStore): Promise<Array<{ projectCardId: number; goal: string; intentKind: "contract_authoring" | "project_execution" }>> {
   const claims: Array<{ projectCardId: number; goal: string; intentKind: "contract_authoring" | "project_execution" }> = [];
   await startGeneration({
-    getStore: () => ({ countStartedAuthoringTurns: () => 0, countConsecutiveUnstartableAuthoringTurns: () => 0, lastAuthoringClaimAt: () => null, lastAuthoringFailureCode: () => null }),
+    getStore: storeFactory ?? (() => ({ countStartedAuthoringTurns: () => 0, countConsecutiveUnstartableAuthoringTurns: () => 0, lastAuthoringClaimAt: () => null, lastAuthoringFailureCode: () => null })),
     bootRecovery: () => [] as number[],
     onOwnershipReleased: () => () => {},
     scheduleProjectExecution(projectCardId: number, goal: string) {
@@ -906,6 +914,48 @@ describe("scheduled-project-runner #1546 reattach routing", () => {
     await new Promise(r => setTimeout(r, 20));
 
     expect(claims).toHaveLength(0);
+    const card = kanban.kanbanGetCard(root)!;
+    expect(card.status).toBe("queued");
+    expect(card.next_retry_at).not.toBeNull();
+
+    control.signalCancel("operator");
+    await expect(pending).rejects.toThrow(/cancelled/);
+  });
+
+  it("#1628 review: reattach with a spent authoring budget never claims another turn", async () => {
+    await seedReservation();
+    const claims = await fakeCoordinator(() => new runStoreMod.OrcProjectRunStore() as never);
+    // A queued card with a FUTURE retry marker is invisible to every driver
+    // path (the boot scan skips non-stranded queued roots, the kanban-retry
+    // due source only fires when due, deriveAction no-ops queued+future, and
+    // reconcileChildCard returns without a contract): the runner's reattach
+    // is the only actor that can claim here, so any fourth turn is its doing.
+    const { root } = await seedReattach({
+      state: "awaiting_contract",
+      cardStatus: "queued",
+      retryMarker: new Date(Date.now() + 60_000).toISOString(),
+    });
+    const generation = new reviewStoreMod.ProjectReviewStore().getSupervision(root)!.generation;
+    const old = new Date(Date.now() - 600_000).toISOString();
+    const rs = new runStoreMod.OrcProjectRunStore();
+    for (let i = 0; i < 3; i++) {
+      rs.db.prepare(`
+        INSERT INTO orc_project_runs
+          (id, intent_key, intent_kind, intent_ref, goal, project_card_id,
+           project_generation, ownership_generation, owner_peer, owner_instance_id,
+           origin_kind, origin_peer, state, outcome, failure_code, created_at, started_at, released_at, updated_at)
+        VALUES (?, ?, 'contract_authoring', NULL, 'seeded goal', ?, ?, ?, 'kp', 'inst-test', 'local', NULL, 'released', 'failed', NULL, ?, ?, ?, ?)
+      `).run(`or_spent_${root}_${i}`, `contract:${root}:${generation}`, root, generation, 100 + i, old, old, old, old);
+    }
+    const control = makeControl("spr-spent-budget");
+    const pending = mod.scheduledProjectRunner(makeRequest({ executionControl: control }));
+    await new Promise(r => setTimeout(r, 150));
+
+    // Pre-fix the runner claimed a fourth turn here with the machine-derived
+    // goal. Post-fix it defers to the driver, which no-ops on the not-due
+    // card — no goal-bearing claim, no fourth run row, marker untouched.
+    expect(claims.filter(c => c.intentKind === "contract_authoring" && String(c.goal).includes("Agent budget"))).toHaveLength(0);
+    expect(new runStoreMod.OrcProjectRunStore().getRunsForProject(root)).toHaveLength(3);
     const card = kanban.kanbanGetCard(root)!;
     expect(card.status).toBe("queued");
     expect(card.next_retry_at).not.toBeNull();

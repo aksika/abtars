@@ -270,10 +270,35 @@ type AuthoringScheduleResult =
 const CONTRACT_AUTHORING_EXHAUSTED = "contract_authoring_exhausted";
 const CONTRACT_AUTHORING_UNSTARTABLE = "contract_authoring_unstartable";
 
+// #1628 review: one-shot re-wakes for interval-deferred authoring retries.
+// Keyed per generation+project so a wake storm arms at most one timer; the
+// entry is deleted when the timer fires. In-memory by design — the interval
+// is a 5s debounce, not crash-surviving state; the boot recovery sweep is
+// the durable floor. A fired timer re-checks generation liveness so a stale
+// timer can never wake a closed generation.
+const armedAuthoringRetryWakes = new Set<string>();
+
+function armAuthoringRetryWake(generation: ReconcilerGeneration, projectId: number, delayMs: number): void {
+  if (!Number.isFinite(delayMs)) return;
+  const key = `${generation.id}:${projectId}`;
+  if (armedAuthoringRetryWakes.has(key)) return;
+  armedAuthoringRetryWakes.add(key);
+  setTimeout(() => {
+    armedAuthoringRetryWakes.delete(key);
+    if (!isActive(generation)) return;
+    logInfo(TAG, `Project ${projectId}: authoring claim interval elapsed — re-waking for retry`);
+    requestReconcileForProject(projectId);
+  }, Math.max(0, delayMs));
+}
+
 /**
  * #1628: schedule a contract-authoring turn or settle the project terminally.
- * Decision order: unavailable coordinator → started-turn ceiling →
- * consecutive-unstartable ceiling → minimum claim interval → claim.
+ * Decision order: unavailable coordinator → live-run re-entry (ceilings and
+ * the claim interval are skipped while a run is live; settling a project
+ * whose authoring turn is still in flight would invalidate the active run) →
+ * started-turn ceiling → consecutive-unstartable ceiling → minimum claim
+ * interval (with a one-shot re-wake at expiry, so the retry never depends on
+ * the periodic resync) → claim.
  * Returns a discriminated result so callers can distinguish a deferred
  * (busy) claim from an owned one. An existing live authoring row is always
  * re-entered: that path is an idempotent observation/promotion, not a new
@@ -300,28 +325,39 @@ function scheduleContractAuthoringOrSettle(generation: ReconcilerGeneration, pro
     return { kind: "deferred", reason: "occurrence_unavailable" };
   }
 
-  const startedTurns = runStore.countStartedAuthoringTurns(projectId, projectGeneration);
-  if (startedTurns >= MAX_STARTED_CONTRACT_AUTHORING_TURNS) {
-    logWarn(TAG, `Project ${projectId}: ${startedTurns} started authoring turns — settling ${CONTRACT_AUTHORING_EXHAUSTED}`);
-    settleAuthoringExhausted(projectId, reviewStore, runStore, CONTRACT_AUTHORING_EXHAUSTED);
-    return { kind: "settled", blockerClass: CONTRACT_AUTHORING_EXHAUSTED };
-  }
-
-  const unstartableTurns = runStore.countConsecutiveUnstartableAuthoringTurns(projectId, projectGeneration);
-  if (unstartableTurns >= MAX_CONSECUTIVE_UNSTARTABLE_AUTHORING_TURNS) {
-    logWarn(TAG, `Project ${projectId}: ${unstartableTurns} consecutive pre-start failures — settling ${CONTRACT_AUTHORING_UNSTARTABLE}`);
-    settleAuthoringExhausted(projectId, reviewStore, runStore, CONTRACT_AUTHORING_UNSTARTABLE);
-    return { kind: "settled", blockerClass: CONTRACT_AUTHORING_UNSTARTABLE };
-  }
-
   // Keep lightweight coordinator test doubles and older injected stores
   // compatible; production OrcProjectRunStore always provides this method.
+  // #1628 review: the live-run read comes FIRST. countStartedAuthoringTurns
+  // counts live runs (started_at is set, no state filter), so evaluating the
+  // ceilings first settles a project whose authoring turn is still in flight
+  // and invalidates the active run. With a live run the ceilings are skipped
+  // and the coordinator re-entry below observes/promotes it instead.
   const liveRun = runStore.getLiveRunForProject?.(projectId);
   const hasLiveAuthoringRun = liveRun?.project_generation === projectGeneration
     && liveRun.intent_kind === "contract_authoring";
   if (!hasLiveAuthoringRun) {
+    const startedTurns = runStore.countStartedAuthoringTurns(projectId, projectGeneration);
+    if (startedTurns >= MAX_STARTED_CONTRACT_AUTHORING_TURNS) {
+      logWarn(TAG, `Project ${projectId}: ${startedTurns} started authoring turns — settling ${CONTRACT_AUTHORING_EXHAUSTED}`);
+      settleAuthoringExhausted(projectId, reviewStore, runStore, CONTRACT_AUTHORING_EXHAUSTED);
+      return { kind: "settled", blockerClass: CONTRACT_AUTHORING_EXHAUSTED };
+    }
+
+    const unstartableTurns = runStore.countConsecutiveUnstartableAuthoringTurns(projectId, projectGeneration);
+    if (unstartableTurns >= MAX_CONSECUTIVE_UNSTARTABLE_AUTHORING_TURNS) {
+      logWarn(TAG, `Project ${projectId}: ${unstartableTurns} consecutive pre-start failures — settling ${CONTRACT_AUTHORING_UNSTARTABLE}`);
+      settleAuthoringExhausted(projectId, reviewStore, runStore, CONTRACT_AUTHORING_UNSTARTABLE);
+      return { kind: "settled", blockerClass: CONTRACT_AUTHORING_UNSTARTABLE };
+    }
+
     const lastClaimAt = runStore.lastAuthoringClaimAt(projectId, projectGeneration);
     if (lastClaimAt && Date.now() - Date.parse(lastClaimAt) < MIN_AUTHORING_CLAIM_INTERVAL_MS) {
+      // #1628 review: the release event that drove this wake is the retry
+      // signal — deferring must not drop it on the floor with no re-arm, or
+      // the retry waits for the periodic resync. Re-wake once at interval
+      // expiry; the unstartable ceiling still bounds genuine quick-failure
+      // loops, so the debounce loses no storm protection.
+      armAuthoringRetryWake(generation, projectId, Date.parse(lastClaimAt) + MIN_AUTHORING_CLAIM_INTERVAL_MS - Date.now());
       logWarn(TAG, `Project ${projectId}: authoring claim within interval — deferring (last claim ${lastClaimAt})`);
       return { kind: "deferred", reason: "claim_interval" };
     }
