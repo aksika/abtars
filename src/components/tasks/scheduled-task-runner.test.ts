@@ -2,6 +2,7 @@ import { describe, expect, it, vi, beforeEach, afterEach } from "vitest";
 import { ScheduledTaskRunner } from "./scheduled-task-runner.js";
 import { settleRunOnce } from "./task-run-settler.js";
 import { ProviderExecutionError } from "../transport/provider-failure.js";
+import type { ContentOutcome } from "../clean-response.js";
 
 vi.mock("./task-state-store.js", () => ({
   updateActiveRun: vi.fn(),
@@ -108,9 +109,9 @@ describe("ScheduledTaskRunner #1506 deadline ownership", () => {
 
   it("keeps a late completion from winning after the deadline", async () => {
     let started!: (control: any) => void;
-    let complete!: (value: { cardId: number; result: string }) => void;
+    let complete!: (value: { cardId: number; result: string; outcome: ContentOutcome }) => void;
     const startedPromise = new Promise<any>((resolve) => { started = resolve; });
-    const resultPromise = new Promise<{ cardId: number; result: string }>((resolve) => { complete = resolve; });
+    const resultPromise = new Promise<{ cardId: number; result: string; outcome: ContentOutcome }>((resolve) => { complete = resolve; });
     const runner = new ScheduledTaskRunner({
       agentRunner: async (request) => {
         request.executionControl?.setCardId(43);
@@ -123,7 +124,7 @@ describe("ScheduledTaskRunner #1506 deadline ownership", () => {
     const control = await startedPromise;
     expect(control.cardId).toBe(43);
     await vi.advanceTimersByTimeAsync(10_000);
-    complete({ cardId: 43, result: "late" });
+    complete({ cardId: 43, result: "late", outcome: "text" });
     await vi.advanceTimersByTimeAsync(4_999);
     expect(vi.mocked(settleRunOnce)).not.toHaveBeenCalledWith(expect.objectContaining({ outcome: "success" }));
     await vi.advanceTimersByTimeAsync(1);
@@ -174,7 +175,7 @@ describe("ScheduledTaskRunner #1516 orchestration dispatch", () => {
   });
 
   it("routes maxAgents=1 through the direct agent runner exactly once", async () => {
-    const agentRunner = vi.fn(async () => ({ cardId: 7, result: "direct result", outcome: "text" as const }));
+    const agentRunner = vi.fn(async (_request: import("../spin-types.js").SpinRequest) => ({ cardId: 7, result: "direct result", outcome: "text" as const }));
     const projectRunner = vi.fn(async () => ({ cardId: 8, result: "project result" }));
     const runner = new ScheduledTaskRunner({ agentRunner, projectRunner });
     const outcome = await runner.run(makeEntry("dispatch-direct"), makeReservation("dispatch-direct"));
@@ -193,7 +194,13 @@ describe("ScheduledTaskRunner #1516 orchestration dispatch", () => {
   });
 
   it("fails closed when a single-agent runner omits the required outcome", async () => {
-    const agentRunner = vi.fn(async () => ({ cardId: 9, result: "legacy result" }));
+    // #1651 v2: AgentTaskRunner now requires `outcome`. This test pins the
+    // documented defensive branch — a legacy runner that omits outcome is a
+    // contract violation production must fail closed on (empty_model_response).
+    // The mock's declared return satisfies the current type; the runtime shape
+    // deliberately omits `outcome` to simulate that legacy caller.
+    const agentRunner: (request: import("../spin-types.js").SpinRequest) => Promise<{ cardId: number; result: string; outcome: ContentOutcome }> =
+      vi.fn(async () => ({ cardId: 9, result: "legacy result", outcome: undefined as never }));
     const projectRunner = vi.fn(async () => ({ cardId: 8, result: "project result" }));
     const runner = new ScheduledTaskRunner({ agentRunner, projectRunner });
     const legacy = makeEntry("dispatch-legacy");
@@ -211,8 +218,8 @@ describe("ScheduledTaskRunner #1516 orchestration dispatch", () => {
   });
 
   it("routes maxAgents>1 through the project runner exactly once, never the direct runner", async () => {
-    const agentRunner = vi.fn(async () => ({ cardId: 7, result: "direct result" }));
-    const projectRunner = vi.fn(async () => ({ cardId: 8, result: "project synthesis" }));
+    const agentRunner = vi.fn(async (_request: import("../spin-types.js").SpinRequest) => ({ cardId: 7, result: "direct result", outcome: "text" as const }));
+    const projectRunner = vi.fn(async (_request: import("./scheduled-project-runner.js").ScheduledProjectRequest) => ({ cardId: 8, result: "project synthesis" }));
     const runner = new ScheduledTaskRunner({ agentRunner, projectRunner });
     const entry = makeEntry("dispatch-project");
     entry.orchestration = { maxAgents: 4 };
@@ -237,7 +244,7 @@ describe("ScheduledTaskRunner #1516 orchestration dispatch", () => {
   });
 
   it("passes the resolved report artifact path to the project runner for report tasks", async () => {
-    const projectRunner = vi.fn(async () => ({ cardId: 8, result: "synthesis" }));
+    const projectRunner = vi.fn(async (_request: import("./scheduled-project-runner.js").ScheduledProjectRequest) => ({ cardId: 8, result: "synthesis" }));
     const runner = new ScheduledTaskRunner({ agentRunner: undefined, projectRunner });
     const entry = makeEntry("dispatch-report");
     entry.orchestration = { maxAgents: 2 };
@@ -278,7 +285,7 @@ describe("ScheduledTaskRunner #1602 normalized-entry guard", () => {
   });
 
   it("settles a raw agent entry with no interaction as definition_failed, with no dispatch", async () => {
-    const agentRunner = vi.fn(async () => ({ cardId: 7, result: "must not run" }));
+    const agentRunner = vi.fn(async () => ({ cardId: 7, result: "must not run", outcome: "text" as const }));
     const projectRunner = vi.fn(async () => ({ cardId: 8, result: "must not run" }));
     const runner = new ScheduledTaskRunner({ agentRunner, projectRunner });
     const raw = makeEntry("raw-entry");
@@ -296,7 +303,7 @@ describe("ScheduledTaskRunner #1602 normalized-entry guard", () => {
   });
 
   it("guards a null interaction object with the same classification", async () => {
-    const agentRunner = vi.fn(async () => ({ cardId: 7, result: "must not run" }));
+    const agentRunner = vi.fn(async () => ({ cardId: 7, result: "must not run", outcome: "text" as const }));
     const runner = new ScheduledTaskRunner({ agentRunner });
     const raw = makeEntry("null-interaction");
     raw.interaction = null;
@@ -311,7 +318,7 @@ describe("ScheduledTaskRunner #1602 normalized-entry guard", () => {
   });
 
   it("settles an unsupported interaction discriminant as definition_failed without dispatch", async () => {
-    const agentRunner = vi.fn(async () => ({ cardId: 7, result: "must not run" }));
+    const agentRunner = vi.fn(async () => ({ cardId: 7, result: "must not run", outcome: "text" as const }));
     const runner = new ScheduledTaskRunner({ agentRunner });
     const raw = makeEntry("bad-mode");
     raw.interaction = { mode: "weird" };
@@ -394,7 +401,7 @@ describe("ScheduledTaskRunner #1610 announce delivery contract", () => {
   ].join("\n");
 
   it("appends the delivery contract to one-shot announce dispatch prompts", async () => {
-    const agentRunner = vi.fn(async () => ({ cardId: 7, result: "direct result", outcome: "text" as const }));
+    const agentRunner = vi.fn(async (_request: import("../spin-types.js").SpinRequest) => ({ cardId: 7, result: "direct result", outcome: "text" as const }));
     const runner = new ScheduledTaskRunner({ agentRunner });
     const outcome = await runner.run(makeEntry("contract-announce"), makeReservation("contract-announce"));
 
@@ -411,7 +418,7 @@ describe("ScheduledTaskRunner #1610 announce delivery contract", () => {
   });
 
   it("leaves report dispatch prompts unchanged", async () => {
-    const agentRunner = vi.fn(async () => ({ cardId: 7, result: "report result", outcome: "text" as const }));
+    const agentRunner = vi.fn(async (_request: import("../spin-types.js").SpinRequest) => ({ cardId: 7, result: "report result", outcome: "text" as const }));
     const runner = new ScheduledTaskRunner({ agentRunner });
     const entry = makeEntry("contract-report");
     entry.delivery = "report";
@@ -492,7 +499,7 @@ describe("ScheduledTaskRunner #1610 announce delivery contract", () => {
         retryability: "none",
       }),
     }));
-    const settleCall = mockedSettle.mock.calls[0]![0] as Record<string, unknown>;
+    const settleCall = mockedSettle.mock.calls[0]![0];
     expect(settleCall["deliveryText"]).toBeUndefined();
     expect(settleCall["releaseDelivery"]).not.toBe(true);
     expect(mockedSettle).not.toHaveBeenCalledWith(expect.objectContaining({ outcome: "success" }));
@@ -624,9 +631,9 @@ describe("ScheduledTaskRunner #1297 credits_exhausted mapping", () => {
     const outcome = await runner.run(makeEntry("credits-noretry"), makeReservation("credits-noretry"));
 
     expect(outcome.status).toBe("failed");
-    const settleCall = mockedSettle.mock.calls[0]![0] as Record<string, unknown>;
+    const settleCall = mockedSettle.mock.calls[0]![0];
     expect(settleCall["retryAt"]).toBeUndefined();
-    expect((settleCall["diagnostic"] as { retryability: string }).retryability).toBe("none");
+    expect(settleCall.diagnostic?.retryability).toBe("none");
   });
 
   it("keeps generic mapping for ordinary model errors (no typed provider failure)", async () => {

@@ -339,7 +339,7 @@ describe("legacy task-history.jsonl migration", () => {
   it("a transaction failure rolls back the import, leaves the source intact, and a clean retry succeeds", async () => {
     const { resolveNativeDep } = await import("../../utils/lazy-require.js");
     const Database = resolveNativeDep("better-sqlite3") as new (p: string) => {
-      prepare(sql: string): { run(...p: unknown[]): { changes: number }; get(...p: unknown[]): Record<string, unknown> | undefined; all(...p: unknown[]): unknown[] };
+      prepare(sql: string): { run(...p: unknown[]): { changes: number; lastInsertRowid: number | bigint }; get(...p: unknown[]): Record<string, unknown> | undefined; all(...p: unknown[]): unknown[] };
       exec(sql: string): void;
       transaction<T>(fn: () => T): () => T;
       close(): void;

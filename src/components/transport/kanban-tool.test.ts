@@ -1,11 +1,12 @@
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, type Mock } from "vitest";
 
 import { kanbanTool } from "./kanban-tool.js";
+import type { KanbanCard } from "../tasks/kanban-board.js";
 
 interface MockBoard {
-  createDispatchableCard: ReturnType<typeof vi.fn>;
-  kanbanUpdate: ReturnType<typeof vi.fn>;
-  kanbanList: ReturnType<typeof vi.fn>;
+  createDispatchableCard: Mock<(input: unknown) => { cardId: number; status: "queued" } | { error: string }>;
+  kanbanUpdate: Mock<(id: number, fields: unknown) => void>;
+  kanbanList: Mock<(filter?: string, filterKey?: string) => KanbanCard[]>;
 }
 
 vi.mock("../tasks/kanban-board.js", (): MockBoard => {
@@ -18,7 +19,7 @@ vi.mock("../tasks/kanban-board.js", (): MockBoard => {
 
 // Get the mock from the module after vi.mock hoists
 async function getMockBoard(): Promise<MockBoard> {
-  return import("../tasks/kanban-board.js") as Promise<MockBoard>;
+  return vi.mocked(await import("../tasks/kanban-board.js")) as MockBoard;
 }
 
 describe("kanban_manage validation (Layer C — #1327, #955)", () => {

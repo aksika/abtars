@@ -62,7 +62,7 @@ function systemEntry(overrides: Partial<ScheduledTask> = {}): ScheduledTask {
     priority: "medium",
     delivery: "silent",
     ...overrides,
-  };
+  } as ScheduledTask;
 }
 
 describe("CronQueue.runSystem", () => {

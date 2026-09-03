@@ -41,7 +41,7 @@ describe("initializeState legacy repair", () => {
 
     store.initializeState([{
       id: "task", kind: "agent", prompt: "p", agent: "task", interaction: { mode: "oneshot" },
-      delivery: "silent", enabled: true, priority: "medium", at: new Date().toISOString(),
+      delivery: "silent", enabled: true, priority: "medium", at: new Date().toISOString(), orchestration: { maxAgents: 1 },
     }]);
 
     const repaired = store.readState("task")!;
@@ -63,7 +63,7 @@ describe("initializeState legacy repair", () => {
 
     store.initializeState([{
       id: "task", kind: "agent", prompt: "p", agent: "task", interaction: { mode: "oneshot" },
-      delivery: "silent", enabled: true, priority: "medium", at: new Date().toISOString(),
+      delivery: "silent", enabled: true, priority: "medium", at: new Date().toISOString(), orchestration: { maxAgents: 1 },
     }]);
 
     const repaired = store.readState("task")!;

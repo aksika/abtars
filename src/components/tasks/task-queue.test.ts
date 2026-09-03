@@ -69,7 +69,7 @@ vi.mock("../spin.js", () => ({
 }));
 
 vi.mock("./scheduled-task-runner.js", () => {
-  const MockRunner = function () {
+  const MockRunner = function (this: { run: ReturnType<typeof vi.fn> }) {
     this.run = vi.fn().mockResolvedValue({ status: "success", safeDetail: "mocked" });
   };
   return { ScheduledTaskRunner: MockRunner };
@@ -85,7 +85,7 @@ function makeFakeChild(): child_process.ChildProcess {
 }
 
 function makeEntry(overrides: Partial<ScheduledTask> = {}): ScheduledTask {
-  const base: ScheduledTask = {
+  return {
     id: "t" + Math.random().toString(36).slice(2, 6),
     kind: "script",
     command: "echo test",
@@ -95,8 +95,7 @@ function makeEntry(overrides: Partial<ScheduledTask> = {}): ScheduledTask {
     enabled: true,
     priority: "medium",
     ...overrides,
-  };
-  return base;
+  } as ScheduledTask;
 }
 
 function makeReservation(runId = "test-run", trigger: "manual" | "schedule" = "manual"): any {
@@ -319,7 +318,7 @@ describe("CronQueue #1539 two-lane admission", () => {
       const activeRun = makeReservation("deadline-run", "manual");
       vi.mocked(stateStore.reserveRun).mockReturnValue({ ok: true, run: activeRun });
       vi.mocked(stateStore.readState).mockReturnValue({
-        nextRunAt: Date.now() - 1000, consecutiveFailures: 0, consecutiveDeferrals: 0, autoPaused: false,
+        nextRunAt: Date.now() - 1000, consecutiveFailures: 0, consecutiveDeferrals: 0, autoPaused: false, autoResumeCount: 0,
         activeRun,
       });
       q.enqueue(entry);
@@ -414,10 +413,10 @@ describe("CronQueue #1539 lane semantics", () => {
       const coord = new ScheduledRunCoordinator();
       const q = new CronQueue(coord);
       const a = makeEntry({ id: "stale-a", kind: "script", command: "echo a" });
-      const runA = makeReservation("stale-a-run", "scheduled");
+      const runA = makeReservation("stale-a-run", "schedule");
       vi.mocked(stateStore.reserveRun).mockReturnValue({ ok: true, run: runA });
       vi.mocked(stateStore.readState).mockReturnValue({
-        nextRunAt: Date.now() - 1000, consecutiveFailures: 0, consecutiveDeferrals: 0, autoPaused: false,
+        nextRunAt: Date.now() - 1000, consecutiveFailures: 0, consecutiveDeferrals: 0, autoPaused: false, autoResumeCount: 0,
         activeRun: runA,
       });
       q.enqueue(a, false, runA);
@@ -435,9 +434,9 @@ describe("CronQueue #1539 lane semantics", () => {
 
   it("settles the reservation once and releases the lane when start finds the reservation stale", () => {
     const entry = makeEntry({ id: "stale-start", kind: "script", command: "echo hi" });
-    const reservation = makeReservation("stale-start-run", "scheduled");
+    const reservation = makeReservation("stale-start-run", "schedule");
     vi.mocked(stateStore.readState).mockReturnValue({
-      nextRunAt: Date.now() - 1000, consecutiveFailures: 0, consecutiveDeferrals: 0, autoPaused: false,
+      nextRunAt: Date.now() - 1000, consecutiveFailures: 0, consecutiveDeferrals: 0, autoPaused: false, autoResumeCount: 0,
       activeRun: undefined,
     });
     const result = queue.enqueue(entry, false, reservation);

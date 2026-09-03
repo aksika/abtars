@@ -10,6 +10,7 @@ import { join } from "node:path";
 import { mkdirSync, rmSync, writeFileSync, mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { LifecycleWakeScheduler } from "../lifecycle-wake-scheduler.js";
+import type { ScheduledTask } from "./task-types.js";
 import type { ScheduledRunCoordinator } from "./scheduled-run-coordinator.js";
 
 let TEST_HOME: string;
@@ -356,7 +357,7 @@ describe("run-deadline inactivity limits #1600", () => {
 
 describe("settleExpiredRun failure cascade (#1588)", () => {
   it("settles an expired run as failed and fires the cascade exactly once", () => {
-    const entry = {
+    const entry: ScheduledTask = {
       id: "expired-task",
       kind: "agent",
       prompt: "p",
@@ -386,7 +387,7 @@ describe("settleExpiredRun failure cascade (#1588)", () => {
 
     // A second settlement of the same occurrence reports nothing further.
     const run = { runId: "exp-1", groupId: "g", attempt: 1 as const, trigger: "schedule" as const, occurrenceAt: now, reservedAt: now, deadlineAt: now - 60_000, phase: "executing" as const, lastProgressAt: now };
-    dueSources.settleExpiredRun(entry, run, "again", "abort", (_entryId, diagnostic) => calls.push(diagnostic.code));
+    dueSources.settleExpiredRun(entry, run, "again", "abort", (event) => calls.push(event.diagnostic.code));
     expect(calls).toHaveLength(1);
   });
 });

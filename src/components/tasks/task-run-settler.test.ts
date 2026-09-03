@@ -409,7 +409,7 @@ describe("settleRunOnce failure cascade (#1588)", () => {
     const run = reserve("cascade-once");
     const calls: Array<[string, string]> = [];
     const opts = {
-      entry: ENTRY, run, outcome: "failed",
+      entry: ENTRY, run, outcome: "failed" as const,
       diagnostic: failure.makeTaskFailure("execution", "model_error", "executing", "boom", "none"),
       onFailure: (event: import("../sha/sha-types.js").ScheduledFailureEvent) => calls.push([event.entryId, event.diagnostic.code]),
     };

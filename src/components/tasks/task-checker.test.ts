@@ -65,8 +65,8 @@ beforeEach(() => {
   clearPendingReminders();
 });
 
-function makeTask(overrides: Partial<ScheduledTask> = {}): ScheduledTask {
-  return {
+function makeTask(overrides: Partial<Extract<ScheduledTask, { kind: "agent" }>> = {}): ScheduledTask {
+  const base: Extract<ScheduledTask, { kind: "agent" }> = {
     id: "t1",
     kind: "agent",
     prompt: "test task",
@@ -77,8 +77,9 @@ function makeTask(overrides: Partial<ScheduledTask> = {}): ScheduledTask {
     schedule: "0 9 * * *",
     enabled: true,
     priority: "medium",
-    ...overrides,
+    orchestration: { maxAgents: 1 },
   };
+  return { ...base, ...overrides };
 }
 
 function activeRun(overrides: Record<string, unknown> = {}): any {
@@ -121,6 +122,7 @@ describe("checkCron", () => {
       consecutiveFailures: 0,
       consecutiveDeferrals: 0,
       autoPaused: false,
+      autoResumeCount: 0,
       activeRun: activeRun({ runId: "owner-run", deadlineAt: Date.now() - 1, phase: "cancelling" }),
     });
 
@@ -137,6 +139,7 @@ describe("checkCron", () => {
       consecutiveFailures: 0,
       consecutiveDeferrals: 2,
       autoPaused: false,
+      autoResumeCount: 0,
       deferredAdmission: {
         groupId: "t1:group",
         occurrenceAt: now - 11 * 60_000,
@@ -230,13 +233,14 @@ describe("coordinator.recover #1539 restart ownership", () => {
     vi.mocked(historyStore.getRun).mockReturnValue(undefined);
   });
 
-  function runWith(cardId: number | undefined, deadlineAt: number, phase = "executing", reattach?: (entry: any, run: any) => boolean, taskOverrides: Partial<ScheduledTask> = {}): Promise<void> {
+  function runWith(cardId: number | undefined, deadlineAt: number, phase = "executing", reattach?: (entry: any, run: any) => boolean, taskOverrides: Partial<Extract<ScheduledTask, { kind: "agent" }>> = {}): Promise<void> {
     vi.mocked(taskStore.readEntries).mockReturnValue([makeTask(taskOverrides)]);
     vi.mocked(stateStore.readState).mockReturnValue({
       nextRunAt: Date.now() - 1000,
       consecutiveFailures: 0,
       consecutiveDeferrals: 0,
       autoPaused: false,
+      autoResumeCount: 0,
       activeRun: activeRun({ deadlineAt, phase, cardId }),
     });
     return new ScheduledRunCoordinator().recover([makeTask(taskOverrides)], reattach);
@@ -349,6 +353,7 @@ describe("run-deadline due source #1539", () => {
       consecutiveFailures: 0,
       consecutiveDeferrals: 0,
       autoPaused: false,
+      autoResumeCount: 0,
       activeRun: activeRun({ runId: "live-run", groupId: "live-group", ...runOverrides }),
     });
   }
@@ -445,7 +450,7 @@ describe("run-deadline due source #1539", () => {
       phase: "executing" as const, lastProgressAt: Date.now(), cardId: 7,
     };
     vi.mocked(stateStore.readState).mockReturnValue({
-      nextRunAt: Date.now() - 1000, consecutiveFailures: 0, consecutiveDeferrals: 0, autoPaused: false,
+      nextRunAt: Date.now() - 1000, consecutiveFailures: 0, consecutiveDeferrals: 0, autoPaused: false, autoResumeCount: 0,
       activeRun: run,
     });
     coordinator.start(makeTask({ orchestration: { maxAgents: 2 } }), run, "scheduled");
