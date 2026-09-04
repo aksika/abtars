@@ -248,6 +248,16 @@ describe("resolveCandidateModel", () => {
     const resolved = resolveCandidateModel(candidate, "high", false);
     expect(resolved.model.contextWindow).toBe(128000);
   });
+
+  it("carries the threaded maxOutput instead of a hardcoded cap (#1770)", () => {
+    const resolved = resolveCandidateModel({ ...candidate, maxOutput: 384000 }, "off", false);
+    expect(resolved.model.maxTokens).toBe(384000);
+  });
+
+  it("falls to the models.json-miss floor when no maxOutput resolves (#1770)", () => {
+    const resolved = resolveCandidateModel(candidate, "off", false);
+    expect(resolved.model.maxTokens).toBe(8192);
+  });
 });
 
 // ── #1746 runtime clamp slot ────────────────────────────────────────────────

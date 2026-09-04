@@ -91,6 +91,7 @@ export async function ensurePiThinkingClamp(piAiRoot?: Record<string, unknown>):
 
 import { logWarn, logDebug } from "../logger.js";
 import { createHash } from "node:crypto";
+import { resolveModelMeta } from "./pi-catalog.js";
 import { resolvePiInstallation, loadPiModule } from "../pi-installation.js";
 import type { PiModuleSpecifier } from "../pi-installation.js";
 import type { ReasoningEffort } from "./kiro-transport.js";
@@ -283,6 +284,14 @@ export interface ResolvedPiModel {
  * `model.reasoning` false so no reasoning param is emitted. A custom Pi model
  * without a non-null `thinkingLevelMap.xhigh` never claims xhigh — Pi's
  * clamped result wins.
+ *
+ * #1770: maxOutput is never invented here. The threaded candidate value
+ * (resolved at construction: pi catalog wins, models.json floor) leads; a
+ * live pi-catalog lookup covers ad-hoc candidates built without resolution;
+ * the models.json-miss default (8192, mirroring transport-config/resolver)
+ * is the last resort. A hardcoded small cap starves thinking models —
+ * reasoning and answer share max_tokens, so the cap burns on thinking and
+ * the turn settles length-truncated with empty content.
  */
 export function resolveCandidateModel(
   candidate: {
@@ -292,11 +301,15 @@ export function resolveCandidateModel(
     apiFormat?: ApiFormat;
     thinking?: PiAiCandidate["thinking"];
     maxContext: number;
+    maxOutput?: number;
     provider: string;
   },
   requestedEffort: ReasoningEffort,
   hasImage: boolean,
 ): ResolvedPiModel {
+  const maxOutput = candidate.maxOutput
+    ?? resolveModelMeta(candidate.model, candidate.provider)?.maxOutput
+    ?? 8192;
   const piCandidate: PiAiCandidate = {
     model: candidate.model,
     endpoint: candidate.endpoint,
@@ -304,7 +317,7 @@ export function resolveCandidateModel(
     apiFormat: candidate.apiFormat,
     thinking: candidate.thinking,
     reasoningEffort: requestedEffort,
-    maxOutput: 4096,
+    maxOutput,
     contextWindow: candidate.maxContext,
   };
   const model = buildPiModel(piCandidate, pickPiApi(candidate.apiFormat), hasImage, candidate.provider);

@@ -103,6 +103,8 @@ export async function createSubagentTransport(role: SubagentRole, registry?: imp
     const configured: ModelCandidate = {
       model: agent.model, provider: agent.providerName, endpoint: primaryEndpoint,
       apiKey, maxContext: agent.contextWindow, apiFormat: agent.provider.apiFormat,
+      // #1770: thread the resolved ceiling (pi catalog wins, models.json floor).
+      maxOutput: agent.maxOutput,
       thinking: agent.provider.thinking,
       // #1748: keep the resolved provider policy on the candidate so fallback
       // rotation cannot inherit the primary provider's retention setting.
@@ -122,6 +124,8 @@ export async function createSubagentTransport(role: SubagentRole, registry?: imp
           provider: mainAgent.providerName,
           endpoint: mainAgent.provider.endpoint ?? primaryEndpoint,
           maxContext: mainAgent.contextWindow,
+          // #1770: thread the resolved ceiling (pi catalog wins, models.json floor).
+          maxOutput: mainAgent.maxOutput,
           apiFormat: mainAgent.provider.apiFormat,
           thinking: mainAgent.provider.thinking,
         }

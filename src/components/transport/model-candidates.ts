@@ -31,6 +31,11 @@ export interface CandidateSpec {
   maxContext: number;
   apiFormat?: ApiFormat;
   thinking?: PiAiCandidate["thinking"];
+  /** #1770: resolved max output tokens (pi catalog wins, models.json floor).
+   *  Threaded from ResolvedAgent at construction; resolveCandidateModel falls
+   *  back to a live pi-catalog lookup when absent. Optional so ad-hoc and
+   *  test fixtures without resolved metadata keep compiling. */
+  maxOutput?: number;
   /** #1748: provider-resolved prompt-cache retention for this candidate.
    *  Keeping it on the candidate prevents a fallback provider from inheriting
    *  the primary provider's retention policy. */

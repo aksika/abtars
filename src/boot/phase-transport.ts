@@ -248,6 +248,9 @@ export async function buildTransport(ctx: BootCtx): Promise<PhaseResult> {
         endpoint: fbResolved?.provider.endpoint ?? resolved.provider.endpoint ?? "http://localhost:11434/v1",
         apiKey: fbResolved?.provider.apiKeyEnv ? getEnv().getApiKey(fbResolved.provider.apiKeyEnv) : apiKey,
         maxContext: fbResolved?.contextWindow ?? resolved.contextWindow,
+        // #1770: thread the resolved ceiling (pi catalog wins, models.json
+        // floor) so the request carries the model's real limit, not a pin.
+        maxOutput: fbResolved?.maxOutput ?? resolved.maxOutput,
         apiFormat: fbResolved?.provider.apiFormat,
         thinking: fbResolved?.provider.thinking,
         // #1748: resolve retention from the fallback provider itself; absent
@@ -264,6 +267,9 @@ export async function buildTransport(ctx: BootCtx): Promise<PhaseResult> {
         endpoint: resolved.provider.endpoint ?? "http://localhost:11434/v1",
         apiKey,
         maxContext: resolved.contextWindow,
+        // #1770: thread the resolved ceiling (pi catalog wins, models.json
+        // floor) so the request carries the model's real limit, not a pin.
+        maxOutput: resolved.maxOutput,
         apiFormat: resolved.provider.apiFormat,
         thinking: resolved.provider.thinking,
         // #1748: every candidate carries its provider-resolved retention.
