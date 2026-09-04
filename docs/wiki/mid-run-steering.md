@@ -12,7 +12,7 @@ Inject messages into a running agent without interrupting it, or hard-stop a gen
 ## How `/wait` works
 
 1. You send `/wait Don't forget to also check the logs`
-2. The busy-guard stashes your text in `pendingWait` on the session
+2. The busy-guard queues your text into the session's generation-bound instruction queue
 3. Between the agent's next tool calls, it sees: `[USER] Wait! Don't forget to also check the logs`
 4. The agent incorporates your guidance and continues working
 

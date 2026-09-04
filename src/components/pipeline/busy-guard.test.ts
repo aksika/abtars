@@ -97,6 +97,40 @@ describe("busyGuardMiddleware", () => {
     expect(next).not.toHaveBeenCalled();
   });
 
+  it("/wait queues into the generation-bound instruction queue while busy (#1768)", async () => {
+    const ctx = makeCtx(
+      { busy: true, activeExecutionId: "exec_1", steeringAccepting: true, instructionQueue: [] },
+      { text: "/wait check the logs" },
+    );
+    ctx.text = "/wait check the logs";
+    await mockSpin(ctx._session);
+    const next = vi.fn();
+    await busyGuardMiddleware(ctx, next);
+    expect(ctx.handled).toBe(true);
+    expect(next).not.toHaveBeenCalled();
+    expect(ctx._session.instructionQueue).toHaveLength(1);
+    expect(ctx._session.instructionQueue[0]!.text).toBe("[USER] Wait! check the logs");
+    expect(ctx.adapter.sendMessage).toHaveBeenCalledWith("100", "📌 Noted.", expect.any(Object));
+    // Proves the consumer path: spin's steering drain can lease it.
+    const { leaseInstructions } = await import("../session-instruction-queue.js");
+    expect(leaseInstructions(ctx._session, "steer")).not.toBeNull();
+  });
+
+  it("/wait reports rejection instead of a false ack when not steerable (#1768)", async () => {
+    const ctx = makeCtx(
+      { busy: true, steeringAccepting: false, instructionQueue: [] },
+      { text: "/wait check the logs" },
+    );
+    ctx.text = "/wait check the logs";
+    await mockSpin(ctx._session);
+    const next = vi.fn();
+    await busyGuardMiddleware(ctx, next);
+    expect(ctx.handled).toBe(true);
+    expect(next).not.toHaveBeenCalled();
+    expect(ctx._session.instructionQueue).toHaveLength(0);
+    expect(ctx.adapter.sendMessage).toHaveBeenCalledWith("100", expect.stringContaining("Wait not accepted"), expect.any(Object));
+  });
+
   it("skips generic notification when ctx.deferReply is set", async () => {
     const ctx = makeCtx({ busy: true });
     await mockSpin(ctx._session);

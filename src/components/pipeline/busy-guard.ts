@@ -5,7 +5,6 @@
 import type { Middleware } from "./middleware.js";
 import { logInfo, logDebug, logWarn } from "../logger.js";
 import { logAndSwallow } from "../log-and-swallow.js";
-import { randomBytes } from "node:crypto";
 import { isTrustedScheduledAnnouncement } from "../../types/platform.js";
 
 const MAX_QUEUE_DEPTH = 20;
@@ -64,39 +63,17 @@ export const busyGuardMiddleware: Middleware = async (ctx, next) => {
       return;
     }
 
-    // /wait — legacy non-interrupting injection (#1248: bounded FIFO)
+    // /wait — non-interrupting injection via the generation-bound instruction
+    // queue, same path as /steer (#1768: the legacy pendingWait FIFO had no
+    // consumer, so queued instructions were silently dropped).
     if (lower.startsWith("/wait")) {
       const body = text.replace(/^\/wait\s*/i, "").trim();
       const steer = body ? `[USER] Wait! ${body}` : "[USER] Wait!";
-      const { MAX_WAIT_ITEMS, MAX_WAIT_ITEM_BYTES, MAX_WAIT_TOTAL_BYTES } = await import("../spin-types.js");
-      const bytes = Buffer.byteLength(steer, "utf8");
-      if (bytes > MAX_WAIT_ITEM_BYTES) {
-        logWarn("busy-guard", `Wait item too large for ${activeId}: ${bytes} bytes > ${MAX_WAIT_ITEM_BYTES}`);
-        try { await adapter.sendMessage(msg.channelId, "⚠️ That message is too long for a /wait instruction.", { threadId: msg.threadId }); } catch { /* */ }
-        ctx.handled = true;
-        return;
-      }
-      if (entry.pendingWait.length >= MAX_WAIT_ITEMS) {
-        logWarn("busy-guard", `Wait queue full for ${activeId}: ${entry.pendingWait.length} items`);
-        try { await adapter.sendMessage(msg.channelId, "⚠️ Too many /wait instructions already queued.", { threadId: msg.threadId }); } catch { /* */ }
-        ctx.handled = true;
-        return;
-      }
-      const totalBytes = entry.pendingWait.reduce((s, i) => s + i.bytes, 0);
-      if (totalBytes + bytes > MAX_WAIT_TOTAL_BYTES) {
-        logWarn("busy-guard", `Wait aggregate bytes exceeded for ${activeId}: ${totalBytes + bytes} > ${MAX_WAIT_TOTAL_BYTES}`);
-        try { await adapter.sendMessage(msg.channelId, "⚠️ Too many /wait bytes queued already.", { threadId: msg.threadId }); } catch { /* */ }
-        ctx.handled = true;
-        return;
-      }
-      entry.pendingWait.push({
-        id: `wait_${randomBytes(4).toString("hex")}`,
-        text: steer,
-        createdAt: Date.now(),
-        bytes,
-      });
-      logInfo("busy-guard", `Wait queued for ${activeId}: "${body || "(no message)"}" (${entry.pendingWait.length} items, ${totalBytes + bytes} bytes)`);
-      try { await adapter.sendMessage(msg.channelId, "📌 Noted.", { threadId: msg.threadId }); } catch { /* */ }
+      const { queueInstruction } = await import("../session-instruction-queue.js");
+      const result = queueInstruction(entry, { text: steer, source: "platform" });
+      logInfo("busy-guard", `Wait for ${activeId}: ${result.ok ? "queued" : result.reason} — "${body.slice(0, 60)}"`);
+      const message = result.ok ? "📌 Noted." : `Wait not accepted: ${result.reason}.`;
+      try { await adapter.sendMessage(msg.channelId, message, { threadId: msg.threadId }); } catch { /* */ }
       ctx.handled = true;
       return;
     }
