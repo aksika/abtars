@@ -62,6 +62,24 @@ export const TERMINAL_TOOL_REASONS: ReadonlySet<ToolFailureReason> = new Set([
   "aborted",
 ]);
 
+/**
+ * #1767: empty-turn-after-tool-failure policy. A terminal tool class always
+ * throws. Any other recorded failure throws except under the sleep origin:
+ * the sleep pump treats an empty turn after a surfaced tool error as a
+ * completed step (#1752 R8), but scheduled unattended-task runs,
+ * interactive chat, unverified provenance, and direct transport callers
+ * (absent mode) fail closed — an Orc that stops after its artifact write
+ * failed, without writing the artifact and without any error surfacing, is
+ * a failure (Molty 2026-09-04 finance-daily / daily-ai).
+ */
+export function shouldThrowAfterToolFailure(
+  reason: ToolFailureReason,
+  authorizationMode: import("../action-gate.js").ToolAuthorizationMode | undefined,
+): boolean {
+  if ((TERMINAL_TOOL_REASONS as ReadonlySet<string>).has(reason)) return true;
+  return authorizationMode !== "unattended-sleep";
+}
+
 const MEMORY_FAILURE_REASONS: ReadonlySet<string> = new Set([
   "memory_validation", "memory_not_found", "memory_conflict",
   "memory_unauthorized", "memory_idempotency_conflict",

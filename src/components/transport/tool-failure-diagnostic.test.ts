@@ -11,6 +11,7 @@ import {
   summarizeToolFailure,
   renderDiagnostic,
   PiCoreToolExecutionError,
+  shouldThrowAfterToolFailure,
 } from "./tool-failure-diagnostic.js";
 import type { ToolFailureDiagnosticV1 } from "./tool-failure-diagnostic.js";
 
@@ -487,5 +488,25 @@ describe("#1716 cleanup_incomplete passthrough", () => {
     const d = parseBashResultToDiagnostic(result, "exec-1716b", "execute_bash");
     expect(d?.reason).toBe("nonzero_exit");
     expect(d?.cleanup_incomplete).toBeUndefined();
+  });
+});
+
+describe("shouldThrowAfterToolFailure (#1767)", () => {
+  it("terminal tool classes always throw, regardless of origin", () => {
+    for (const reason of ["repeated_failure", "spawn_error", "timeout", "aborted"] as const) {
+      for (const mode of ["interactive", "unattended-task", "unattended-sleep", "unverified", undefined] as const) {
+        expect(shouldThrowAfterToolFailure(reason, mode)).toBe(true);
+      }
+    }
+  });
+
+  it("non-terminal failures throw for every origin except sleep", () => {
+    for (const reason of ["nonzero_exit", "policy_rejected", "shell_syntax_error", "unknown"] as const) {
+      expect(shouldThrowAfterToolFailure(reason, "interactive")).toBe(true);
+      expect(shouldThrowAfterToolFailure(reason, "unattended-task")).toBe(true);
+      expect(shouldThrowAfterToolFailure(reason, "unverified")).toBe(true);
+      expect(shouldThrowAfterToolFailure(reason, undefined)).toBe(true);
+      expect(shouldThrowAfterToolFailure(reason, "unattended-sleep")).toBe(false);
+    }
   });
 });

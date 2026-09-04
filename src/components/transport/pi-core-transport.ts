@@ -16,7 +16,7 @@ import type { OutputObserver } from "../session-output-feed.js";
 import type { DurableContextProviderHolder } from "./pi-core-context.js";
 import { resolveCandidateModel, deriveCacheIdentity } from "./pi-ai-adapter.js";
 import { candidateKey } from "./model-candidates.js";
-import { PiCoreToolExecutionError, buildTerminalDiagnostic, TERMINAL_TOOL_REASONS } from "./tool-failure-diagnostic.js";
+import { PiCoreToolExecutionError, buildTerminalDiagnostic, shouldThrowAfterToolFailure } from "./tool-failure-diagnostic.js";
 import type { ToolFailureDiagnosticV1 } from "./tool-failure-diagnostic.js";
 import { ProviderExecutionError } from "./provider-failure.js";
 import type { ProviderTerminalFailure } from "./provider-failure.js";
@@ -690,20 +690,27 @@ export class PiCoreTransport implements IKiroTransport {
           return responseText;
         }
 
-        // #1752 R8: only a genuinely terminal tool class may promote an
-        // empty final response into a thrown turn failure. A plain
-        // nonzero_exit (or policy_rejected / shell_syntax_error) was already
-        // returned to the model as content; the model saw it and chose to
-        // stop — that is not a transport failure.
+        // #1767: R8's silent path is scoped to unattended-sleep execution
+        // only. A plain nonzero_exit (or policy_rejected /
+        // shell_syntax_error) returns "" solely for the sleep pump, which
+        // treats an empty turn after a surfaced tool error as a completed
+        // step (#1752 R8). Every other origin — scheduled unattended-task
+        // runs, interactive chat, unverified provenance, direct transport
+        // callers — fails closed with the thrown diagnostic (pre-R8
+        // behavior): an Orc that stops after its artifact write failed,
+        // without writing the artifact and without any error surfacing, is
+        // a failure (Molty 2026-09-04: finance-daily settled success with
+        // no artifact; daily-ai burned its idle budget in silence).
         const lastFailure: ToolFailureDiagnosticV1 | null = this._lastToolFailure;
         if (lastFailure) {
           const reason = (lastFailure as ToolFailureDiagnosticV1).reason;
-          const terminal = (TERMINAL_TOOL_REASONS as ReadonlySet<string>).has(reason);
-          if (terminal) {
-            logInfo(TAG, `sendPrompt: empty response with terminal tool failure (${reason}) — throwing diagnostic`);
+          // #1767: throw unless the sleep origin owns the silent path (see
+          // shouldThrowAfterToolFailure — R8 scoped to unattended-sleep).
+          if (shouldThrowAfterToolFailure(reason, context?.authorizationMode)) {
+            logInfo(TAG, `sendPrompt: empty response with tool failure (${reason}) — throwing diagnostic`);
             throw new PiCoreToolExecutionError(lastFailure);
           }
-          logInfo(TAG, `sendPrompt: empty response with non-terminal tool failure (${reason}) — returning "" (recording preserved)`);
+          logInfo(TAG, `sendPrompt: empty response with non-terminal tool failure (${reason}) — returning "" (sleep origin, recording preserved)`);
         }
 
         // #1297: a committed successful output and a terminal tool failure
