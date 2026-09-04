@@ -86,6 +86,29 @@ describe("1752 E2E — normal sleep authorization and failure/recovery truth", (
     expect(classifyCommand("cat > file << 'EOF'\nDROP TABLE\nEOF")).toBe("allow");
   });
 
+  it("interactive in-root commands allow via the #1771 pre-pass; sleep stays untouched", () => {
+    const sandbox = mkdtempSync(join(tmpdir(), "1752-1771-"));
+    const savedHome = process.env["HOME"];
+    const savedAbtars = process.env["ABTARS_HOME"];
+    const savedAbmind = process.env["ABMIND_HOME"];
+    process.env["HOME"] = sandbox;
+    process.env["ABTARS_HOME"] = join(sandbox, ".abtars");
+    process.env["ABMIND_HOME"] = join(sandbox, ".abmind");
+    try {
+      // Interactive classification (default home cwd): in-root allows.
+      expect(classifyCommand("rm -rf ~/.abtars/cache")).toBe("allow");
+      expect(classifyCommand("node ~/.abtars/scripts/x.js")).toBe("allow");
+      // Out-of-root and gated forms are unchanged.
+      expect(classifyCommand("rm -rf ~/Documents")).toBe("auth-required");
+      expect(classifyCommand("rm -rf /")).toBe("block");
+    } finally {
+      if (savedHome === undefined) delete process.env["HOME"]; else process.env["HOME"] = savedHome;
+      if (savedAbtars === undefined) delete process.env["ABTARS_HOME"]; else process.env["ABTARS_HOME"] = savedAbtars;
+      if (savedAbmind === undefined) delete process.env["ABMIND_HOME"]; else process.env["ABMIND_HOME"] = savedAbmind;
+      rmSync(sandbox, { recursive: true, force: true });
+    }
+  });
+
   it("prompt_round_limit survives host→daemon→report with stage/cause/action and resumability", async () => {
     const memoryDir = mkdtempSync(join(tmpdir(), "abmind-1752-"));
     const origUser = process.env["ABMIND_USER_ID"];

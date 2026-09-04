@@ -4,10 +4,11 @@
  */
 
 import { randomBytes } from "node:crypto";
-import { readFileSync, writeFileSync, mkdirSync, appendFileSync, existsSync } from "node:fs";
+import { readFileSync, mkdirSync, appendFileSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import { logInfo, logWarn, logError } from "./logger.js";
 import { logAndSwallow } from "./log-and-swallow.js";
+import { atomicWriteSync } from "./atomic-write.js";
 
 const TAG = "action-gate";
 
@@ -36,6 +37,70 @@ export interface AuthRequest {
 }
 
 export type NotifyFn = (text: string, buttons: Array<{ text: string; data: string }>) => Promise<void>;
+
+/** #1771: compile a stored rule pattern (glob: `*` → any run, `?` → one char) to an anchored regex. */
+export function globToRegExp(glob: string): RegExp {
+  let src = "^";
+  for (const ch of glob) {
+    if (ch === "*") src += ".*";
+    else if (ch === "?") src += ".";
+    else if ("\\.+^${}()|[]".includes(ch)) src += `\\${ch}`;
+    else src += ch;
+  }
+  return new RegExp(src + "$");
+}
+
+const PRIVILEGE_WRAPPERS = new Set(["sudo", "doas", "pkexec", "runuser", "su"]);
+const FAMILY_SUBCOMMAND_EXES = new Set(["git", "npm", "pnpm", "yarn", "docker"]);
+const GIT_OPTIONS_WITH_VALUES = new Set(["-C", "-c", "--git-dir", "--work-tree", "--namespace", "--config-env", "--exec-path", "--super-prefix"]);
+
+function commandBasename(value: string): string {
+  const slash = value.lastIndexOf("/");
+  return slash >= 0 ? value.slice(slash + 1) : value;
+}
+
+/**
+ * #1771: derive the stored family pattern for an "Always allow" grant.
+ * Unwraps one privilege wrapper (prefix preserved: `sudo rm …` → `sudo rm*`)
+ * and transparent `env` + `VAR=value` prefixes (dropped). git/npm-style
+ * executables keep their subcommand (`git status*`, `npm run*`); anything
+ * else collapses to the executable (`node*`). Always ends with `*`.
+ */
+export function familyPattern(cmd: string): string {
+  const tokens = cmd.split(/\s+/).filter((t) => t.length > 0);
+  let i = 0;
+  let prefix = "";
+  if (tokens[0] !== undefined && PRIVILEGE_WRAPPERS.has(commandBasename(tokens[0]).toLowerCase())) {
+    prefix = `${tokens[0]} `;
+    i = 1;
+  }
+  if (tokens[i] === "env") {
+    i++;
+    while (i < tokens.length && /^[A-Za-z_][A-Za-z0-9_]*=/.test(tokens[i]!)) i++;
+  } else {
+    while (i < tokens.length && /^[A-Za-z_][A-Za-z0-9_]*=/.test(tokens[i]!)) i++;
+  }
+  const exe = tokens[i];
+  if (exe === undefined) {
+    const raw = cmd.trim();
+    return raw ? `${raw}*` : "*";
+  }
+  const rest = tokens.slice(i + 1);
+  if (FAMILY_SUBCOMMAND_EXES.has(commandBasename(exe).toLowerCase())) {
+    const optionsWithValues = commandBasename(exe).toLowerCase() === "git" ? GIT_OPTIONS_WITH_VALUES : undefined;
+    for (let k = 0; k < rest.length; k++) {
+      const arg = rest[k]!;
+      if (arg === "--") {
+        const sub = rest[k + 1];
+        return sub !== undefined ? `${prefix}${exe} ${sub}*` : `${prefix}${exe}*`;
+      }
+      if (optionsWithValues?.has(arg)) { k++; continue; }
+      if (arg.startsWith("-") && arg.length > 1) continue;
+      return `${prefix}${exe} ${arg}*`;
+    }
+  }
+  return `${prefix}${exe}*`;
+}
 
 /**
  * #1629/#1663: trusted tool-authorization mode derived by Spin from durable
@@ -71,15 +136,50 @@ export class ActionGate {
     this.notify = fn;
   }
 
-  /** Check if a rule already allows/denies this action. */
+  /** Check if a rule already allows/denies this action (last match wins). */
   checkRules(category: string, pattern: string): "allow" | "deny" | null {
+    return this.matchedRule(category, pattern)?.action ?? null;
+  }
+
+  /**
+   * #1771: last matching rule for (category, pattern), re-reading the file
+   * first so concurrent `abtars auth` CLI edits are honored without a
+   * restart. A parse failure keeps the last in-memory snapshot (never a
+   * silent empty set).
+   */
+  matchedRule(category: string, pattern: string): AuthRule | null {
+    this.reloadRules();
+    let matched: AuthRule | null = null;
     for (const rule of this.rules) {
       if (rule.category !== category) continue;
-      if (rule.pattern === "*" || rule.pattern === pattern) {
-        return rule.action;
+      let re: RegExp;
+      try {
+        re = globToRegExp(rule.pattern);
+      } catch {
+        continue;
       }
+      if (re.test(pattern)) matched = rule;
     }
-    return null;
+    return matched;
+  }
+
+  /** #1771: rules for `abtars auth list` (re-reads; returns a copy). */
+  listRules(): AuthRule[] {
+    this.reloadRules();
+    return this.rules.map((r) => ({ ...r }));
+  }
+
+  /**
+   * #1771: remove rule by 0-based index for `abtars auth rm`.
+   * Re-reads before splicing and writes atomically. False on out-of-range.
+   */
+  removeRule(index: number): boolean {
+    this.reloadRules();
+    if (!Number.isInteger(index) || index < 0 || index >= this.rules.length) return false;
+    this.rules.splice(index, 1);
+    this.writeRules();
+    logInfo(TAG, `Removed rule at index ${index}`);
+    return true;
   }
 
   /**
@@ -92,13 +192,13 @@ export class ActionGate {
    */
   async requestAuth(category: string, detail: string, options: AuthRequestOptions = {}): Promise<boolean> {
     // Check persistent rules first — they outrank every fallback
-    const rule = this.checkRules(category, detail);
-    if (rule === "allow") {
-      this.audit(category, detail, "allowed-by-rule");
+    const matched = this.matchedRule(category, detail);
+    if (matched?.action === "allow") {
+      this.audit(category, detail, "allowed-by-rule", matched.pattern);
       return true;
     }
-    if (rule === "deny") {
-      this.audit(category, detail, "denied-by-rule");
+    if (matched?.action === "deny") {
+      this.audit(category, detail, "denied-by-rule", matched.pattern);
       return false;
     }
 
@@ -171,8 +271,10 @@ export class ActionGate {
       this.audit(req.category, req.detail, "allowed-once");
       req.resolve(true);
     } else if (action === "always") {
-      this.storeRule(req.category, req.detail, "allow");
-      this.audit(req.category, req.detail, "allowed-always");
+      // #1771: store the command family, never the raw command text.
+      const family = familyPattern(req.detail);
+      this.storeRule(req.category, family, "allow");
+      this.audit(req.category, req.detail, "allowed-always", family);
       req.resolve(true);
     } else {
       this.audit(req.category, req.detail, "denied");
@@ -208,9 +310,29 @@ export class ActionGate {
   }
 
   private storeRule(category: string, pattern: string, action: "allow" | "deny"): void {
+    // #1771: re-read before appending so a concurrent CLI edit is not
+    // clobbered (and a just-removed rule is not resurrected).
+    this.reloadRules();
     this.rules.push({ category, pattern, action, createdAt: new Date().toISOString() });
-    writeFileSync(this.rulesPath, JSON.stringify({ rules: this.rules }, null, 2) + "\n");
+    this.writeRules();
     logInfo(TAG, `Stored rule: ${action} ${category}:${pattern}`);
+  }
+
+  private writeRules(): void {
+    try {
+      atomicWriteSync(this.rulesPath, JSON.stringify({ rules: this.rules }, null, 2) + "\n");
+    } catch (err) {
+      logAndSwallow(TAG, "write rules file", err);
+    }
+  }
+
+  private reloadRules(): void {
+    if (!existsSync(this.rulesPath)) { this.rules = []; return; }
+    try {
+      const data = JSON.parse(readFileSync(this.rulesPath, "utf-8")) as { rules?: unknown };
+      if (Array.isArray(data.rules)) this.rules = data.rules as AuthRule[];
+      // Non-array payload: keep the last in-memory snapshot.
+    } catch { /* keep the last in-memory snapshot */ }
   }
 
   private loadRules(): void {
@@ -221,9 +343,10 @@ export class ActionGate {
     } catch { this.rules = []; }
   }
 
-  private audit(category: string, detail: string, outcome: string): void {
-    const entry = JSON.stringify({ ts: new Date().toISOString(), category, detail: detail.slice(0, 200), outcome });
-    try { appendFileSync(this.auditPath, entry + "\n"); } catch { /* best effort */ }
+  private audit(category: string, detail: string, outcome: string, pattern?: string): void {
+    const entry: Record<string, string> = { ts: new Date().toISOString(), category, detail: detail.slice(0, 200), outcome };
+    if (pattern !== undefined) entry["pattern"] = pattern.slice(0, 200);
+    try { appendFileSync(this.auditPath, JSON.stringify(entry) + "\n"); } catch { /* best effort */ }
   }
 
   private formatMessage(category: string, detail: string): string {

@@ -3,8 +3,11 @@
  * Defense-in-depth: catches accidental/confused model behavior, NOT adversarial bypass.
  */
 
-import { resolve, sep } from "node:path";
+import { join, resolve, sep } from "node:path";
 import { homedir } from "node:os";
+import { existsSync } from "node:fs";
+import { abmindHome, abtarsHome } from "../paths.js";
+import { resolveReleasesDir } from "../cli/deploy-lib/paths.js";
 import { getEnv } from "./env-schema.js";
 import { logWarn } from "./logger.js";
 
@@ -100,11 +103,26 @@ const CODE_INTERPRETERS = new Set(["node", "nodejs", "python", "python3", "perl"
 const DYNAMIC_SENSITIVE_COMMANDS = new Set(["rm", "git", "kill", "chmod", "find", "awk", "gawk", "mawk"]);
 
 /** Classify a command into block / auth-required / allow. Payload-aware per #1752. */
-export function classifyCommand(cmd: string): CommandTier {
-  return classifyInternal(typeof cmd === "string" ? cmd : "", 0, MAX_NESTED_BYTES);
+export function classifyCommand(cmd: string, cwd?: string): CommandTier {
+  return classifyInternal(typeof cmd === "string" ? cmd : "", 0, MAX_NESTED_BYTES, cwd ?? homedir());
 }
 
-function classifyInternal(cmd: string, depth: number, remainingBytes: number): CommandTier {
+/**
+ * #1771: root-scope predicate shared by classification and audit tagging.
+ * True when every path operand of the command resolves under the ab roots
+ * (abmind/abtars/releases homes) with eval forms, dynamic tokens, expanding
+ * heredocs, secret paths, and ambiguous lexes excluded. Pure: safe to call
+ * for audit annotation alongside classifyCommand.
+ */
+export function isRootScopeAllow(cmd: string, cwd?: string): boolean {
+  const input = typeof cmd === "string" ? cmd : "";
+  const heredocs = maskHeredocBodies(input);
+  if (heredocs.malformed) return false;
+  const lexed = lexShell(heredocs.visible);
+  return rootScopePrePass(lexed, heredocs.bodies, cwd ?? homedir());
+}
+
+function classifyInternal(cmd: string, depth: number, remainingBytes: number, cwd: string): CommandTier {
   if (depth > MAX_NESTED_DEPTH || remainingBytes <= 0) return "auth-required";
 
   const heredocs = maskHeredocBodies(cmd);
@@ -120,9 +138,15 @@ function classifyInternal(cmd: string, depth: number, remainingBytes: number): C
 
   for (const payload of [...lexed.substitutions, ...heredocSubstitutions(heredocs.bodies)]) {
     if (!payload.trim()) return "auth-required";
-    const nestedTier = classifyInternal(payload, depth + 1, remainingBytes - payload.length);
+    const nestedTier = classifyInternal(payload, depth + 1, remainingBytes - payload.length, cwd);
     if (nestedTier !== "allow") return nestedTier;
   }
+
+  // #1771 D pre-pass: commands operating entirely inside the ab roots run
+  // without a prompt. Runs before the per-segment loop so in-root
+  // source/scripts also allow (intentional #1752 R2.4 deviation); can only
+  // relax to allow, never tighten, and never overrides the block tier above.
+  if (rootScopePrePass(lexed, heredocs.bodies, cwd)) return "allow";
 
   for (const segment of lexed.segments) {
     const executable = findExecutable(segment.tokens);
@@ -151,14 +175,14 @@ function classifyInternal(cmd: string, depth: number, remainingBytes: number): C
       if (commandIndex === null) return "auth-required";
       const payload = nextValue(segment.tokens, commandIndex + 1);
       if (!payload || payload.dynamic || !payload.value.trim()) return "auth-required";
-      const nestedTier = classifyInternal(payload.value, depth + 1, remainingBytes - payload.value.length);
+      const nestedTier = classifyInternal(payload.value, depth + 1, remainingBytes - payload.value.length, cwd);
       if (nestedTier !== "allow") return nestedTier;
       continue;
     }
 
     if (word === "eval") {
       if (args.length === 0 || args.some(t => t.dynamic)) return "auth-required";
-      const nestedTier = classifyInternal(args.map(t => t.value).join(" "), depth + 1, remainingBytes - args.reduce((n, t) => n + t.value.length, 0));
+      const nestedTier = classifyInternal(args.map(t => t.value).join(" "), depth + 1, remainingBytes - args.reduce((n, t) => n + t.value.length, 0), cwd);
       if (nestedTier !== "allow") return nestedTier;
       continue;
     }
@@ -192,6 +216,137 @@ function classifyInternal(cmd: string, depth: number, remainingBytes: number): C
   }
   return "allow";
 }
+
+// ── #1771 D: ab-root path-scope pre-pass ─────────────────────────────────
+
+/**
+ * Allowed roots, resolved per call so ABMIND_HOME / ABTARS_HOME /
+ * ABTARS_RELEASES overrides (and hermetic tests) work — never hardcoded
+ * homedir() paths.
+ */
+function allowedBashRoots(): string[] {
+  return [abmindHome(), abtarsHome(), resolveReleasesDir()];
+}
+
+function secretRoot(): string {
+  return join(abtarsHome(), "secret");
+}
+
+function isUnder(resolved: string, root: string): boolean {
+  return resolved === root || resolved.startsWith(root + sep);
+}
+
+/**
+ * True when the lexed command operates exclusively inside the ab roots.
+ * Fail-safe: every veto returns false (fall through to normal
+ * classification); only a fully in-root operand set returns true.
+ */
+function rootScopePrePass(lexed: ShellLexResult, bodies: HeredocBody[], cwd: string): boolean {
+  if (lexed.ambiguous) return false;
+  if (lexed.segments.length === 0) return false;
+  if (hasExpandingHeredocBody(bodies)) return false;
+  if (hasEvalFlag(lexed)) return false;
+  if (anyDynamicToken(lexed)) return false;
+  if (hasRmRootTarget(lexed)) return false;
+  return allPathOperandsInRoots(lexed, cwd);
+}
+
+function hasExpandingHeredocBody(bodies: HeredocBody[]): boolean {
+  return bodies.some((b) => b.expands && hasUnescapedExpansion(b.text));
+}
+
+/** Any dynamic data token vetoes the pre-pass (fail closed). */
+function anyDynamicToken(lexed: ShellLexResult): boolean {
+  return lexed.segments.some((segment) => segment.tokens.some((t) => !t.operator && t.dynamic));
+}
+
+const EVAL_LONG_PREFIXES = ["--eval", "--command", "--exec"];
+
+/**
+ * Inline-code eval flags. Exact `-e`/`-c`/`-E` and `--eval*`/`--command*`/
+ * `--exec*` (bare or `=value`) match on any executable — a veto only drops
+ * the pre-pass shortcut, so over-matching is safe. Short-option bundles
+ * containing e/c/E (`node -ce …`, `perl -E …`) are scoped to interpreter
+ * executables so `git -C` and friends are unaffected.
+ */
+function hasEvalFlag(lexed: ShellLexResult): boolean {
+  for (const segment of lexed.segments) {
+    const found = findExecutable(segment.tokens);
+    const word = found ? commandBasename(segment.tokens[found.index]!.value).toLowerCase() : "";
+    const isInterpreter = CODE_INTERPRETERS.has(word) || SHELL_INTERPRETERS.has(word)
+      || word === "sqlite3" || word === "psql" || word === "mysql" || word === "eval";
+    for (let k = 0; k < segment.tokens.length; k++) {
+      if (found && k === found.index) continue;
+      const token = segment.tokens[k]!;
+      if (token.operator) continue;
+      const v = token.value;
+      if (v === "-e" || v === "-c" || v === "-E") return true;
+      // `--eval`, `--eval=…`, `--command…`, `--exec…` (but not `--exec-path`-style
+      // double-dash compounds, which are ordinary options). Over-matching here
+      // would only drop the pre-pass shortcut, never grant one.
+      if (v.startsWith("--") && EVAL_LONG_PREFIXES.some((p) => v === p || v.startsWith(p + "=") || (v.startsWith(p) && !v.startsWith(p + "-")))) return true;
+      if (isInterpreter && /^-[A-Za-z]+$/.test(v) && /[ecE]/.test(v)) return true;
+    }
+  }
+  return false;
+}
+
+/** `rm` with a `/` target never takes the pre-pass (block tier owns it). */
+function hasRmRootTarget(lexed: ShellLexResult): boolean {
+  for (const segment of lexed.segments) {
+    const found = findExecutable(segment.tokens);
+    if (!found) continue;
+    if (commandBasename(segment.tokens[found.index]!.value).toLowerCase() !== "rm") continue;
+    for (const arg of argsAfter(segment.tokens, found.index)) {
+      if (arg.value === "/") return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * Every path operand must resolve under an allowed root (and outside the
+ * secret dir). Path-like tokens count regardless of any preceding flag —
+ * deliberately no flag-value bookkeeping: extra operands can only veto, so
+ * imprecision here is fail-closed. Bare words count only when they exist on
+ * disk under cwd. No operands at all → false (fall through).
+ */
+function allPathOperandsInRoots(lexed: ShellLexResult, cwd: string): boolean {
+  const roots = allowedBashRoots();
+  const secret = secretRoot();
+  const home = homedir();
+  let sawOperand = false;
+  for (const segment of lexed.segments) {
+    for (const token of segment.tokens) {
+      if (token.operator) continue;
+      const v = token.value;
+      if (v === "-" || v.startsWith("-")) continue;
+      if (token.dynamic) return false;
+      const pathLike = v.startsWith("/") || v.startsWith("~") || v.startsWith(".") || v.includes("/");
+      let resolved: string;
+      if (pathLike) {
+        // `~user/…` is refused outright: only bare `~` / `~/…` expand to home.
+        if (v.startsWith("~") && v !== "~" && !v.startsWith("~/")) return false;
+        resolved = v === "~" ? home : v.startsWith("~/") ? join(home, v.slice(2)) : resolve(cwd, v);
+      } else {
+        let candidate: string;
+        try {
+          candidate = resolve(cwd, v);
+        } catch {
+          return false;
+        }
+        if (!existsSync(candidate)) continue;
+        resolved = candidate;
+      }
+      sawOperand = true;
+      if (isUnder(resolved, secret)) return false;
+      if (!roots.some((root) => isUnder(resolved, root))) return false;
+    }
+  }
+  return sawOperand;
+}
+
+// ── executable classification ──────────────────────────────────────────────
 
 function classifyExecutable(word: string, args: string[]): CommandTier {
   if (["sudo", "doas", "pkexec", "runuser", "su"].includes(word)) return "auth-required";
@@ -706,10 +861,10 @@ export function checkPath(path: string, mode: "read" | "write"): string | null {
 }
 
 /** Check if a bash command is allowed. Returns error message or null if OK. */
-export function checkCommand(cmd: string): string | null {
+export function checkCommand(cmd: string, cwd?: string): string | null {
   if (!isGuardrailsActive()) return null;
 
-  const tier = classifyCommand(cmd);
+  const tier = classifyCommand(cmd, cwd);
   if (tier === "block") {
     logWarn(TAG, `Blocked command: ${cmd.slice(0, 100)}`);
     return `Command blocked by guardrails: ${cmd.slice(0, 60)}`;

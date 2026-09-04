@@ -3,9 +3,13 @@ import { mkdtempSync, rmSync, existsSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
+// Mutable root-scope predicate for the #1771 audit-tag test below.
+const rootScopeMock = vi.hoisted(() => ({ value: false }));
+
 vi.mock("../guardrails.js", () => ({
   checkCommand: () => null,
   classifyCommand: () => "allow",
+  isRootScopeAllow: () => rootScopeMock.value,
 }));
 
 const home = mkdtempSync(join(tmpdir(), "abtars-audit-1716-"));
@@ -71,6 +75,20 @@ describe("#1716 audit call_id pairing through executeToolCall", () => {
     const before = readRows().length;
     await executeToolCall("definitely_not_a_tool_1716", {}, { userId: "tester" });
     expect(readRows().length).toBe(before);
+  });
+
+  it("tags root-scope executions with policy root-scope-allow (#1771)", async () => {
+    rootScopeMock.value = true;
+    try {
+      await executeToolCall("execute_bash", { command: "echo root-scope-tag-check" }, { userId: "tester" });
+      const start = readRows().filter((r) => r["tool"] === "execute_bash").at(-2)!;
+      expect(start["policy"]).toBe("root-scope-allow");
+    } finally {
+      rootScopeMock.value = false;
+    }
+    await executeToolCall("execute_bash", { command: "echo no-tag-check" }, { userId: "tester" });
+    const plain = readRows().filter((r) => r["tool"] === "execute_bash").at(-2)!;
+    expect(plain["policy"]).toBeUndefined();
   });
 });
 

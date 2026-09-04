@@ -11,6 +11,7 @@ const guardrailMocks = vi.hoisted(() => ({
 vi.mock("../guardrails.js", () => ({
   checkCommand: () => null,
   classifyCommand: () => guardrailMocks.classifyImpl,
+  isRootScopeAllow: () => false,
 }));
 import { isBridgeSpawnCommand, getToolDefinitions, getToolSchemas, executeToolCall, getToolDescriptor, setActionGate, setSendDocument } from "./tool-registry.js";
 import { createClientRuntime } from "../memory-runtime.js";

@@ -67,6 +67,7 @@ Usage:
   abtars status
   abtars logs
   abtars config
+  abtars auth list|rm
   abtars deps [list|install|remove]
   abtars tribe join --peer <host:port>
   abtars tribe invite --peer <host:port>
@@ -223,6 +224,10 @@ export async function main(argv: readonly string[]): Promise<number> {
       case 'kanban': {
         const { kanban: kanbanCmd } = await import('./commands/kanban.js');
         return await kanbanCmd(argv.slice(1));
+      }
+      case 'auth': {
+        const { auth: authCmd } = await import('./commands/auth.js');
+        return await authCmd(argv.slice(1));
       }
       case '':
       case 'help':

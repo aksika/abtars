@@ -1,4 +1,7 @@
 import { describe, it, expect, vi } from "vitest";
+import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { HostToolService, redactLiterals } from "./host-tool-service.js";
 import { SealedSecretHandles } from "./sealed-secret-handles.js";
 
@@ -179,5 +182,35 @@ describe("#1716 bounded settlement boundary", () => {
       { userId: "u1", executionId: "e1-abort", signal: controller.signal },
     );
     expect(JSON.parse(result).aborted).toBe(true);
+  });
+
+  it("lets in-root commands through without ActionGate (#1771)", async () => {
+    const sandbox = mkdtempSync(join(tmpdir(), "hostsvc-1771-"));
+    const savedHome = process.env["HOME"];
+    const savedAbtars = process.env["ABTARS_HOME"];
+    process.env["HOME"] = sandbox;
+    process.env["ABTARS_HOME"] = join(sandbox, ".abtars");
+    try {
+      mkdirSync(join(sandbox, ".abtars", "cache"), { recursive: true });
+      const { service, actionGate } = makeService();
+      const requestAuth = (actionGate as unknown as { requestAuth: ReturnType<typeof vi.fn> }).requestAuth;
+      const allowed = await service.runBash(
+        { command: "rm -rf ~/.abtars/cache" },
+        { userId: "u1", executionId: "e1-1771" },
+      );
+      expect(JSON.parse(allowed)).toMatchObject({ exit_code: 0 });
+      expect(requestAuth).not.toHaveBeenCalled();
+
+      const gated = await service.runBash(
+        { command: "rm -rf ~/Documents" },
+        { userId: "u1", executionId: "e2-1771" },
+      );
+      expect(JSON.parse(gated)).toMatchObject({ exit_code: 0 });
+      expect(requestAuth).toHaveBeenCalledTimes(1);
+    } finally {
+      if (savedHome === undefined) delete process.env["HOME"]; else process.env["HOME"] = savedHome;
+      if (savedAbtars === undefined) delete process.env["ABTARS_HOME"]; else process.env["ABTARS_HOME"] = savedAbtars;
+      rmSync(sandbox, { recursive: true, force: true });
+    }
   });
 });

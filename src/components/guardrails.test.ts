@@ -1,5 +1,8 @@
-import { describe, expect, it } from "vitest";
-import { classifyCommand } from "./guardrails.js";
+import { describe, expect, it, beforeEach, afterEach } from "vitest";
+import { mkdtempSync, mkdirSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { classifyCommand, isRootScopeAllow } from "./guardrails.js";
 
 describe("guardrails command classification", () => {
   it.each([
@@ -33,5 +36,95 @@ describe("guardrails command classification", () => {
     ["ambiguous shell syntax", "echo 'unterminated", "auth-required"],
   ] as const)("classifies %s from executable structure", (_name, command, expected) => {
     expect(classifyCommand(command)).toBe(expected);
+  });
+});
+
+// ── #1771 D: ab-root path-scope pre-pass ────────────────────────────────────
+
+describe("guardrails root-scope pre-pass (#1771)", () => {
+  let sandbox: string;
+  let abmind: string;
+  let abtars: string;
+  let releases: string;
+  let outside: string;
+  const savedEnv: Record<string, string | undefined> = {};
+
+  beforeEach(() => {
+    sandbox = mkdtempSync(join(tmpdir(), "guardrails-1771-"));
+    // HOME-shaped layout so `~`-forms (the only rm -rf spellings that reach
+    // the pre-pass — literal `rm -rf /…` stays block via the text prefix)
+    // resolve hermetically. os.homedir() honors $HOME per call on POSIX.
+    abmind = join(sandbox, ".abmind");
+    abtars = join(sandbox, ".abtars");
+    releases = join(sandbox, ".abtars-releases");
+    outside = join(sandbox, "outside");
+    for (const d of [abmind, abtars, releases, outside]) mkdirSync(d, { recursive: true });
+    mkdirSync(join(abtars, "node_modules"), { recursive: true });
+    for (const key of ["HOME", "ABMIND_HOME", "ABTARS_HOME", "ABTARS_RELEASES"] as const) savedEnv[key] = process.env[key];
+    process.env["HOME"] = sandbox;
+    process.env["ABMIND_HOME"] = abmind;
+    process.env["ABTARS_HOME"] = abtars;
+    process.env["ABTARS_RELEASES"] = releases;
+  });
+
+  afterEach(() => {
+    for (const key of ["HOME", "ABMIND_HOME", "ABTARS_HOME", "ABTARS_RELEASES"] as const) {
+      const saved = savedEnv[key];
+      if (saved === undefined) delete process.env[key];
+      else process.env[key] = saved;
+    }
+    rmSync(sandbox, { recursive: true, force: true });
+  });
+
+  it("allows commands operating entirely inside the ab roots", () => {
+    const cases: Array<[string, string]> = [
+      ["in-root node script", `node ${abtars}/scripts/x.js`],
+      ["in-root rm -rf (tilde form)", "rm -rf ~/.abtars/node_modules"],
+      ["in-root git with -C value", `git -C ${abtars} clean -f`],
+      ["in-root sudo rm (tilde form)", "sudo rm -rf ~/.abtars/cache"],
+      ["in-root releases rm (tilde form)", "rm -rf ~/.abtars-releases/v1"],
+      ["quoted heredoc to abmind", `cat > ${abmind}/m.md <<'EOF'\nhello\nEOF`],
+      ["quoted heredoc body with $ stays eligible", "rm -rf ~/.abtars/x <<'EOF'\n$Y\nEOF"],
+      ["in-root source", `source ${abtars}/x.sh`],
+      ["relative script in rooted cwd", "./rel.sh"],
+      ["bare word existing under rooted cwd", "rm -rf node_modules"],
+    ];
+    for (const [name, command] of cases) {
+      expect(classifyCommand(command, abtars), name).toBe("allow");
+      expect(isRootScopeAllow(command, abtars), name).toBe(true);
+    }
+  });
+
+  it("falls through to normal classification outside the roots", () => {
+    const cases: Array<[string, string, "allow" | "auth-required" | "block"]> = [
+      ["literal absolute rm stays block via prefix", "rm -rf /tmp/test", "block"],
+      ["node eval", "node -e '1'", "auth-required"],
+      ["bundled node eval flag", "node -ce '1'", "auth-required"],
+      ["perl uppercase eval", "perl -E 'say 1'", "auth-required"],
+      ["bash -c with gated payload", "bash -c 'sudo id'", "auth-required"],
+      ["dynamic target", 'rm -rf "$TARGET"', "auth-required"],
+      ["dynamic beside in-root operands", "rm -rf $DIR ~/.abtars/cache", "auth-required"],
+      ["glob is dynamic", "rm -rf ~/.abtars/*", "auth-required"],
+      ["secret subtree never in-root", "rm -rf ~/.abtars/secret/t", "auth-required"],
+      ["unquoted expanding heredoc", "rm -rf ~/.abtars/x <<EOF\necho $HOME\nEOF", "auth-required"],
+      ["home documents", "rm -rf ~/Documents", "auth-required"],
+      ["tilde-user refused", "rm -rf ~root/x", "auth-required"],
+      ["root wipe stays block", "rm -rf /", "block"],
+      ["out-of-root source", "source /tmp/x.sh", "auth-required"],
+      ["bare word in unrooted cwd", "rm -rf node_modules", "auth-required"],
+      ["sibling-prefix escape", "rm -rf ~/.abtars-evil/x", "auth-required"],
+    ];
+    for (const [name, command, expected] of cases) {
+      const cwd = name === "bare word in unrooted cwd" ? outside : abtars;
+      expect(classifyCommand(command, cwd), name).toBe(expected);
+      expect(isRootScopeAllow(command, cwd), name).toBe(false);
+    }
+  });
+
+  it("isRootScopeAllow rejects malformed and operand-less commands", () => {
+    expect(isRootScopeAllow("", abtars)).toBe(false);
+    expect(isRootScopeAllow("echo 'unterminated", abtars)).toBe(false);
+    expect(isRootScopeAllow("npm run build", abtars)).toBe(false);
+    expect(isRootScopeAllow("rm -rf /", abtars)).toBe(false);
   });
 });

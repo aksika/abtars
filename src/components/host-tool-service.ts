@@ -20,9 +20,9 @@
  */
 
 import { execFileSync } from "node:child_process";
-import { logWarn } from "./logger.js";
+import { logInfo, logWarn } from "./logger.js";
 import { redactSecrets } from "./logger.js";
-import { checkCommand, classifyCommand } from "./guardrails.js";
+import { checkCommand, classifyCommand, isRootScopeAllow } from "./guardrails.js";
 import { fingerprintCommand, previewCommand } from "./transport/tool-failure-diagnostic.js";
 import { runBashCommand } from "./bash-runner.js";
 import { getEnv } from "./env-schema.js";
@@ -204,9 +204,9 @@ export class HostToolService {
     if (ctx.authorizationMode !== "unattended-sleep") {
       // Guardrails — one deterministic policy result for classifier,
       // guardrail, auth, and audit.
-      const tier = classifyCommand(cmd);
+      const tier = classifyCommand(cmd, ctx.executionScope?.cwd);
       if (tier === "block") {
-        const blockMsg = checkCommand(cmd);
+        const blockMsg = checkCommand(cmd, ctx.executionScope?.cwd);
         if (blockMsg) {
           logWarn("host-tool-service", `Guardrails blocked [${fingerprintCommand(cmd)}]: ${previewCommand(cmd)}`);
           return policyRejected(cmd, blockMsg);
@@ -219,6 +219,13 @@ export class HostToolService {
       }
       if (isBridgeKillCommand(cmd)) {
         return policyRejected(cmd, "Command blocked: this would kill the bridge process (yourself). Ask the user to send /restart for a session reset.");
+      }
+
+      // #1771: pre-pass allows bypass ActionGate, so they leave no
+      // auth/audit.jsonl trace on this path (no per-call sink exists here) —
+      // emit a structured log line with the root-scope marker instead.
+      if (tier === "allow" && isRootScopeAllow(cmd, ctx.executionScope?.cwd)) {
+        logInfo("host-tool-service", `Root-scope allow [${fingerprintCommand(cmd)}]: ${previewCommand(cmd)}`);
       }
 
       // ActionGate: only command + variable names reach the authorization

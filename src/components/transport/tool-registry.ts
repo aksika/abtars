@@ -20,7 +20,7 @@ import type { OrcInvocationContextV2 } from "../orc-project/orc-project-contract
 import { formatRunReason } from "../orc-project/orc-project-contracts.js";
 import { OrcProjectRunStore } from "../orc-project/orc-project-run-store.js";
 import { orcToolAllowedOnIntent } from "../orc-project/orc-intent-policy.js";
-import { checkCommand, classifyCommand } from "../guardrails.js";
+import { checkCommand, classifyCommand, isRootScopeAllow } from "../guardrails.js";
 import { SealedSecretHandles as staticSealedHandles } from "../sealed-secret-handles.js";
 
 const TAG = "tool_registry";
@@ -308,9 +308,9 @@ function runBash(cmd: string, timeout = defaultBashTimeoutMs(), signal?: AbortSi
   // authorization wait or reject a model-produced command by classification.
   if (authorizationMode !== "unattended-sleep") {
     // Single deterministic policy result for guardrail/auth/audit (#1752)
-    const tier = classifyCommand(cmd);
+    const tier = classifyCommand(cmd, executionScope?.cwd);
     if (tier === "block") {
-      const cmdBlock = checkCommand(cmd);
+      const cmdBlock = checkCommand(cmd, executionScope?.cwd);
       if (cmdBlock) {
         logWarn("tool-registry", `Guardrails blocked [${fingerprintCommand(cmd)}]: ${previewCommand(cmd)}`);
         return Promise.resolve(JSON.stringify({ error: "policy_rejected", stderr: cmdBlock, exit_code: 126, command_fingerprint: fingerprintCommand(cmd), command_preview: previewCommand(cmd) }));
@@ -1156,7 +1156,11 @@ export async function executeToolCall(name: string, args: Record<string, unknown
     auditArgs = auditArgs.replace(/secret:[A-Za-z0-9_-]+/g, "[SEALED_HANDLE]");
   }
   const callId = randomUUID();
-  audit({ ts, tool: name, call_id: callId, args: auditArgs, userId: context?.userId });
+  // #1771: tag in-root executions so pre-pass allows stay traceable in the
+  // audit sink. Audit-only: result shape and diagnostics are untouched.
+  const rootScope = name === "execute_bash" && typeof args["command"] === "string"
+    && isRootScopeAllow(args["command"], context?.executionScope?.cwd);
+  audit({ ts, tool: name, call_id: callId, args: auditArgs, userId: context?.userId, ...(rootScope ? { policy: "root-scope-allow" } : {}) });
 
   let result: string | undefined;
   let failed = false;
