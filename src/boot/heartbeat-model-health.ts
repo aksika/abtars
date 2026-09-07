@@ -1,5 +1,6 @@
 import { getEnv } from "../components/env-schema.js";
 import { logInfo, logWarn } from "../components/logger.js";
+import { modelHealthProbeBody } from "../components/transport/model-health-probe.js";
 import type { BootCtx } from "./context.js";
 
 export async function runModelHealthCheck(ctx: BootCtx): Promise<void> {
@@ -32,7 +33,7 @@ export async function runModelHealthCheck(ctx: BootCtx): Promise<void> {
         const res = await fetch(`${endpoint}/chat/completions`, {
           method: "POST",
           headers: { "Content-Type": "application/json", ...(apiKey ? { Authorization: `Bearer ${apiKey}` } : {}) },
-          body: JSON.stringify({ model, messages: [{ role: "user", content: "hi" }], max_tokens: 1 }),
+          body: JSON.stringify(modelHealthProbeBody(model)),
           signal: AbortSignal.timeout(30_000),
         });
         if (!res.ok) {

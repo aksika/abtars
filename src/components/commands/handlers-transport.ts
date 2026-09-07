@@ -3,6 +3,7 @@ import { logAndSwallow } from "../log-and-swallow.js";
 import type { CommandContext } from "./types.js";
 import { triggerResetSession} from "./registry.js";
 import { MAX_COMPACT_INSTRUCTIONS_BYTES } from "../compact-summarizer.js";
+import { modelHealthProbeBody } from "../transport/model-health-probe.js";
 
 const TAG = "cmd";
 
@@ -198,7 +199,7 @@ export async function handleModels(text: string, ctx: CommandContext): Promise<b
         const res = await fetch(`${endpoint}/chat/completions`, {
           method: "POST",
           headers: { "Content-Type": "application/json", ...(apiKey ? { Authorization: `Bearer ${apiKey}` } : {}) },
-          body: JSON.stringify({ model, messages: [{ role: "user", content: "hi" }], max_tokens: 1 }),
+          body: JSON.stringify(modelHealthProbeBody(model)),
           signal: AbortSignal.timeout(10_000),
         });
         if (res.ok) {
