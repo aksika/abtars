@@ -769,18 +769,23 @@ export class Spin {
       ? "unattended-sleep" as const
       : resolveToolAuthorizationMode(cardId);
 
-    // #1319: Track card association and publish execution.started for Orc
+    // #1319: Track card association for Orc turns. The execution.started
+    // publish moved behind the durable bind below (#1778) — subscribers must
+    // never observe an execution whose run was never owned. Turns with no
+    // durable run to bind publish here: there is nothing to order against.
     if (cardId !== undefined && spec.type === "O") {
       session.activeCardId = cardId;
       session.activeRootCardId = resolveRootId(cardId);
-      this.orcActivityFeed?.publish({
-        kind: "execution.started",
-        timestamp: Date.now(),
-        sessionId: session.id,
-        executionId: capturedExecutionId,
-        rootCardId: session.activeRootCardId,
-        cardId,
-      } as Parameters<NonNullable<typeof this.orcActivityFeed>["publish"]>[0]);
+      if (!spec.orcContext) {
+        this.orcActivityFeed?.publish({
+          kind: "execution.started",
+          timestamp: Date.now(),
+          sessionId: session.id,
+          executionId: capturedExecutionId,
+          rootCardId: session.activeRootCardId,
+          cardId,
+        } as Parameters<OrcActivityFeed["publish"]>[0]);
+      }
     }
 
     // 4-7. Single try/catch so EVERY exit path (pre-exec throws included) flows
@@ -829,6 +834,18 @@ export class Spin {
         session.orcContext = boundOrcContext;
         boundOrcTurnControl = spec.orcTurnControl;
         boundMaxPromptRounds = spec.orcMaxPromptRounds;
+        // #1778: the bind CAS above committed — only now is execution.started
+        // truthful to publish.
+        if (cardId !== undefined) {
+          this.orcActivityFeed?.publish({
+            kind: "execution.started",
+            timestamp: Date.now(),
+            sessionId: session.id,
+            executionId: capturedExecutionId,
+            rootCardId: session.activeRootCardId,
+            cardId,
+          } as Parameters<OrcActivityFeed["publish"]>[0]);
+        }
       }
       // 4. before-hook
       await profile.beforePrompt?.(session, cardId);
@@ -1524,31 +1541,17 @@ export class Spin {
       }
     }
 
-    // #1319: Publish execution.completed before clearing association
-    if (spec.type === "O") {
-      this.orcActivityFeed?.publish({
-        kind: "execution.completed",
-        summary: result.slice(0, 200),
-        timestamp: Date.now(),
-        sessionId: session.id,
-        executionId: capturedExecutionId,
-        rootCardId: session.activeRootCardId,
-        cardId: session.activeCardId,
-      } as Parameters<NonNullable<typeof this.orcActivityFeed>["publish"]>[0]);
-    }
-    session.activeExecutionId = undefined;
-    session.activeCardId = undefined;
-    session.activeRootCardId = undefined;
-
-    await profile.afterPrompt?.(session, cardId);
-
-    // #1480/#1680: Release Orc run after a successful turn. A normal model
-    // termination still must satisfy the durable intent postcondition: an
-    // unsatisfied intent (prose-only completion) is released `failed` with the
-    // stable `intent_postcondition_unsatisfied` code. A turn that ended by the
+    // #1480/#1680: Release the Orc run before any observability publish or
+    // session-association clear. A normal model termination still must
+    // satisfy the durable intent postcondition: an unsatisfied intent
+    // (prose-only completion) is released `failed` with the stable
+    // `intent_postcondition_unsatisfied` code. A turn that ended by the
     // host-owned turn control (durable intent satisfied) releases `completed`
     // with `failure_code = NULL`. #1691: the release authority is the captured
-    // bound context, never the mutable session fields.
+    // bound context, never the mutable session fields. #1778: the durable
+    // CAS wins before `execution.completed` is published and before the
+    // session association clears, so a successor turn can never bind while
+    // this run is still live.
     const releaseContext = bound?.orcContext ?? session.orcContext;
     if (releaseContext) {
       let outcome: import("./orc-project/orc-project-contracts.js").OrcRunOutcome = "completed";
@@ -1591,7 +1594,10 @@ export class Spin {
           if (!released) this.reportFailedOrcRelease(coordinator.getStore(), releaseContext);
         } else {
           // #1628: coordinator unavailable — fall back to the direct store
-          // release; the boot sweep remains the recovery floor.
+          // release; the boot sweep remains the recovery floor. #1778: no
+          // ownership-released wake is lost here — listeners subscribe on a
+          // coordinator instance, so with no coordinator there is nobody to
+          // wake in-process; the durable release is the recovery signal.
           const { OrcProjectRunStore } = await import("./orc-project/orc-project-run-store.js");
           const store = new OrcProjectRunStore();
           const released = store.release(releaseContext, outcome, failureCode);
@@ -1599,6 +1605,26 @@ export class Spin {
         }
       } catch (err) { logWarn(TAG, `Orc release error: ${err instanceof Error ? err.message : String(err)}`); }
     }
+
+    // #1319: Publish execution.completed only after the durable release CAS
+    // was attempted, and clear the session association after it — a successor
+    // turn on this session can no longer observe a live run as free.
+    if (spec.type === "O") {
+      this.orcActivityFeed?.publish({
+        kind: "execution.completed",
+        summary: result.slice(0, 200),
+        timestamp: Date.now(),
+        sessionId: session.id,
+        executionId: capturedExecutionId,
+        rootCardId: session.activeRootCardId,
+        cardId: session.activeCardId,
+      } as Parameters<OrcActivityFeed["publish"]>[0]);
+    }
+    session.activeExecutionId = undefined;
+    session.activeCardId = undefined;
+    session.activeRootCardId = undefined;
+
+    await profile.afterPrompt?.(session, cardId);
 
     const stepEvent: StepEvent = {
       sessionId: session.id, cardId, stepIndex, result, outcome,
@@ -1682,31 +1708,12 @@ export class Spin {
       }
     }
 
-    // #1319: Publish execution.failed before clearing association. A satisfied
-    // handoff is not a failed execution — publishing it would be an
-    // operator-visible lie about a turn that already succeeded.
-    if (spec.type === "O" && !handoffSatisfied) {
-      this.orcActivityFeed?.publish({
-        kind: "execution.failed",
-        error: msg,
-        timestamp: Date.now(),
-        sessionId: session.id,
-        executionId: capturedExecutionId,
-        rootCardId: session.activeRootCardId,
-        cardId: session.activeCardId,
-      } as Parameters<NonNullable<typeof this.orcActivityFeed>["publish"]>[0]);
-    }
-    session.activeExecutionId = undefined;
-    session.activeCardId = undefined;
-    session.activeRootCardId = undefined;
-
-    await profile.afterPrompt?.(session, cardId);
-
-    // #1480/#1680: Release Orc run after a failed turn. The stable bounded
-    // failure code comes from the host-owned turn control when the transport
-    // recorded one (prompt_round_limit, turn_cancelled); anything else maps to
-    // `provider_failure`. Raw provider/model prose is never persisted. #1691: the
-    // release authority is the captured bound context, never the mutable
+    // #1480/#1680: Release the Orc run before the failure publish and the
+    // association clear (see finishSpin). The stable bounded failure code
+    // comes from the host-owned turn control when the transport recorded one
+    // (prompt_round_limit, turn_cancelled); anything else maps to
+    // `provider_failure`. Raw provider/model prose is never persisted. #1691:
+    // the release authority is the captured bound context, never the mutable
     // session fields.
     const releaseContext = bound?.orcContext ?? session.orcContext;
     if (releaseContext) {
@@ -1729,6 +1736,26 @@ export class Spin {
         }
       } catch (err) { logWarn(TAG, `Orc release error: ${err instanceof Error ? err.message : String(err)}`); }
     }
+
+    // #1319: Publish execution.failed only after the durable release CAS was
+    // attempted. A satisfied handoff is not a failed execution — publishing
+    // it would be an operator-visible lie about a turn that already succeeded.
+    if (spec.type === "O" && !handoffSatisfied) {
+      this.orcActivityFeed?.publish({
+        kind: "execution.failed",
+        error: msg,
+        timestamp: Date.now(),
+        sessionId: session.id,
+        executionId: capturedExecutionId,
+        rootCardId: session.activeRootCardId,
+        cardId: session.activeCardId,
+      } as Parameters<OrcActivityFeed["publish"]>[0]);
+    }
+    session.activeExecutionId = undefined;
+    session.activeCardId = undefined;
+    session.activeRootCardId = undefined;
+
+    await profile.afterPrompt?.(session, cardId);
 
     const stepEvent: StepEvent = {
       sessionId: session.id, cardId, stepIndex,
