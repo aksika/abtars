@@ -66,7 +66,7 @@ describe("tui startup — pi-tui load failure (#1441)", () => {
       installation: {
         executable: "/usr/bin/pi",
         packageRoot: "/usr/lib/pi-coding-agent",
-        version: "0.84.2",
+        version: "0.85.1",
         source: "path",
         pinStatus: "at-pin",
         moduleRoots: { ai: "/tmp/pi-ai", tui: "/tmp/pi-tui", agentCore: "/tmp/pi-agent-core" },
@@ -86,7 +86,7 @@ describe("tui startup — pi-tui load failure (#1441)", () => {
       installation: {
         executable: "/usr/bin/pi",
         packageRoot: "/usr/lib/pi-coding-agent",
-        version: "0.84.2",
+        version: "0.85.1",
         source: "path",
         pinStatus: "at-pin",
         moduleRoots: { ai: "/tmp/pi-ai", tui: "/tmp/pi-tui", agentCore: "/tmp/pi-agent-core" },
@@ -113,7 +113,7 @@ describe("tui startup — pi-tui load failure (#1441)", () => {
       installation: {
         executable: "/usr/bin/pi",
         packageRoot: "/usr/lib/pi-coding-agent",
-        version: "0.84.2",
+        version: "0.85.1",
         source: "path",
         pinStatus: "at-pin",
         moduleRoots: { ai: "/tmp/pi-ai", tui: "/tmp/pi-tui", agentCore: "/tmp/pi-agent-core" },
@@ -147,7 +147,7 @@ describe("tui startup — pi-tui load failure (#1441)", () => {
       installation: {
         executable: "/usr/bin/pi",
         packageRoot: "/usr/lib/pi-coding-agent",
-        version: "0.84.2",
+        version: "0.85.1",
         source: "path",
         pinStatus: "at-pin",
         moduleRoots: { ai: "/tmp/pi-ai", tui: "/tmp/pi-tui", agentCore: "/tmp/pi-agent-core" },

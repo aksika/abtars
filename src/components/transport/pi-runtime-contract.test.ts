@@ -17,7 +17,7 @@ import { ModelHealthRegistry } from "./model-health-registry.js";
 import type { PiInstallation, PiModuleSpecifier, PiInstallationState } from "../pi-installation.js";
 import type { PiRuntimeContractDependencies } from "./pi-runtime-contract.js";
 
-const PINNED_INSTALL_COMMAND = "npm i -g '@earendil-works/pi-coding-agent@~0.84.2'";
+const PINNED_INSTALL_COMMAND = "npm i -g '@earendil-works/pi-coding-agent@~0.85.1'";
 
 function makeInstallation(version = "0.84.0"): PiInstallation {
   return {

@@ -51,7 +51,7 @@ describe("mapProviderName (C2)", () => {
     expect(mapProviderName("kiro")).toBeNull();
     expect(mapProviderName("9router")).toBeNull();
   });
-  it("covers every pi 0.84.2 KnownProvider id (#1747 set completion)", () => {
+  it("covers every pi 0.85.1 KnownProvider id (#1747 set completion)", () => {
     for (const id of ["baseten", "radius", "qwen-token-plan", "qwen-token-plan-cn", "qwen-token-plan-individual"]) {
       expect(mapProviderName(id)).toBe(id);
     }
@@ -216,7 +216,7 @@ describe("loadPiModels (C8)", () => {
       installation: {
         executable: "/usr/bin/pi",
         packageRoot: "/usr/lib/pi-coding-agent",
-        version: "0.84.2",
+        version: "0.85.1",
         source: "path",
         pinStatus: "at-pin",
         moduleRoots: { ai: "/usr/lib/pi-ai", tui: "/usr/lib/pi-tui", agentCore: "/usr/lib/pi-agent-core" },
@@ -235,7 +235,7 @@ describe("loadPiModels (C8)", () => {
       installation: {
         executable: "/usr/bin/pi",
         packageRoot: "/usr/lib/pi-coding-agent",
-        version: "0.84.2",
+        version: "0.85.1",
         source: "path",
         pinStatus: "at-pin",
         moduleRoots: { ai: "/usr/lib/pi-ai", tui: "/usr/lib/pi-tui", agentCore: "/usr/lib/pi-agent-core" },

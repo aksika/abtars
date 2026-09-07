@@ -94,10 +94,10 @@ describe("lockfile resolutions match PI_COMPATIBILITY (#1438)", () => {
 
 describe("classifyPiPin (#1572)", () => {
   it.each([
-    ["0.84.2", "at-pin"],
-    ["0.84.9", "at-pin"],
-    ["0.84.2-alpha.1", "at-pin"],
-    ["0.85.0", "above-pin"],
+    ["0.85.1", "at-pin"],
+    ["0.85.9", "at-pin"],
+    ["0.85.1-alpha.1", "at-pin"],
+    ["0.86.0", "above-pin"],
     ["0.90.0", "above-pin"],
     ["1.0.0", "above-pin"],
     ["garbage", "above-pin"],
@@ -108,14 +108,14 @@ describe("classifyPiPin (#1572)", () => {
 
 describe("formatPiPinWarning (#1572)", () => {
   it("returns null for at-pin versions", () => {
-    expect(formatPiPinWarning("0.84.2")).toBeNull();
-    expect(formatPiPinWarning("0.84.9")).toBeNull();
+    expect(formatPiPinWarning("0.85.1")).toBeNull();
+    expect(formatPiPinWarning("0.85.9")).toBeNull();
   });
 
   it("returns the warning with the exact downgrade command for above-pin", () => {
-    const warning = formatPiPinWarning("0.85.1");
+    const warning = formatPiPinWarning("0.86.0");
     expect(warning).not.toBeNull();
-    expect(warning).toContain("0.85.1");
+    expect(warning).toContain("0.86.0");
     expect(warning).toContain(`npm i -g '${PI_COMPATIBILITY.packageName}@${PI_COMPATIBILITY.pinnedRange}'`);
   });
 
@@ -132,7 +132,7 @@ describe("formatPiPinnedInstallCommand (#1573)", () => {
   });
 
   it("is the single command reused by the pin warning", () => {
-    const warning = formatPiPinWarning("0.85.1");
+    const warning = formatPiPinWarning("0.86.0");
     expect(warning).toContain(formatPiPinnedInstallCommand());
     expect(warning!.split(formatPiPinnedInstallCommand())).toHaveLength(2);
   });

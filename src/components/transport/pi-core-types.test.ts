@@ -28,7 +28,7 @@ describe("validatePiAgentCoreModule", () => {
     expect(() => validatePiAgentCoreModule(mod, "0.80.8")).not.toThrow();
   });
 
-  it("no longer blocks 0.80.7 (blocklist removed in #1747; minimum is ~0.84.2)", () => {
+  it("no longer blocks 0.80.7 (blocklist removed in #1747; minimum is ~0.85.1)", () => {
     expect(() => validatePiAgentCoreModule({ Agent: makeValidAgent() }, "0.80.7")).not.toThrow();
   });
 

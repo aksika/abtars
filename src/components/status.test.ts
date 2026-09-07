@@ -160,13 +160,13 @@ describe("renderOperatorStatus", () => {
     const out = renderOperatorStatus(
       makeOperatorView({
         warnings: [
-          "Pi 0.85.0 is newer than the version abtars is built against (0.84.x).\nPi features may fail. To return to the tested version:\n  npm i -g '@earendil-works/pi-coding-agent@~0.84.2'",
+          "Pi 0.86.0 is newer than the version abtars is built against (0.85.x).\nPi features may fail. To return to the tested version:\n  npm i -g '@earendil-works/pi-coding-agent@~0.85.1'",
         ],
       }),
     );
     expect(out).toContain("warnings:      1");
-    expect(out).toContain("Pi 0.85.0 is newer than the version abtars is built against");
-    expect(out).toContain("npm i -g '@earendil-works/pi-coding-agent@~0.84.2'");
+    expect(out).toContain("Pi 0.86.0 is newer than the version abtars is built against");
+    expect(out).toContain("npm i -g '@earendil-works/pi-coding-agent@~0.85.1'");
   });
 
   it("omits the warnings section when there are none", () => {
@@ -212,13 +212,13 @@ describe("renderChatStatus", () => {
       makeOperatorView({
         runtime: makeRuntimeView(),
         warnings: [
-          "Pi 0.85.0 is newer than the version abtars is built against (0.84.x).\nPi features may fail. To return to the tested version:\n  npm i -g '@earendil-works/pi-coding-agent@~0.84.2'",
+          "Pi 0.86.0 is newer than the version abtars is built against (0.85.x).\nPi features may fail. To return to the tested version:\n  npm i -g '@earendil-works/pi-coding-agent@~0.85.1'",
         ],
       }),
     );
     expect(out).toContain("Warnings:");
-    expect(out).toContain("Pi 0.85.0 is newer than the version abtars is built against");
-    expect(out).toContain("npm i -g '@earendil-works/pi-coding-agent@~0.84.2'");
+    expect(out).toContain("Pi 0.86.0 is newer than the version abtars is built against");
+    expect(out).toContain("npm i -g '@earendil-works/pi-coding-agent@~0.85.1'");
   });
 
   it("reflects mood from runtime failure signals", () => {
