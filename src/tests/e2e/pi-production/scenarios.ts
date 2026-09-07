@@ -31,6 +31,8 @@ export interface PiAcceptanceContext {
   scenarioStart: number;
   /** Kill the exact bridge PID and spawn bundle/abtars.js with the same home/env. */
   restartBridge: () => Promise<SpawnedChild>;
+  /** #1776: bounded bridge-log tail (re-read from disk on every call). */
+  readBridgeLog: () => string;
   /** #1548: isolated abtars home the bridge reads/writes (tasks, state, kanban). */
   abtarsHome: string;
   /** #1548: bounded artifact persistence through the result writer. */
@@ -79,7 +81,7 @@ export interface ScenarioOutcome {
 
 export interface PiScenario {
   name: string;
-  profiles: readonly ("core" | "full" | "proof")[];
+  profiles: readonly ("core" | "full" | "proof" | "hydration")[];
   run(ctx: PiAcceptanceContext): Promise<void>;
 }
 
@@ -534,6 +536,147 @@ async function resetRebuild(ctx: PiAcceptanceContext): Promise<void> {
     exactlyOnce: [r2],
   }, a2));
   await sendExpectReply(ctx.tui, r2, a2, "post-reset second reply");
+}
+
+// ── Scenario: session-start hydration (#1776, hydration profile) ─────────────
+
+function countLinesWith(text: string, needle: string): number {
+  let count = 0;
+  for (const line of text.split("\n")) {
+    if (line.includes(needle)) count++;
+  }
+  return count;
+}
+
+async function sessionStartHydration(ctx: PiAcceptanceContext): Promise<void> {
+  // Unique-per-run markers. User sides are never truncated; assistant sides
+  // are short enough to survive head/tail truncation.
+  const tag = (s: string): string => `HYD-${s}-${ctx.runId}`;
+  const pairUser = (i: number): string => `${tag(`U${i}`)} continuity probe alpha beta`;
+  const pairAsst = (i: number): string => `${tag(`A${i}`)} acknowledged`;
+  const dailyMarker = tag("DAILY");
+  const weeklyMarker = tag("WEEKLY");
+  const foreignMarker = tag("FOREIGN");
+
+  // 1. Atomic fixture seed: ten complete pairs + fresh daily + weekly + one
+  // foreign-user marker. The seed replaces the primary user's rows (the
+  // runner's smoke turns wrote earlier rows), so the floor is exactly the
+  // ten seeded pairs.
+  await ctx.owner.seedHydrationFixture({
+    userId: MASTER_USER_ID,
+    pairs: Array.from({ length: 10 }, (_, i) => ({ user: pairUser(i), assistant: pairAsst(i) })),
+    daily: `# ${dailyMarker}\n\nContinuity summary for hydration acceptance.`,
+    weekly: `# ${weeklyMarker}\n\nWeekly rollup for hydration acceptance.`,
+    foreignUserId: "e2e-user-b",
+    foreignContent: `${foreignMarker} another user's turn`,
+  });
+
+  // Baseline log evidence before the fresh lifecycle starts.
+  const daemonBaseline = countLinesWith(await ctx.owner.daemonLogTail(), "[session-context]");
+  const bridgeBaselineStates = countLinesWith(ctx.readBridgeLog(), "session-state:");
+  const bridgeBaselineAssembly = countLinesWith(ctx.readBridgeLog(), "session-assembly:");
+
+  // 2. Fresh Main/A lifecycle after setup: the runner's smoke turn must not
+  // satisfy the hydration assertion. Assembly order is consolidation-first,
+  // then chronological pairs, so the chain leads with daily/weekly.
+  const probe1 = ctx.markers.next("H1");
+  const reply1 = ctx.markers.next("H1A");
+  const floorChain = [2, 3, 4, 5, 6, 7, 8, 9].flatMap((i) => [pairUser(i), pairAsst(i)]);
+  ctx.provider.enqueue({
+    candidate: FIXTURE_MODEL_A,
+    expectation: {
+      candidate: FIXTURE_MODEL_A,
+      containsInOrder: [dailyMarker, weeklyMarker, ...floorChain],
+      excludes: [foreignMarker],
+      currentTurn: probe1,
+    },
+    action: { kind: "text", chunks: [reply1] },
+  });
+  await ctx.tui.sendAndAwaitReply("/reset");
+  // /reset ends the attached session and allocates a fresh Main; re-attach so
+  // the probe routes to the new session instead of the ended one.
+  ctx.tui.close();
+  await ctx.tui.connect("resume");
+  await sendExpectReply(ctx.tui, probe1, reply1, "hydration probe reply");
+
+  // 3. One following ordinary turn: succeeds, hydrates nothing new. Durable
+  // Pi projection may retain hydrated markers, so the second request is
+  // never scanned for their absence.
+  const probe2 = ctx.markers.next("H2");
+  const reply2 = ctx.markers.next("H2A");
+  ctx.provider.enqueue(textScript(FIXTURE_MODEL_A, { candidate: FIXTURE_MODEL_A, currentTurn: probe2 }, reply2));
+  await sendExpectReply(ctx.tui, probe2, reply2, "post-hydration ordinary reply");
+
+  // 4. Lifecycle uniqueness from bounded log evidence. The bridge logger
+  // buffers, so poll until the flushed lines arrive or the deadline hits —
+  // a missing prerequisite fails here, never passes as a skip.
+  await waitFor(
+    async () => {
+      const bridge = ctx.readBridgeLog();
+      const newStates = bridge.split("\n").filter((l) => l.includes("session-state:")).slice(bridgeBaselineStates);
+      const newAssemblies = bridge.split("\n").filter((l) => l.includes("session-assembly:")).slice(bridgeBaselineAssembly);
+      const trues = newStates.filter((l) => l.includes("isSessionStart=true"));
+      const falses = newStates.filter((l) => l.includes("isSessionStart=false"));
+      const oks = newAssemblies.filter((l) => l.includes("outcome=ok"));
+      if (trues.length === 1 && falses.length === 1 && oks.length === 1 && newAssemblies.length === 1) {
+        return { trues: trues.length, falses: falses.length, oks: oks.length };
+      }
+      return undefined;
+    },
+    75000,
+    "hydration lifecycle bridge evidence (1 session-start, 1 assembly, then ordinary)",
+  );
+
+  // Daemon evidence: exactly one history-enabled assembly for the lifecycle.
+  const daemonTail = await ctx.owner.daemonLogTail();
+  const newDiags = daemonTail.split("\n").filter((l) => l.includes("[session-context]")).slice(daemonBaseline);
+  if (newDiags.length !== 1) {
+    throw new Error(`expected exactly 1 session-context diagnostic for the fresh lifecycle, saw ${newDiags.length}`);
+  }
+  const diag = newDiags[0]!;
+  const scalar = (name: string): number => {
+    const m = diag.match(new RegExp(`${name}=(\\d+)`));
+    if (!m) throw new Error(`diagnostic missing ${name}: ${diag.slice(0, 160)}`);
+    return parseInt(m[1]!, 10);
+  };
+  const modelContextTokens = scalar("modelContextTokens");
+  const historyBudgetChars = scalar("historyBudgetChars");
+  const usedChars = scalar("usedChars");
+  const daemonPairs = scalar("pairs");
+  const daemonDailies = scalar("dailies");
+  const daemonWeeklies = scalar("weeklies");
+  // The fixture model window is 128k: full-window forwarding with a single
+  // 5% application yields 6,400 (a 15%-prescaled window would yield 960).
+  if (modelContextTokens !== 128000) {
+    throw new Error(`expected full 128000-token model window forwarded, saw ${modelContextTokens}`);
+  }
+  if (historyBudgetChars !== 6400) {
+    throw new Error(`expected single 6,400-char history budget, saw ${historyBudgetChars}`);
+  }
+  if (daemonPairs < 8 || daemonDailies < 1 || daemonWeeklies < 1) {
+    throw new Error(`expected floor evidence pairs>=8 dailies>=1 weeklies>=1, saw ${daemonPairs}/${daemonDailies}/${daemonWeeklies}`);
+  }
+
+  // 5. Bounded content-free artifact: scalars and hashes only.
+  const requestIds = ctx.provider.summaries.map((s) => `seq${s.seq}`);
+  ctx.writeArtifact("session-start-hydration.json", JSON.stringify({
+    scenario: "session-start-hydration",
+    lane: ctx.lane,
+    floorPairsObserved: 8,
+    dailiesObserved: daemonDailies,
+    weekliesObserved: daemonWeeklies,
+    daemonPairs,
+    modelContextTokens,
+    historyBudgetChars,
+    usedChars,
+    providerRequestIds: requestIds,
+    sessionStates: ["isSessionStart=true", "isSessionStart=false"],
+    markerHashes: {
+      probe1: ctx.markers.hash(probe1),
+      daily: ctx.markers.hash(dailyMarker),
+      weekly: ctx.markers.hash(weeklyMarker),
+    },
+  }, null, 2));
 }
 
 // ── Scenario 4: Fail closed (core) ──────────────────────────────────────────
@@ -1038,6 +1181,7 @@ export const PI_SCENARIOS: PiScenario[] = [
   { name: "tool-policy-denial", profiles: ["proof"], run: toolPolicyDenial },
   { name: "durable-compaction", profiles: ["proof"], run: durableCompaction },
   { name: "reset-rebuild", profiles: ["core", "full"], run: resetRebuild },
+  { name: "session-start-hydration", profiles: ["hydration"], run: sessionStartHydration },
   { name: "fail-closed-provider-suppression", profiles: ["core", "full"], run: failClosed },
   { name: "owner-recovery", profiles: ["full"], run: ownerRecovery },
   { name: "bridge-restart", profiles: ["full", "proof"], run: bridgeRestart },
@@ -1069,7 +1213,7 @@ const PROOF_SCENARIO_ORDER = [
   "model-switch",
 ];
 
-export function scenariosForProfile(profile: "core" | "full" | "proof"): PiScenario[] {
+export function scenariosForProfile(profile: "core" | "full" | "proof" | "hydration"): PiScenario[] {
   if (profile === "proof") {
     return PROOF_SCENARIO_ORDER.map((name) => {
       const scenario = PI_SCENARIOS.find((s) => s.name === name);

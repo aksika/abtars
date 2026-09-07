@@ -124,16 +124,18 @@ export async function buildPrompt(
   // --- Session-start injection (skipped for K — no A SOUL/session assembly) ---
   const entry = pSession;
   const isSessionStart = !entry || entry.pendingStart || !entry.seen;
-  logTrace(TAG, `session-state: key=${sessionKey} seen=${entry?.seen} pendingStart=${entry?.pendingStart} isSessionStart=${isSessionStart} memoryMode=${memoryMode}`);
+  logDebug(TAG, `session-state: key=${sessionKey} seen=${entry?.seen} pendingStart=${entry?.pendingStart} isSessionStart=${isSessionStart} memoryMode=${memoryMode}`);
   if (isSessionStart && memoryRuntime?.state === "ready" && memoryMode !== "skill-isolated") {
     try {
       const sessionCtx = await memoryRuntime.assembleSessionContext({
         identity: { principalId: userId, executionId: sessionKey },
-        maxChars: deps.maxContext ? Math.floor(deps.maxContext * 0.15) : undefined,
+        modelContextTokens: deps.maxContext,
       });
       const sessionParts = [sessionCtx.coreKnowledge, sessionCtx.recall, sessionCtx.wakeUp].filter(Boolean);
       if (sessionParts.length > 0) volatileContext.push({ kind: "session_start", content: sessionParts.join("\n\n") });
+      logDebug(TAG, `session-assembly: key=${sessionKey} outcome=${sessionParts.length > 0 ? "ok" : "empty"} coreChars=${sessionCtx.coreKnowledge.length} recallChars=${sessionCtx.recall.length} wakeChars=${sessionCtx.wakeUp.length}`);
     } catch (err) {
+      logDebug(TAG, `session-assembly: key=${sessionKey} outcome=failed`);
       logDebug(TAG, `Session context unavailable: ${err instanceof Error ? err.message : String(err)}`);
     }
     // Rebuild combined prompt with session context

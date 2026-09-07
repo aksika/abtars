@@ -1052,3 +1052,86 @@ describe("#1619 incremental block delivery wiring", () => {
     expect(terminal[0]).toContain("Final answer.");
   });
 });
+
+describe("session-start hydration lifecycle (#1776)", () => {
+  let transport: IKiroTransport;
+
+  beforeEach(async () => {
+    transport = mockTransport();
+    setUserRegistryOverride(MASTER_REGISTRY);
+    const spinMod = await import("./spin.js");
+    vi.spyOn(spinMod.spin, "ensureSessionTransport").mockImplementation(async (session) => {
+      session.transport = transport;
+    });
+  });
+
+  afterEach(() => {
+    drainSystemEvents();
+    setUserRegistryOverride(null);
+    vi.restoreAllMocks();
+  });
+
+  it("hydrates an unseen Main/A session before marking seen, exactly once across two turns", async () => {
+    const spinMod = await import("./spin.js");
+    // One shared session object across turns (production sessions persist):
+    // unseen at boot, so the first turn is a genuine session start.
+    const session: ManagedSession = {
+      id: "test_A_01", userId: "master", platform: "telegram", chatId: 100,
+      delivery: "simple", active: true, status: "ready",
+      idleTimeoutMs: 0, lastActiveAt: Date.now(), messageCount: 0, tokenCount: 0, toolCallCount: 0,
+      log: [], shortIndex: 1,
+      busy: false, queue: [], fullMode: false, pendingStart: false, seen: false,
+      compacting: false, ctxWarned: false, compactFailures: 0, primingTerms: [], completions: [],
+    };
+    vi.spyOn(spinMod.spin, "getActiveSession").mockImplementation((): ManagedSession => session);
+    vi.spyOn(spinMod.spin, "getSessionById").mockImplementation((): ManagedSession => session);
+    vi.spyOn(spinMod.spin, "resolveSession").mockImplementation(async (): Promise<ManagedSession> => session);
+
+    let seenDuringAssembly: boolean | undefined;
+    const assembleSessionContext = vi.fn().mockImplementation(async () => {
+      // Ordering probe: the assembly must observe the session unseen —
+      // the pipeline must not have marked seen before prompt construction.
+      seenDuringAssembly = session.seen;
+      return { coreKnowledge: "HYDRATION-PROBE-1776", recall: "", wakeUp: "" };
+    });
+    const adapter = mockAdapter();
+    const deps = mockDeps(transport, {
+      memoryConfig: { memoryEnabled: true, memoryDir: "/tmp" },
+      memoryRuntime: {
+        state: "ready",
+        capabilities: new Set(["durableContext"]),
+        recordMessage: vi.fn().mockResolvedValue({ id: 1 }),
+        recall: vi.fn().mockResolvedValue({ hits: [] }),
+        recordFeedback: vi.fn().mockResolvedValue({}),
+        assembleSessionContext,
+        getRecentConversation: vi.fn().mockResolvedValue({ results: [] }),
+        getStatus: vi.fn().mockResolvedValue({}),
+        getCoreKnowledge: vi.fn().mockResolvedValue({ core: [] }),
+        embed: vi.fn().mockResolvedValue({}),
+        runMaintenance: vi.fn().mockResolvedValue({}),
+        close: vi.fn().mockResolvedValue(undefined),
+      } as any,
+    } as any);
+
+    await handleInboundMessage(makeMsg({ text: "first turn probe" }), adapter, deps);
+
+    // First turn: exactly one assembly, observed unseen, marker reached transport.
+    expect(assembleSessionContext).toHaveBeenCalledTimes(1);
+    expect(seenDuringAssembly).toBe(false);
+    const sendPrompt = transport.sendPrompt as ReturnType<typeof vi.fn>;
+    const firstTurnPrompts = sendPrompt.mock.calls.map((c: unknown[]) => String(c[1] ?? ""));
+    expect(firstTurnPrompts.length).toBeGreaterThan(0);
+    expect(firstTurnPrompts.some((p) => p.includes("HYDRATION-PROBE-1776"))).toBe(true);
+    // The attempt settles the session seen so later turns do not rehydrate.
+    expect(session.seen).toBe(true);
+    expect(session.pendingStart).toBe(false);
+
+    await handleInboundMessage(makeMsg({ text: "second ordinary turn" }), adapter, deps);
+
+    // Second turn: no second assembly; ordinary prompts carry no hydration block.
+    expect(assembleSessionContext).toHaveBeenCalledTimes(1);
+    const secondTurnPrompts = sendPrompt.mock.calls.slice(firstTurnPrompts.length).map((c: unknown[]) => String(c[1] ?? ""));
+    expect(secondTurnPrompts.length).toBeGreaterThan(0);
+    expect(secondTurnPrompts.some((p) => p.includes("HYDRATION-PROBE-1776"))).toBe(false);
+  });
+});

@@ -143,3 +143,28 @@ describe("buildPrompt durable-context classification (#1529)", () => {
     expect(recordMessage).not.toHaveBeenCalled();
   });
 });
+
+describe("buildPrompt session-context request (#1776)", () => {
+  it("forwards the full model window as modelContextTokens without pre-scaling", async () => {
+    const assembleSessionContext = vi.fn().mockResolvedValue({ coreKnowledge: "", recall: "", wakeUp: "" });
+    const recordMessage = vi.fn().mockResolvedValue({ id: 7 });
+    const runtime = {
+      state: "ready",
+      capabilities: new Set(["durableContext"]),
+      recordMessage,
+      assembleSessionContext,
+    } as never;
+    const deps = { ...baseDeps(runtime), maxContext: 128000 } as never;
+    const result = await buildPrompt(
+      { userId: "master", channelId: "1", platform: "telegram", isGroup: false, messageId: "hydra-1" } as never,
+      "hello",
+      deps,
+      masterRegistry(),
+    );
+    expect(result.isSessionStart).toBe(true);
+    expect(assembleSessionContext).toHaveBeenCalledTimes(1);
+    const input = assembleSessionContext.mock.calls[0]![0] as Record<string, unknown>;
+    expect(input).toMatchObject({ modelContextTokens: 128000 });
+    expect(input).not.toHaveProperty("maxChars");
+  });
+});

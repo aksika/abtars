@@ -7,7 +7,7 @@
  * ownership order and writes matrix + JUnit results.
  */
 
-import { mkdirSync, rmSync, existsSync, chmodSync, mkdtempSync, writeFileSync } from "node:fs";
+import { mkdirSync, rmSync, existsSync, chmodSync, mkdtempSync, writeFileSync, readFileSync, readdirSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { tmpdir } from "node:os";
 import { randomUUID } from "node:crypto";
@@ -301,6 +301,20 @@ async function runLane(
       scenarioStart: Date.now(),
       restartBridge,
       abtarsHome: config.abtarsHome,
+      // #1776: bounded bridge-log tail for lifecycle assertions. Reads the
+      // current bridge log file from disk on every call (the logger buffers,
+      // so callers poll until the expected lines flush or the deadline hits).
+      readBridgeLog: (): string => {
+        try {
+          const logDir = join(config.abtarsHome, "logs");
+          const files = readdirSync(logDir).filter((f) => f.startsWith("bridge-") && f.endsWith(".log")).sort();
+          if (files.length === 0) return "";
+          const content = readFileSync(join(logDir, files[files.length - 1]!), "utf-8");
+          return content.length > 262144 ? content.slice(-262144) : content;
+        } catch {
+          return "";
+        }
+      },
       writeArtifact: (name: string, data: string): void => {
         // #1548: artifact persistence is evidence — a failed write must fail
         // the scenario, never silently pass.

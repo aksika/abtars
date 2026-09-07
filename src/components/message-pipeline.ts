@@ -344,8 +344,9 @@ export async function handleInboundMessage(
   ctx.transport = effectiveSession.transport!;
   ctx.delivery = effectiveSession.delivery;
 
-  // Mark seen so isSessionStart doesn't inject full soul bundle
-  effectiveSession.seen = true;
+  // #1776: do not mark seen here — prompt-builder owns the session-start
+  // decision and marks seen after the hydration attempt. Marking seen first
+  // suppresses hydration on every first turn.
   effectiveSession.lastActiveAt = Date.now();
 
   // --- Core transport/response handling ---

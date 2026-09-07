@@ -172,6 +172,26 @@ export class OwnerControllerClient {
     return ((response as { ok: true; result?: unknown }).result as { rows: ConversationRow[] }).rows;
   }
 
+  /** #1776: atomically seed hydration pairs + daily/weekly + foreign marker. */
+  async seedHydrationFixture(input: {
+    userId: string;
+    pairs: Array<{ user: string; assistant: string }>;
+    daily: string;
+    weekly: string;
+    foreignUserId: string;
+    foreignContent: string;
+  }): Promise<void> {
+    const response = await this.command({ command: "seedHydrationFixture", ...input });
+    this.expectOk(response, "seedHydrationFixture");
+  }
+
+  /** #1776: bounded tail of the fixture daemon's captured logs. */
+  async daemonLogTail(maxBytes = 32768): Promise<string> {
+    const response = await this.command({ command: "daemonLogTail", maxBytes });
+    this.expectOk(response, "daemonLogTail");
+    return ((response as { ok: true; result?: unknown }).result as { tail: string }).tail;
+  }
+
   async shutdown(): Promise<void> {
     if (this.closed) return;
     this.closed = true;

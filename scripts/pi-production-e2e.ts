@@ -3,7 +3,7 @@
  * pi-production-e2e.ts — #1528 CLI orchestrator for the Pi production
  * composition acceptance harness.
  *
- *   tsx scripts/pi-production-e2e.ts [--profile core|full|proof] [--lane local-unix|remote-wss]
+ *   tsx scripts/pi-production-e2e.ts [--profile core|full|proof|hydration] [--lane local-unix|remote-wss]
  *                                    [--abmind-root <path>] [--pi installed|latest|pinned|exact]
  *                                    [--pi-version <exact-semver>] [--keep-artifacts]
  *
@@ -48,8 +48,8 @@ function parseArgs(argv: string[]): {
     const arg = argv[i];
     if (arg === "--profile") {
       const value = argv[++i] ?? "";
-      if (value !== "core" && value !== "full" && value !== "proof") {
-        throw new Error(`--profile must be core, full, or proof (got ${JSON.stringify(value)})`);
+      if (value !== "core" && value !== "full" && value !== "proof" && value !== "hydration") {
+        throw new Error(`--profile must be core, full, proof, or hydration (got ${JSON.stringify(value)})`);
       }
       profile = value;
     } else if (arg === "--lane") {

@@ -160,7 +160,9 @@ export interface RuntimeRecallResult {
 export interface SessionContextInput {
   identity: { principalId: string; executionId: string };
   prompt?: string;
-  maxChars?: number;
+  modelContextTokens?: number;
+  wakeUpMaxChars?: number;
+  includeHistory?: boolean;
 }
 
 export interface SessionContextResult {
@@ -659,7 +661,9 @@ export function createClientRuntime(client: AbmindClientLike): AbtarsMemoryRunti
     async assembleSessionContext(input: SessionContextInput): Promise<SessionContextResult> {
       const assembled = await pm.assembleSessionContext({
         userId: input.identity.principalId,
-        maxChars: input.maxChars,
+        modelContextTokens: input.modelContextTokens,
+        wakeUpMaxChars: input.wakeUpMaxChars,
+        includeHistory: input.includeHistory,
       });
       return assembled as SessionContextResult;
     },

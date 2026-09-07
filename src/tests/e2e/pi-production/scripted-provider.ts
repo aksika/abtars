@@ -355,6 +355,18 @@ export class ScriptedProvider {
       }
     }
 
+    if (expectation.containsInOrder) {
+      const full = messages.map((m) => m.text).join("\n");
+      let cursor = 0;
+      for (const marker of expectation.containsInOrder) {
+        const idx = full.indexOf(marker, cursor);
+        if (idx < 0) {
+          throw new FixtureExpectationError(`ordered-across-text marker missing: ${shortHash(marker)}`);
+        }
+        cursor = idx + marker.length;
+      }
+    }
+
     if (expectation.exactlyOnce) {
       for (const marker of expectation.exactlyOnce) {
         let count = 0;

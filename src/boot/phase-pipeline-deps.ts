@@ -264,7 +264,7 @@ export async function phasePipelineDeps(ctx: BootCtx): Promise<PhaseResult> {
     const { buildSoulBundle } = await import("../components/soul-bundle.js");
     const masterUserId = registry.users.find(u => u.role === "master")?.userId ?? "master";
     const sessionContext = ctx.memoryRuntime.state === "ready"
-      ? await ctx.memoryRuntime.assembleSessionContext({ identity: { principalId: masterUserId, executionId: "boot" }, maxChars: 4096 }).catch(() => null)
+      ? await ctx.memoryRuntime.assembleSessionContext({ identity: { principalId: masterUserId, executionId: "boot" }, includeHistory: false, wakeUpMaxChars: 4096 }).catch(() => null)
       : null;
     const bundle = buildSoulBundle("A", sessionContext?.soulBundle);
     if (bundle) (transport as { setSystemPrompt: (p: string) => void }).setSystemPrompt(bundle);

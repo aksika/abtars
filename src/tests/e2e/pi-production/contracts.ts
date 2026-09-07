@@ -6,7 +6,7 @@
  */
 
 export type PiAcceptanceLane = "local-unix" | "remote-wss";
-export type PiAcceptanceProfile = "core" | "full" | "proof";
+export type PiAcceptanceProfile = "core" | "full" | "proof" | "hydration";
 export type PiScenarioState = "passed" | "failed" | "blocked";
 
 export interface PiRuntimeEvidence {
@@ -105,8 +105,15 @@ export const REASON = {
 export interface RequestExpectation {
   /** Model id the request must carry. */
   candidate: string;
-  /** Markers that must appear, in order, anywhere in the normalized messages. */
+  /** Markers that must appear, in order, each in a successive message. */
   orderedContains?: readonly string[];
+  /**
+   * Markers that must appear as an ordered subsequence of the whole request
+   * text (message boundaries ignored). For content injected as one block —
+   * e.g. session-start hydration inside a single system message — where
+   * orderedContains cannot match twice inside the same message.
+   */
+  containsInOrder?: readonly string[];
   /** Markers that must appear exactly once in the whole request. */
   exactlyOnce?: readonly string[];
   /** Markers that must not appear at all. */
