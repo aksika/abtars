@@ -1,5 +1,8 @@
 import { logWarn } from "../logger.js";
+import { PI_CORE_TOOL_RESULT_MAX_CHARS } from "./tool-result-limits.js";
 import type { AgentTool, AgentToolResult } from "./pi-core-types.js";
+
+export { PI_CORE_TOOL_RESULT_MAX_CHARS } from "./tool-result-limits.js";
 import type { PiExecutionSafetyController } from "./pi-core-safety.js";
 import { getToolDefinitions, executeToolCall, checkToolAvailability } from "./tool-registry.js";
 import type { ToolDefinition } from "./tool-registry.js";
@@ -10,6 +13,22 @@ import type { ToolFailureDiagnosticV1 } from "./tool-failure-diagnostic.js";
 import type { ToolExecutionScope } from "../tasks/task-package.js";
 
 const TAG = "pi-core-tools";
+
+function limitPiCoreToolResult(toolName: string, result: string): string {
+  if (result.length <= PI_CORE_TOOL_RESULT_MAX_CHARS) return result;
+  logWarn(
+    TAG,
+    `Tool ${toolName} result ${result.length} > ${PI_CORE_TOOL_RESULT_MAX_CHARS} chars — truncated`,
+  );
+  // The marker must fit inside the bound, so the delivered count depends on the
+  // rendered marker length. Render once against an upper-bound placeholder to
+  // size the prefix, then render again with the real delivered count.
+  const marker = (delivered: number): string =>
+    `\n\n[TRUNCATED: tool returned ${result.length} chars, ${delivered} delivered. ` +
+    `This result is incomplete — do not treat it as the whole answer.]`;
+  const delivered = PI_CORE_TOOL_RESULT_MAX_CHARS - marker(PI_CORE_TOOL_RESULT_MAX_CHARS).length;
+  return `${result.slice(0, delivered)}${marker(delivered)}`;
+}
 
 export interface PiCoreToolContext {
   executionId: string;
@@ -180,7 +199,7 @@ function definitionToAgentTool(def: ToolDefinition, context: PiCoreToolContext):
         context.onToolSuccess?.();
 
         return {
-          content: [{ type: "text", text: result.slice(0, 2000) }],
+          content: [{ type: "text", text: limitPiCoreToolResult(def.name, result) }],
           details: { tool: def.name },
         };
       } catch (err) {

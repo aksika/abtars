@@ -462,28 +462,76 @@ describe("projectReviewBrief decision-ready projection (#1620)", () => {
     });
   });
 
-  it("truncates prose but preserves every id and evidence reference", async () => {
+  it("retains validated prose exactly while preserving every id and evidence reference (#1772)", async () => {
     const reviewStoreMod = await import("./project-review-store.js");
     const { projectReviewBrief } = await import("./project-review-case.js");
     const store = new reviewStoreMod.ProjectReviewStore();
     const snapshot = makeProjectionSnapshot();
-    const longDesc = "x".repeat(1000);
+    const goal = "g".repeat(4000);
+    const longDesc = "x".repeat(500);
+    const longOutput = "o".repeat(500);
     snapshot.root_contract = {
       ...snapshot.root_contract,
-      goal: "g".repeat(5000),
+      goal,
       criteria: snapshot.root_contract.criteria.map(c => ({ ...c, description: c.id === "c_sup" ? longDesc : c.description })),
+      required_outputs: snapshot.root_contract.required_outputs.map(o => ({ ...o, description: o.id === "out_required" ? longOutput : o.description })),
     };
     const { id } = store.insertReviewCase(7717, 2, 1, snapshot, "digest_brief_4");
 
     const result = projectReviewBrief(id, store);
     expect(result.ok).toBe(true);
     if (!result.ok) return;
-    expect(result.brief.goal.length).toBeLessThanOrEqual(1000);
+    expect(result.brief.goal).toBe(goal);
+    expect(result.brief.goal.length).toBe(4000);
     const sup = result.brief.criteria.find(c => c.criterion_id === "c_sup")!;
-    expect(sup.description.length).toBeLessThanOrEqual(300);
+    expect(sup.description).toBe(longDesc);
+    expect(sup.description.length).toBe(500);
+    const out = result.brief.outputs.find(o => o.output_id === "out_required")!;
+    expect(out.description).toBe(longOutput);
+    expect(out.description.length).toBe(500);
     expect(sup.compatible_evidence.observed).toEqual(["chk_1"]);
     expect(result.brief.uncovered_criteria).toEqual(["c_gap"]);
     expect(result.brief.peer_claims[0]!.card_id).toBe(2001);
+  });
+
+  it("#1772 bounds peer projection summaries once with an announcement", async () => {
+    const kanban = await import("../tasks/kanban-board.js");
+    const reviewStoreMod = await import("./project-review-store.js");
+    const { ReviewCaseAssembler, projectReviewBrief } = await import("./project-review-case.js");
+    const reviewStore = new reviewStoreMod.ProjectReviewStore();
+
+    const rootCardId = kanban.kanbanEnqueue("root-peer-bound", "task", `run-peer-${Date.now()}-${Math.random().toString(36).slice(2)}`, { type: "O" });
+    reviewStore.insertContract(makeRootContractV2(rootCardId, [{ id: "c1", required: true, execution_owner: "delegated" }]));
+    reviewStore.initializeSupervision(rootCardId, `pc_rca_${rootCardId}`, "executing");
+
+    const rawProjection = "p".repeat(5000);
+    const notes = JSON.stringify({
+      parent_project_id: rootCardId,
+      projection: rawProjection,
+      root_criteria: ["c1"],
+      peer: "molty",
+      provenance: { receiver_peer: "molty" },
+    });
+    const peerCardId = kanban.kanbanEnqueue("peer contrib", "peer", undefined, { type: "contribution", parent_id: rootCardId, notes, sourcePeer: "molty" });
+    kanban.requireTaskDatabase().prepare(`UPDATE kanban_board SET status = 'done', source = 'peer', type = 'contribution' WHERE id = ?`).run(peerCardId);
+
+    const assembler = new ReviewCaseAssembler();
+    const snapshot = await assembler.assembleCase(rootCardId, 1, 1);
+    expect("error" in snapshot).toBe(false);
+    if ("error" in snapshot) return;
+    const stored = snapshot.peer_contributions.find(c => c.card_id === peerCardId);
+    expect(stored).toBeDefined();
+    expect(stored!.projection_summary.startsWith("p".repeat(2000))).toBe(true);
+    expect(stored!.projection_summary).toContain("[+3000 chars omitted]");
+    expect(stored!.projection_summary.length).toBeLessThan(2500);
+
+    const { id } = reviewStore.insertReviewCase(rootCardId, 1, 1, snapshot, "digest_peer_bound");
+    const brief = projectReviewBrief(id, reviewStore);
+    expect(brief.ok).toBe(true);
+    if (!brief.ok) return;
+    const claimed = brief.brief.peer_claims.find(c => c.card_id === peerCardId);
+    expect(claimed).toBeDefined();
+    expect(claimed!.projection_summary).toBe(stored!.projection_summary);
   });
 
   it("projects child metadata without exposing an embedded Worker result envelope", async () => {

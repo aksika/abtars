@@ -12,6 +12,7 @@ import {
   renderDiagnostic,
   PiCoreToolExecutionError,
   shouldThrowAfterToolFailure,
+  TERMINAL_TOOL_REASONS,
 } from "./tool-failure-diagnostic.js";
 import type { ToolFailureDiagnosticV1 } from "./tool-failure-diagnostic.js";
 
@@ -230,7 +231,8 @@ describe("parseToolResultToDiagnostic", () => {
       "supervision_missing", "project_terminal", "project_not_reviewable",
       "project_generation_mismatch", "review_case_unknown",
       "review_case_project_mismatch", "review_case_generation_mismatch",
-      "review_case_not_open", "review_case_unreadable", "review_ownership_stale",
+      "review_case_not_open", "review_case_unreadable", "case_too_large",
+      "review_ownership_stale",
       "settlement_lost", "peer_terminal_identity_missing", "peer_terminal_identity_mismatch",
       "internal_error", "peer_relay_blocked", "peer_sandbox",
     ];
@@ -274,6 +276,16 @@ describe("parseToolResultToDiagnostic", () => {
     expect(d!.reason).toBe("unknown");
     expect(d!.stderr_excerpt).toContain("sealed_secrets_unavailable");
     expect(d!.command_preview).toBeUndefined();
+  });
+
+  it("#1772 case_too_large is typed with bounded detail and is not terminal", () => {
+    const result = JSON.stringify({ error: "Review case brief is 2000000 chars; limit is 1048576", reason: "case_too_large" });
+    const d = parseToolResultToDiagnostic(result, execId, "get_project_review_case");
+    expect(d).not.toBeNull();
+    expect(d!.reason).toBe("case_too_large");
+    expect(d!.stderr_excerpt).toContain("Review case brief is");
+    expect(d!.stderr_excerpt!.length).toBeLessThanOrEqual(500);
+    expect(TERMINAL_TOOL_REASONS.has("case_too_large" as never)).toBe(false);
   });
 });
 

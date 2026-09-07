@@ -8,6 +8,8 @@ import type { ModelCandidate } from "./model-candidates.js";
 import { buildPolicy } from "../tool-sandbox.js";
 import { PiCoreToolExecutionError } from "./tool-failure-diagnostic.js";
 import type { ToolFailureDiagnosticV1 } from "./tool-failure-diagnostic.js";
+import { executeToolCall } from "./tool-registry.js";
+import { PI_CORE_TOOL_RESULT_MAX_CHARS } from "./tool-result-limits.js";
 import { createClientRuntime } from "../memory-runtime.js";
 import type { MemoryToolDependenciesHolder } from "../memory-store-quota.js";
 import type { SessionType } from "../spin-types.js";
@@ -157,6 +159,39 @@ describe("createPiAgentTools", () => {
       expect(diag.stderr_excerpt).toContain("Project generation mismatch: expected 1, got 2");
       expect(diag.command_preview).toBeUndefined();
     }
+  });
+
+  describe("#1772 Pi result policy", () => {
+    it("returns a 30,000-character authoritative result exactly", async () => {
+      const big = "a".repeat(30000);
+      vi.mocked(executeToolCall).mockResolvedValueOnce(big);
+      const ctx = makeContext({
+        sandboxPolicy: buildPolicy("owner", { allowedTools: ["secret_get"] }),
+      });
+      const tools = createPiAgentTools(ctx);
+      const tool = tools.find((t) => t.name === "secret_get");
+      expect(tool).toBeDefined();
+      const result = await tool!.execute("call_1772_exact", { name: "x" });
+      expect(result.content[0]).toMatchObject({ type: "text", text: big });
+      expect(result.details).toEqual({ tool: "secret_get" });
+    });
+
+    it("announces over-limit results with the true length inside the bound", async () => {
+      const over = "b".repeat(PI_CORE_TOOL_RESULT_MAX_CHARS + 1000);
+      vi.mocked(executeToolCall).mockResolvedValueOnce(over);
+      const ctx = makeContext({
+        sandboxPolicy: buildPolicy("owner", { allowedTools: ["secret_get"] }),
+      });
+      const tools = createPiAgentTools(ctx);
+      const tool = tools.find((t) => t.name === "secret_get");
+      expect(tool).toBeDefined();
+      const result = await tool!.execute("call_1772_over", { name: "y" });
+      const first = result.content[0] as unknown as { type: string; text: string };
+      const text = first.text ?? "";
+      expect(text).toContain(`[TRUNCATED: tool returned ${over.length} chars`);
+      expect(text.length).toBeLessThanOrEqual(PI_CORE_TOOL_RESULT_MAX_CHARS);
+      expect(result.details).toEqual({ tool: "secret_get" });
+    });
   });
 
   it("treats repeated unavailable private writes as completed non-failures", async () => {

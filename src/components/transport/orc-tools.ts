@@ -14,6 +14,7 @@ import { nerve } from "../nerve.js";
 import { REVIEW_PROJECT_PARAMETERS, INVALID_CONTRACT_PROPOSALS_EXHAUSTED } from "../project-acceptance/project-review-contract.js";
 import { evaluateReviewTurnContext, reviewCaseAvailability, ProjectMutationRejectedError } from "../project-acceptance/review-turn-authority.js";
 import type { ReviewTurnRejection } from "../project-acceptance/review-turn-authority.js";
+import { PI_CORE_TOOL_RESULT_MAX_CHARS } from "./tool-result-limits.js";
 
 const TAG = "orc-tools";
 
@@ -772,7 +773,14 @@ const getProjectReviewCaseTool: ToolDefinition = {
 
       const brief = projectReviewBrief(ctx.reviewCaseId, store);
       if (!brief.ok) return reviewToolRejection(brief.code, capDetail(brief.error));
-      return JSON.stringify(brief.brief);
+      const serializedBrief = JSON.stringify(brief.brief);
+      if (serializedBrief.length > PI_CORE_TOOL_RESULT_MAX_CHARS) {
+        return reviewToolRejection(
+          "case_too_large",
+          capDetail(`Review case brief is ${serializedBrief.length} chars; limit is ${PI_CORE_TOOL_RESULT_MAX_CHARS}`),
+        );
+      }
+      return serializedBrief;
     } catch (err) {
       const rejection = err instanceof ProjectMutationRejectedError ? err.rejection : "internal_error";
       return reviewToolRejection(rejection, `get_project_review_case error: ${capDetail(String(err))}`);

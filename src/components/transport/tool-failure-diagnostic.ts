@@ -39,6 +39,7 @@ export type ToolFailureReason =
   | "review_case_generation_mismatch"
   | "review_case_not_open"
   | "review_case_unreadable"
+  | "case_too_large"
   | "review_ownership_stale"
   | "settlement_lost"
   | "peer_terminal_identity_missing"
@@ -96,7 +97,8 @@ const ORC_TOOL_FAILURE_REASONS: ReadonlySet<string> = new Set([
   "supervision_missing", "project_terminal", "project_not_reviewable",
   "project_generation_mismatch", "review_case_unknown",
   "review_case_project_mismatch", "review_case_generation_mismatch",
-  "review_case_not_open", "review_case_unreadable", "review_ownership_stale",
+  "review_case_not_open", "review_case_unreadable", "case_too_large",
+  "review_ownership_stale",
   "settlement_lost", "peer_terminal_identity_missing", "peer_terminal_identity_mismatch",
   "internal_error",
   "peer_relay_blocked", "peer_sandbox",

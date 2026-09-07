@@ -192,7 +192,7 @@ export class ReviewCaseAssembler {
             card_id: pc.id,
             peer: pc.source_peer ?? (typeof notes.peer === "string" ? notes.peer : "unknown"),
             outcome: pc.status,
-            projection_summary: projection.slice(0, 200),
+            projection_summary: boundProjectionSummary(projection),
             root_criteria: rootCriteria,
             provenance: (typeof notes.provenance === "object" && notes.provenance !== null) ? JSON.stringify(notes.provenance) : "",
           });
@@ -215,7 +215,7 @@ export class ReviewCaseAssembler {
             card_id: r.proxy_card_id ?? 0,
             peer: r.peer,
             outcome: r.state,
-            projection_summary: r.projection_json ? r.projection_json.slice(0, 200) : "",
+            projection_summary: r.projection_json ? boundProjectionSummary(r.projection_json) : "",
             root_criteria: rootCriteria,
             provenance,
           });
@@ -533,12 +533,20 @@ export interface ProjectReviewBriefV1 {
   decision_skeleton: unknown;
 }
 
-const BRIEF_GOAL_MAX = 1000;
-const BRIEF_DESCRIPTION_MAX = 300;
+// #1772: peer projection summaries are bounded, not unbounded. This mirrors
+// peer-help's private MAX_PROJECTION_ITEM_LENGTH = 2_000 by comment rather
+// than by import — exporting that constant here would create a cross-module
+// dependency that pays no rent.
+const BRIEF_PROJECTION_SUMMARY_MAX = 2_000;
 
 function truncateProse(text: string, max: number): string {
   if (text.length <= max) return text;
   return `${text.slice(0, Math.max(max - 3, 0))}...`;
+}
+
+function boundProjectionSummary(text: string): string {
+  if (text.length <= BRIEF_PROJECTION_SUMMARY_MAX) return text;
+  return `${text.slice(0, BRIEF_PROJECTION_SUMMARY_MAX)}…[+${text.length - BRIEF_PROJECTION_SUMMARY_MAX} chars omitted]`;
 }
 
 /**
@@ -578,7 +586,7 @@ export function projectReviewBrief(
       const input = policyByCriterionId.get(c.id);
       return {
         criterion_id: c.id,
-        description: truncateProse(c.description, BRIEF_DESCRIPTION_MAX),
+        description: c.description,
         required: c.required,
         execution_owner: c.execution_owner,
         evidence_expectation: c.evidence_expectation,
@@ -595,7 +603,7 @@ export function projectReviewBrief(
 
     const outputs = snapshot.root_contract.required_outputs.map(o => ({
       output_id: o.id,
-      description: truncateProse(o.description, BRIEF_DESCRIPTION_MAX),
+      description: o.description,
       kind: o.kind,
       required: o.required,
     }));
@@ -640,18 +648,20 @@ export function projectReviewBrief(
     const contradictions: ContradictionCandidate[] = snapshot.contradiction_candidates.map(candidate => ({
       id: candidate.id,
       affected_criterion_ids: [...candidate.affected_criterion_ids],
-      description: truncateProse(candidate.description, BRIEF_DESCRIPTION_MAX),
+      description: candidate.description,
       evidence_ids: [...candidate.evidence_ids],
       sources: [...candidate.sources],
     }));
 
     // Peer rows are explicitly claims. Preserve their stored references and
-    // bound their prose/metadata before exposing them to the provider.
+    // bound their metadata before exposing them to the provider. The
+    // projection summary is bounded exactly once at assembly — pass it
+    // through here without a second cut.
     const peerClaims: ProjectReviewBriefV1["peer_claims"] = snapshot.peer_contributions.map(claim => ({
       card_id: claim.card_id,
       peer: truncateProse(claim.peer, 128),
       outcome: truncateProse(claim.outcome, 64),
-      projection_summary: truncateProse(claim.projection_summary, 200),
+      projection_summary: claim.projection_summary,
       root_criteria: [...claim.root_criteria],
       provenance: truncateProse(claim.provenance, 1000),
     }));
@@ -680,7 +690,7 @@ export function projectReviewBrief(
         project_generation: snapshot.generation,
         review_case_id: row.id,
         round: snapshot.round,
-        goal: truncateProse(snapshot.root_contract.goal, BRIEF_GOAL_MAX),
+        goal: snapshot.root_contract.goal,
         criteria,
         outputs,
         contradictions,

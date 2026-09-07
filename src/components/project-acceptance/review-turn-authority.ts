@@ -40,6 +40,7 @@ export type ReviewTurnRejection =
   | "project_mismatch"                // arg project != bound project
   | "project_generation_mismatch"     // bound or declared generation != current
   | "review_case_unreadable"          // snapshot unparseable or structurally invalid
+  | "case_too_large"                  // serialized brief exceeds the shared model-facing bound
   | "review_ownership_stale"          // a supervision/ownership CAS was lost
   | "settlement_lost"                 // durable kanban settlement race
   | "peer_terminal_identity_missing"  // peer root with no unique accepted help identity

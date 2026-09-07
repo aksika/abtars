@@ -455,7 +455,7 @@ describe("Orc review tools against a real isolated TaskDatabase (#1620)", () => 
     const ERROR_CONTEXT_MISSING_REVIEW = "No active Orc project. review_project only works during a project review turn.";
     const ERROR_SUPERVISION_MISSING = "No project supervision state found. Is this a supervised project?";
 
-    describe("get_project_review_case — all 13 error-envelope branches", () => {
+    describe("get_project_review_case — all 14 error-envelope branches", () => {
       it("context_missing", async () => {
         const raw = await caseTool().execute({ project_card_id: 1, review_case_id: "x" });
         const parsed = JSON.parse(raw) as { error: string; reason: string };
@@ -570,6 +570,28 @@ describe("Orc review tools against a real isolated TaskDatabase (#1620)", () => 
         const parsed = JSON.parse(raw) as { error: string; reason: string };
         expect(parsed.error).toBe("review case snapshot is structurally invalid");
         expect(parsed.reason).toBe("review_case_unreadable");
+      });
+
+      it("case_too_large — oversized brief returns a typed rejection with no partial case", async () => {
+        const pid = uniquePid();
+        await setupVariant(pid, { state: "review_ready", withCase: false });
+        const snapshot = makeOrcOnlySnapshot(pid);
+        const bigCriteria = Array.from({ length: 6000 }, (_, i) => ({
+          id: `c_big_${i}`,
+          description: "d".repeat(100),
+          required: true as const,
+          execution_owner: "orc" as const,
+          evidence_expectation: "synthesis" as const,
+        }));
+        snapshot.root_contract.criteria = [...snapshot.root_contract.criteria, ...bigCriteria];
+        const { id } = store.insertReviewCase(pid, 1, 1, snapshot, `digest_big_${pid}`);
+        const raw = await caseTool().execute({ project_card_id: pid, review_case_id: id }, orcCtx(pid));
+        const parsed = JSON.parse(raw) as { error: string; reason: string };
+        expect(parsed.reason).toBe("case_too_large");
+        expect(parsed.error.length).toBeLessThanOrEqual(500);
+        expect(parsed.error).toContain("Review case brief is");
+        expect(raw).not.toContain("c_big_0");
+        expect(raw).not.toContain("decision_skeleton");
       });
 
       it("catch — an unclassified throw surfaces internal_error with bounded prose", async () => {
