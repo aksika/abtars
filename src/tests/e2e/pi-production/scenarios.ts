@@ -593,10 +593,16 @@ async function sessionStartHydration(ctx: PiAcceptanceContext): Promise<void> {
     action: { kind: "text", chunks: [reply1] },
   });
   await ctx.tui.sendAndAwaitReply("/reset");
-  // /reset ends the attached session and allocates a fresh Main; re-attach so
-  // the probe routes to the new session instead of the ended one.
+  // Re-attach with a brand-new session: `resume` would reattach to the
+  // most-recently-active ready session, which is not deterministically the
+  // fresh Main. A new attach guarantees the probe is the lifecycle's first
+  // turn. The id rotation proves the lifecycle is actually fresh.
+  const preResetSession = ctx.tui.sessionId;
   ctx.tui.close();
-  await ctx.tui.connect("resume");
+  await ctx.tui.connect("new");
+  if (ctx.tui.sessionId === null || ctx.tui.sessionId === preResetSession) {
+    throw new Error(`fresh lifecycle requires a rotated session id (was ${preResetSession}, now ${ctx.tui.sessionId})`);
+  }
   await sendExpectReply(ctx.tui, probe1, reply1, "hydration probe reply");
 
   // 3. One following ordinary turn: succeeds, hydrates nothing new. Durable
