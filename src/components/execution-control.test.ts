@@ -52,8 +52,7 @@ describe("createExecutionSupervisor — legacy drain ownership (#1638/#1648)", (
     expect(dispatch).toHaveBeenCalledWith(expect.objectContaining({ cardId, type: "T" }));
   });
 
-  it("#1750 skips an ownerless O root by identity while still dispatching a W child", async () => {
-    const sup = createExecutionSupervisor({ maxConcurrent: {} });
+  it("#1750 skips an ownerless O root by identity while still dispatching a W child", async () => {    const sup = createExecutionSupervisor({ maxConcurrent: {} });
     const dispatch = vi.fn();
     // #1750 shape: a bare type=O root with no parent and no project_supervision
     // row (the row is written later when the Reconciler adopts the project).
@@ -68,5 +67,55 @@ describe("createExecutionSupervisor — legacy drain ownership (#1638/#1648)", (
     expect(dispatch).toHaveBeenCalledWith(expect.objectContaining({ cardId: wChild, type: "W" }));
     const oCard = kanbanMod.kanbanGetCard(oRoot) as { status: string } | undefined;
     expect(oCard?.status).toBe("queued");
+  });
+});
+
+describe("createExecutionSupervisor — owned occupancy (#1778)", () => {
+  it("a stale generation's close never frees its successor's slot", () => {
+    const sup = createExecutionSupervisor({ maxConcurrent: { W: 5 } });
+    const oldCtrl = sup.open({ executionRef: "a_old:1", attemptId: "a_old", generation: 1, cardId: 7001, type: "W" });
+    expect(sup.admit("W", 7001, "a_old:1")).toBe(true);
+    sup.bindSession("a_old:1", "session-old");
+
+    // The successor admits the same card while the predecessor still holds it.
+    const newCtrl = sup.open({ executionRef: "a_new:2", attemptId: "a_new", generation: 2, cardId: 7001, type: "W" });
+    expect(sup.admit("W", 7001, "a_new:2")).toBe(true);
+    sup.bindSession("a_new:2", "session-new");
+    void oldCtrl;
+    void newCtrl;
+
+    // The stale predecessor closes late: the successor's slot must survive.
+    expect(sup.close("a_old:1", "failed")).toBe(true);
+    expect(sup.runningCount("W")).toBe(1);
+
+    // The live successor closes: the slot frees exactly once.
+    expect(sup.close("a_new:2", "completed")).toBe(true);
+    expect(sup.runningCount("W")).toBe(0);
+  });
+
+  it("close releases an already-terminal bound control without touching unowned slots", () => {
+    const sup = createExecutionSupervisor({ maxConcurrent: { T: 5 } });
+    sup.open({ executionRef: "run_1", cardId: 7002, type: "T" });
+    expect(sup.admit("T", 7002, "run_1")).toBe(true);
+    sup.bindSession("run_1", "session-t");
+    // A deadline won before completion terminalized the control early.
+    expect(sup.close("run_1", "timed_out")).toBe(true);
+    expect(sup.runningCount("T")).toBe(0);
+    // A second close is a terminal no-op that still leaves occupancy empty.
+    expect(sup.close("run_1", "timed_out")).toBe(false);
+    expect(sup.runningCount("T")).toBe(0);
+  });
+
+  it("close after remove is a no-op that releases nothing", () => {
+    const sup = createExecutionSupervisor({ maxConcurrent: { W: 5 } });
+    sup.open({ executionRef: "a_gone:1", attemptId: "a_gone", generation: 1, cardId: 7003, type: "W" });
+    expect(sup.admit("W", 7003, "a_gone:1")).toBe(true);
+    sup.bindSession("a_gone:1", "session-gone");
+    expect(sup.remove("a_gone:1")).toBe(true);
+    expect(sup.close("a_gone:1", "failed")).toBe(false);
+    // The slot is still held: only the bound owner may release it, and the
+    // binding is gone — occupancy converges through the live driver, never
+    // through a removed handle.
+    expect(sup.runningCount("W")).toBe(1);
   });
 });

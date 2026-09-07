@@ -12,7 +12,7 @@
 
 import { logDebug, logWarn } from "./logger.js";
 import { logAndSwallow } from "./log-and-swallow.js";
-import { kanbanQueuedDispatchOrder, kanbanFail, isUnblocked, type KanbanCard } from "./tasks/kanban-board.js";
+import { kanbanQueuedDispatchOrder, kanbanFail, kanbanGetCard, isUnblocked, type KanbanCard } from "./tasks/kanban-board.js";
 import { isValidSessionType } from "./spin-profiles.js";
 import { WorkerSupervisionStore } from "./worker-supervision-store.js";
 import { ProjectReviewStore } from "./project-acceptance/project-review-store.js";
@@ -160,9 +160,19 @@ export interface ExecutionSupervisor {
   remove(executionRef: string): boolean;
   /** #987/#1274: per-type admission gate (capacity + Healer cooldown). */
   canAdmit(type: SessionType, cardId?: number): boolean;
-  /** Admit a card: gate check + occupancy mark in one step. */
-  admit(type: SessionType, cardId: number): boolean;
-  /** Release occupancy for a card; records Healer completion time. */
+  /**
+   * Admit a card: gate check + occupancy mark in one step. The optional
+   * executionRef records which generation owns the slot; admission order
+   * defines the live generation (last writer wins), so a stale generation's
+   * later release can never free its successor's slot — see close().
+   */
+  admit(type: SessionType, cardId: number, executionRef?: string): boolean;
+  /**
+   * Release occupancy for a card; records Healer completion time.
+   * Legacy blind primitive — kept for tests and control-less paths.
+   * Production Spin turns release through close(), which proves the closing
+   * generation still owns the execution.
+   */
   release(type: SessionType, cardId: number): void;
   /** #1439: full set of card IDs Spin considers running, across all types. */
   runningCardIds(): readonly number[];
@@ -222,11 +232,33 @@ function isSupervisedRootIdentity(card: KanbanCard): boolean {
   }
 }
 
+/**
+ * #1778: true when a card is owned by the Reconciler/Orc driver rather than
+ * legacy Spin dispatch — a supervised worker child or an actively supervised
+ * project root. Pre-execution dispatch failures for such cards must leave the
+ * card queued for its owner instead of failing it from Spin.
+ */
+export function isReconcilerOwnedCard(cardId: number): boolean {
+  try {
+    if (cardHasSupervision(cardId)) return true;
+    const card = kanbanGetCard(cardId);
+    if (!card) return false;
+    return isSupervisedRootIdentity(card);
+  } catch {
+    return false;
+  }
+}
+
 export function createExecutionSupervisor(options: ExecutionSupervisorOptions): ExecutionSupervisor {
   const controls = new Map<string, ExecutionControlImpl>();
   const sessionBindings = new Map<string, string>();   // sessionId → executionRef
   const refSessions = new Map<string, string>();       // executionRef → sessionId
   const running = new Map<SessionType, Set<number>>();
+  /** #1778: occupancy ownership — `${type}:${cardId}` → owning executionRef.
+   * Admission order defines the live generation: a re-admit transfers
+   * ownership to the successor, so a stale generation's release is a no-op
+   * instead of freeing a slot it no longer owns. */
+  const occupancyOwner = new Map<string, string>();
   const maxConcurrent = options.maxConcurrent;
   const now = options.now ?? (() => Date.now());
   const onOccupancyChanged = options.onOccupancyChanged;
@@ -256,18 +288,38 @@ export function createExecutionSupervisor(options: ExecutionSupervisorOptions): 
     return true;
   }
 
-  function admit(type: SessionType, cardId: number): boolean {
+  function admit(type: SessionType, cardId: number, executionRef?: string): boolean {
     if (!canAdmit(type, cardId)) return false;
     if (!running.has(type)) running.set(type, new Set());
     running.get(type)!.add(cardId);
+    if (executionRef !== undefined) occupancyOwner.set(`${type}:${cardId}`, executionRef);
     publishActiveCardIds();
     return true;
   }
 
   function release(type: SessionType, cardId: number): void {
     running.get(type)?.delete(cardId);
+    occupancyOwner.delete(`${type}:${cardId}`);
     if (type === "H") lastHealerDoneAt = now();
     publishActiveCardIds();
+  }
+
+  /**
+   * #1778: release one occupancy slot for a proven owner. A slot releases
+   * only when no newer generation re-admitted the card after this one —
+   * silently skipping a successor-owned slot instead of freeing it.
+   */
+  function releaseOwnedCard(cardId: number, executionRef: string): void {
+    for (const [type, set] of running) {
+      if (!set.has(cardId)) continue;
+      const owner = occupancyOwner.get(`${type}:${cardId}`);
+      if (owner !== undefined && owner !== executionRef) continue;
+      set.delete(cardId);
+      occupancyOwner.delete(`${type}:${cardId}`);
+      if (type === "H") lastHealerDoneAt = now();
+      publishActiveCardIds();
+      break;
+    }
   }
 
   function drainLegacyQueued(dispatch: (request: SpinRequest) => void): void {
@@ -369,15 +421,11 @@ export function createExecutionSupervisor(options: ExecutionSupervisorOptions): 
       // (binding dropped by remove()) resolves to a no-op.
       if (refSessions.get(executionRef) === undefined) return false;
       const transitioned = ctrl.markTerminal(outcome);
-      if (transitioned && ctrl.cardId !== undefined) {
-        for (const [type, set] of running) {
-          if (set.delete(ctrl.cardId)) {
-            if (type === "H") lastHealerDoneAt = now();
-            publishActiveCardIds();
-            break;
-          }
-        }
-      }
+      // #1778: binding proves this generation still owns the execution, so
+      // the slot releases even when the control already terminalized through
+      // another path (a deadline or cancel that won before completion).
+      // releaseOwnedCard additionally refuses a slot a successor re-admitted.
+      if (ctrl.cardId !== undefined) releaseOwnedCard(ctrl.cardId, executionRef);
       return transitioned;
     },
 
@@ -396,8 +444,8 @@ export function createExecutionSupervisor(options: ExecutionSupervisorOptions): 
       return canAdmit(type, cardId);
     },
 
-    admit(type, cardId) {
-      return admit(type, cardId);
+    admit(type, cardId, executionRef) {
+      return admit(type, cardId, executionRef);
     },
 
     release(type, cardId) {
@@ -429,6 +477,7 @@ export function createExecutionSupervisor(options: ExecutionSupervisorOptions): 
       sessionBindings.clear();
       refSessions.clear();
       running.clear();
+      occupancyOwner.clear();
       lastHealerDoneAt = 0;
     },
   };

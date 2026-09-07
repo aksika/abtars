@@ -20,7 +20,7 @@ import { profileFor, type SessionProfile } from "./spin-profiles.js";
 import { WorkerSupervisionService, validateWorkerRootCriteria } from "./worker-supervision-service.js";
 import { WorkerSupervisionStore } from "./worker-supervision-store.js";
 import { pushLog, isHollow, cancelSessionExecution, createSpinSessionRegistry, type SpinSessionRegistry } from "./spin-sessions.js";
-import { createExecutionSupervisor, type ExecutionSupervisor, SpinBindRejectionError } from "./execution-control.js";
+import { createExecutionSupervisor, type ExecutionSupervisor, SpinBindRejectionError, isReconcilerOwnedCard, type TerminalOutcome } from "./execution-control.js";
 import { createSpinMaintenance, type SpinMaintenance } from "./spin-maintenance.js";
 import { leaseInstructions, markDelivered, markConsumed, failAfterDelivery, expireInstructions, restoreBeforeDelivery, subscribeSteerEvents } from "./session-instruction-queue.js";
 import { createExecutionTelemetryScope } from "./execution-telemetry.js";
@@ -754,7 +754,7 @@ export class Spin {
     // control at the earliest point so forced settlement can fail it exactly
     // once instead of leaving it running.
     if (cardId !== undefined) spec.executionControl?.setCardId(cardId);
-    if (cardId !== undefined && this.executions.admit(spec.type, cardId)) {
+    if (cardId !== undefined && this.executions.admit(spec.type, cardId, spec.executionControl?.executionRef)) {
       kanbanRunning(cardId);
     }
 
@@ -1320,8 +1320,23 @@ export class Spin {
     return orcContext ? { orcContext, orcTurnControl, maxPromptRounds } : undefined;
   }
 
-  private async finishSpin(
-    spec: SpinSessionSpec, profile: SessionProfile, session: ManagedSession, capturedExecutionId: string,
+  /**
+   * #1778: release Spin occupancy through the bound execution control, never
+   * by bare card ID. close() proves the closing generation still owns the
+   * execution (binding) and refuses a slot a successor re-admitted — a stale
+   * completion can no longer free its successor's slot. Control-less turns
+   * (legacy paths and unit fakes) keep the blind release.
+   */
+  private releaseExecutionSlot(spec: SpinSessionSpec, cardId: number, outcome: TerminalOutcome): void {
+    const ref = spec.executionControl?.executionRef;
+    if (ref !== undefined) {
+      this.executions.close(ref, outcome);
+    } else {
+      this.executions.release(spec.type, cardId);
+    }
+  }
+
+  private async finishSpin(    spec: SpinSessionSpec, profile: SessionProfile, session: ManagedSession, capturedExecutionId: string,
     cardId: number | undefined, stepIndex: number, started: number, result: string,
     outcome: ContentOutcome,
     terminate: "call" | "response" | "external",
@@ -1377,7 +1392,7 @@ export class Spin {
       // #1248: If cancellation already won, skip normal completion settlement
       if (spec.executionControl?.terminal) {
         logInfo(TAG, `Card ${cardId}: execution control already terminal — skipping finishSpin settlement`);
-        this.executions.release(spec.type, cardId);
+        this.releaseExecutionSlot(spec, cardId, spec.executionControl.terminalOutcome ?? "cancelled");
         return;
       }
 
@@ -1593,7 +1608,7 @@ export class Spin {
     await spec.onStepComplete?.(stepEvent);
 
     this.applyTerminate(session, terminate);
-    if (cardId !== undefined) { this.executions.release(spec.type, cardId); this.executions.drainLegacyQueued((request) => this.dispatch(request)); }
+    if (cardId !== undefined) { this.releaseExecutionSlot(spec, cardId, "completed"); this.executions.drainLegacyQueued((request) => this.dispatch(request)); }
   }
 
   private async failSpin(
@@ -1632,7 +1647,7 @@ export class Spin {
       // #1248: If terminal already won (cancellation), skip fail settlement
       if (spec.executionControl?.terminal) {
         logInfo(TAG, `Card ${cardId}: execution control already terminal — skipping failSpin settlement`);
-        this.executions.release(spec.type, cardId);
+        this.releaseExecutionSlot(spec, cardId, spec.executionControl.terminalOutcome ?? "cancelled");
         return;
       }
       if (spec.attemptId) {
@@ -1723,7 +1738,7 @@ export class Spin {
     await spec.onStepComplete?.(stepEvent);
 
     this.applyTerminate(session, terminate);
-    if (cardId !== undefined) { this.executions.release(spec.type, cardId); this.executions.drainLegacyQueued((request) => this.dispatch(request)); }
+    if (cardId !== undefined) { this.releaseExecutionSlot(spec, cardId, "failed"); this.executions.drainLegacyQueued((request) => this.dispatch(request)); }
   }
 
   /**
@@ -1879,7 +1894,15 @@ export class Spin {
       }
       const note = err instanceof Error ? err.message : String(err);
       logError(TAG, `${type} card:${cardId} dispatch failed before execution — failing card`, err);
-      try { kanbanFail(cardId, `dispatch failed before execution: ${note}`); }
+      try {
+        // #1778: a pre-execution failure must not settle a Reconciler-owned
+        // card from Spin — leave it queued for its owner driver.
+        if (isReconcilerOwnedCard(cardId)) {
+          logWarn(TAG, `${type} card:${cardId} dispatch failed before execution — Reconciler-owned, left queued: ${note.slice(0, 200)}`);
+          return;
+        }
+        kanbanFail(cardId, `dispatch failed before execution: ${note}`);
+      }
       catch (failErr) { logAndSwallow(TAG, "kanbanFail after dispatch rejection", failErr); }
     });
   }
