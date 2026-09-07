@@ -283,6 +283,67 @@ describe("CronQueue #1539 two-lane admission", () => {
     }
   });
 
+  it("#1778 escalates to SIGKILL when the child ignores SIGTERM past the grace window", () => {
+    vi.useFakeTimers();
+    try {
+      const entry = makeEntry({ kind: "script", command: "sleep 100" });
+      queue.enqueue(entry);
+      const child = activeChildren[0]!;
+      (child as unknown as { exitCode: number | null }).exitCode = null;
+      const kill = vi.fn();
+      (child as unknown as { kill: typeof kill }).kill = kill;
+
+      expect(queue.cancel("test-run", "operator cancel")).toBe("requested");
+      expect(kill).toHaveBeenCalledWith("SIGTERM");
+      expect(kill).toHaveBeenCalledTimes(1);
+
+      // The child ignores SIGTERM: no exit inside the 5s grace, so the
+      // bounded fallback fires exactly one SIGKILL — never a second verdict,
+      // only physical cleanup escalation.
+      vi.advanceTimersByTime(5000);
+      expect(kill).toHaveBeenCalledWith("SIGKILL");
+      expect(kill).toHaveBeenCalledTimes(2);
+      expect(vi.mocked(historyStore.appendRunOnce)).not.toHaveBeenCalled();
+
+      // The forced exit settles the run exactly once through the normal path
+      // and leaves no timer behind.
+      child.emit("exit", 137);
+      expect(vi.mocked(historyStore.appendRunOnce)).toHaveBeenCalledWith(expect.objectContaining({
+        runId: "test-run",
+      }));
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("#1778 fires no SIGKILL when the child exits inside the grace window", () => {
+    vi.useFakeTimers();
+    try {
+      const entry = makeEntry({ kind: "script", command: "sleep 100" });
+      queue.enqueue(entry);
+      const child = activeChildren[0]!;
+      (child as unknown as { exitCode: number | null }).exitCode = null;
+      const kill = vi.fn();
+      (child as unknown as { kill: typeof kill }).kill = kill;
+
+      expect(queue.cancel("test-run", "operator cancel")).toBe("requested");
+      expect(kill).toHaveBeenCalledWith("SIGTERM");
+
+      // The child honors SIGTERM: the exit settles the run and detaches the
+      // fallback timer, so advancing far past the grace fires nothing — a
+      // dead pid is never signalled again.
+      (child as unknown as { exitCode: number | null }).exitCode = 143;
+      child.emit("exit", 143);
+      vi.advanceTimersByTime(30000);
+      expect(kill).not.toHaveBeenCalledWith("SIGKILL");
+      expect(kill).toHaveBeenCalledTimes(1);
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("a late exit after spawn failure cannot clear a newer job's current state", () => {
     const entry = makeEntry({ id: "late-exit-1", kind: "script", command: "nope" });
     queue.enqueue(entry);
