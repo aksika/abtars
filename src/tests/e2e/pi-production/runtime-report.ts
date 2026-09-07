@@ -160,7 +160,7 @@ function checkExecutable(checks: PiRuntimeCheck[], installation: PiInstallation)
   }
 }
 
-export async function inspectPiRuntime(): Promise<PiRuntimeReport> {
+export async function inspectPiRuntime(expectedVersion?: string): Promise<PiRuntimeReport> {
   const checks: PiRuntimeCheck[] = [];
   const resolved = resolvePiInstallation({ useCache: false });
   if (resolved.state !== "compatible") {
@@ -172,6 +172,39 @@ export async function inspectPiRuntime(): Promise<PiRuntimeReport> {
   check(checks, "installation", "compatible", true);
   checkExecutable(checks, installation);
   const packageVersions = readPackageVersions(installation, checks);
+
+  // #1780: an exact candidate gates lanes on the requested version. Every
+  // observed version must equal the request — a mismatch is a pre-lane
+  // failure, never a warning.
+  if (expectedVersion !== undefined) {
+    check(
+      checks,
+      "exact-version",
+      "installation-version",
+      installation.version === expectedVersion,
+      installation.version === expectedVersion ? undefined : `installation is ${installation.version}, expected exact ${expectedVersion}`,
+    );
+    for (const [label, version] of Object.entries(packageVersions)) {
+      check(
+        checks,
+        "exact-version",
+        `${label}:exact-version`,
+        version === expectedVersion,
+        version === expectedVersion ? undefined : `${label} is ${version}, expected exact ${expectedVersion}`,
+      );
+    }
+    const coherent =
+      installation.version === expectedVersion &&
+      Object.values(packageVersions).length === 4 &&
+      Object.values(packageVersions).every((v) => v === expectedVersion);
+    check(
+      checks,
+      "exact-version",
+      "requested-version-coherence",
+      coherent,
+      coherent ? undefined : `requested ${expectedVersion}, observed installation ${installation.version} packages ${JSON.stringify(packageVersions)}`,
+    );
+  }
 
   const ai = await loadRuntimeModule(installation, "pi-ai", { package: "@earendil-works/pi-ai" }, checks);
   const agentCore = await loadRuntimeModule(installation, "pi-agent-core", { package: "@earendil-works/pi-agent-core" }, checks);
@@ -192,6 +225,22 @@ export async function inspectPiRuntime(): Promise<PiRuntimeReport> {
     );
     checkExports(checks, `pi-ai/${api}`, module, ["stream", "streamSimple"]);
   }
+
+  // #1780: the consumed providers/all catalog surface. Loading and shape
+  // validation only — never invoke builtinModels (catalog/network side effects).
+  const providersAll = await loadRuntimeModule(
+    installation,
+    "pi-ai/providers/all",
+    { package: "@earendil-works/pi-ai", subpath: "providers/all" },
+    checks,
+  );
+  check(
+    checks,
+    "pi-ai/providers/all",
+    "export:builtinModels",
+    providersAll !== null && typeof providersAll["builtinModels"] === "function",
+    providersAll === null ? "module unavailable" : undefined,
+  );
 
   return {
     ok: checks.every((entry) => entry.state === "passed"),

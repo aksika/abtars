@@ -10,7 +10,9 @@ export type PiAcceptanceProfile = "core" | "full";
 export type PiScenarioState = "passed" | "failed" | "blocked";
 
 export interface PiRuntimeEvidence {
-  source: "host" | "latest" | "pinned";
+  source: "host" | "latest" | "pinned" | "exact";
+  /** Requested exact version — present only for `exact` selections. */
+  requestedVersion?: string;
   version?: string;
   executable?: string;
 }

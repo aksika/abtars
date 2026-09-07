@@ -453,26 +453,37 @@ export class ScriptedProvider {
   private async streamToolCall(res: ServerResponse, name: string, args: unknown): Promise<void> {
     this.sseStart(res);
     const argsText = typeof args === "string" ? args : JSON.stringify(args);
-    const toolPayload = JSON.stringify({
-      id: `chatcmpl-fixture-${this.seq}`,
-      object: "chat.completion.chunk",
-      created: Math.floor(Date.now() / 1000),
-      model: "fixture",
-      choices: [{
-        index: 0,
-        delta: {
-          role: "assistant",
-          tool_calls: [{
-            index: 0,
-            id: `call_fixture_${this.seq}`,
-            type: "function",
-            function: { name, arguments: argsText },
-          }],
-        },
-        finish_reason: null,
-      }],
-    });
-    res.write(`data: ${toolPayload}\n\n`);
+    // #1780: deliver the argument JSON fragmented across multiple deltas so
+    // the real Pi parser must reassemble it. A single complete chunk cannot
+    // detect normalized tool-call delta drift (lost/duplicated fragments).
+    const fragments = splitIntoFragments(argsText, 3);
+    const callId = `call_fixture_${this.seq}`;
+    for (let i = 0; i < fragments.length; i++) {
+      const functionPayload: Record<string, unknown> =
+        i === 0
+          ? { name, arguments: fragments[i] }
+          : { arguments: fragments[i] };
+      const chunkPayload = JSON.stringify({
+        id: `chatcmpl-fixture-${this.seq}`,
+        object: "chat.completion.chunk",
+        created: Math.floor(Date.now() / 1000),
+        model: "fixture",
+        choices: [{
+          index: 0,
+          delta: {
+            role: "assistant",
+            tool_calls: [{
+              index: 0,
+              ...(i === 0 ? { id: callId, type: "function" } : {}),
+              function: functionPayload,
+            }],
+          },
+          finish_reason: null,
+        }],
+      });
+      res.write(`data: ${chunkPayload}\n\n`);
+      await delay(2);
+    }
     res.write(`data: ${JSON.stringify({
       id: `chatcmpl-fixture-${this.seq}`,
       object: "chat.completion.chunk",
@@ -498,6 +509,21 @@ function extractText(content: unknown): string {
 
 function shortHash(marker: string): string {
   return createHash("sha256").update(marker).digest("hex").slice(0, 8);
+}
+
+/**
+ * Split text into N roughly equal fragments for multi-delta tool-call
+ * delivery (#1780). Splits by character count — the fragments are only
+ * reassembled by the real Pi parser, never parsed here.
+ */
+function splitIntoFragments(text: string, parts: number): string[] {
+  if (parts <= 1 || text.length <= parts) return [text];
+  const size = Math.ceil(text.length / parts);
+  const out: string[] = [];
+  for (let i = 0; i < text.length; i += size) {
+    out.push(text.slice(i, i + size));
+  }
+  return out;
 }
 
 function readBounded(req: IncomingMessage): Promise<Buffer> {

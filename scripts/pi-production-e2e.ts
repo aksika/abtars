@@ -4,8 +4,8 @@
  * composition acceptance harness.
  *
  *   tsx scripts/pi-production-e2e.ts [--profile core|full] [--lane local-unix|remote-wss]
- *                                    [--abmind-root <path>] [--pi installed|latest|pinned]
- *                                    [--keep-artifacts]
+ *                                    [--abmind-root <path>] [--pi installed|latest|pinned|exact]
+ *                                    [--pi-version <exact-semver>] [--keep-artifacts]
  *
  * Missing prerequisites (repo, build artifact, lane material) produce a
  * non-zero blocked result — never a passing skip.
@@ -19,9 +19,12 @@ import { fileURLToPath } from "node:url";
 import { runPiProductionE2E } from "../src/tests/e2e/pi-production/runner.js";
 import { resolvePiExecutable } from "../src/tests/e2e/pi-production/bridge-config.js";
 import { PI_COMPATIBILITY } from "../src/config/pi-compatibility.js";
+import {
+  parsePiSelection,
+  resolvePiPackageSpec,
+  type PiSelection as PiSelectionSpec,
+} from "../src/tests/e2e/pi-production/pi-selection.js";
 import type { PiAcceptanceLane, PiAcceptanceProfile, PiRuntimeEvidence } from "../src/tests/e2e/pi-production/contracts.js";
-
-type PiSelection = "installed" | "latest" | "pinned";
 
 interface PiRuntimeScope {
   evidence: PiRuntimeEvidence;
@@ -32,13 +35,14 @@ function parseArgs(argv: string[]): {
   profile: PiAcceptanceProfile;
   lane?: PiAcceptanceLane;
   abmindRoot?: string;
-  pi: PiSelection;
+  pi: PiSelectionSpec;
   keepArtifacts: boolean;
 } {
   let profile: PiAcceptanceProfile = "core";
   let lane: PiAcceptanceLane | undefined;
   let abmindRoot: string | undefined;
-  let pi: PiSelection = "installed";
+  let piRaw = "installed";
+  let piVersion: string | undefined;
   let keepArtifacts = false;
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i];
@@ -57,15 +61,16 @@ function parseArgs(argv: string[]): {
     } else if (arg === "--abmind-root") {
       abmindRoot = resolve(argv[++i] ?? "");
     } else if (arg === "--pi") {
-      const value = argv[++i] ?? "";
-      if (value !== "installed" && value !== "latest" && value !== "pinned") {
-        throw new Error(`--pi must be installed, latest, or pinned (got ${JSON.stringify(value)})`);
-      }
-      pi = value;
+      piRaw = argv[++i] ?? "";
+    } else if (arg === "--pi-version") {
+      piVersion = argv[++i];
     } else if (arg === "--keep-artifacts") {
       keepArtifacts = true;
     }
   }
+  // The pure selector validates the pair and rejects missing/malformed/range
+  // exact versions before any candidate is installed (#1780).
+  const pi = parsePiSelection({ pi: piRaw, piVersion });
   return { profile, lane, abmindRoot, pi, keepArtifacts };
 }
 
@@ -79,8 +84,8 @@ function readPiVersion(executable: string): string {
   return version;
 }
 
-function preparePiRuntime(selection: PiSelection, keepArtifacts: boolean): PiRuntimeScope {
-  if (selection === "installed") {
+function preparePiRuntime(selection: PiSelectionSpec, keepArtifacts: boolean): PiRuntimeScope {
+  if (selection.kind === "installed") {
     const executable = resolvePiExecutable();
     return {
       evidence: {
@@ -99,16 +104,21 @@ function preparePiRuntime(selection: PiSelection, keepArtifacts: boolean): PiRun
   mkdirSync(configDir, { recursive: true });
 
   try {
+    const packageSpec = resolvePiPackageSpec(selection, {
+      packageName: PI_COMPATIBILITY.packageName,
+      pinnedRange: PI_COMPATIBILITY.pinnedRange,
+    });
+    if (!packageSpec) throw new Error(`no package spec for Pi selection ${selection.kind}`);
     execFileSync("npm", [
       "install", "--global", "--prefix", prefix,
       "--no-fund", "--no-audit", "--package-lock=false",
-      `${PI_COMPATIBILITY.packageName}@${selection === "latest" ? "latest" : PI_COMPATIBILITY.pinnedRange}`,
+      packageSpec,
     ], { stdio: "inherit" });
 
     const binDir = join(prefix, "bin");
     const executable = join(binDir, "pi");
     if (!existsSync(executable)) {
-      throw new Error(`${selection} Pi install completed without ${executable}`);
+      throw new Error(`${selection.kind} Pi install completed without ${executable}`);
     }
     const version = readPiVersion(executable);
 
@@ -127,7 +137,12 @@ function preparePiRuntime(selection: PiSelection, keepArtifacts: boolean): PiRun
     process.env.ABTARS_HOME = configHome;
 
     return {
-      evidence: { source: selection, executable, version },
+      evidence: {
+        source: selection.kind,
+        ...(selection.kind === "exact" ? { requestedVersion: selection.requestedVersion } : {}),
+        executable,
+        version,
+      },
       cleanup: () => {
         if (previousPath === undefined) delete process.env.PATH;
         else process.env.PATH = previousPath;
@@ -158,9 +173,10 @@ async function main(): Promise<void> {
       abmindRoot: args.abmindRoot,
       keepArtifacts: args.keepArtifacts,
       piRuntime: piRuntime.evidence,
+      ...(args.pi.kind === "exact" ? { expectedPiVersion: args.pi.requestedVersion } : {}),
     });
 
-    console.log(`\n═══ Pi production E2E — ${args.pi} Pi ${piRuntime.evidence.version ?? "unknown"}, profile ${args.profile} (${result.matrix.runId}) ═══`);
+    console.log(`\n═══ Pi production E2E — ${args.pi.kind} Pi ${piRuntime.evidence.version ?? "unknown"}, profile ${args.profile} (${result.matrix.runId}) ═══`);
     for (const lane of result.matrix.lanes) {
       if (lane.state === "blocked") {
         console.log(`  ⊘ ${lane.lane} — blocked: ${lane.blockedBy}`);

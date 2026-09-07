@@ -40,6 +40,8 @@ export interface PiE2EOptions {
   /** Keep the disposable run root after completion (diagnostics). */
   keepArtifacts?: boolean;
   piRuntime?: PiRuntimeEvidence;
+  /** Exact candidate version — when set, the runtime report gates lanes on it. */
+  expectedPiVersion?: string;
 }
 
 export interface PiE2ERunResult {
@@ -122,7 +124,7 @@ export async function runPiProductionE2E(opts: PiE2EOptions): Promise<PiE2ERunRe
     return { matrix, exitCode: 1 };
   }
 
-  const piRuntimeReport = await inspectPiRuntime();
+  const piRuntimeReport = await inspectPiRuntime(opts.expectedPiVersion);
   if (!piRuntimeReport.ok) {
     for (const lane of desiredLanes) {
       lanes.push(runtimeFailureResult(lane, opts.profile, piRuntimeReport));

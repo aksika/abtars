@@ -246,6 +246,51 @@ async function toolMultiGeneration(ctx: PiAcceptanceContext): Promise<void> {
   if (!postTool) {
     throw new Error("no post-tool provider generation observed carrying the tool result");
   }
+
+  // #1780: fragmented argument JSON must arrive intact at the real tool
+  // boundary. The fixture streams the args across multiple SSE deltas through
+  // the real Pi parser; the audit sink records the decoded args the tool
+  // actually received. The unique query marker isolates this turn's entry.
+  // A lost, duplicated, or malformed fragment drifts the decoded query and
+  // fails here even when a post-tool continuation still occurs.
+  const observedArgs = await waitFor(
+    async () => {
+      let raw: string;
+      try {
+        raw = readFileSync(join(ctx.abtarsHome, "logs", "audit.jsonl"), "utf-8");
+      } catch {
+        return undefined;
+      }
+      for (const line of raw.trim().split("\n").reverse()) {
+        if (!line.trim()) continue;
+        let entry: Record<string, unknown>;
+        try {
+          entry = JSON.parse(line) as Record<string, unknown>;
+        } catch {
+          continue;
+        }
+        if (entry["tool"] !== "memory_recall") continue;
+        const argsRaw = entry["args"];
+        if (typeof argsRaw !== "string") continue;
+        let decoded: Record<string, unknown>;
+        try {
+          decoded = JSON.parse(argsRaw) as Record<string, unknown>;
+        } catch {
+          continue;
+        }
+        if (decoded["query"] !== query) continue;
+        return decoded;
+      }
+      return undefined;
+    },
+    15_000,
+    `audit entry for fragmented memory_recall query ${query.slice(0, 40)}`,
+  );
+  if (observedArgs["query"] !== query || observedArgs["limit"] !== 5) {
+    throw new Error(
+      `fragmented tool arguments drifted at the tool boundary: expected ${JSON.stringify({ query, limit: 5 }).slice(0, 200)} (got ${JSON.stringify(observedArgs).slice(0, 300)})`,
+    );
+  }
 }
 
 // ── Scenario 3: Reset/rebuild (core) ────────────────────────────────────────
