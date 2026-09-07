@@ -571,10 +571,10 @@ async function sessionStartHydration(ctx: PiAcceptanceContext): Promise<void> {
     foreignContent: `${foreignMarker} another user's turn`,
   });
 
-  // Baseline log evidence before the fresh lifecycle starts.
+  // Baseline daemon evidence before the fresh lifecycle starts. (The daemon
+  // tail is in-memory, so positional baselines are stable here — unlike the
+  // bridge file log, which flushes lazily and must be filtered by key.)
   const daemonBaseline = countLinesWith(await ctx.owner.daemonLogTail(), "[session-context]");
-  const bridgeBaselineStates = countLinesWith(ctx.readBridgeLog(), "session-state:");
-  const bridgeBaselineAssembly = countLinesWith(ctx.readBridgeLog(), "session-assembly:");
 
   // 2. Fresh Main/A lifecycle after setup: the runner's smoke turn must not
   // satisfy the hydration assertion. Assembly order is consolidation-first,
@@ -613,18 +613,22 @@ async function sessionStartHydration(ctx: PiAcceptanceContext): Promise<void> {
   ctx.provider.enqueue(textScript(FIXTURE_MODEL_A, { candidate: FIXTURE_MODEL_A, currentTurn: probe2 }, reply2));
   await sendExpectReply(ctx.tui, probe2, reply2, "post-hydration ordinary reply");
 
-  // 4. Lifecycle uniqueness from bounded log evidence. The bridge logger
-  // buffers, so poll until the flushed lines arrive or the deadline hits —
-  // a missing prerequisite fails here, never passes as a skip.
+  // 4. Lifecycle uniqueness from bounded log evidence, scoped to the fresh
+  // session key (earlier sessions' lines can flush late, so positional
+  // baselines on the lazily-flushed bridge file are unsound). The bridge
+  // logger buffers, so poll until the flushed lines arrive or the deadline
+  // hits — a missing prerequisite fails here, never passes as a skip.
+  const freshSession = ctx.tui.sessionId;
+  if (!freshSession) throw new Error("fresh lifecycle has no attached session id");
   await waitFor(
     async () => {
       const bridge = ctx.readBridgeLog();
-      const newStates = bridge.split("\n").filter((l) => l.includes("session-state:")).slice(bridgeBaselineStates);
-      const newAssemblies = bridge.split("\n").filter((l) => l.includes("session-assembly:")).slice(bridgeBaselineAssembly);
-      const trues = newStates.filter((l) => l.includes("isSessionStart=true"));
-      const falses = newStates.filter((l) => l.includes("isSessionStart=false"));
-      const oks = newAssemblies.filter((l) => l.includes("outcome=ok"));
-      if (trues.length === 1 && falses.length === 1 && oks.length === 1 && newAssemblies.length === 1) {
+      const states = bridge.split("\n").filter((l) => l.includes("session-state:") && l.includes(`key=${freshSession} `));
+      const assemblies = bridge.split("\n").filter((l) => l.includes("session-assembly:") && l.includes(`key=${freshSession} `));
+      const trues = states.filter((l) => l.includes("isSessionStart=true"));
+      const falses = states.filter((l) => l.includes("isSessionStart=false"));
+      const oks = assemblies.filter((l) => l.includes("outcome=ok"));
+      if (trues.length === 1 && falses.length === 1 && oks.length === 1 && assemblies.length === 1) {
         return { trues: trues.length, falses: falses.length, oks: oks.length };
       }
       return undefined;
