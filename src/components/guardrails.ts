@@ -3,9 +3,9 @@
  * Defense-in-depth: catches accidental/confused model behavior, NOT adversarial bypass.
  */
 
-import { join, resolve, sep } from "node:path";
+import { basename, dirname, join, resolve, sep } from "node:path";
 import { homedir } from "node:os";
-import { existsSync } from "node:fs";
+import { existsSync, realpathSync } from "node:fs";
 import { abmindHome, abtarsHome } from "../paths.js";
 import { resolveReleasesDir } from "../cli/deploy-lib/paths.js";
 import { getEnv } from "./env-schema.js";
@@ -109,10 +109,11 @@ export function classifyCommand(cmd: string, cwd?: string): CommandTier {
 
 /**
  * #1771: root-scope predicate shared by classification and audit tagging.
- * True when every path operand of the command resolves under the ab roots
- * (abmind/abtars/releases homes) with eval forms, dynamic tokens, expanding
- * heredocs, secret paths, and ambiguous lexes excluded. Pure: safe to call
- * for audit annotation alongside classifyCommand.
+ * True when the command is scoped to a trusted ab root. Guardrails are an
+ * authorization nuisance filter, not a containment boundary: command
+ * substitutions, globs, loops, and interpreter payloads are intentionally
+ * allowed here. Explicit paths still have to stay inside a trusted root and
+ * outside the secret subtree; seatbelt is the hard containment layer.
  */
 export function isRootScopeAllow(cmd: string, cwd?: string): boolean {
   const input = typeof cmd === "string" ? cmd : "";
@@ -136,17 +137,17 @@ function classifyInternal(cmd: string, depth: number, remainingBytes: number, cw
   const lexed = lexShell(heredocs.visible);
   if (lexed.ambiguous) return "auth-required";
 
+  // #1771 D pre-pass: trusted roots are guardrail trust zones. It runs before
+  // nested payload classification so shell syntax does not recreate the
+  // authorization prompt this policy is meant to remove. Explicit paths in
+  // nested substitutions are still checked for root/secret escapes.
+  if (rootScopePrePass(lexed, heredocs.bodies, cwd)) return "allow";
+
   for (const payload of [...lexed.substitutions, ...heredocSubstitutions(heredocs.bodies)]) {
     if (!payload.trim()) return "auth-required";
     const nestedTier = classifyInternal(payload, depth + 1, remainingBytes - payload.length, cwd);
     if (nestedTier !== "allow") return nestedTier;
   }
-
-  // #1771 D pre-pass: commands operating entirely inside the ab roots run
-  // without a prompt. Runs before the per-segment loop so in-root
-  // source/scripts also allow (intentional #1752 R2.4 deviation); can only
-  // relax to allow, never tighten, and never overrides the block tier above.
-  if (rootScopePrePass(lexed, heredocs.bodies, cwd)) return "allow";
 
   for (const segment of lexed.segments) {
     const executable = findExecutable(segment.tokens);
@@ -233,62 +234,104 @@ function secretRoot(): string {
 }
 
 function isUnder(resolved: string, root: string): boolean {
-  return resolved === root || resolved.startsWith(root + sep);
+  return resolved === root || (root === sep ? resolved.startsWith(sep) : resolved.startsWith(root + sep));
+}
+
+interface RootScopeContext {
+  roots: string[];
+  secret: string | null;
 }
 
 /**
- * True when the lexed command operates exclusively inside the ab roots.
- * Fail-safe: every veto returns false (fall through to normal
- * classification); only a fully in-root operand set returns true.
+ * Resolve the existing portion of a path through the filesystem before
+ * comparing it with a trusted root. This catches `..` through symlinks and
+ * allows new files below an already-existing trusted directory.
+ */
+function canonicalizeScopePath(candidate: string): string | null {
+  let current = candidate;
+  const suffix: string[] = [];
+  while (!existsSync(current)) {
+    const parent = dirname(current);
+    if (parent === current) return null;
+    suffix.unshift(basename(current));
+    current = parent;
+  }
+  try {
+    const canonicalBase = realpathSync(current);
+    return suffix.length === 0 ? canonicalBase : resolve(canonicalBase, ...suffix);
+  } catch {
+    return null;
+  }
+}
+
+function rootScopeContext(): RootScopeContext {
+  const roots = allowedBashRoots()
+    .map((root) => canonicalizeScopePath(root))
+    .filter((root): root is string => root !== null);
+  return { roots, secret: canonicalizeScopePath(secretRoot()) };
+}
+
+function isTrustedScopePath(candidate: string, context: RootScopeContext): boolean {
+  const canonical = canonicalizeScopePath(candidate);
+  if (canonical === null) return false;
+  if (context.secret !== null && isUnder(canonical, context.secret)) return false;
+  return context.roots.some((root) => isUnder(canonical, root));
+}
+
+function joinScopePath(base: string, child: string): string {
+  return child.startsWith(sep) ? child : `${base}${sep}${child}`;
+}
+
+function scopeOperandPath(value: string, cwd: string, home: string): string | null {
+  if (value === "~") return home;
+  if (value.startsWith("~")) {
+    if (!value.startsWith("~/")) return null;
+    return joinScopePath(home, value.slice(2));
+  }
+  return joinScopePath(cwd, value);
+}
+
+function dynamicPathPrefix(value: string): string {
+  const marker = value.search(/[$*]/);
+  return marker < 0 ? value : value.slice(0, marker);
+}
+
+function isPathLike(value: string): boolean {
+  return value.startsWith("/") || value.startsWith("~") || value.startsWith(".") || value.includes("/");
+}
+
+/**
+ * True when the command has a trusted working directory or explicit operands
+ * in trusted roots. The path checks prevent lexical/symlink escapes, while
+ * opaque shell values remain intentionally permissive at guardrail level.
  */
 function rootScopePrePass(lexed: ShellLexResult, bodies: HeredocBody[], cwd: string): boolean {
   if (lexed.ambiguous) return false;
   if (lexed.segments.length === 0) return false;
-  if (hasExpandingHeredocBody(bodies)) return false;
-  if (hasEvalFlag(lexed)) return false;
-  if (anyDynamicToken(lexed)) return false;
   if (hasRmRootTarget(lexed)) return false;
-  return allPathOperandsInRoots(lexed, cwd);
+  if (!allPathOperandsInRoots(lexed, cwd)) return false;
+  return nestedPathOperandsInRoots(lexed.substitutions, bodies, cwd, 0);
 }
-
-function hasExpandingHeredocBody(bodies: HeredocBody[]): boolean {
-  return bodies.some((b) => b.expands && hasUnescapedExpansion(b.text));
-}
-
-/** Any dynamic data token vetoes the pre-pass (fail closed). */
-function anyDynamicToken(lexed: ShellLexResult): boolean {
-  return lexed.segments.some((segment) => segment.tokens.some((t) => !t.operator && t.dynamic));
-}
-
-const EVAL_LONG_PREFIXES = ["--eval", "--command", "--exec"];
 
 /**
- * Inline-code eval flags. Exact `-e`/`-c`/`-E` and `--eval*`/`--command*`/
- * `--exec*` (bare or `=value`) match on any executable — a veto only drops
- * the pre-pass shortcut, so over-matching is safe. Short-option bundles
- * containing e/c/E (`node -ce …`, `perl -E …`) are scoped to interpreter
- * executables so `git -C` and friends are unaffected.
+ * Check explicit paths in nested shell payloads without reapplying command
+ * classification. A trusted-root command may contain arbitrary nested syntax,
+ * but an explicit nested path must not turn a root trust decision into a
+ * sibling-prefix or symlink escape.
  */
-function hasEvalFlag(lexed: ShellLexResult): boolean {
-  for (const segment of lexed.segments) {
-    const found = findExecutable(segment.tokens);
-    const word = found ? commandBasename(segment.tokens[found.index]!.value).toLowerCase() : "";
-    const isInterpreter = CODE_INTERPRETERS.has(word) || SHELL_INTERPRETERS.has(word)
-      || word === "sqlite3" || word === "psql" || word === "mysql" || word === "eval";
-    for (let k = 0; k < segment.tokens.length; k++) {
-      if (found && k === found.index) continue;
-      const token = segment.tokens[k]!;
-      if (token.operator) continue;
-      const v = token.value;
-      if (v === "-e" || v === "-c" || v === "-E") return true;
-      // `--eval`, `--eval=…`, `--command…`, `--exec…` (but not `--exec-path`-style
-      // double-dash compounds, which are ordinary options). Over-matching here
-      // would only drop the pre-pass shortcut, never grant one.
-      if (v.startsWith("--") && EVAL_LONG_PREFIXES.some((p) => v === p || v.startsWith(p + "=") || (v.startsWith(p) && !v.startsWith(p + "-")))) return true;
-      if (isInterpreter && /^-[A-Za-z]+$/.test(v) && /[ecE]/.test(v)) return true;
-    }
+function nestedPathOperandsInRoots(substitutions: string[], bodies: HeredocBody[], cwd: string, depth: number): boolean {
+  if (depth > MAX_NESTED_DEPTH) return false;
+  const payloads = [...substitutions, ...heredocSubstitutions(bodies)];
+  for (const payload of payloads) {
+    if (!payload.trim()) return false;
+    const heredocs = maskHeredocBodies(payload);
+    if (heredocs.malformed) return false;
+    const lexed = lexShell(heredocs.visible);
+    if (lexed.ambiguous || hasRmRootTarget(lexed)) return false;
+    if (!allPathOperandsInRoots(lexed, cwd)) return false;
+    if (!nestedPathOperandsInRoots(lexed.substitutions, heredocs.bodies, cwd, depth + 1)) return false;
   }
-  return false;
+  return true;
 }
 
 /** `rm` with a `/` target never takes the pre-pass (block tier owns it). */
@@ -305,45 +348,41 @@ function hasRmRootTarget(lexed: ShellLexResult): boolean {
 }
 
 /**
- * Every path operand must resolve under an allowed root (and outside the
- * secret dir). Path-like tokens count regardless of any preceding flag —
- * deliberately no flag-value bookkeeping: extra operands can only veto, so
- * imprecision here is fail-closed. Bare words count only when they exist on
- * disk under cwd. No operands at all → false (fall through).
+ * Every explicit path operand must resolve under an allowed root and outside
+ * the secret dir. Dynamic values are intentionally ignored by this guardrail
+ * layer; seatbelt is responsible for hard containment. A trusted cwd also
+ * makes commands without explicit paths eligible for the root trust zone.
  */
 function allPathOperandsInRoots(lexed: ShellLexResult, cwd: string): boolean {
-  const roots = allowedBashRoots();
-  const secret = secretRoot();
+  const context = rootScopeContext();
   const home = homedir();
   let sawOperand = false;
   for (const segment of lexed.segments) {
-    for (const token of segment.tokens) {
+    const executable = findExecutable(segment.tokens);
+    for (let index = 0; index < segment.tokens.length; index++) {
+      const token = segment.tokens[index]!;
       if (token.operator) continue;
       const v = token.value;
       if (v === "-" || v.startsWith("-")) continue;
-      if (token.dynamic) return false;
-      const pathLike = v.startsWith("/") || v.startsWith("~") || v.startsWith(".") || v.includes("/");
-      let resolved: string;
-      if (pathLike) {
-        // `~user/…` is refused outright: only bare `~` / `~/…` expand to home.
-        if (v.startsWith("~") && v !== "~" && !v.startsWith("~/")) return false;
-        resolved = v === "~" ? home : v.startsWith("~/") ? join(home, v.slice(2)) : resolve(cwd, v);
-      } else {
-        let candidate: string;
-        try {
-          candidate = resolve(cwd, v);
-        } catch {
-          return false;
-        }
+      if (executable?.index === index || /^[A-Za-z_][A-Za-z0-9_]*=/.test(v)) continue;
+
+      const value = token.dynamic ? dynamicPathPrefix(v) : v;
+      if (!value || !isPathLike(value)) {
+        if (token.dynamic) continue;
+        const candidate = joinScopePath(cwd, v);
         if (!existsSync(candidate)) continue;
-        resolved = candidate;
+        sawOperand = true;
+        if (!isTrustedScopePath(candidate, context)) return false;
+        continue;
       }
+
+      const resolved = scopeOperandPath(value, cwd, home);
+      if (resolved === null) return false;
       sawOperand = true;
-      if (isUnder(resolved, secret)) return false;
-      if (!roots.some((root) => isUnder(resolved, root))) return false;
+      if (!isTrustedScopePath(resolved, context)) return false;
     }
   }
-  return sawOperand;
+  return sawOperand || isTrustedScopePath(cwd, context);
 }
 
 // ── executable classification ──────────────────────────────────────────────

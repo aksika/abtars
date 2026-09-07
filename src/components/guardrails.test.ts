@@ -1,5 +1,5 @@
 import { describe, expect, it, beforeEach, afterEach } from "vitest";
-import { mkdtempSync, mkdirSync, rmSync } from "node:fs";
+import { mkdtempSync, mkdirSync, rmSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { classifyCommand, isRootScopeAllow } from "./guardrails.js";
@@ -51,9 +51,8 @@ describe("guardrails root-scope pre-pass (#1771)", () => {
 
   beforeEach(() => {
     sandbox = mkdtempSync(join(tmpdir(), "guardrails-1771-"));
-    // HOME-shaped layout so `~`-forms (the only rm -rf spellings that reach
-    // the pre-pass — literal `rm -rf /…` stays block via the text prefix)
-    // resolve hermetically. os.homedir() honors $HOME per call on POSIX.
+    // HOME-shaped layout so `~`-forms resolve hermetically. os.homedir()
+    // honors $HOME per call on POSIX.
     abmind = join(sandbox, ".abmind");
     abtars = join(sandbox, ".abtars");
     releases = join(sandbox, ".abtars-releases");
@@ -88,6 +87,9 @@ describe("guardrails root-scope pre-pass (#1771)", () => {
       ["in-root source", `source ${abtars}/x.sh`],
       ["relative script in rooted cwd", "./rel.sh"],
       ["bare word existing under rooted cwd", "rm -rf node_modules"],
+      ["daily-ai review pipeline with glob and substitution", `ls -lt ~/.abtars/workspace/daily-ai/ | head -20; echo "---"; for f in $(ls -t ~/.abtars/workspace/daily-ai/*.md | head -4); do echo "== $f =="; grep -i -n "nvidia\\|open.source\\|opensource\\|github" "$f"`],
+      ["arbitrary command syntax in rooted cwd", "npm run build"],
+      ["nested privileged command in rooted cwd", "echo $(sudo rm -rf ~/.abtars/cache)"],
     ];
     for (const [name, command] of cases) {
       expect(classifyCommand(command, abtars), name).toBe("allow");
@@ -95,36 +97,46 @@ describe("guardrails root-scope pre-pass (#1771)", () => {
     }
   });
 
-  it("falls through to normal classification outside the roots", () => {
+  it("keeps explicit out-of-root paths on normal classification", () => {
     const cases: Array<[string, string, "allow" | "auth-required" | "block"]> = [
       ["literal absolute rm stays block via prefix", "rm -rf /tmp/test", "block"],
-      ["node eval", "node -e '1'", "auth-required"],
-      ["bundled node eval flag", "node -ce '1'", "auth-required"],
-      ["perl uppercase eval", "perl -E 'say 1'", "auth-required"],
-      ["bash -c with gated payload", "bash -c 'sudo id'", "auth-required"],
-      ["dynamic target", 'rm -rf "$TARGET"', "auth-required"],
-      ["dynamic beside in-root operands", "rm -rf $DIR ~/.abtars/cache", "auth-required"],
-      ["glob is dynamic", "rm -rf ~/.abtars/*", "auth-required"],
+      ["node eval in rooted cwd", "node -e '1'", "allow"],
+      ["bundled node eval in rooted cwd", "node -ce '1'", "allow"],
+      ["perl uppercase eval in rooted cwd", "perl -E 'say 1'", "allow"],
+      ["bash -c with gated payload in rooted cwd", "bash -c 'sudo id'", "allow"],
+      ["dynamic target in rooted cwd", 'rm -rf "$TARGET"', "allow"],
+      ["dynamic beside in-root operands", "rm -rf $DIR ~/.abtars/cache", "allow"],
+      ["glob is allowed in rooted cwd", "rm -rf ~/.abtars/*", "allow"],
       ["secret subtree never in-root", "rm -rf ~/.abtars/secret/t", "auth-required"],
-      ["unquoted expanding heredoc", "rm -rf ~/.abtars/x <<EOF\necho $HOME\nEOF", "auth-required"],
+      ["unquoted expanding heredoc in rooted cwd", "rm -rf ~/.abtars/x <<EOF\necho $HOME\nEOF", "allow"],
       ["home documents", "rm -rf ~/Documents", "auth-required"],
       ["tilde-user refused", "rm -rf ~root/x", "auth-required"],
       ["root wipe stays block", "rm -rf /", "block"],
       ["out-of-root source", "source /tmp/x.sh", "auth-required"],
       ["bare word in unrooted cwd", "rm -rf node_modules", "auth-required"],
       ["sibling-prefix escape", "rm -rf ~/.abtars-evil/x", "auth-required"],
+      ["dot-dot escape", "rm -rf ~/.abtars/../Documents", "auth-required"],
+      ["nested out-of-root command", "echo $(rm -rf /tmp/test)", "block"],
     ];
     for (const [name, command, expected] of cases) {
       const cwd = name === "bare word in unrooted cwd" ? outside : abtars;
       expect(classifyCommand(command, cwd), name).toBe(expected);
-      expect(isRootScopeAllow(command, cwd), name).toBe(false);
+      expect(isRootScopeAllow(command, cwd), name).toBe(expected === "allow");
     }
   });
 
-  it("isRootScopeAllow rejects malformed and operand-less commands", () => {
+  it("rejects malformed commands and accepts rooted commands without operands", () => {
     expect(isRootScopeAllow("", abtars)).toBe(false);
     expect(isRootScopeAllow("echo 'unterminated", abtars)).toBe(false);
-    expect(isRootScopeAllow("npm run build", abtars)).toBe(false);
+    expect(isRootScopeAllow("npm run build", abtars)).toBe(true);
+    expect(isRootScopeAllow("npm run build", outside)).toBe(false);
     expect(isRootScopeAllow("rm -rf /", abtars)).toBe(false);
+  });
+
+  it("rejects symlink traversal through a trusted root", () => {
+    symlinkSync(outside, join(abtars, "escape"));
+    const command = "rm -rf ~/.abtars/escape/new.txt";
+    expect(classifyCommand(command, abtars)).toBe("auth-required");
+    expect(isRootScopeAllow(command, abtars)).toBe(false);
   });
 });
