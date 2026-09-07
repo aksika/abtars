@@ -1,4 +1,4 @@
-import { logInfo } from "./logger.js";
+import { logInfo, logWarn } from "./logger.js";
 import { spin } from "./spin.js";
 import { WorkerSupervisionService } from "./worker-supervision-service.js";
 import { WorkerSupervisionStore } from "./worker-supervision-store.js";
@@ -8,6 +8,7 @@ import { logSwarmTrace } from "./swarm-trace.js";
 import { ProjectReviewStore } from "./project-acceptance/project-review-store.js";
 import type { ToolExecutionScope } from "./tasks/task-package.js";
 import type { SwarmExecutorAdapter, ExecutionClaim, ExecutorCapacity, StartObservation, CancelObservation, ExecutionObservation, CancelReason } from "./swarm-executor-types.js";
+import { makeExecutionOutcomeEnvelope } from "./swarm-executor-types.js";
 
 const TAG = "spin-worker-adapter";
 
@@ -108,9 +109,10 @@ export class SpinWorkerAdapter implements SwarmExecutorAdapter {
   }
 
   async cancel(claim: ExecutionClaim, reason: CancelReason): Promise<CancelObservation> {
-    const ctrl = this.executions.get(`${claim.attemptId}:${claim.generation}`);
+    const executionRef = `${claim.attemptId}:${claim.generation}`;
+    const ctrl = this.executions.get(executionRef);
+    const store = new WorkerSupervisionStore();
     if (!ctrl) {
-      const store = new WorkerSupervisionStore();
       const attempt = store.getAttempt(claim.attemptId);
       if (!attempt) return { kind: "not_found" };
       if (store.isAttemptTerminal(attempt.lifecycle)) {
@@ -120,10 +122,15 @@ export class SpinWorkerAdapter implements SwarmExecutorAdapter {
     }
 
     if (ctrl.generation !== claim.generation) {
-      return { kind: "already_terminal", lifecycle: "failed" };
+      // A live control for another generation owns this card now — report
+      // its truthful lifecycle instead of a fabricated one.
+      const attempt = store.getAttempt(claim.attemptId);
+      const latest = attempt ? store.getLatestAttempt(attempt.card_id) : undefined;
+      return { kind: "already_terminal", lifecycle: latest?.lifecycle ?? attempt?.lifecycle ?? "cancelled" };
     }
 
-    const store = new WorkerSupervisionStore();
+    // Physical interrupt intent first: requestCancel only signals the running
+    // process, it never writes a durable verdict.
     store.requestCancel(claim.attemptId, reason);
 
     const result = await ctrl.requestCancel(reason);
@@ -134,10 +141,71 @@ export class SpinWorkerAdapter implements SwarmExecutorAdapter {
       return { kind: "already_terminal", lifecycle: attempt?.lifecycle ?? "cancelled" };
     }
 
-    ctrl.markTerminal("cancelled");
-    store.cancelAttempt(claim.attemptId);
+    // #1778: the durable cancellation verdict goes through the attempt
+    // owner — terminalSettlement with the expected generation — never a
+    // direct lifecycle write that could settle a replacement attempt. The
+    // handoff envelope is the observational seam record: physical cleanup is
+    // not confirmed by this path, so cleanup stays unknown and the lease,
+    // workspace, and capacity remain held until the owner observes cleanup.
+    const handoff = makeExecutionOutcomeEnvelope({
+      source: "worker",
+      executionRef,
+      attemptId: claim.attemptId,
+      attemptGeneration: claim.generation,
+      observation: "terminal",
+      outcome: "cancelled",
+      cleanup: "unknown",
+      correlationKey: `cancel:${claim.attemptId}:${claim.generation}`,
+      detail: `adapter cancel: ${reason}`,
+    });
+    if (!handoff.ok) {
+      logWarn(TAG, `Cancel handoff envelope rejected for ${claim.attemptId}: ${handoff.error}`);
+    }
+    const correlationKey = handoff.ok ? handoff.envelope.correlationKey : `cancel:${claim.attemptId}:${claim.generation}`;
+    const settlement = store.terminalSettlement({
+      attemptId: claim.attemptId,
+      expectedGeneration: claim.generation,
+      desiredState: "cancelled",
+      stableReason: `adapter_cancel:${reason} (${correlationKey})`,
+    });
+    logSwarmTrace({
+      event: "adapter_cancel_handoff",
+      card: claim.cardId,
+      attempt: claim.attemptId,
+      generation: claim.generation,
+      to: settlement.kind,
+      reason: `${reason} outcome=cancelled cleanup=unknown key=${correlationKey}`,
+    });
 
-    return { kind: "cancelled", attemptId: claim.attemptId };
+    switch (settlement.kind) {
+      case "settled":
+      case "budget_violation":
+        ctrl.markTerminal("cancelled");
+        return { kind: "cancelled", attemptId: claim.attemptId };
+      case "replayed": {
+        // Another writer settled first — mirror the truthful durable
+        // lifecycle on the in-memory control, never overwrite the verdict.
+        const attempt = store.getAttempt(claim.attemptId);
+        const lifecycle = attempt?.lifecycle ?? "cancelled";
+        ctrl.markTerminal(
+          lifecycle === "completed" ? "completed"
+            : lifecycle === "failed" ? "failed"
+              : lifecycle === "timed_out" ? "timed_out" : "cancelled",
+        );
+        return { kind: "already_terminal", lifecycle };
+      }
+      case "stale": {
+        // This generation no longer owns the card. Fence the dead control
+        // so its late callbacks stay inert, and report the live owner's
+        // lifecycle when one can be read.
+        ctrl.markTerminal("cancelled");
+        const attempt = store.getAttempt(claim.attemptId);
+        const latest = attempt ? store.getLatestAttempt(attempt.card_id) : undefined;
+        return { kind: "already_terminal", lifecycle: latest?.lifecycle ?? attempt?.lifecycle ?? "cancelled" };
+      }
+      case "conflict":
+        return { kind: "cancel_failed", reason: "conflicting terminal state" };
+    }
   }
 
   async inspect(claim: ExecutionClaim): Promise<ExecutionObservation> {
