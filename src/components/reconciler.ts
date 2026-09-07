@@ -31,6 +31,7 @@ import { deriveProjectLifecycleDecision } from "./project-acceptance/project-lif
 import { REVIEW_REQUEST_ABANDONED, REPAIR_SOURCE_CONTRACT_INVALID } from "./project-acceptance/project-review-contract.js";
 import { deriveRepairContract } from "./retry/retry-directive.js";
 import { settleRunOnce } from "./tasks/task-run-settler.js";
+import { drainPeerCallbackOutbox } from "./peer-callback-outbox.js";
 import { makeTaskFailure } from "./tasks/task-failure.js";
 import { scheduledOccurrenceState, inspectScheduledOccurrence, isScheduledRootIdentity as sharedIsScheduledRootIdentity } from "./tasks/scheduled-occurrence-gate.js";
 import type { PiRunService } from "./pi-executor/pi-run-service.js";
@@ -2506,10 +2507,18 @@ export async function startReconciler(deps: ReconcilerDeps): Promise<ReconcilerH
     const onDone = (cardId: number) => {
       requestReconcileForProject(cardId);
       wakeScheduledOrcProjectsAfterTerminalRoot(generation, cardId);
+      // #1778: event-driven redrive of peer delivery left pending by a
+      // failed same-tick send (any card's, not just this one's). Bounded
+      // (one indexed scan, ≤100 sends), emits no nerve events itself, so it
+      // cannot re-arm the pump.
+      drainPeerCallbackOutbox().catch(err => logAndSwallow(TAG, "peer callback redrive", err));
     };
     const onFailed = (cardId: number) => {
       requestReconcileForProject(cardId);
       wakeScheduledOrcProjectsAfterTerminalRoot(generation, cardId);
+      // #1778: same redrive as onDone — a failed terminal may carry the
+      // queued peer obligation.
+      drainPeerCallbackOutbox().catch(err => logAndSwallow(TAG, "peer callback redrive", err));
     };
     nerve.on("card:queued", onQueued);
     nerve.on("card:done", onDone);
@@ -2563,6 +2572,19 @@ export async function startReconciler(deps: ReconcilerDeps): Promise<ReconcilerH
     // isolated. Builds the immutable report.
     const report = await runAttemptRecovery(generation, coordinatorRecovered);
     generation.recovery = report;
+
+    // #1778: one-shot recovery drain of the peer-callback outbox. A crash
+    // between a card-terminal commit and its peer send leaves the intent
+    // queued; this converges it without a new timer or heartbeat job. A
+    // failed send stays pending for the event-driven redrive above. Never
+    // throws (drain is total), but a defensive catch keeps boot independent
+    // of delivery health.
+    try {
+      const redriven = await drainPeerCallbackOutbox();
+      if (redriven > 0) logInfo(TAG, `Boot recovery: redrove ${redriven} pending peer callback(s)`);
+    } catch (err) {
+      logWarn(TAG, `Boot peer-callback drain failed — intents stay queued: ${err instanceof Error ? err.message : String(err)}`);
+    }
 
     // 9. Active-project scan queues into pendingProjectWakes while starting;
     // the flush below runs the quarantine-aware wake path after running.

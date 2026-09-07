@@ -190,6 +190,9 @@ function db(): SqliteDb | null {
     )`);
     _db.exec(`CREATE INDEX IF NOT EXISTS idx_card_transitions_card
       ON kanban_card_transitions(card_id, id)`);
+    // #1778: durable peer-callback outbox — intents commit atomically with
+    // the card terminal they report.
+    ensurePeerCallbackOutboxSchema(wrapTaskDatabase(_db));
     // #1601: durable scheduled-run state lives in the same shared database.
     // Idempotent DDL + one-time JSON migration, inside the same open path.
     initTaskStateSchema(wrapTaskDatabase(_db));
@@ -254,6 +257,12 @@ export interface TransitionRequest {
   /** Correlates to worker_attempts when the mover is a supervised attempt. */
   readonly attemptId?: string;
   readonly claimGeneration?: number;
+  /**
+   * #1778: peer delivery obligation queued atomically with a won terminal.
+   * Only an applied transition queues — reasserted or lost CAS queue
+   * nothing, so duplicate terminal observations never duplicate delivery.
+   */
+  readonly outboxCallback?: PeerCallbackIntent;
   /**
    * Columns co-written in the SAME statement as the status change. Keys are
    * restricted to the whitelist; values are bound parameters, never
@@ -428,6 +437,76 @@ export function wrapTaskDatabase(db: {
   };
 }
 
+/**
+ * #1778: peer delivery intent queued atomically with a card terminal. One
+ * row per card terminal state (`pc_<cardId>_<done|failed>`): a terminal
+ * storm or a duplicate settlement can never queue a second obligation for
+ * the same verdict. Payload bounds mirror the settlement evidence bounds —
+ * result/error text is already sliced by callers; artifacts are capped here.
+ */
+export interface PeerCallbackIntent {
+  peer: string;
+  status: "done" | "failed";
+  resultSummary?: string;
+  error?: string;
+  tokensUsed?: number;
+  artifacts?: Array<{ name: string; content: string }>;
+}
+
+const PEER_CALLBACK_ARTIFACT_MAX = 20;
+const PEER_CALLBACK_ARTIFACT_CONTENT_MAX = 2000;
+
+export function peerCallbackOutboxId(cardId: number, to: CardStatus): string {
+  return `pc_${cardId}_${to}`;
+}
+
+/** #1778: idempotent DDL for the callback outbox (safe to re-run). */
+export function ensurePeerCallbackOutboxSchema(database: { exec(sql: string): void }): void {
+  database.exec(`CREATE TABLE IF NOT EXISTS peer_callback_outbox (
+    id TEXT PRIMARY KEY,
+    card_id INTEGER NOT NULL,
+    peer TEXT NOT NULL,
+    status TEXT NOT NULL CHECK(status IN ('done','failed')),
+    payload_json TEXT NOT NULL,
+    attempts INTEGER NOT NULL DEFAULT 0,
+    last_error TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    sent_at TEXT
+  )`);
+  database.exec(`CREATE INDEX IF NOT EXISTS idx_peer_callback_outbox_pending
+    ON peer_callback_outbox(card_id) WHERE sent_at IS NULL`);
+}
+
+/**
+ * #1778: record a peer delivery obligation inside the caller's transaction —
+ * the single writer path is kanbanTransition on an applied terminal. Runs on
+ * the caller's TaskDatabase handle so out-of-process callers stay on their
+ * own connection.
+ */
+export function queuePeerCallbackInTx(
+  tx: TaskDatabase,
+  cardId: number,
+  to: CardStatus,
+  intent: PeerCallbackIntent,
+): void {
+  const artifacts = (intent.artifacts ?? []).slice(0, PEER_CALLBACK_ARTIFACT_MAX).map(a => ({
+    name: String(a.name).slice(0, 200),
+    content: String(a.content).slice(0, PEER_CALLBACK_ARTIFACT_CONTENT_MAX),
+  }));
+  const payload = {
+    action: "callback",
+    task_id: cardId,
+    status: intent.status,
+    ...(intent.resultSummary !== undefined ? { result_summary: intent.resultSummary } : {}),
+    ...(intent.error !== undefined ? { error: intent.error } : {}),
+    tokens_used: intent.tokensUsed ?? 0,
+    ...(artifacts.length > 0 ? { artifacts } : {}),
+  };
+  tx.prepare(
+    `INSERT OR IGNORE INTO peer_callback_outbox (id, card_id, peer, status, payload_json) VALUES (?, ?, ?, ?, ?)`,
+  ).run(peerCallbackOutboxId(cardId, to), cardId, intent.peer, intent.status, JSON.stringify(payload));
+}
+
 /** #1590 — the single permitted writer of kanban_board.status. */
 export function kanbanTransition(req: TransitionRequest, database?: TaskDatabase): TransitionOutcome {
   if (req.from.length === 0) {
@@ -471,6 +550,7 @@ export function kanbanTransition(req: TransitionRequest, database?: TaskDatabase
     )`);
     tx.exec(`CREATE INDEX IF NOT EXISTS idx_card_transitions_card
       ON kanban_card_transitions(card_id, id)`);
+    ensurePeerCallbackOutboxSchema(tx);
   }
 
   const reason = redactSecrets(req.reason).slice(0, MAX_JOURNAL_REASON);
@@ -524,6 +604,13 @@ export function kanbanTransition(req: TransitionRequest, database?: TaskDatabase
         req.cardId, observed, req.to, req.actor, reason,
         req.attemptId ?? null, req.claimGeneration ?? null,
       );
+      // #1778: a queued peer callback commits atomically with the card
+      // terminal it reports — a crash between settlement and delivery can no
+      // longer lose the callback. Reasserted/lost CAS queues nothing: only a
+      // won terminal commits a delivery obligation.
+      if (req.outboxCallback) {
+        queuePeerCallbackInTx(tx, req.cardId, req.to, req.outboxCallback);
+      }
       // Bounded growth without a timer: prune the oldest rows per card.
       tx.prepare(
         `DELETE FROM kanban_card_transitions
@@ -669,7 +756,7 @@ function notifyKanbanDueChanged(): void {
   } catch { /* hook failures must never break board writes */ }
 }
 
-export function kanbanComplete(id: number, resultPath: string | null, summary: string, emit = true): void {
+export function kanbanComplete(id: number, resultPath: string | null, summary: string, emit = true, callback?: PeerCallbackIntent): void {
   // #1590: from includes `queued` because task-run-settler completes one-shot
   // K/T cards that were enqueued but never dispatched (system-task runner
   // path) — verified against production callers, not just the matrix.
@@ -682,6 +769,7 @@ export function kanbanComplete(id: number, resultPath: string | null, summary: s
       completed_at: sqliteNow(),
     },
     emit,
+    ...(callback ? { outboxCallback: callback } : {}),
   });
   // #1590: preserve the pre-CAS debug log for the already-settled case.
   if (outcome.kind === "no_op" && (outcome.observed === "done" || outcome.observed === "delivering" || outcome.observed === "delivered")) {
@@ -727,7 +815,7 @@ export function kanbanCompleteProject(
   return outcome.kind === "applied";
 }
 
-export function kanbanFail(id: number, error: string, emit = true): void {
+export function kanbanFail(id: number, error: string, emit = true, callback?: PeerCallbackIntent): void {
   // #1590: `done` is included because task-run-settler fails an accepted
   // project card when artifact validation later detects a stale artifact
   // (verified against the scheduled-project integration flow).
@@ -736,6 +824,7 @@ export function kanbanFail(id: number, error: string, emit = true): void {
     reason: "settlement failed",
     fields: { error: error.slice(0, 1000), completed_at: sqliteNow() },
     emit,
+    ...(callback ? { outboxCallback: callback } : {}),
   });
 }
 
@@ -776,13 +865,13 @@ export function kanbanFailProject(
 const MAX_RETRIES = 3;
 
 /** Fail with retry logic — exponential backoff (10s→20s→40s, cap 5min). After MAX_RETRIES → permanent fail. */
-export function kanbanRetryOrFail(id: number, error: string): "retrying" | "failed" {
+export function kanbanRetryOrFail(id: number, error: string, callback?: PeerCallbackIntent): "retrying" | "failed" {
   const d = dbOrNull();
   if (!d) return "failed";
   const card = d.prepare("SELECT retry_count FROM kanban_board WHERE id = ?").get(id) as { retry_count: number } | undefined;
   const retryCount = (card?.retry_count ?? 0) + 1;
   if (retryCount > MAX_RETRIES) {
-    kanbanFail(id, `${error} (after ${MAX_RETRIES} retries)`);
+    kanbanFail(id, `${error} (after ${MAX_RETRIES} retries)`, true, callback);
     return "failed";
   }
   const backoffMs = Math.min(10_000 * Math.pow(2, retryCount - 1), 300_000);

@@ -21,6 +21,7 @@ import { WorkerSupervisionService, validateWorkerRootCriteria } from "./worker-s
 import { WorkerSupervisionStore } from "./worker-supervision-store.js";
 import { pushLog, isHollow, cancelSessionExecution, createSpinSessionRegistry, type SpinSessionRegistry } from "./spin-sessions.js";
 import { createExecutionSupervisor, type ExecutionSupervisor, SpinBindRejectionError, isReconcilerOwnedCard, type TerminalOutcome } from "./execution-control.js";
+import { drainPeerCallbackForCard } from "./peer-callback-outbox.js";
 import { createSpinMaintenance, type SpinMaintenance } from "./spin-maintenance.js";
 import { leaseInstructions, markDelivered, markConsumed, failAfterDelivery, expireInstructions, restoreBeforeDelivery, subscribeSteerEvents } from "./session-instruction-queue.js";
 import { createExecutionTelemetryScope } from "./execution-telemetry.js";
@@ -1513,31 +1514,45 @@ export class Spin {
         : outcome === "reaction"
           ? "model returned only a reaction"
           : "model returned no output";
+      // #1778: peer delivery intents commit atomically with the card terminal
+      // they report (kanban outbox), then deliver best-effort on the same
+      // tick. Supervised project results are still emitted by
+      // ProjectReviewService only after accepted settlement commits — the
+      // execution turn must not send a premature peer "done" callback.
+      const peerCallback = spec.callbackPeer && !supervisedProject ? spec.callbackPeer : undefined;
       if (shouldKanbanComplete && !staleWorkerResult && spec.settlementOwner !== "caller") {
         if (criteriaVerdict === "failed") {
-          kanbanFail(cardId, workerSummary);
+          kanbanFail(cardId, workerSummary, true,
+            peerCallback ? { peer: peerCallback, status: "failed", error: workerSummary } : undefined);
         } else if (criteriaVerdict === "unreadable") {
           logWarn(TAG, `Card ${cardId}: supervised worker criteria unreadable — deferring terminal settlement`);
         } else if (criteriaVerdict === null && outcome !== "text") {
           logWarn(TAG, `Card ${cardId}: ${noContentReason} — settling failed instead of done`);
-          kanbanFail(cardId, noContentReason);
+          kanbanFail(cardId, noContentReason, true,
+            peerCallback ? { peer: peerCallback, status: "failed", error: noContentReason } : undefined);
         } else {
-          kanbanComplete(cardId, null, workerSummary);
-        }
-      }
-      // Supervised project results are emitted by ProjectReviewService only
-      // after accepted settlement commits. The execution turn must not send a
-      // premature peer "done" callback.
-      if (spec.callbackPeer && !supervisedProject) {
-        if (criteriaVerdict === "failed") {
-          fireCallback(spec.callbackPeer, cardId, "failed", undefined, workerSummary);
-        } else if (criteriaVerdict === null && outcome !== "text") {
           // #1651 v2: never report done to a peer for a turn without text.
-          fireCallback(spec.callbackPeer, cardId, "failed", undefined, noContentReason);
-        } else if (criteriaVerdict !== "unreadable") {
-          const card = kanbanGetCard(cardId);
-          fireCallback(spec.callbackPeer, cardId, "done", result.slice(0, 500), undefined, artifacts, card?.tokens_used ?? 0);
+          const doneCallback = peerCallback && (criteriaVerdict !== null || outcome === "text")
+            ? {
+                peer: peerCallback, status: "done" as const,
+                resultSummary: result.slice(0, 500),
+                artifacts,
+                tokensUsed: kanbanGetCard(cardId)?.tokens_used ?? 0,
+              }
+            : undefined;
+          kanbanComplete(cardId, null, workerSummary, true, doneCallback);
         }
+      } else if (peerCallback && criteriaVerdict !== "unreadable" && (criteriaVerdict !== null || outcome === "text")) {
+        // No card terminal was committed above (stale result, caller-owned,
+        // or supervised-project deferral): queue a done intent only when the
+        // turn itself decided success and the card still terminalized through
+        // its owner below. Delivery still waits for the owning commit.
+        logDebug(TAG, `Card ${cardId}: peer done callback deferred to the owning settlement`);
+      }
+      if (peerCallback) {
+        // Same-tick best-effort delivery; anything unsent stays queued for
+        // the boot recovery drain. Never throws into settlement.
+        drainPeerCallbackForCard(cardId).catch(err => logAndSwallow(TAG, "peer callback drain", err));
       }
     }
 
@@ -1703,8 +1718,15 @@ export class Spin {
         }
       }
       if (!staleWorkerFailure && !handoffSatisfied && spec.settlementOwner !== "caller") {
-        kanbanRetryOrFail(cardId, msg);
-        if (spec.callbackPeer) fireCallback(spec.callbackPeer, cardId, "failed", undefined, msg);
+        // #1778: the failed intent commits atomically with the card terminal
+        // inside RetryOrFail. A retrying (non-terminal) backoff queues nothing
+        // — interim attempts are not peer verdicts; the terminal attempt's
+        // callback is the exactly-once delivery.
+        kanbanRetryOrFail(cardId, msg,
+          spec.callbackPeer ? { peer: spec.callbackPeer, status: "failed", error: msg.slice(0, 1000) } : undefined);
+        if (spec.callbackPeer) {
+          drainPeerCallbackForCard(cardId).catch(err => logAndSwallow(TAG, "peer callback drain", err));
+        }
       }
     }
 
@@ -2197,20 +2219,6 @@ export function resolveToolAuthorizationMode(cardId: number | undefined): import
 export function renderSteeringContinuation(batch: QueuedSessionInstruction[]): string {
   const items = batch.map((i, idx) => `${idx + 1}. ${i.text}`).join("\n");
   return `[USER STEERING — received while you were working]\n${items}\n[/USER STEERING]\n\nIncorporate this direction into the current project. Do not restart completed work unnecessarily. Report the updated result.`;
-}
-
-/** #675: Fire result callback to the delegating peer. Fire-and-forget. */
-async function fireCallback(peerName: string, taskId: number, status: "done" | "failed", result?: string, error?: string, artifacts?: Array<{ name: string; content: string }>, tokensUsed?: number): Promise<void> {
-  try {
-    const { getPeerTransport } = await import("./peer-transport/index.js");
-    const transport = getPeerTransport();
-    const payload: Record<string, unknown> = { action: "callback", task_id: taskId, status, result_summary: result, error, tokens_used: tokensUsed ?? 0 };
-    if (artifacts?.length) payload.artifacts = artifacts;
-    await transport.send(peerName, { type: "callback", payload });
-    logInfo(TAG, `Callback fired to ${peerName} for card:${taskId} (${status})`);
-  } catch (err) {
-    logWarn(TAG, `Callback to ${peerName} failed (card:${taskId}): ${err instanceof Error ? err.message : String(err)}`);
-  }
 }
 
 export const spin = new Spin();

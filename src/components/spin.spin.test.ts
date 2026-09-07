@@ -110,6 +110,12 @@ vi.mock("./tasks/kanban-channel.js", () => ({
 let _nextId = 1;
 interface MockCard { id: number; title: string; source: string; status: string; type: string; next_retry_at?: string | null; [key: string]: unknown; }
 const _cards = new Map<number, MockCard>();
+// #1778: in-memory peer-callback outbox. Settlement helpers record the
+// delivery intent exactly when they commit the terminal (mirroring the
+// INSERT OR IGNORE in kanbanTransition); the peer-callback-outbox mock
+// below delivers only what was queued.
+interface MockOutboxIntent { cardId: number; to: string; peer: string; status: string; resultSummary?: string; error?: string; tokensUsed?: number; artifacts?: Array<{ name: string; content: string }>; }
+const _outbox: MockOutboxIntent[] = [];
 // #1629: configurable root resolution — defaults to identity (card is its own
 // root). Provenance tests install a parent-chain walker or a failure stub.
 let resolveRootImpl: ((id: number) => number | undefined) | null = null;
@@ -132,9 +138,37 @@ vi.mock("./tasks/kanban-board.js", () => ({
     return id;
   },
   kanbanRunning: (id: number) => { const c = _cards.get(id); if (c) c.status = "running"; },
-  kanbanComplete: (id: number) => { const c = _cards.get(id); if (c) c.status = "done"; },
-  kanbanFail: (id: number) => { const c = _cards.get(id); if (c) c.status = "failed"; },
-  kanbanRetryOrFail: (id: number) => { const c = _cards.get(id); if (c) c.status = "failed"; return "failed"; },
+  kanbanComplete: (id: number, _path: unknown, _summary: unknown, _emit?: unknown, callback?: { peer: string; status: "done" | "failed"; resultSummary?: string; error?: string; tokensUsed?: number; artifacts?: Array<{ name: string; content: string }> }) => {
+    const c = _cards.get(id);
+    if (c) {
+      c.status = "done";
+      if (callback) _outbox.push({ cardId: id, to: "done", peer: callback.peer, status: callback.status, resultSummary: callback.resultSummary, error: callback.error, tokensUsed: callback.tokensUsed, artifacts: callback.artifacts });
+    }
+  },
+  kanbanFail: (id: number, _error?: unknown, _emit?: unknown, callback?: { peer: string; status: "done" | "failed"; resultSummary?: string; error?: string; tokensUsed?: number; artifacts?: Array<{ name: string; content: string }> }) => {
+    const c = _cards.get(id);
+    if (c) {
+      c.status = "failed";
+      if (callback) _outbox.push({ cardId: id, to: "failed", peer: callback.peer, status: callback.status, resultSummary: callback.resultSummary, error: callback.error, tokensUsed: callback.tokensUsed, artifacts: callback.artifacts });
+    }
+  },
+  kanbanRetryOrFail: (id: number, _error?: unknown, callback?: { peer: string; status: "done" | "failed"; resultSummary?: string; error?: string; tokensUsed?: number; artifacts?: Array<{ name: string; content: string }> }) => {
+    const c = _cards.get(id);
+    if (c) {
+      c.status = "failed";
+      if (callback) _outbox.push({ cardId: id, to: "failed", peer: callback.peer, status: callback.status, resultSummary: callback.resultSummary, error: callback.error, tokensUsed: callback.tokensUsed, artifacts: callback.artifacts });
+    }
+    return "failed";
+  },
+  // #1778: take (and clear) queued peer intents for a card — the mock drain's
+  // only source, so a test send proves the intent was queued at settlement.
+  __takeOutboxForCard: (cardId: number) => {
+    const taken = _outbox.filter(e => e.cardId === cardId);
+    for (let i = _outbox.length - 1; i >= 0; i--) {
+      if (_outbox[i]!.cardId === cardId) _outbox.splice(i, 1);
+    }
+    return taken;
+  },
   kanbanList: (filter?: string) => {
     const cards = Array.from(_cards.values());
     if (filter === "*") return cards;
@@ -166,6 +200,38 @@ vi.mock("./tasks/kanban-board.js", () => ({
     const c = _cards.get(id);
     if (c) (c as any)[field] = value;
   },
+}));
+
+vi.mock("./peer-callback-outbox.js", () => ({
+  // #1778: deliver only what settlement queued — a send here proves the
+  // intent committed with the card terminal. Real durability/delivery is
+  // covered by peer-callback-outbox tests against a real database.
+  drainPeerCallbackForCard: async (cardId: number) => {
+    const board = await import("./tasks/kanban-board.js") as unknown as {
+      __takeOutboxForCard(id: number): MockOutboxIntent[];
+    };
+    const { getPeerTransport } = await import("./peer-transport/index.js") as unknown as {
+      getPeerTransport(): { send(peer: string, msg: unknown): Promise<unknown> };
+    };
+    const transport = getPeerTransport();
+    const intents = board.__takeOutboxForCard(cardId);
+    for (const intent of intents) {
+      await transport.send(intent.peer, {
+        type: "callback",
+        payload: {
+          action: "callback",
+          task_id: cardId,
+          status: intent.status,
+          ...(intent.resultSummary !== undefined ? { result_summary: intent.resultSummary } : {}),
+          ...(intent.error !== undefined ? { error: intent.error } : {}),
+          tokens_used: intent.tokensUsed ?? 0,
+          ...(intent.artifacts?.length ? { artifacts: intent.artifacts } : {}),
+        },
+      });
+    }
+    return intents.length;
+  },
+  drainPeerCallbackOutbox: async () => 0,
 }));
 
 vi.mock("../utils/local-time.js", () => ({
@@ -271,6 +337,7 @@ describe("spin(spec) — unified session API (#1271)", () => {
     projectSupervision.clear();
     projectStoreReadFails = false;
     callbackSend.mockClear();
+    _outbox.length = 0;
     setUserRegistryOverride(makeRegistry([
       makeUser("aksika", "master", 111),
       makeUser("adrika", "user", 222),

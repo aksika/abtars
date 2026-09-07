@@ -591,6 +591,36 @@ describe("startup rollback", () => {
   });
 });
 
+// ── #1778 peer-callback boot drain ──────────────────────────────────────────
+
+describe("#1778 boot recovery drains the peer-callback outbox", () => {
+  it("a commit/send crash window converges at startup without a new terminal", async () => {
+    // A card terminal committed its peer intent, but the process died before
+    // the send: exactly one pending row, no delivery yet.
+    const cardId = kanban.kanbanEnqueue("crash-window card", "peer", undefined, { type: "W", goal: "lane" });
+    kanban.kanbanRunning(cardId);
+    kanban.kanbanFail(cardId, "settled before crash", true, { peer: "kp", status: "failed", error: "settled before crash" });
+    const db = kanban.requireTaskDatabase();
+    const before = db.prepare(`SELECT attempts, sent_at FROM peer_callback_outbox WHERE card_id = ?`).get(cardId) as {
+      attempts: number; sent_at: string | null;
+    };
+    expect(before.sent_at).toBeNull();
+    expect(before.attempts).toBe(0);
+
+    // Boot runs the one-shot recovery drain (the send fails in this env —
+    // no peer transport — so the row stays pending, but attempted).
+    const h = await startGeneration();
+    expect(h.recovery.generationId).toBeDefined();
+    const after = db.prepare(`SELECT attempts, sent_at FROM peer_callback_outbox WHERE card_id = ?`).get(cardId) as {
+      attempts: number; sent_at: string | null;
+    };
+    // Either the row delivered (transport up) or the boot drain attempted it
+    // and kept it pending for the event-driven redrive — never silently lost.
+    expect(after.sent_at !== null || after.attempts > 0).toBe(true);
+    await h.stop();
+  });
+});
+
 // ── #1678 review-turn liveness ──────────────────────────────────────────────
 
 describe("#1678 single owner of Orc review-turn liveness", () => {
