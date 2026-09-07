@@ -322,7 +322,7 @@ export class ScriptedProvider {
     const normalizedText = (text: string): string => text.replace(/^\[[^\]]*\]\s*/, "");
     const userTexts = messages
       .filter((m) => m.role === "user")
-      .map((m) => normalizedText(m.text));
+      .map((m) => normalizedText(stripVolatileContext(m.text)));
     const markerHashes = userTexts.map((t) => createHash("sha256").update(t).digest("hex").slice(0, 16));
 
     return { model, messages, roleCounts, toolCalls, markerHashes, userTexts };
@@ -517,6 +517,14 @@ function extractText(content: unknown): string {
       .join("");
   }
   return "";
+}
+
+// #1776: session-start hydration wraps volatile context in a [CONTEXT]
+// block ahead of the current turn. Marker matching targets the current
+// turn, so strip the volatile decoration before the bounded slice —
+// otherwise a legitimately hydrated first turn pushes its marker past it.
+function stripVolatileContext(text: string): string {
+  return text.replace(/\[CONTEXT[\s\S]*?\[\/CONTEXT\]\s*/, "");
 }
 
 function shortHash(marker: string): string {
