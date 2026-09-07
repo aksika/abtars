@@ -1,7 +1,7 @@
 import { logDebug, logInfo, logWarn, redactSecrets } from "../logger.js";
 import { nextRunFromSchedule, settleActiveRun, setRunOutcome, readState } from "./task-state-store.js";
 import { appendRunOnce, type TaskRunEvent } from "./task-history-store.js";
-import { kanbanAttachResult, kanbanAttachProjectResult, kanbanComplete, kanbanCompleteProject, kanbanFail, kanbanGetCard, kanbanSetDeliveryReady, kanbanSetProjectDeliveryReady, requireTaskDatabase } from "./kanban-board.js";
+import { kanbanAttachResult, kanbanAttachProjectResult, kanbanComplete, kanbanCompleteProject, kanbanFail, kanbanFailProject, kanbanGetCard, kanbanSetDeliveryReady, kanbanSetProjectDeliveryReady, requireTaskDatabase } from "./kanban-board.js";
 import { logTaskDebug } from "./task-log-ctx.js";
 import { makeTaskFailure, decideFailurePolicy, formatTaskFailure, AUTO_PAUSE_FAILURE_THRESHOLD, AUTO_RESUME_COOLDOWN_MS } from "./task-failure.js";
 import type { TaskFailureDiagnosticV1 } from "./task-failure.js";
@@ -225,7 +225,7 @@ export function settleRunOnce(opts: SettleOptions): SettleResult {
   // run row; a late/duplicate settler never reaches here.
   setRunOutcome(run.runId, effectiveOutcome);
 
-  applyPostSettlementSideEffects({ cardId, outcome: effectiveOutcome, detail: safeDetail, deliveryText: safeDeliveryText, resultPath, diagnostic, releaseDelivery, attachResult });
+  applyPostSettlementSideEffects({ cardId, runId: run.runId, outcome: effectiveOutcome, detail: safeDetail, deliveryText: safeDeliveryText, resultPath, diagnostic, releaseDelivery, attachResult });
 
   const nowPaused = patch.autoPaused === true;
   if (nowPaused && !wasPaused) {
@@ -280,6 +280,7 @@ export function settleRunFromHistory(entry: ScheduledTask, run: ActiveTaskRun, e
 
   applyPostSettlementSideEffects({
     cardId: event.kanbanCardId,
+    runId: event.runId,
     outcome: event.outcome,
     detail: safeDetail,
     deliveryText: sanitizeText(event.deliveryText, 4000),
@@ -294,6 +295,9 @@ export function settleRunFromHistory(entry: ScheduledTask, run: ActiveTaskRun, e
 
 function applyPostSettlementSideEffects(opts: {
   cardId?: number;
+  /** The settling run's identity — a supervised root fails only when this
+   * run still owns the card's callback, never on a successor's behalf. */
+  runId?: string;
   outcome: TerminalOutcome;
   detail?: string;
   deliveryText?: string;
@@ -302,7 +306,7 @@ function applyPostSettlementSideEffects(opts: {
   releaseDelivery?: boolean;
   attachResult?: boolean;
 }): void {
-  const { cardId, outcome, detail, deliveryText, resultPath, diagnostic, releaseDelivery, attachResult } = opts;
+  const { cardId, runId, outcome, detail, deliveryText, resultPath, diagnostic, releaseDelivery, attachResult } = opts;
   if (cardId === undefined) return;
   if (outcome === "success" || outcome === "noop" || outcome === "skipped") {
     // #1610: the user-facing payload wins when present; operational detail and
@@ -342,7 +346,21 @@ function applyPostSettlementSideEffects(opts: {
     // the owner is gone, so a running card would orphan forever. The message
     // carries the owner_lost diagnostic — a truthful statement, not a claim
     // about whether the run's side effects completed.
-    kanbanFail(cardId, formatTaskFailure(diagnostic).slice(0, 1000));
+    // #1778: a supervised project root fails only under its exact
+    // generation/run authority — the settling run must still own the card's
+    // callback, so a late failure from a superseded run cannot fail the
+    // successor's root. Unsupervised cards keep the plain path.
+    const message = formatTaskFailure(diagnostic).slice(0, 1000);
+    const card = kanbanGetCard(cardId);
+    const generation = card?.type === "O" ? readProjectSupervisionGeneration(cardId) : undefined;
+    const scheduledProject = card && card.type === "O" && card.source === "task";
+    if (scheduledProject && generation !== undefined && runId !== undefined) {
+      kanbanFailProject(cardId, message, { projectGeneration: generation, scheduledRunId: runId });
+    } else if (card && card.type === "O" && generation !== undefined) {
+      kanbanFailProject(cardId, message, { projectGeneration: generation });
+    } else {
+      kanbanFail(cardId, message);
+    }
   }
 }
 

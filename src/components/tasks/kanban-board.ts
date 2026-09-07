@@ -367,6 +367,14 @@ const EXTRA_PREDICATES = new Set<string>([
   // while artifact attach/release still require outcome='success'.
   "type = 'O' AND source = 'task' AND source_id = ? AND EXISTS (SELECT 1 FROM project_supervision ps WHERE ps.project_card_id = kanban_board.id AND ps.state = 'accepted' AND ps.generation = ?) AND EXISTS (SELECT 1 FROM task_runs tr WHERE tr.run_id = ? AND tr.finished_at IS NOT NULL)",
   "type = 'O' AND source != 'task' AND EXISTS (SELECT 1 FROM project_supervision ps WHERE ps.project_card_id = kanban_board.id AND ps.state = 'accepted' AND ps.generation = ?)",
+  // #1778: project-root failure — exact supervision generation and, for a
+  // scheduled root, the owning run identity. Unlike completion this does not
+  // require an accepted state: failing an accepted-but-stale root (stale
+  // artifact detected after acceptance) and failing a live executing root
+  // owned by this run are both legitimate, but a late failure from a
+  // superseded generation or a foreign run must mutate nothing.
+  "type = 'O' AND source = 'task' AND source_id = ? AND EXISTS (SELECT 1 FROM project_supervision ps WHERE ps.project_card_id = kanban_board.id AND ps.generation = ?)",
+  "type = 'O' AND source != 'task' AND EXISTS (SELECT 1 FROM project_supervision ps WHERE ps.project_card_id = kanban_board.id AND ps.generation = ?)",
 ]);
 
 /** #1644: trace a project-aware CAS rejection with only bounded authority
@@ -729,6 +737,40 @@ export function kanbanFail(id: number, error: string, emit = true): void {
     fields: { error: error.slice(0, 1000), completed_at: sqliteNow() },
     emit,
   });
+}
+
+/**
+ * #1778: fail a supervised project root only while the exact supervision
+ * generation still owns the callback. Scheduled roots additionally require
+ * the owning run identity. A late failure from a superseded generation or a
+ * foreign run loses its predicate and mutates nothing — the duplicate is
+ * traced, never applied.
+ */
+export function kanbanFailProject(
+  cardId: number,
+  error: string,
+  authority: { projectGeneration: number; scheduledRunId?: string },
+  emit = true,
+): boolean {
+  const outcome = kanbanTransition({
+    cardId,
+    from: ["queued", "running", "done"],
+    to: "failed",
+    actor: "settle_failed",
+    reason: "project settlement failed",
+    fields: { error: error.slice(0, 1000), completed_at: sqliteNow() },
+    extraPredicate: authority.scheduledRunId !== undefined
+      ? "type = 'O' AND source = 'task' AND source_id = ? AND EXISTS (SELECT 1 FROM project_supervision ps WHERE ps.project_card_id = kanban_board.id AND ps.generation = ?)"
+      : "type = 'O' AND source != 'task' AND EXISTS (SELECT 1 FROM project_supervision ps WHERE ps.project_card_id = kanban_board.id AND ps.generation = ?)",
+    extraPredicateParams: authority.scheduledRunId !== undefined
+      ? [authority.scheduledRunId, authority.projectGeneration]
+      : [authority.projectGeneration],
+    emit,
+  });
+  if (outcome.kind === "no_op" && outcome.observed !== "failed") {
+    traceProjectMutationRejected("project_failure", cardId, authority);
+  }
+  return outcome.kind === "applied";
 }
 
 const MAX_RETRIES = 3;
