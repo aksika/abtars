@@ -40,14 +40,67 @@ const NATIVE_RECOVERY_POLL_MS = 250;
 /** Internal sentinel: roll back the turn-start transaction. */
 const TURN_START_ROLLBACK = Symbol("pi_coding_turn_start_rollback");
 
+/**
+ * #1577 abtars-owned extension UI request. Product-shaped projection of the
+ * Pi `RpcExtensionUIRequest` union: the sink layers (platforms) consume this
+ * type and never the Pi type. Converted at the service edge by
+ * `toCodingUiRequest`; every field is optional except identity so future Pi
+ * variants degrade to a generic prompt instead of breaking the sink.
+ */
+export interface CodingUiRequest {
+  id: string;
+  method: string;
+  title?: string;
+  message?: string;
+  options?: string[];
+  placeholder?: string;
+  prefill?: string;
+  statusKey?: string;
+  statusText?: string;
+  widgetKey?: string;
+  widgetLines?: string[];
+  text?: string;
+}
+
+/** Edge conversion: Pi UI request → product shape. Field-preserving. */
+export function toCodingUiRequest(request: RpcExtensionUIRequest): CodingUiRequest {
+  const base = { id: request.id, method: request.method } as CodingUiRequest;
+  if (request.method === "select") {
+    base.title = request.title;
+    base.options = request.options;
+  } else if (request.method === "confirm") {
+    base.title = request.title;
+    base.message = request.message;
+  } else if (request.method === "input") {
+    base.title = request.title;
+    base.placeholder = request.placeholder;
+  } else if (request.method === "editor") {
+    base.title = request.title;
+    base.prefill = request.prefill;
+  } else if (request.method === "notify") {
+    base.message = request.message;
+  } else if (request.method === "setStatus") {
+    base.statusKey = request.statusKey;
+    base.statusText = request.statusText ?? undefined;
+  } else if (request.method === "setWidget") {
+    base.widgetKey = request.widgetKey;
+    base.widgetLines = request.widgetLines ?? undefined;
+  } else if (request.method === "setTitle") {
+    base.title = request.title;
+  } else if (request.method === "set_editor_text") {
+    base.text = request.text;
+  }
+  return base;
+}
+
 export interface PiCodingProjectionSink {
   /** One editable progress message per turn (content-free lifecycle). */
   progress(sessionId: string, text: string): void;
   /** Tool name + lifecycle, no arguments, no output. */
   tool(sessionId: string, name: string, started: boolean): void;
   /** Correlated extension UI request (input/editor as prompts, select/confirm
-   * as inline controls — rendered by the sink). */
-  uiRequest(sessionId: string, request: RpcExtensionUIRequest): void;
+   * as inline controls — rendered by the sink). Product shape; never Pi. */
+  uiRequest(sessionId: string, request: CodingUiRequest): void;
   /** Final assistant text, chunked by the sink to platform limits. */
   assistantText(sessionId: string, text: string): void;
   /** Final usage + changed-file summary. */
@@ -1404,12 +1457,12 @@ export class PiCodingSessionService {
         pendingRequestType: method as PiCodingUiType,
       }, owned.generation);
       if (result.applied) {
-        this.deps.sink.uiRequest(owned.sessionId, request);
+        this.deps.sink.uiRequest(owned.sessionId, toCodingUiRequest(request));
       } else {
         logWarn(TAG, `UI request rejected for ${owned.sessionId} (gen=${owned.generation}, req=${request.id})`);
       }
     } else if (method === "notify") {
-      this.deps.sink.progress(owned.sessionId, String((request as { message?: unknown }).message ?? ""));
+      this.deps.sink.progress(owned.sessionId, String(request.message ?? ""));
     }
   }
 

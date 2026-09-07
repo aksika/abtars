@@ -419,10 +419,8 @@ export class PiCoreTransport implements IKiroTransport {
         executionId,
         sessionKey,
         durableIntent.mode === "durable" ? durableIntent.beforeMessageId : undefined,
+        image ? [{ type: "image", mimeType: image.mime, data: image.base64 }] : undefined,
       );
-      if (image) {
-        (currentTurn as { imageContent?: Array<{ mime: string; base64: string }> }).imageContent = [image];
-      }
 
       // Context seed: durable vs ephemeral. A durable seed requires the
       // just-persisted cursor and a non-empty caller identity, both enforced by

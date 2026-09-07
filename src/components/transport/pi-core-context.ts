@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { logWarn, logError, logTrace } from "../logger.js";
-import type { AssistantMessage, ModelApi, PiExecutionContextSeed, AgentMessage, AbtarsCurrentTurnMessage } from "./pi-core-types.js";
+import type { AssistantMessage, ModelApi, AgentMessage } from "./pi-core-types.js";
+import type { PiExecutionContextSeed, AbtarsCurrentTurnMessage } from "./pi-port.js";
 import type { DurableContextProjectionInput, DurableContextProjectionResult } from "../memory-runtime.js";
 
 const TAG = "pi-core-context";

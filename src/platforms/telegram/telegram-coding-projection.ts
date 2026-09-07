@@ -16,7 +16,7 @@
  */
 
 import type { PlatformAdapter, SendOpts } from "../../types/platform.js";
-import type { PiCodingProjectionSink } from "../../components/pi-executor/pi-coding-session-service.js";
+import type { PiCodingProjectionSink, CodingUiRequest } from "../../components/pi-executor/pi-coding-session-service.js";
 import type { PiCodingSessionStore } from "../../components/pi-executor/pi-coding-session-store.js";
 import type { TelegramApi } from "./telegram-api.js";
 import { logWarn } from "../../components/logger.js";
@@ -141,10 +141,10 @@ export function createCodingProjectionSink(store: PiCodingSessionStore): PiCodin
       progress(sessionId, `${started ? "+" : "-"} ${name}`);
     },
 
-    uiRequest(sessionId, request) {
+    uiRequest(sessionId: string, request: CodingUiRequest) {
       const chat = chatFor(sessionId);
       if (!chat) return;
-      const title = String((request as { title?: unknown }).title ?? "Pi requests input");
+      const title = request.title ?? "Pi requests input";
       if (request.method === "confirm") {
         void send(chat, title, {
           reply_markup: {
@@ -157,7 +157,7 @@ export function createCodingProjectionSink(store: PiCodingSessionStore): PiCodin
         return;
       }
       if (request.method === "select") {
-        const options = ((request as { options?: unknown }).options as string[] | undefined) ?? [];
+        const options = request.options ?? [];
         const rows = options.slice(0, MAX_UI_OPTIONS).map((opt) => ([
           { text: opt.slice(0, 60), callback_data: callbackData(sessionId, request.id, opt) },
         ]));
@@ -167,7 +167,7 @@ export function createCodingProjectionSink(store: PiCodingSessionStore): PiCodin
         return;
       }
       // input / editor — correlated prompt in chat
-      const placeholder = String((request as { placeholder?: unknown }).placeholder ?? (request as { prefill?: unknown }).prefill ?? "");
+      const placeholder = request.placeholder ?? request.prefill ?? "";
       const extra = placeholder ? `\n\nSuggested: ${placeholder.slice(0, 200)}` : "";
       void send(chat, `* Pi asks (${request.method}): ${title}${extra}\n\nReply with your answer — it is submitted to Pi.`);
     },

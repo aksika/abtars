@@ -1,7 +1,8 @@
 import { logDebug, logWarn, logTrace } from "../logger.js";
 import type { FallbackPolicy } from "./fallback-policy.js";
 import { candidateKey as candidateIdentityKey } from "./model-candidates.js";
-import type { AgentContext, AgentLoopTurnUpdate, AgentMessage, AbtarsAgentMessage, SafetyPrepareNextTurnContext, ModelApi, ToolDecision, TurnDecision } from "./pi-core-types.js";
+import type { AgentContext, AgentLoopTurnUpdate, AgentMessage, AbtarsAgentMessage, SafetyPrepareNextTurnContext, ModelApi } from "./pi-core-types.js";
+import type { ToolDecision, TurnDecision } from "./pi-port.js";
 import { ToolLoopGuard } from "./tool-loop-guard.js";
 
 const TAG = "pi-core-safety";

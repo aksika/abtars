@@ -460,16 +460,16 @@ async function durableCompaction(ctx: PiAcceptanceContext): Promise<void> {
   // Durable history: exactly one user row per turn marker and one assistant
   // row per reply marker since this scenario started; no foreign proof
   // marker may have entered the owner's history in that window. A missing
-  // row on the first read is retried boundedly (read transient); duplicate
-  // or foreign rows fail immediately — they cannot be a timing artifact.
+  // row on the first read is retried boundedly (read transient — e.g. a
+  // checkpoint-commit lock coinciding with the query); duplicate or foreign
+  // rows fail immediately since they cannot be timing artifacts. The final
+  // failure carries query diagnostics.
   let rows = await ctx.owner.conversationRows(MASTER_USER_ID, since, 200);
-  for (let attempt = 1; attempt <= 3; attempt++) {
-    const missing = turnMarkers.filter(
-      (m) => !rows.some((r) => r.role === "user" && r.content.includes(m)),
-    );
-    if (missing.length === 0) break;
-    if (attempt === 3) break;
-    await settleBetweenTurns(1500);
+  const missingMarkers = () => turnMarkers.filter(
+    (m) => !rows.some((r) => r.role === "user" && r.content.includes(m)),
+  );
+  for (let attempt = 1; attempt <= 5 && missingMarkers().length > 0; attempt++) {
+    await settleBetweenTurns(2000);
     rows = await ctx.owner.conversationRows(MASTER_USER_ID, since, 200);
   }
   const ours = new Set([...turnMarkers, ...replyMarkers, summary, pm, pa]);
@@ -482,7 +482,14 @@ async function durableCompaction(ctx: PiAcceptanceContext): Promise<void> {
   }
   for (const m of turnMarkers) {
     const hits = rows.filter((r) => r.role === "user" && r.content.includes(m));
-    if (hits.length !== 1) throw new Error(`turn marker ${m.slice(0, 40)} has ${hits.length} user rows, expected exactly 1`);
+    if (hits.length !== 1) {
+      const roles = [...new Set(rows.map((r) => r.role))].join(",");
+      const foundMarkers = turnMarkers.filter((t) => rows.some((r) => r.content.includes(t)));
+      throw new Error(
+        `turn marker ${m.slice(0, 40)} has ${hits.length} user rows, expected exactly 1 ` +
+        `(rows=${rows.length} roles=[${roles}] since=${since} markersFound=${foundMarkers.length}/5)`,
+      );
+    }
   }
   for (const a of replyMarkers) {
     const hits = rows.filter((r) => r.role === "assistant" && r.content.includes(a));

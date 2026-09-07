@@ -71,6 +71,62 @@ function hasRuntimeBinding(node) {
   return bindings.elements.some((el) => !el.isTypeOnly);
 }
 
+/**
+ * #1577 integration-area allowlist: even fully-erased static Pi imports are
+ * permitted only inside the cohesive integration boundary. A new file
+ * importing Pi types anywhere else fails the guard — add the file to the
+ * integration area (or document a presentation exception here) in the same
+ * commit. Product interfaces must never name Pi types.
+ */
+const PI_IMPORT_ALLOWLIST_DIRS = [
+  "src/components/transport/",
+  "src/components/pi-executor/",
+];
+const PI_IMPORT_ALLOWLIST_FILES = [
+  // Documented presentation exception: the interactive TUI renders Pi
+  // shapes; it is integration area, not a product domain interface.
+  "src/cli/commands/tui-ui.ts",
+];
+
+export function isPiImportAllowed(relPath) {
+  if (PI_IMPORT_ALLOWLIST_DIRS.some((dir) => relPath.startsWith(dir))) return true;
+  if (PI_IMPORT_ALLOWLIST_FILES.includes(relPath)) return true;
+  return false;
+}
+
+/**
+ * Surface check: any static @earendil-works import (type-only or runtime)
+ * in a non-excluded file outside the allowlist. Runtime bindings are
+ * reported separately by checkPiBoundarySource and stay forbidden
+ * everywhere; this check additionally pins the type surface to the
+ * integration area.
+ */
+export function checkPiImportSurface(sourceText, fileName, relPath) {
+  if (isExcludedFile(relPath) || isPiImportAllowed(relPath)) return [];
+  const sourceFile = ts.createSourceFile(
+    fileName,
+    sourceText,
+    ts.ScriptTarget.Latest,
+    /*setParentNodes*/ true,
+    ts.ScriptKind.TS,
+  );
+  const found = [];
+  function visit(node) {
+    if (ts.isImportDeclaration(node) && isEarendilImport(node)) {
+      const spec = node.moduleSpecifier;
+      found.push({
+        file: fileName,
+        line: sourceFile.getLineAndCharacterOfPosition(node.getStart(sourceFile)).line + 1,
+        specifier: spec !== undefined && ts.isStringLiteral(spec) ? spec.text : "unknown",
+        kind: "outside-allowlist",
+      });
+    }
+    ts.forEachChild(node, visit);
+  }
+  visit(sourceFile);
+  return found;
+}
+
 /** Check one source text; exported for the boundary test's fixture exercise. */
 export function checkPiBoundarySource(sourceText, fileName) {
   const sourceFile = ts.createSourceFile(
@@ -123,6 +179,10 @@ function main() {
       violations.push(violation);
       failed = true;
     }
+    for (const outside of checkPiImportSurface(sourceText, file, relPath)) {
+      violations.push(outside);
+      failed = true;
+    }
   }
 
   violations.sort((a, b) => {
@@ -133,13 +193,19 @@ function main() {
   });
 
   for (const violation of violations) {
-    process.stderr.write(
-      `VIOLATION: ${relative(ROOT_DIR, violation.file)}:${violation.line}: non-type import of ${violation.specifier}\n`,
-    );
+    if (violation.kind === "outside-allowlist") {
+      process.stderr.write(
+        `VIOLATION: ${relative(ROOT_DIR, violation.file)}:${violation.line}: Pi import of ${violation.specifier} outside the integration-area allowlist (transport/, pi-executor/, tui-ui.ts)\n`,
+      );
+    } else {
+      process.stderr.write(
+        `VIOLATION: ${relative(ROOT_DIR, violation.file)}:${violation.line}: non-type import of ${violation.specifier}\n`,
+      );
+    }
   }
 
   if (failed) {
-    process.stderr.write("\ncheck-pi-boundary: FAIL — @earendil-works runtime imports found in production source.\n");
+    process.stderr.write("\ncheck-pi-boundary: FAIL — Pi boundary violations found in production source.\n");
     process.exit(1);
   } else {
     process.stdout.write("check-pi-boundary: OK — no @earendil-works runtime imports in production source.\n");

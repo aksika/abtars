@@ -117,7 +117,7 @@ describe("telegram coding projection #1635", () => {
 
   it("confirm renders as an inline keyboard with yes/no callbacks", () => {
     const sink = createCodingProjectionSink(store);
-    sink.uiRequest("coding-1", { type: "extension_ui_request", id: "req-1", method: "confirm", title: "Approve?", message: "run it" });
+    sink.uiRequest("coding-1", { id: "req-1", method: "confirm", title: "Approve?", message: "run it" });
     expect(sent).toHaveLength(1);
     const markup = (sent[0]!.opts as { reply_markup: { inline_keyboard: Array<Array<{ text: string; callback_data: string }>> } }).reply_markup;
     expect(markup.inline_keyboard[0]!.map(b => b.text)).toEqual(["Yes", "No"]);
@@ -129,7 +129,7 @@ describe("telegram coding projection #1635", () => {
   it("select renders options as bounded opaque callbacks", () => {
     const sink = createCodingProjectionSink(store);
     const longOption = "option-a:" + "x".repeat(500);
-    sink.uiRequest("coding-1", { type: "extension_ui_request", id: "req-2", method: "select", title: "Pick", options: [longOption, "option-b"] });
+    sink.uiRequest("coding-1", { id: "req-2", method: "select", title: "Pick", options: [longOption, "option-b"] });
     const markup = (sent[0]!.opts as { reply_markup: { inline_keyboard: Array<Array<{ text: string; callback_data: string }>> } }).reply_markup;
     expect(markup.inline_keyboard).toHaveLength(2);
     expect(markup.inline_keyboard[0]![0]!.callback_data).not.toContain("option-a");
@@ -138,7 +138,7 @@ describe("telegram coding projection #1635", () => {
 
   it("input renders as a correlated prompt with a suggestion", () => {
     const sink = createCodingProjectionSink(store);
-    sink.uiRequest("coding-1", { type: "extension_ui_request", id: "req-3", method: "input", title: "Enter name", placeholder: "repo" });
+    sink.uiRequest("coding-1", { id: "req-3", method: "input", title: "Enter name", placeholder: "repo" });
     expect(sent[0]!.text).toContain("Enter name");
     expect(sent[0]!.text).toContain("repo");
     expect(sent[0]!.text).not.toContain("req-3"); // request id never leaks into visible text
@@ -148,7 +148,7 @@ describe("telegram coding projection #1635", () => {
     const handler = vi.fn(async () => true);
     setCodingCallbackHandler(handler);
     const sink = createCodingProjectionSink(store);
-    sink.uiRequest("coding-1", { type: "extension_ui_request", id: "req-1", method: "confirm", title: "Approve?", message: "run it" });
+    sink.uiRequest("coding-1", { id: "req-1", method: "confirm", title: "Approve?", message: "run it" });
     const markup = (sent[0]!.opts as { reply_markup: { inline_keyboard: Array<Array<{ text: string; callback_data: string }>> } }).reply_markup;
     const callback = markup.inline_keyboard[0]![0]!.callback_data;
     expect(isCodingCallback(callback)).toBe(true);

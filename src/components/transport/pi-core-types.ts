@@ -16,12 +16,16 @@ import type {
   AssistantMessageEvent as PublicAssistantMessageEvent,
   AssistantMessageEventStream as PublicAssistantMessageEventStream,
   Api,
-  ImageContent,
   Message,
   Model,
-  TextContent,
   UserMessage,
 } from "@earendil-works/pi-ai";
+import type {
+  AbtarsContentPart,
+  AbtarsCurrentTurnMessage,
+  AbtarsImagePart,
+  AbtarsInstructionAgentMessage,
+} from "./pi-port.js";
 
 const TAG = "pi-core-types";
 
@@ -67,29 +71,10 @@ export interface PiAgentCoreModule {
   Agent: new (options?: PiAgentOptions) => PiAgent;
 }
 
-// ── #1444: instruction messages ────────────────────────────────────────────────
-
-export interface AbtarsInstructionAgentMessage {
-  role: "abtars_instruction";
-  content: string;
-  timestamp?: number;
-  leaseId: string;
-  instructionIds: readonly string[];
-  executionId: string;
-  kind: "steer" | "followUp";
-}
-
-// ── #1446: current-turn marker ─────────────────────────────────────────────────
-
-export interface AbtarsCurrentTurnMessage {
-  role: "abtars_current_turn";
-  content: string | Array<TextContent | ImageContent>;
-  executionId: string;
-  sessionId: string;
-  durableMessageId?: number;
-  timestamp: number;
-  imageContent?: Array<{ mime: string; base64: string }>;
-}
+// ── #1444/#1446 product messages: owned by ./pi-port.js ──────────────────────
+// AbtarsInstructionAgentMessage, AbtarsCurrentTurnMessage, and the content
+// model live in the Pi-free port module; this integration area imports them
+// for the augmentation declaration, factories, and converters below.
 
 declare module "@earendil-works/pi-agent-core" {
   interface CustomAgentMessages {
@@ -100,53 +85,25 @@ declare module "@earendil-works/pi-agent-core" {
 
 export type AbtarsAgentMessage = AgentMessage | AbtarsInstructionAgentMessage | AbtarsCurrentTurnMessage;
 
-// ── #1446: context projection source ───────────────────────────────────────────
-
-export type PiContextProjectionSource =
-  | {
-      mode: "durable";
-      sessionKey: string;
-      beforeMessageId: number;
-      maxContext: number;
-      /** #1527: caller identity threaded into the projection request. */
-      userId: string;
-    }
-  | {
-      mode: "ephemeral";
-      sessionKey: string;
-    };
-
-export interface PiExecutionContextSeed {
-  source: PiContextProjectionSource;
-  executionId: string;
-  currentTurn: AbtarsCurrentTurnMessage;
-  volatileBlocks: readonly { kind: string; content: string }[];
-}
-
-// ── #1446: tool execution context ──────────────────────────────────────────────
-
-export interface PiToolExecutionContext {
-  executionId: string;
-  userId: string;
-  signal?: AbortSignal;
-  safety: unknown;
-  onToolStart?: (name: string) => void;
-  onToolSuccess?: () => void;
-  /** Wrap a JSON schema object as a Pi-compatible TypeScript schema (Type.Unsafe). */
-  createUnsafeSchema?: (schema: Record<string, unknown>) => Record<string, unknown>;
-}
-
-// ── #1446: safety controller types ─────────────────────────────────────────────
-
-export type ToolDecision =
-  | { decision: "execute" }
-  | { decision: "error"; reason: string }
-  | { decision: "skip" };
-
-export type TurnDecision =
-  | { decision: "continue" }
-  | { decision: "stop"; reason: string }
-  | { decision: "pause" };
+// Product vocabulary re-exported for compatibility: product code should
+// import these from ./pi-port.js directly. The port module itself stays
+// Pi-free; this barrel only forwards product types, never Pi types.
+export type {
+  AbtarsContentPart,
+  AbtarsImagePart,
+  AbtarsInstructionAgentMessage,
+  AbtarsCurrentTurnMessage,
+  PiContextProjectionSource,
+  PiExecutionContextSeed,
+  PiToolExecutionContext,
+  ToolDecision,
+  TurnDecision,
+  PortTurnIdentity,
+  PortModelPolicy,
+  PortToolDescriptor,
+  PortTerminalOutcome,
+  PortEventKind,
+} from "./pi-port.js";
 
 export interface SafetyPrepareNextTurnContext {
   roundsUsed: number;
@@ -257,20 +214,24 @@ export function convertInstructionToLlm(message: AbtarsAgentMessage): Message {
 export function convertCurrentTurnToLlm(message: AbtarsAgentMessage): Message {
   if (message.role !== "abtars_current_turn") return message as Message;
   const turn = message as AbtarsCurrentTurnMessage;
-  if (turn.imageContent && turn.imageContent.length > 0) {
+  if (turn.images && turn.images.length > 0) {
     const text = typeof turn.content === "string" ? turn.content : "";
     return {
       role: "user",
       content: [
         { type: "text" as const, text },
-        ...turn.imageContent.map((img) => ({ type: "image" as const, data: img.base64, mimeType: img.mime })),
+        ...turn.images.map((img) => ({ type: "image" as const, data: img.data, mimeType: img.mimeType })),
       ],
       timestamp: turn.timestamp,
     } satisfies UserMessage;
   }
   return {
     role: "user",
-    content: typeof turn.content === "string" ? turn.content : turn.content,
+    content: typeof turn.content === "string" ? turn.content : turn.content.map((part) =>
+      part.type === "text"
+        ? { type: "text" as const, text: part.text }
+        : { type: "image" as const, data: part.data, mimeType: part.mimeType },
+    ),
     timestamp: turn.timestamp,
   } satisfies UserMessage;
 }
@@ -305,11 +266,11 @@ export function createInstructionMessage(
 }
 
 export function createCurrentTurnMessage(
-  content: string | Array<TextContent | ImageContent>,
+  content: string | AbtarsContentPart[],
   executionId: string,
   sessionId: string,
   durableMessageId?: number,
-  imageContent?: Array<{ mime: string; base64: string }>,
+  images?: AbtarsImagePart[],
 ): AbtarsCurrentTurnMessage {
   return {
     role: "abtars_current_turn",
@@ -318,7 +279,7 @@ export function createCurrentTurnMessage(
     durableMessageId,
     content,
     timestamp: Date.now(),
-    imageContent,
+    images,
   };
 }
 

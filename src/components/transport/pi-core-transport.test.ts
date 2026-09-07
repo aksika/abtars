@@ -406,7 +406,7 @@ describe("PiCoreTransport", () => {
       sessionId: "sess_1",
       content: "Look at this",
       timestamp: 123,
-      imageContent: [{ mime: "image/png", base64: "iVBOR=" }],
+      images: [{ type: "image", mimeType: "image/png", data: "iVBOR=" }],
     };
     const m = convertCurrentTurnToLlm(msg) as { content: Array<{ type: string; text?: string; data?: string; mimeType?: string }> };
     expect(m.role).toBe("user");

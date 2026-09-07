@@ -12,7 +12,7 @@ import { describe, it, expect } from "vitest";
 import { readFileSync, existsSync } from "node:fs";
 import { resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
-import { checkPiBoundarySource } from "../../../scripts/check-pi-boundary.mjs";
+import { checkPiBoundarySource, checkPiImportSurface } from "../../../scripts/check-pi-boundary.mjs";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const ROOT = resolve(__dirname, "..", "..", "..");
@@ -44,6 +44,26 @@ describe("dependency boundary (#1425)", () => {
     expect(violations).toHaveLength(1);
     expect(violations[0]!.line).toBe(6);
     expect(violations[0]!.specifier).toBe("@earendil-works/pi-ai");
+  });
+
+  it("#1577 — the import-surface allowlist pins Pi types to the integration area", () => {
+    const typeOnly = 'import type { Model } from "@earendil-works/pi-ai";';
+    // Inside the integration area: no surface violation.
+    expect(checkPiImportSurface(typeOnly, "x.ts", "src/components/transport/pi-core-types.ts")).toEqual([]);
+    expect(checkPiImportSurface(typeOnly, "x.ts", "src/components/pi-executor/pi-rpc-client.ts")).toEqual([]);
+    expect(checkPiImportSurface(typeOnly, "x.ts", "src/cli/commands/tui-ui.ts")).toEqual([]);
+    // Outside it: even a type-only Pi import fails.
+    const outside = checkPiImportSurface(typeOnly, "x.ts", "src/components/pipeline/prompt-builder.ts");
+    expect(outside).toHaveLength(1);
+    expect(outside[0]!.kind).toBe("outside-allowlist");
+    // Test/dev exclusions still skip both checks.
+    expect(checkPiImportSurface(typeOnly, "x.ts", "src/components/transport/pi-core-types.test.ts")).toEqual([]);
+  });
+
+  it("#1577 — the product port module imports no Pi package", () => {
+    const port = readFileSync(resolve(ROOT, "src", "components", "transport", "pi-port.ts"), "utf-8");
+    expect(port).not.toMatch(/from\s+["']@earendil-works\//);
+    expect(port).not.toMatch(/import\(["']@earendil-works\//);
   });
 });
 
