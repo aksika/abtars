@@ -54,6 +54,8 @@ const kanbanUpdateMock = vi.fn();
 const cascadeFailMock = vi.fn();
 const kanbanFailMock = vi.fn();
 const kanbanCompleteMock = vi.fn();
+const kanbanTransitionMock = vi.fn();
+const sqliteNowMock = vi.fn().mockReturnValue("2026-09-07 00:00:00");
 const kanbanRunningProjectIdsMock = vi.fn().mockReturnValue([]);
 const kanbanStrandedQueuedProjectIdsMock = vi.fn().mockReturnValue([]);
 const kanbanQueuedDispatchOrderMock = vi.fn().mockReturnValue([]);
@@ -62,6 +64,8 @@ const resolveRootIdMock = vi.fn().mockReturnValue(undefined);
 vi.mock("./tasks/kanban-board.js", () => ({
   kanbanFail: kanbanFailMock,
   kanbanComplete: kanbanCompleteMock,
+  kanbanTransition: kanbanTransitionMock,
+  sqliteNow: sqliteNowMock,
   kanbanUpdate: kanbanUpdateMock,
   kanbanGetCard: kanbanGetCardMock,
   kanbanGetChildren: kanbanGetChildrenMock,
@@ -405,6 +409,7 @@ async function swapTestGeneration(
   kanbanRunningProjectIdsMock.mockReturnValue([]);
   kanbanFailMock.mockReset();
   kanbanCompleteMock.mockReset();
+  kanbanTransitionMock.mockReset();
   kanbanPromoteDueRetryMock.mockReset();
   kanbanPromoteDueRetryMock.mockReturnValue(false);
   getLiveRunForProjectMock.mockReset();
@@ -616,6 +621,11 @@ describe("Reconciler — #1411 domain guard", () => {
         // or the pump's dirty flag loops forever on the mock board
         kanbanFailMock.mockImplementation((id: number) => { if (id === cardId) card.status = "failed"; });
         kanbanCompleteMock.mockImplementation((id: number) => { if (id === cardId) card.status = "done"; });
+        // #1778: attempt-correlated projections ride kanbanTransition now.
+        kanbanTransitionMock.mockImplementation((req: { cardId: number; to: string }) => {
+          if (req.cardId === cardId) card.status = req.to;
+          return { kind: "applied", from: "queued" };
+        });
         kanbanQueuedDispatchOrderMock.mockReturnValue([card]);
         kanbanGetCardMock.mockImplementation((id: number) => {
           if (id === cardId) return card;
@@ -632,14 +642,21 @@ describe("Reconciler — #1411 domain guard", () => {
     it("#1656 fails the W card when a completed Pi attempt's envelope criteria did not pass", async () => {
       await runPiStartProjection(1, envelopeWith({ criteria: [{ criterion_id: "c1", status: "failed", evidence_ids: [] }] }));
 
-      expect(kanbanFailMock).toHaveBeenCalledWith(1, "worker completed without passing acceptance");
+      // #1778: the projection carries the deciding attempt identity.
+      expect(kanbanTransitionMock).toHaveBeenCalled();
+      expect(kanbanTransitionMock.mock.calls[0]?.[0]).toMatchObject(
+        { cardId: 1, to: "failed", attemptId: "a_1", claimGeneration: 1 },
+      );
       expect(kanbanCompleteMock).not.toHaveBeenCalled();
     });
 
     it("#1656 completes the W card when a completed Pi attempt's envelope passes exact acceptance", async () => {
       await runPiStartProjection(1, envelopeWith({}));
 
-      expect(kanbanCompleteMock).toHaveBeenCalledWith(1, null, "worker completed");
+      expect(kanbanTransitionMock).toHaveBeenCalled();
+      expect(kanbanTransitionMock.mock.calls[0]?.[0]).toMatchObject(
+        { cardId: 1, to: "done", attemptId: "a_1", claimGeneration: 1 },
+      );
       expect(kanbanFailMock).not.toHaveBeenCalled();
     });
 
@@ -648,14 +665,20 @@ describe("Reconciler — #1411 domain guard", () => {
         attempt: { id: "a_1", ordinal: 1, contract_id: "c_1", contract_digest: "other", executor_kind: "pi", executor_id: "pi-coding", started_at: "", finished_at: "" },
       }));
 
-      expect(kanbanFailMock).toHaveBeenCalledWith(1, "worker completed without passing acceptance");
+      expect(kanbanTransitionMock).toHaveBeenCalled();
+      expect(kanbanTransitionMock.mock.calls[0]?.[0]).toMatchObject(
+        { cardId: 1, to: "failed", attemptId: "a_1", claimGeneration: 1 },
+      );
       expect(kanbanCompleteMock).not.toHaveBeenCalled();
     });
 
     it("#1656 fails the W card when a completed attempt has no persisted envelope", async () => {
       await runPiStartProjection(1, undefined);
 
-      expect(kanbanFailMock).toHaveBeenCalledWith(1, "worker completed without passing acceptance");
+      expect(kanbanTransitionMock).toHaveBeenCalled();
+      expect(kanbanTransitionMock.mock.calls[0]?.[0]).toMatchObject(
+        { cardId: 1, to: "failed", attemptId: "a_1", claimGeneration: 1 },
+      );
       expect(kanbanCompleteMock).not.toHaveBeenCalled();
     });
   });

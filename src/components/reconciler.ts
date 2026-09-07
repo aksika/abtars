@@ -1,11 +1,10 @@
 import { nerve } from "./nerve.js";
 import { spin } from "./spin.js";
 import {
-  kanbanComplete,
   kanbanFail,
   kanbanGetCard, kanbanGetChildren, kanbanRunningProjectIds, kanbanStrandedQueuedProjectIds,
   kanbanQueuedDispatchOrder, kanbanPromoteDueRetry, kanbanTransition, sqliteNow, KANBAN_TERMINAL_STATUSES,
-  isUnblocked, cascadeFail, resolveRootId, requireTaskDatabase, type KanbanCard,
+  isUnblocked, cascadeFail, resolveRootId, requireTaskDatabase, type KanbanCard, type TaskDatabase,
 } from "./tasks/kanban-board.js";
 import { logInfo, logWarn, logError, redactSecrets } from "./logger.js";
 import { logAndSwallow } from "./log-and-swallow.js";
@@ -1904,6 +1903,50 @@ async function runWorkerDispatch(generation: ReconcilerGeneration): Promise<void
   }
 }
 
+/**
+ * #1778: attempt-correlated card projection. A worker card terminalizes from
+ * its attempt owner's durable verdict; the journal row carries the deciding
+ * attempt identity and generation (the budget_enforcement pattern), so a late
+ * projection is auditable to its owner instead of posing as an unattributed
+ * card write. Field and from-set parity with kanbanComplete/kanbanFail is
+ * deliberate — only the correlation is new.
+ */
+function projectAttemptCard(
+  db: TaskDatabase,
+  cardId: number,
+  to: "done" | "failed",
+  attempt: { id: string; generation: number },
+  summary: string,
+): void {
+  if (to === "done") {
+    kanbanTransition({
+      cardId,
+      from: ["running", "queued"],
+      to: "done",
+      actor: "settle_done",
+      reason: "worker settlement complete",
+      attemptId: attempt.id,
+      claimGeneration: attempt.generation,
+      fields: {
+        result_path: null,
+        result_summary: summary.slice(0, 4000),
+        completed_at: sqliteNow(),
+      },
+    }, db);
+  } else {
+    kanbanTransition({
+      cardId,
+      from: ["queued", "running", "done"],
+      to: "failed",
+      actor: "settle_failed",
+      reason: "worker settlement failed",
+      attemptId: attempt.id,
+      claimGeneration: attempt.generation,
+      fields: { error: summary.slice(0, 1000), completed_at: sqliteNow() },
+    }, db);
+  }
+}
+
 async function dispatchOnePass(generation: ReconcilerGeneration): Promise<void> {
   const store = new WorkerSupervisionStore();
   const capacities = new Map<string, { adapter: SwarmExecutorAdapter; max: number }>();
@@ -1939,12 +1982,12 @@ async function dispatchOnePass(generation: ReconcilerGeneration): Promise<void> 
           const resultData = store.getResultByAttempt(latestAttempt.id);
           const completedContract = resultData ? supSvc.getContractForCard(card.id) : undefined;
           if (completedContract && resultData && acceptancePassed(completedContract, resultData.envelope)) {
-            kanbanComplete(card.id, null, "worker completed");
+            projectAttemptCard(store.db, card.id, "done", { id: latestAttempt.id, generation: latestAttempt.generation || 1 }, "worker completed");
           } else {
-            kanbanFail(card.id, "worker completed without passing acceptance");
+            projectAttemptCard(store.db, card.id, "failed", { id: latestAttempt.id, generation: latestAttempt.generation || 1 }, "worker completed without passing acceptance");
           }
         } else {
-          kanbanFail(card.id, `worker ${latestAttempt.lifecycle}`);
+          projectAttemptCard(store.db, card.id, "failed", { id: latestAttempt.id, generation: latestAttempt.generation || 1 }, `worker ${latestAttempt.lifecycle}`);
         }
         generation.dispatchPump.dirty = true;
       }
@@ -1973,8 +2016,13 @@ async function dispatchOnePass(generation: ReconcilerGeneration): Promise<void> 
             desiredState: "failed",
             stableReason: "pi_executor_unavailable",
           });
+          projectAttemptCard(store.db, card.id, "failed", { id: eligibilityClaim.attemptId, generation: eligibilityClaim.generation }, "Pi executor unavailable for coding child");
+        } else {
+          // No eligibility claim could be recorded — the card cannot stay
+          // queued forever. Fail it unattributed exactly as before: no
+          // attempt decided this verdict, so there is nothing to correlate.
+          kanbanFail(card.id, "Pi executor unavailable for coding child");
         }
-        kanbanFail(card.id, "Pi executor unavailable for coding child");
       }
       continue;
     }
@@ -2076,7 +2124,7 @@ async function dispatchOnePass(generation: ReconcilerGeneration): Promise<void> 
         desiredState: "failed",
         stableReason: "could not enter starting state",
       });
-      kanbanFail(card.id, "could not enter starting state");
+      projectAttemptCard(store.db, card.id, "failed", { id: claim.attemptId, generation: claim.generation }, "could not enter starting state");
       continue;
     }
 
@@ -2103,12 +2151,12 @@ async function dispatchOnePass(generation: ReconcilerGeneration): Promise<void> 
           const afterResult = store.getResultByAttempt(afterStart.id);
           const afterContract = afterResult ? supSvc.getContractForCard(card.id) : undefined;
           if (afterContract && afterResult && acceptancePassed(afterContract, afterResult.envelope)) {
-            kanbanComplete(card.id, null, "worker completed");
+            projectAttemptCard(store.db, card.id, "done", { id: afterStart.id, generation: afterStart.generation || 1 }, "worker completed");
           } else {
-            kanbanFail(card.id, "worker completed without passing acceptance");
+            projectAttemptCard(store.db, card.id, "failed", { id: afterStart.id, generation: afterStart.generation || 1 }, "worker completed without passing acceptance");
           }
         } else {
-          kanbanFail(card.id, `worker ${afterStart.lifecycle}`);
+          projectAttemptCard(store.db, card.id, "failed", { id: afterStart.id, generation: afterStart.generation || 1 }, `worker ${afterStart.lifecycle}`);
         }
         generation.dispatchPump.dirty = true;
       }
@@ -2138,7 +2186,7 @@ async function dispatchOnePass(generation: ReconcilerGeneration): Promise<void> 
           desiredState: "failed",
           stableReason: `start_failed: deferred_${observation.reason}`,
         });
-        kanbanFail(card.id, `worker start deferred but could not requeue: ${observation.reason}`);
+        projectAttemptCard(store.db, card.id, "failed", { id: claim.attemptId, generation: claim.generation }, `worker start deferred but could not requeue: ${observation.reason}`);
       }
     } else {
       logSwarmTrace({ event: "worker_start_failed", card: card.id, attempt: claim.attemptId, reason: "start_failed" });
@@ -2148,7 +2196,7 @@ async function dispatchOnePass(generation: ReconcilerGeneration): Promise<void> 
         desiredState: "failed",
         stableReason: `start_failed: ${observation.reason}`,
       });
-      kanbanFail(card.id, `worker start failed: ${observation.reason}`);
+      projectAttemptCard(store.db, card.id, "failed", { id: claim.attemptId, generation: claim.generation }, `worker start failed: ${observation.reason}`);
     }
 
   }
@@ -2273,6 +2321,8 @@ async function abortProject(generation: ReconcilerGeneration, projectId: number,
     if (card.status !== "running" && card.status !== "queued") continue;
     const attempt = store.getLatestAttempt(card.id);
     if (!attempt) {
+      // Ownerless convergence: no attempt ever claimed this child, so there
+      // is no owner verdict to correlate — fail it unattributed.
       kanbanFail(card.id, `project aborted: ${reason}`);
       continue;
     }
@@ -2296,8 +2346,14 @@ async function abortProject(generation: ReconcilerGeneration, projectId: number,
           hardDeadlineAt: attempt.hard_deadline_at ?? undefined,
         }, "project_abort");
       }
+      // The attempt is terminal at a known generation (just won, or already
+      // decided) — project the card from that owner verdict.
+      projectAttemptCard(store.db, card.id, "failed", { id: attempt.id, generation: attempt.generation || 1 }, `project aborted: ${reason}`);
+      continue;
     }
-    kanbanFail(card.id, `project aborted: ${reason}`);
+    // Stale or conflicting settlement: a successor generation owns this card
+    // now — failing it here would settle another owner's live work.
+    logWarn(TAG, `Abort skipped card ${card.id}: attempt ${attempt.id} settlement ${settlement.kind} — successor owns the card`);
   }
   // #1546: the last-resort settler performs the one root card mutation after
   // winning settlement; a second root fail would emit a duplicate terminal
@@ -2655,7 +2711,9 @@ async function runAttemptRecovery(generation: ReconcilerGeneration, coordinatorR
         logSwarmTrace({ event: "recovery_settled", card: attempt.card_id, attempt: attempt.id, generation: attempt.generation, reason: "bridge_restart" });
         try {
           const card = kanbanGetCard(attempt.card_id);
-          if (card) kanbanFail(card.id, "bridge_restart");
+          // The attempt just settled at a known generation — project the
+          // card from that owner verdict, correlated for audit.
+          if (card) projectAttemptCard(store.db, card.id, "failed", { id: attempt.id, generation: attempt.generation || 1 }, "bridge_restart");
         } catch (err) {
           // The durable attempt settlement is authoritative; a projection
           // failure must not make an unrelated active attempt disappear from
