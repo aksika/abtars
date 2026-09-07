@@ -6,7 +6,7 @@
  */
 
 export type PiAcceptanceLane = "local-unix" | "remote-wss";
-export type PiAcceptanceProfile = "core" | "full";
+export type PiAcceptanceProfile = "core" | "full" | "proof";
 export type PiScenarioState = "passed" | "failed" | "blocked";
 
 export interface PiRuntimeEvidence {

@@ -79,7 +79,7 @@ export interface ScenarioOutcome {
 
 export interface PiScenario {
   name: string;
-  profiles: readonly ("core" | "full")[];
+  profiles: readonly ("core" | "full" | "proof")[];
   run(ctx: PiAcceptanceContext): Promise<void>;
 }
 
@@ -291,6 +291,217 @@ async function toolMultiGeneration(ctx: PiAcceptanceContext): Promise<void> {
       `fragmented tool arguments drifted at the tool boundary: expected ${JSON.stringify({ query, limit: 5 }).slice(0, 200)} (got ${JSON.stringify(observedArgs).slice(0, 300)})`,
     );
   }
+}
+
+// ── Scenario 2b: Tool policy denial (proof) — #1775 ─────────────────────────
+
+/**
+ * A forbidden bridge-spawning command must be rejected by the production
+ * self-protection guard before any process is created, surfacing as a
+ * structured policy rejection that the turn then continues past normally.
+ */
+async function toolPolicyDenial(ctx: PiAcceptanceContext): Promise<void> {
+  const m = ctx.markers.next("PD1");
+  const reply = ctx.markers.next("PD1A");
+  const deniedCommand = "node main.js";
+
+  ctx.provider.enqueue({
+    candidate: FIXTURE_MODEL_A,
+    expectation: { candidate: FIXTURE_MODEL_A, currentTurn: m },
+    action: { kind: "toolCall", name: "execute_bash", arguments: { command: deniedCommand } },
+  });
+  ctx.provider.enqueue(textScript(FIXTURE_MODEL_A, {
+    candidate: FIXTURE_MODEL_A,
+    currentTurn: m,
+    exactlyOnce: [m],
+  }, reply));
+
+  // Summaries accumulate lane-wide: scope every lookup below to requests
+  // made after this turn starts, so an earlier scenario's tool pair can
+  // never satisfy this scenario's assertions.
+  const baselineSeq = Math.max(0, ...ctx.provider.summaries.map((s) => s.seq));
+  await sendExpectReply(ctx.tui, m, reply, "post-denial reply");
+
+  const summaries = ctx.provider.summariesFor(FIXTURE_MODEL_A).filter((s) => s.seq > baselineSeq);
+  const toolSummary = summaries.find((s) => s.action === "toolCall");
+  if (!toolSummary) {
+    throw new Error(`denied tool call never reached the provider (toolCalls seen: ${JSON.stringify(summaries.map((s) => s.toolCalls))})`);
+  }
+  const postTool = summaries.filter((s) => s.seq > toolSummary.seq).find((s) => s.roleCounts["tool"] !== undefined);
+  if (!postTool) {
+    throw new Error("no post-denial provider generation observed carrying the tool result");
+  }
+  if (!postTool.toolCalls.includes("execute_bash")) {
+    throw new Error(`post-denial generation does not carry the denied call (toolCalls seen: ${JSON.stringify(postTool.toolCalls)})`);
+  }
+
+  // Correlate the audit invocation + completion entries by call id. The
+  // invocation carries the redacted argument string; the completion must
+  // carry the structured policy rejection and no successful completion for
+  // this call may exist.
+  const completions = await waitFor(
+    async () => {
+      let raw: string;
+      try {
+        raw = readFileSync(join(ctx.abtarsHome, "logs", "audit.jsonl"), "utf-8");
+      } catch {
+        return undefined;
+      }
+      const invocationIds = new Set<string>();
+      const found: Array<{ callId: string; status: unknown; error: unknown }> = [];
+      for (const line of raw.split("\n")) {
+        if (!line.trim()) continue;
+        let entry: Record<string, unknown>;
+        try {
+          entry = JSON.parse(line) as Record<string, unknown>;
+        } catch {
+          continue;
+        }
+        if (entry["tool"] !== "execute_bash") continue;
+        const callId = entry["call_id"];
+        if (typeof callId !== "string") continue;
+        if (entry["args"] !== undefined) {
+          let decoded: Record<string, unknown> | null = null;
+          try {
+            decoded = JSON.parse(entry["args"] as string) as Record<string, unknown>;
+          } catch {
+            decoded = null;
+          }
+          if (decoded?.["command"] === deniedCommand) invocationIds.add(callId);
+        } else if (entry["status"] !== undefined) {
+          found.push({ callId, status: entry["status"], error: entry["error"] });
+        }
+      }
+      if (invocationIds.size === 0) return undefined;
+      const ours = found.filter((c) => invocationIds.has(c.callId));
+      return ours.length > 0 ? ours : undefined;
+    },
+    15_000,
+    `audit completion for denied execute_bash ${deniedCommand}`,
+  );
+  for (const c of completions) {
+    if (c.status !== "error") {
+      throw new Error(`denied execute_bash completion is not an error (call ${c.callId}, status=${JSON.stringify(c.status)})`);
+    }
+    if (c.error !== "policy_rejected") {
+      throw new Error(`denied execute_bash completion is not a policy rejection (call ${c.callId}, error=${JSON.stringify(c.error)})`);
+    }
+  }
+
+  ctx.writeArtifact("tool-policy-denial.json", JSON.stringify({
+    schemaVersion: 1,
+    kind: "pi-boundary-proof",
+    runId: ctx.runId,
+    lane: ctx.lane,
+    piVersion: "0.85.1",
+    route: "pi-ai",
+    tuiSessionId: ctx.tui.sessionId,
+    scenario: "tool-policy-denial",
+    markerHashes: [ctx.markers.hash(m), ctx.markers.hash(reply)],
+    providerRequestIds: [String(toolSummary.seq), String(postTool.seq)],
+    assertions: { denialError: "policy_rejected", completions: completions.length },
+  }, null, 2));
+}
+
+// ── Scenario 2c: Durable compaction (proof) — #1775 ─────────────────────────
+
+/** Bounded deterministic long reply: the marker plus filler, exactly N chars. */
+function longProofReply(marker: string, chars: number): string {
+  const filler = "0123456789abcdef";
+  const repeats = Math.max(0, Math.ceil((chars - marker.length - 1) / filler.length));
+  return `${marker}\n${filler.repeat(repeats)}`.slice(0, chars);
+}
+
+/**
+ * Five large normal turns followed by manual /compact must produce a durable
+ * checkpoint that the next turn's projected context consumes — without making
+ * Pi's transcript a second durable authority and without duplicating rows.
+ */
+async function durableCompaction(ctx: PiAcceptanceContext): Promise<void> {
+  const since = Date.now();
+  const turnMarkers: string[] = [];
+  const replyMarkers: string[] = [];
+
+  for (let i = 1; i <= 5; i++) {
+    const m = ctx.markers.next(`CC${i}`);
+    const a = ctx.markers.next(`CC${i}A`);
+    turnMarkers.push(m);
+    replyMarkers.push(a);
+    ctx.provider.enqueue(textScript(FIXTURE_MODEL_A, {
+      candidate: FIXTURE_MODEL_A,
+      currentTurn: m,
+      exactlyOnce: [m],
+    }, longProofReply(a, 24_000)));
+    await sendExpectReply(ctx.tui, m, a, `compaction turn ${i} reply`);
+  }
+
+  // The summarizer request shape is owned by the production compaction flow,
+  // so its script carries no request expectation — FIFO serves it. A stale or
+  // missing summary fails closed at the post-compaction expectation below.
+  const summary = ctx.markers.next("CSUM");
+  ctx.provider.enqueue(textScript(FIXTURE_MODEL_A, undefined, summary));
+
+  const compactReply = await ctx.tui.sendAndAwaitReply("/compact");
+  if (!compactReply.markdown.includes("Compaction complete")) {
+    throw new Error(`manual /compact did not complete (got: ${compactReply.markdown.slice(0, 200)})`);
+  }
+  await settleBetweenTurns();
+
+  const pm = ctx.markers.next("PC1");
+  const pa = ctx.markers.next("PC1A");
+  ctx.provider.enqueue(textScript(FIXTURE_MODEL_A, {
+    candidate: FIXTURE_MODEL_A,
+    currentTurn: pm,
+    orderedContains: [summary],
+    exactlyOnce: [pm],
+  }, pa));
+  await sendExpectReply(ctx.tui, pm, pa, "post-compaction reply");
+
+  // Durable history: exactly one user row per turn marker and one assistant
+  // row per reply marker since this scenario started; no foreign proof
+  // marker may have entered the owner's history in that window. A missing
+  // row on the first read is retried boundedly (read transient); duplicate
+  // or foreign rows fail immediately — they cannot be a timing artifact.
+  let rows = await ctx.owner.conversationRows(MASTER_USER_ID, since, 200);
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    const missing = turnMarkers.filter(
+      (m) => !rows.some((r) => r.role === "user" && r.content.includes(m)),
+    );
+    if (missing.length === 0) break;
+    if (attempt === 3) break;
+    await settleBetweenTurns(1500);
+    rows = await ctx.owner.conversationRows(MASTER_USER_ID, since, 200);
+  }
+  const ours = new Set([...turnMarkers, ...replyMarkers, summary, pm, pa]);
+  for (const row of rows) {
+    for (const marker of row.content.match(/PI-E2E-[A-Za-z0-9-]+/g) ?? []) {
+      if (!ours.has(marker)) {
+        throw new Error(`foreign proof marker in durable history: ${marker.slice(0, 60)}`);
+      }
+    }
+  }
+  for (const m of turnMarkers) {
+    const hits = rows.filter((r) => r.role === "user" && r.content.includes(m));
+    if (hits.length !== 1) throw new Error(`turn marker ${m.slice(0, 40)} has ${hits.length} user rows, expected exactly 1`);
+  }
+  for (const a of replyMarkers) {
+    const hits = rows.filter((r) => r.role === "assistant" && r.content.includes(a));
+    if (hits.length !== 1) throw new Error(`reply marker ${a.slice(0, 40)} has ${hits.length} assistant rows, expected exactly 1`);
+  }
+
+  ctx.writeArtifact("durable-compaction.json", JSON.stringify({
+    schemaVersion: 1,
+    kind: "pi-boundary-proof",
+    runId: ctx.runId,
+    lane: ctx.lane,
+    piVersion: "0.85.1",
+    route: "pi-ai",
+    tuiSessionId: ctx.tui.sessionId,
+    scenario: "durable-compaction",
+    markerHashes: [...turnMarkers, ...replyMarkers].map((mk) => ctx.markers.hash(mk)),
+    providerRequestIds: [],
+    assertions: { turns: 5, replyChars: 24_000, durableRows: rows.length, compactResult: "complete" },
+  }, null, 2));
 }
 
 // ── Scenario 3: Reset/rebuild (core) ────────────────────────────────────────
@@ -655,6 +866,25 @@ async function cancellation(ctx: PiAcceptanceContext): Promise<void> {
   if (since.some((s) => s.action === "unscripted" || s.action === "expectation_failed")) {
     throw new Error("orphan or unscripted provider request after cancellation");
   }
+
+  // #1775: late arrivals after the terminal outcome must be fenced. After the
+  // continuation settles, drain straggler frames, then require a bounded quiet
+  // window with no new provider request on either candidate. The sleep is a
+  // negative-assertion window, not readiness evidence.
+  await settleBetweenTurns();
+  for (let i = 0; i < 3; i++) {
+    try {
+      await ctx.tui.awaitMessage(1_000);
+    } catch {
+      break;
+    }
+  }
+  const quietBaseline = ctx.provider.summaries.length;
+  await new Promise((resolve) => setTimeout(resolve, 2500));
+  const quietLater = ctx.provider.summaries.length;
+  if (quietLater !== quietBaseline) {
+    throw new Error(`late provider request after cancellation settled (summaries ${quietBaseline} → ${quietLater})`);
+  }
 }
 
 // ── Scenario 11b: Acquisition hang cancellation (full) — #1506 ──────────────
@@ -796,17 +1026,19 @@ async function piTerminalCleanup(ctx: PiAcceptanceContext): Promise<void> {
 // ── Registry ────────────────────────────────────────────────────────────────
 
 export const PI_SCENARIOS: PiScenario[] = [
-  { name: "main-continuity-and-cursor", profiles: ["core", "full"], run: mainContinuity },
-  { name: "tool-multi-generation", profiles: ["core", "full"], run: toolMultiGeneration },
+  { name: "main-continuity-and-cursor", profiles: ["core", "full", "proof"], run: mainContinuity },
+  { name: "tool-multi-generation", profiles: ["core", "full", "proof"], run: toolMultiGeneration },
+  { name: "tool-policy-denial", profiles: ["proof"], run: toolPolicyDenial },
+  { name: "durable-compaction", profiles: ["proof"], run: durableCompaction },
   { name: "reset-rebuild", profiles: ["core", "full"], run: resetRebuild },
   { name: "fail-closed-provider-suppression", profiles: ["core", "full"], run: failClosed },
   { name: "owner-recovery", profiles: ["full"], run: ownerRecovery },
-  { name: "bridge-restart", profiles: ["full"], run: bridgeRestart },
+  { name: "bridge-restart", profiles: ["full", "proof"], run: bridgeRestart },
   { name: "lazy-transport-composition", profiles: ["full"], run: lazyTransports },
-  { name: "steer-followup", profiles: ["full"], run: steerFollowUp },
+  { name: "steer-followup", profiles: ["full", "proof"], run: steerFollowUp },
   { name: "candidate-fallback", profiles: ["full"], run: fallback },
-  { name: "model-switch", profiles: ["full"], run: modelSwitch },
-  { name: "cancellation-deadline", profiles: ["full"], run: cancellation },
+  { name: "model-switch", profiles: ["full", "proof"], run: modelSwitch },
+  { name: "cancellation-deadline", profiles: ["full", "proof"], run: cancellation },
   { name: "acquisition-hang-cancellation", profiles: ["full"], run: acquisitionCancel },
   { name: "scheduled-orc-round-limit", profiles: ["full"], run: scheduledOrcRoundLimit },
   { name: "scheduled-orc-round-limit-restart", profiles: ["full"], run: scheduledOrcRoundLimitRestart },
@@ -818,6 +1050,25 @@ export const PI_SCENARIOS: PiScenario[] = [
   { name: "pi-terminal-cleanup", profiles: ["core"], run: piTerminalCleanup },
 ];
 
-export function scenariosForProfile(profile: "core" | "full"): PiScenario[] {
+/** #1775 proof order: later scenarios observe state produced by earlier ones. */
+const PROOF_SCENARIO_ORDER = [
+  "main-continuity-and-cursor",
+  "tool-multi-generation",
+  "tool-policy-denial",
+  "durable-compaction",
+  "steer-followup",
+  "cancellation-deadline",
+  "bridge-restart",
+  "model-switch",
+];
+
+export function scenariosForProfile(profile: "core" | "full" | "proof"): PiScenario[] {
+  if (profile === "proof") {
+    return PROOF_SCENARIO_ORDER.map((name) => {
+      const scenario = PI_SCENARIOS.find((s) => s.name === name);
+      if (!scenario) throw new Error(`proof profile requires missing registry scenario ${name}`);
+      return scenario;
+    });
+  }
   return PI_SCENARIOS.filter((s) => s.profiles.includes(profile));
 }
