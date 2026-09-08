@@ -149,6 +149,7 @@ type RunRow = Record<string, unknown> & {
   session_id: string | null;
   execution_id: string | null;
   terminal_request_json: string | null;
+  report_contract_json: string | null;
   owner_pid: number;
   owner_started_at: number | null;
   finished_at: number | null;
@@ -282,6 +283,7 @@ const RUN_COLUMNS = [
   "run_id", "task_id", "group_id", "attempt", "trigger", "occurrence_at",
   "reserved_at", "deadline_at", "phase", "last_progress_at", "progress_sequence",
   "card_id", "session_id", "execution_id", "terminal_request_json",
+  "report_contract_json",
   "owner_pid", "owner_started_at",
 ];
 
@@ -302,9 +304,87 @@ function runInsertValues(run: ActiveTaskRun, taskId: string, ownerPid = process.
     run.sessionId ?? null,
     run.executionId ?? null,
     run.terminalRequest === undefined ? null : JSON.stringify(run.terminalRequest),
+    null, // report_contract_json: persisted once at preflight success (#1729 v2)
     ownerPid,
     ownerStartedAt,
   ];
+}
+
+/**
+ * #1729 v2: the persisted report-contract snapshot — exactly what the mechanical
+ * `validateReportArtifact` check consumes. Written once at preflight success,
+ * read by the synthesis admission check, never updated. `reserved_at` is read
+ * live from the same task_runs row (immutable per occurrence).
+ */
+export interface ReportContractSnapshot {
+  artifactPath: string;
+  minBytes: number;
+  requiredSections: string[];
+  baseline: { existed: boolean; size?: number; mtimeMs?: number };
+}
+
+/** Strict shape check shared by the reader and the synthesis admission path. */
+export function parseReportContractSnapshot(raw: unknown): ReportContractSnapshot | undefined {
+  if (!raw || typeof raw !== "object") return undefined;
+  const s = raw as Record<string, unknown>;
+  if (typeof s.artifactPath !== "string" || s.artifactPath.length === 0) return undefined;
+  if (typeof s.minBytes !== "number" || !Array.isArray(s.requiredSections) ||
+      !s.requiredSections.every((h): h is string => typeof h === "string")) return undefined;
+  const b = s.baseline as Record<string, unknown> | undefined;
+  if (!b || typeof b.existed !== "boolean") return undefined;
+  return {
+    artifactPath: s.artifactPath,
+    minBytes: s.minBytes,
+    requiredSections: s.requiredSections as string[],
+    baseline: {
+      existed: b.existed,
+      ...(typeof b.size === "number" ? { size: b.size } : {}),
+      ...(typeof b.mtimeMs === "number" ? { mtimeMs: b.mtimeMs } : {}),
+    },
+  };
+}
+
+/**
+ * #1729 v2: persist the report snapshot against the live occurrence. CAS-guarded
+ * on the unfinished run — returns false when the run already moved on (the
+ * admission check then treats a missing snapshot as "no evidence", i.e. today's
+ * routing). Never overwrites: preflight runs once per occurrence.
+ */
+export function persistReportContract(taskId: string, runId: string, snapshot: ReportContractSnapshot): boolean {
+  try {
+    const db = requireTaskDatabase();
+    return cas(db, `UPDATE task_runs SET report_contract_json = ? WHERE task_id = ? AND run_id = ? AND finished_at IS NULL AND report_contract_json IS NULL`,
+      JSON.stringify(snapshot), taskId, runId) === "won";
+  } catch (err) {
+    logAndSwallow(TAG, "persistReportContract", err, "warn");
+    return false;
+  }
+}
+
+/**
+ * #1729 v2: read the report snapshot + reservation clock for an occurrence.
+ * Returns undefined for legacy rows (pre-migration NULL), unparseable snapshots,
+ * or missing/terminal rows — all fail safe to today's routing downstream.
+ */
+export function readReportContract(runId: string): { snapshot: ReportContractSnapshot; reservedAt: number } | undefined {
+  try {
+    const db = requireTaskDatabase();
+    const row = db.prepare("SELECT report_contract_json, reserved_at FROM task_runs WHERE run_id = ?").get(runId) as
+      | { report_contract_json: string | null; reserved_at: number }
+      | undefined;
+    if (!row || row.report_contract_json === null) return undefined;
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(row.report_contract_json);
+    } catch {
+      return undefined;
+    }
+    const snapshot = parseReportContractSnapshot(parsed);
+    if (!snapshot) return undefined;
+    return { snapshot, reservedAt: row.reserved_at };
+  } catch {
+    return undefined;
+  }
 }
 
 export function initializeState(entries: ScheduledTask[]): void {
@@ -375,7 +455,9 @@ export function updateState(taskId: string, update: Partial<TaskRuntimeState>): 
       }
       if (activeRun !== undefined) {
         const values = runInsertValues(activeRun, taskId);
-        const setCols = RUN_COLUMNS.map(c => `${c} = excluded.${c}`).join(", ");
+        // #1729 v2: report_contract_json is written once by persistReportContract
+        // and never overwritten by full-row upserts.
+        const setCols = RUN_COLUMNS.filter(c => c !== "report_contract_json").map(c => `${c} = excluded.${c}`).join(", ");
         db.prepare(`INSERT INTO task_runs (${RUN_COLUMNS.join(", ")}) VALUES (${RUN_COLUMNS.map(() => "?").join(", ")})
           ON CONFLICT(run_id) DO UPDATE SET ${setCols}`).run(...values);
       }
@@ -405,7 +487,7 @@ export function updateStateIf(
       const { sets, vals } = statePatchColumns({ ...update, activeRun: undefined });
       if (update.activeRun !== undefined) {
         db.prepare(`INSERT INTO task_runs (${RUN_COLUMNS.join(", ")}) VALUES (${RUN_COLUMNS.map(() => "?").join(", ")})
-          ON CONFLICT(run_id) DO UPDATE SET ${RUN_COLUMNS.map(c => `${c} = excluded.${c}`).join(", ")}`).run(...runInsertValues(update.activeRun, taskId));
+          ON CONFLICT(run_id) DO UPDATE SET ${RUN_COLUMNS.filter(c => c !== "report_contract_json").map(c => `${c} = excluded.${c}`).join(", ")}`).run(...runInsertValues(update.activeRun, taskId));
       }
       if (sets.length > 0) {
         db.prepare(`UPDATE task_state SET ${sets.join(", ")} WHERE task_id = ?`).run(...vals, taskId);

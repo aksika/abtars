@@ -13,6 +13,7 @@ vi.mock("./task-state-store.js", () => ({
   incrementDeferrals: vi.fn(() => 0),
   advanceNextRun: vi.fn(),
   readLastPromptAt: vi.fn(() => 0),
+  persistReportContract: vi.fn(() => true),
 }));
 vi.mock("./kanban-board.js", () => ({
   kanbanComplete: vi.fn(),

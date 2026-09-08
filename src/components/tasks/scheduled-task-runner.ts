@@ -2,7 +2,7 @@ import { join } from "node:path";
 import { existsSync, readFileSync } from "node:fs";
 import { abtarsHome } from "../../paths.js";
 import { logInfo, logWarn } from "../logger.js";
-import { advanceRun, requestRunTerminal, readState } from "./task-state-store.js";
+import { advanceRun, requestRunTerminal, readState, persistReportContract } from "./task-state-store.js";
 import { preflightTask, validateReportArtifact } from "./task-preflight.js";
 import type { TaskToolRegistry } from "./task-preflight.js";
 import { settleRunOnce } from "./task-run-settler.js";
@@ -153,6 +153,17 @@ export class ScheduledTaskRunner {
         logTaskTrace("task_preflight_passed", { task: entry.id, run: reservation.runId });
         resolvedContract = preflight.report;
         artifactBaseline = preflight.artifactBaseline;
+        // #1729 v2: persist the resolved report contract + baseline once against
+        // this occurrence for the synthesis admission check. Best-effort: a lost
+        // write fails safe to today's routing downstream (missing snapshot).
+        if (preflight.report && !persistReportContract(taskId, runId, {
+          artifactPath: preflight.report.artifactPath,
+          minBytes: preflight.report.minBytes,
+          requiredSections: preflight.report.requiredSections,
+          baseline: preflight.artifactBaseline ?? { existed: false },
+        })) {
+          logWarn(TAG, `Report-contract snapshot not persisted for "${entry.id}" run ${runId} — synthesis admission falls back to review routing`);
+        }
       }
 
       const contextFile = join(abtarsHome(), "workspace", entry.id, "CONTEXT.md");

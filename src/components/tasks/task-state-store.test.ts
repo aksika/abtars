@@ -292,3 +292,76 @@ describe("claimPauseWarn #1609 durable per-hour warning ceiling", () => {
     });
   });
 });
+
+describe("#1729 v2 report-contract snapshot", () => {
+  const entry = {
+    id: "task", kind: "agent", prompt: "p", agent: "task", interaction: { mode: "oneshot" },
+    delivery: "silent", enabled: true, priority: "medium", at: new Date().toISOString(), orchestration: { maxAgents: 1 },
+  } as const;
+
+  function seedLiveRun(runId = "run-rc"): void {
+    store.initializeState([{ ...entry }]);
+    const result = store.reserveRun("task", {
+      runId,
+      groupId: "g-1",
+      attempt: 1,
+      trigger: "schedule",
+      occurrenceAt: Date.now(),
+      deadlineAt: Date.now() + 60_000,
+    });
+    if (!result.ok) throw new Error("seed conflict");
+  }
+
+  const snap = () => ({
+    artifactPath: join(home, "workspace", "r.md"),
+    minBytes: 10,
+    requiredSections: ["# H"],
+    baseline: { existed: false },
+  });
+
+  it("persists once, reads back, and refuses a second write", () => {
+    seedLiveRun();
+    expect(store.persistReportContract("task", "run-rc", snap())).toBe(true);
+    const read = store.readReportContract("run-rc");
+    expect(read?.snapshot.artifactPath).toBe(snap().artifactPath);
+    expect(read?.snapshot.minBytes).toBe(10);
+    expect(typeof read?.reservedAt).toBe("number");
+    // Write-once: a later full-row upsert or second persist must not clobber.
+    expect(store.persistReportContract("task", "run-rc", { ...snap(), minBytes: 999 })).toBe(false);
+    expect(store.readReportContract("run-rc")?.snapshot.minBytes).toBe(10);
+  });
+
+  it("reads legacy NULL rows as no-evidence, never a fabricated snapshot", () => {
+    seedLiveRun();
+    // reserveRun inserts NULL — the exact shape of pre-migration rows.
+    expect(store.readReportContract("run-rc")).toBeUndefined();
+  });
+
+  it("rejects unparseable snapshot JSON", async () => {
+    seedLiveRun();
+    const kanban = await import("./kanban-board.js");
+    kanban.requireTaskDatabase().prepare(
+      "UPDATE task_runs SET report_contract_json = ? WHERE run_id = ?"
+    ).run("{not-json", "run-rc");
+    expect(store.readReportContract("run-rc")).toBeUndefined();
+  });
+
+  it("rejects snapshots missing the validator's required fields", async () => {
+    seedLiveRun();
+    const kanban = await import("./kanban-board.js");
+    const db = kanban.requireTaskDatabase();
+    db.prepare("UPDATE task_runs SET report_contract_json = ? WHERE run_id = ?")
+      .run(JSON.stringify({ artifactPath: "", minBytes: 10, requiredSections: ["# H"], baseline: { existed: false } }), "run-rc");
+    expect(store.readReportContract("run-rc")).toBeUndefined();
+    db.prepare("UPDATE task_runs SET report_contract_json = ? WHERE run_id = ?")
+      .run(JSON.stringify({ artifactPath: "/x.md", minBytes: 10, requiredSections: "nope", baseline: { existed: false } }), "run-rc");
+    expect(store.readReportContract("run-rc")).toBeUndefined();
+  });
+
+  it("exposes the column on fresh DBs exactly once", async () => {
+    seedLiveRun();
+    const kanban = await import("./kanban-board.js");
+    const cols = kanban.requireTaskDatabase().prepare(`PRAGMA table_info(task_runs)`).all() as Array<{ name: string }>;
+    expect(cols.filter(c => c.name === "report_contract_json")).toHaveLength(1);
+  });
+});
