@@ -361,17 +361,26 @@ async function main(): Promise<void> {
         }
       },
     };
+    const acceptanceExec = `acceptance-exec-${Date.now()}`;
     const host = new PiCoreExecutionHost({
-      executionId: `acceptance-exec-${Date.now()}`, sessionId: "acceptance-session",
-      initialState: { systemPrompt: "acceptance", model: acceptanceModel, messages: [], tools: [] },
+      seed: {
+        source: { mode: "ephemeral" as const, sessionKey: "acceptance-session" },
+        executionId: acceptanceExec,
+        currentTurn: piTypes.createCurrentTurnMessage("acceptance probe", acceptanceExec, "acceptance-session"),
+        volatileBlocks: [],
+      },
+      initialState: { systemPrompt: "acceptance", model: acceptanceModel, tools: [] },
       streamFn: noProviderStream,
     });
     await host.start({ module: realModule, installation: { executable: "", packageRoot: "", version: "installed", source: "path", pinStatus: "at-pin", moduleRoots: { ai: "", tui: "", agentCore: "" } } });
-    if (host.state !== "running") return `Pi host did not enter running state: ${host.state}`;
+    // #1777: startup always prompts the seed's current turn, so the throwing
+    // provider boundary terminates the turn instead of leaving the host
+    // running. The lifecycle proof is clean termination + safe cancel.
+    if (!host.isSettled) return `Pi host did not settle after provider refusal: ${host.state}`;
     host.cancel();
     await host.waitForSettlement();
     if (!host.isSettled) return `Pi host did not settle after cancellation`;
-    return { observed: "real public Pi Agent constructed, started, cancelled, and settled", evidence: ["provider_calls=0", "host_state=settled"] };
+    return { observed: "real public Pi Agent constructed, provider refusal terminated the turn, cancel-after-settle safe", evidence: ["provider_refused", "host_state=settled"] };
   });
 
   await checkpoint("M16", "Provider/model selection is interface-driven", "execution", "SessionProfile lookup works", async () => {
@@ -522,6 +531,7 @@ async function main(): Promise<void> {
   });
 
   const PH = await import("../src/components/transport/pi-core-host.js");
+  const { createCurrentTurnMessage } = await import("../src/components/transport/pi-core-types.js");
   const EC = await import("../src/components/execution-control.js");
 
   await checkpoint("M30", "Non-settling provider: forced terminal + slot release + cleanup timeout", "timeout", "Non-settling Pi provider forces terminal settlement within 5s bound", async () => {
@@ -556,9 +566,13 @@ async function main(): Promise<void> {
     };
     const mockInstallation = { executable: "/pi", packageRoot: "/pi", version: "0.80.7", source: "path" as const, pinStatus: "at-pin" as const, moduleRoots: { ai: "", tui: "", agentCore: "" } };
     const host = new PH.PiCoreExecutionHost({
-      executionId,
-      sessionId: "m30-session",
-      initialState: { systemPrompt: "test", model: acceptanceModel, messages: [] },
+      seed: {
+        source: { mode: "ephemeral" as const, sessionKey: "m30-session" },
+        executionId,
+        currentTurn: createCurrentTurnMessage("m30 probe", executionId, "m30-session"),
+        volatileBlocks: [],
+      },
+      initialState: { systemPrompt: "test", model: acceptanceModel, tools: [] },
       streamFn: noProviderStream,
     });
     try {

@@ -6,6 +6,7 @@ import { markDelivered, markConsumed, failAfterDelivery } from "../session-instr
 import type { InstructionQueueHolder } from "../session-instruction-queue.js";
 import { DurableContextUnavailableError } from "./pi-core-context.js";
 import type { PiCoreContextProjection, TransformOptions } from "./pi-core-context.js";
+import type { PiExecutionContextSeed } from "./pi-port.js";
 import type { PiExecutionSafetyController } from "./pi-core-safety.js";
 import type { OutputObserver } from "../session-output-feed.js";
 import type { ExecutionTelemetryScope } from "../execution-telemetry.js";
@@ -24,12 +25,15 @@ export type PiCoreTerminalReason =
   | "prompt_completed_without_agent_end";
 
 export interface PiCoreExecutionHostOptions {
-  executionId: string;
-  sessionId: string;
+  /** #1777: single product seed — replaces the former separately supplied
+   *  executionId/sessionId inputs and initial current-turn message list.
+   *  Host identity derives from `seed.executionId` and
+   *  `seed.currentTurn.sessionId`; the first prompt derives from
+   *  `seed.currentTurn`. There is no second initialization path. */
+  seed: PiExecutionContextSeed;
   initialState: {
     systemPrompt: string;
     model: ModelApi;
-    messages: AgentMessage[];
     tools?: import("@earendil-works/pi-agent-core").AgentTool[];
     /** #1619: clamped effective reasoning level for the initial model. */
     thinkingLevel?: import("./kiro-transport.js").ReasoningEffort;
@@ -101,8 +105,9 @@ export class PiCoreExecutionHost {
   }
 
   constructor(opts: PiCoreExecutionHostOptions) {
-    this.executionId = opts.executionId;
-    this.sessionId = opts.sessionId;
+    // #1777: identity comes from the seed only — no parallel inputs.
+    this.executionId = opts.seed.executionId;
+    this.sessionId = opts.seed.currentTurn.sessionId;
     this.opts = opts;
     this.outputObserver = opts.outputObserver;
     this._generation = ++PiCoreExecutionHost._hostCounter;
@@ -240,7 +245,9 @@ export class PiCoreExecutionHost {
     }
 
     // Send the actual user/current-turn messages via prompt(), not via state.
-    const userMessages = [...this.opts.initialState.messages];
+    // #1777: the initial prompt derives from the seed's current turn — the
+    // same object the context projection consumes. No separate message list.
+    const userMessages = [this.opts.seed.currentTurn as unknown as AgentMessage];
     if (userMessages.length > 0) {
       try {
         await this.agent.prompt(userMessages);
