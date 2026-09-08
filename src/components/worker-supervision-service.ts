@@ -25,10 +25,26 @@ const MAX_RESULT_LENGTH = 500;
  * card with no project contract is unaffected; an Orc-only root admits
  * unmapped children but rejects mappings to Orc-owned ids.
  */
+/**
+ * #1729 v2: worker-side evidence shape for the artifact-evidence rule.
+ * `criterion_ids` on artifacts refer to worker-local criteria; `supports`
+ * maps the whole worker contract to root criteria — the rule bridges them.
+ */
+export interface WorkerEvidenceInput {
+  readonly criteria: ReadonlyArray<{ readonly id: string }>;
+  readonly expectedArtifacts: ReadonlyArray<{
+    readonly id: string;
+    readonly kind: string;
+    readonly required: boolean;
+    readonly criterion_ids: ReadonlyArray<string>;
+  }>;
+}
+
 export function validateWorkerRootCriteria(
   rootCardId: number,
   childContractId: string,
   supportsRootCriteria: readonly string[],
+  workerContract?: WorkerEvidenceInput,
 ): string | undefined {
   const legal = rootCriterionIds(rootCardId);
   if (legal === undefined) return undefined; // no project contract → unchanged
@@ -59,6 +75,25 @@ export function validateWorkerRootCriteria(
   });
   if (mappingErrors.length > 0) {
     return `root-criterion mapping rejected: ${mappingErrors.map(e => e.message).join("; ")}`;
+  }
+  // #1729 v2: structural artifact-evidence rule. A supported root criterion
+  // demanding artifact evidence requires the worker to declare a required file
+  // linked to a valid worker-local criterion — otherwise an always-true check
+  // (e.g. `echo done` with zero artifacts) passes vacuously. This cannot prove
+  // file content is meaningful research; that stays with lane execution + review.
+  if (workerContract) {
+    const workerCriterionIds = new Set(workerContract.criteria.map(c => c.id));
+    for (const rootId of supportsRootCriteria) {
+      const rootCriterion = rootContract.criteria.find(c => c.id === rootId);
+      if (!rootCriterion || rootCriterion.evidence_expectation !== "artifact") continue;
+      const covered = workerContract.expectedArtifacts.some(a =>
+        a.required === true &&
+        a.kind === "file" &&
+        a.criterion_ids.some(cid => workerCriterionIds.has(cid)));
+      if (!covered) {
+        return `root-criterion evidence rejected: ${rootId} demands artifact evidence but the worker declares no required file linked to a worker criterion`;
+      }
+    }
   }
   return undefined;
 }
@@ -124,7 +159,11 @@ export class WorkerSupervisionService {
     // #1604 R3: a supervised child under a contract-bearing root must declare
     // the root criteria it supports; validated unconditionally so an omitted
     // mapping is rejected here, at spawn time, not at settlement.
-    const mappingError = validateWorkerRootCriteria(boundRootCardId, opts?.contractId ?? "(pending)", opts?.supportsRootCriteria ?? []);
+    // #1729 v2: also enforce the artifact-evidence rule transactionally.
+    const mappingError = validateWorkerRootCriteria(boundRootCardId, opts?.contractId ?? "(pending)", opts?.supportsRootCriteria ?? [], {
+      criteria: opts?.criteria ?? [],
+      expectedArtifacts: opts?.expectedArtifacts ?? [],
+    });
     if (mappingError) return { error: mappingError };
 
     const contractId = opts?.contractId ?? createContractId();

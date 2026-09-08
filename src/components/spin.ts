@@ -2050,10 +2050,15 @@ export class Spin {
       const rootCardId = request.authority?.projectCardId ?? resolveRootId(parentCardId) ?? parentCardId;
       // #1604 R3: required mapping — the pre-check runs before any card is
       // created, so an omitted mapping fails the spawn, never the settlement.
+      // #1729 v2: artifact-evidence rule enforced on the same pre-check.
       const mappingError = validateWorkerRootCriteria(
         rootCardId,
         request.contract.id || "(pending)",
         request.contract.supports_root_criteria ? [...request.contract.supports_root_criteria] : [],
+        {
+          criteria: request.contract.criteria,
+          expectedArtifacts: request.contract.expected_artifacts ?? [],
+        },
       );
       if (mappingError) throw new Error(mappingError);
 

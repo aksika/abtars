@@ -123,7 +123,10 @@ describe("spawn_worker contract boundary (#1591)", () => {
     expect(result).toContain("[err]");
     expect(result).toContain("c1, c2, c3, c4, c5");
     expect(spawnChildMock).not.toHaveBeenCalled();
-    expect(validateWorkerRootCriteriaMock).toHaveBeenCalledWith(42, "(pending)", []);
+    expect(validateWorkerRootCriteriaMock).toHaveBeenCalledWith(42, "(pending)", [], {
+      criteria: [{ id: "l1c1", description: "Run feed discovery" }],
+      expectedArtifacts: [],
+    });
   });
 
   it("#1604 passes the declared mapping to the admission predicate", async () => {
@@ -136,7 +139,10 @@ describe("spawn_worker contract boundary (#1591)", () => {
     }, orcContext);
 
     expect(result).toContain("+ Worker card #123 created");
-    expect(validateWorkerRootCriteriaMock).toHaveBeenCalledWith(42, "(pending)", ["c1"]);
+    expect(validateWorkerRootCriteriaMock).toHaveBeenCalledWith(42, "(pending)", ["c1"], {
+      criteria: [{ id: "l1c1", description: "Run feed discovery" }],
+      expectedArtifacts: [],
+    });
     expect(spawnChildMock).toHaveBeenCalled();
   });
 

@@ -521,3 +521,97 @@ describe("WorkerSupervisionService", () => {
     });
   });
 });
+
+describe("#1729 v2 lane artifact-evidence rule", () => {
+  function seedArtifactRoot(): void {
+    new ReviewStore().insertContract({
+      schema_version: 2,
+      id: `pc_${rootId}`,
+      digest: `digest_${rootId}`,
+      project_card_id: rootId,
+      goal: "Daily briefing",
+      criteria: [
+        { id: "lane-a", description: "lane with handoff", required: false, execution_owner: "delegated", evidence_expectation: "artifact" },
+        { id: "lane-o", description: "observed lane", required: false, execution_owner: "delegated", evidence_expectation: "observed" },
+        { id: "orc-s", description: "synthesis", required: true, execution_owner: "orc", evidence_expectation: "synthesis" },
+      ],
+      required_outputs: [],
+      constraints: [],
+      limits: { hard_deadline_at: undefined, max_tokens: undefined, max_cost: undefined, max_review_rounds: 5, max_repair_rounds: 3 },
+      provenance: { requested_by: "user", authored_by: "orc", created_at: "2026-09-08T00:00:00.000Z" },
+    } as never);
+  }
+
+  const worker = (id: string) => ({ id, description: `${id} work` });
+  const file = (id: string, criterionIds: string[], extra?: { required?: boolean; kind?: string }) => ({
+    id, kind: (extra?.kind ?? "file") as "file", ref: `${id}.md`,
+    required: extra?.required ?? true, criterion_ids: criterionIds,
+  });
+
+  it("rejects the 2026-09-08 vacuous shape: artifact-evidence lane, zero artifacts, passing check", () => {
+    seedArtifactRoot();
+    const err = validateWorkerRootCriteria(rootId, "(pending)", ["lane-a"], {
+      criteria: [worker("w1")],
+      expectedArtifacts: [],
+    });
+    expect(err).toMatch(/lane-a demands artifact evidence/);
+    expect(err).toMatch(/no required file/);
+  });
+
+  it("accepts the healthy shape: required file linked to a valid worker criterion", () => {
+    seedArtifactRoot();
+    expect(validateWorkerRootCriteria(rootId, "(pending)", ["lane-a"], {
+      criteria: [worker("w1")],
+      expectedArtifacts: [file("handoff", ["w1"])],
+    })).toBeUndefined();
+  });
+
+  it("ignores observed-evidence lanes with zero artifacts", () => {
+    seedArtifactRoot();
+    expect(validateWorkerRootCriteria(rootId, "(pending)", ["lane-o"], {
+      criteria: [worker("w1")],
+      expectedArtifacts: [],
+    })).toBeUndefined();
+  });
+
+  it("rejects a file linked only to an unknown worker criterion", () => {
+    seedArtifactRoot();
+    const err = validateWorkerRootCriteria(rootId, "(pending)", ["lane-a"], {
+      criteria: [worker("w1")],
+      expectedArtifacts: [file("handoff", ["ghost"])],
+    });
+    expect(err).toMatch(/no required file/);
+  });
+
+  it("rejects optional-only and non-file artifacts", () => {
+    seedArtifactRoot();
+    expect(validateWorkerRootCriteria(rootId, "(pending)", ["lane-a"], {
+      criteria: [worker("w1")],
+      expectedArtifacts: [file("handoff", ["w1"], { required: false })],
+    })).toMatch(/no required file/);
+    expect(validateWorkerRootCriteria(rootId, "(pending)", ["lane-a"], {
+      criteria: [worker("w1")],
+      expectedArtifacts: [file("handoff", ["w1"], { kind: "directory" })],
+    })).toMatch(/no required file/);
+  });
+
+  it("keeps mapping-only behavior for legacy callers without worker evidence", () => {
+    seedArtifactRoot();
+    expect(validateWorkerRootCriteria(rootId, "(pending)", ["lane-a"])).toBeUndefined();
+    expect(validateWorkerRootCriteria(rootId, "(pending)", ["nope"])).toMatch(/not delegable/);
+  });
+
+  it("rejects a vacuous createChild with no contract or attempt writes", () => {
+    seedArtifactRoot();
+    const svc = new Service();
+    const cardId = kanbanEnqueue("vacuous lane", "agent", undefined, { type: "W", parent_id: rootId });
+    const result = svc.createChild("vacuous lane", rootId, "orc", {
+      cardId,
+      criteria: [{ id: "w1", description: "work" }],
+      verificationCommands: [{ id: "v", argv: ["echo", "done"], timeout_ms: 15000, criterion_ids: ["w1"] }],
+      supportsRootCriteria: ["lane-a"],
+    });
+    expect((result as { error?: string }).error).toMatch(/no required file/);
+    expect(svc.getContractForCard(cardId)).toBeUndefined();
+  });
+});

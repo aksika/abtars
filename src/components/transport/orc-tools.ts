@@ -202,7 +202,12 @@ const spawnWorkerTool: ToolDefinition = {
     // guard in this tool.
     if (hasStructuredData) {
       const { validateWorkerRootCriteria } = await import("../worker-supervision-service.js") as typeof import("../worker-supervision-service.js");
-      const mappingError = validateWorkerRootCriteria(projectCardId, "(pending)", supportsRootCriteriaRaw);
+      // #1729 v2: thread the worker evidence shape so artifact-evidence lanes
+      // without a required file fail here, before any card is created.
+      const mappingError = validateWorkerRootCriteria(projectCardId, "(pending)", supportsRootCriteriaRaw, {
+        criteria: criteriaRaw as Array<{ id: string }>,
+        expectedArtifacts: artifactsRaw as Array<{ id: string; kind: string; required: boolean; criterion_ids: string[] }>,
+      });
       if (mappingError) return `[err] ${mappingError}`;
     }
     let cardId: number;
