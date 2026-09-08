@@ -217,6 +217,7 @@ export class HttpTransport implements PeerTransport {
 
   async send(peer: string, message: PeerMessage): Promise<unknown> {
     if (message.type === "ask") {
+      // #1786: lane-1 chat over the WS broker (ephemeral). No direct dial.
       const { callPeer } = await import("../peer-client.js");
       const config = loadPeerConfig();
       return callPeer(peer, message.payload.prompt as string, config.maxHops);

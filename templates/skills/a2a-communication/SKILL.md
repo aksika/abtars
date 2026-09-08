@@ -1,30 +1,40 @@
 ---
 name: a2a-communication
-description: Communicate with other abtars agents — delegate tasks, ask questions
+description: Communicate with other abtars agents — quick chat or delegation
 requires: abtars
 ---
 
-# Peer Communication (peer_ask)
+# Peer Communication (two lanes)
 
 Talk to other abtars instances configured in `~/.abtars/config/peers.json`.
+Pick the lane explicitly — transport reachability never chooses it.
+
+| Intent | Tool | What happens |
+| --- | --- | --- |
+| Quick discussion / Q&A, including follow-ups | `peer_session` | Cardless chat turn over the peer route. No card, no Orc run. |
+| Delegate work with durable ownership and results | `peer_ask_help` | Supervised work: proxy card, contract, review, terminal result. |
+
+A one-sentence delegation is still delegation (`peer_ask_help`). A long
+discussion is still chat (`peer_session`).
 
 ## When to use
 
 - You need information or action from another agent
-- The user explicitly asks you to delegate to a peer ("ask <peer>...", "tell <peer> to...")
+- The user explicitly asks you to contact a peer ("ask <peer>...", "tell <peer> to...")
 - A task requires capabilities only available on the other host
 
 ## When NOT to use
 
 - The user is talking to you directly — don't forward their message to a peer unless asked
 - Simple questions you can answer yourself
-- Anything time-critical under 1 second (peer_ask blocks for up to 60s)
+- Anything time-critical under 1 second (chat blocks for up to 60s)
 
 ## Usage
 
 ```
-peer_ask(peer_name="<peer>", prompt="What's the current disk usage?")
-peer_ask(peer_name="<peer>", prompt="Run 'abtars status' and report back")
+peer_session(peer_name="<peer>", message="What's the current disk usage?")
+peer_session(peer_name="<peer>", message="Follow-up question", session_id="<id from previous call>")
+peer_ask_help(peer="<peer>", goal="Run 'abtars status' and report back")
 ```
 
 ## Available peers
@@ -33,36 +43,41 @@ Check `~/.abtars/config/peers.json` for configured peer names. If no peers confi
 
 ## Behavior
 
-- Blocks until the peer responds (up to 60s timeout)
-- Hop limit prevents infinite loops (max 12 hops across the chain)
-- Each call is logged as PEER_CALL in the bridge log
-- The peer processes your prompt as if a user sent it — full agent capabilities on their side
+- Chat blocks until the peer responds (up to 60s timeout); the remote side
+  answers discussion-only with no tools, memory writes, or side effects.
+- Chat conversations persist up to ten exchanges (20 messages) with
+  five-minute idle expiry. Omit `session_id` for a new conversation; an
+  unknown or expired ID returns `session_expired`.
+- Delegation is accepted/declined/deferred by the receiver and tracked to a
+  terminal result; poll with `peer_help_status`, cancel with
+  `peer_withdraw_help`.
+- Each call is logged as PEER_CALL in the bridge log.
 
-## If peer_ask fails (connection refused / timeout)
+## If a peer call fails (no open route)
 
-The peer may be behind a firewall that blocks inbound TCP. Use the doorbell:
+Both lanes ride the authenticated WS peer route. With no open route you get
+an explicit `unavailable` error — there is no direct-dial fallback. Check
+route state first (`abtars doctor`, routes probe):
 
 ```
 peer_doorbell(peer_name="<peer>")
 ```
 
-This sends a signed UDP doorbell on port 5353 that tells the peer to establish a direct WSS connection. Flow:
-1. `peer_ask("<peer>", "your question")` → fails (ECONNREFUSED)
-2. `peer_doorbell("<peer>")` → sends signed doorbell query
-3. Peer receives doorbell → initiates outbound WSS connect to you
-4. WSS route established — retry `peer_ask`
+This sends a signed UDP doorbell on port 5353 asking the peer to
+(re)establish its outbound WSS connection to you, then retry the call.
+The doorbell requests a route refresh, not an answer.
 
-**Always try `peer_ask` first.** Only use `peer_doorbell` if direct call fails. The doorbell requests a WSS refresh, not a direct answer.
+## Authentication
 
-## Authentication (CRITICAL)
-
-- All peer calls use **JWT-HS256** auth automatically (`peer-jwt.ts`)
-- The shared secret is the `token` field in `peers.json` for each peer
-- JWT is sent as `Authorization: Bearer <token>` header
-- **NEVER** call a peer endpoint manually (curl/http) without JWT — you'll get 401
-- Always use `peer_ask()` tool which handles signing automatically
-- If you get 401 from a peer, it means auth failed — check token match, clock skew, or peer name mismatch (iss/aud)
+- All peer traffic uses Ed25519 request signing with the enrolled keys in
+  `peers.json` (`verifyKey`); WS routes additionally pin the peer TLS cert.
+- **NEVER** call a peer endpoint manually (curl/http) without proper auth.
+- Always use the `peer_session` / `peer_ask_help` tools, which authenticate
+  automatically. If a call is rejected, check enrollment, trust, and peer
+  name mismatch — not shared secrets.
 
 ## Network topology
 
-Peer IPs are configured in `~/.abtars/config/peers.json`. Each entry has a `url` field with the peer's address and port.
+Peer addresses are configured in `~/.abtars/config/peers.json`. Either side
+can dial out; the route is bidirectional once established, so a peer behind
+a restrictive firewall stays reachable as long as it dials out.

@@ -916,6 +916,9 @@ export class Spin {
         contextProvider: this.contextProvider.current ?? undefined,
         // #1629: trusted per-execution tool authorization mode.
         authorizationMode,
+        // #1786: per-execution sandbox override (peer deny-all). Transports
+        // prefer it over their constructed default; see PromptRequestContext.
+        sandboxPolicy: spec.tools,
       };
       const leaseEmitter = spec.attemptId && spec.executionControl?.generation !== undefined
         ? new ExecutorProgressEmitter()

@@ -35,12 +35,12 @@
 
 ## A2A Protocol
 
-Two abTARS instances communicate via OpenAI-compatible `/v1/chat/completions` endpoint over Tailscale:
+Two abTARS instances communicate over an authenticated WS peer route over Tailscale:
 
-- **Authentication** — per-peer JWT tokens + digital signatures
+- **Authentication** — Ed25519 request signatures on enrolled keys + TLS cert pinning
 - **Anti-loop** — hop counting prevents infinite ping-pong
-- **Firewall traversal** — signed UDP doorbell on port 5353 for NAT/corporate firewalls
-- **Agent tools** — `peer_ask` (single question), `peer_chat` (multi-turn session), `peer_doorbell` (request WSS refresh)
+- **Firewall traversal** — signed UDP doorbell on port 5353 for NAT/corporate firewalls; either side dials out, route is bidirectional
+- **Agent tools** — `peer_session` (quick chat, cardless), `peer_ask_help` (durable delegation), `peer_doorbell` (request WSS refresh)
 
 Configure peers in `~/.abtars/config/peers.json`.
 

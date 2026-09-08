@@ -94,13 +94,13 @@ Multiple abTARS instances communicate directly — agent-to-agent. One instance 
 
 ### Architecture
 
-Each abTARS instance exposes an **Agent API** — an authenticated endpoint on port 3100. Other instances call it using the `peer_ask` tool or delegate tasks via `peer_delegate`.
+Each abTARS instance exposes an **Agent API** plus a persistent WS peer route. Other instances chat via `peer_session` or delegate work via `peer_ask_help`.
 
 ```
-+-----------+  peer_ask / delegate   +-----------+
-| Instance A | ---------------------> | Instance B |
-|   (WSL)   | <--------------------- |   (Mac)   |
-+-----------+      response          +-----------+
++-----------+  peer_session / peer_ask_help   +-----------+
+| Instance A | -----------------------------> | Instance B |
+|   (WSL)   | <----------------------------- |   (Mac)   |
++-----------+  response over the same route  +-----------+
 ```
 
 ### Security
@@ -114,27 +114,26 @@ Two independent layers:
 
 Both must pass. Compromising one doesn't break the other.
 
-### peer_ask tool
+### peer_session tool (quick chat)
 
-The agent uses `peer_ask` to talk to another instance:
+The agent uses `peer_session` for discussion:
 
 ```
-peer_ask(peer: "peer-b", message: "What's your current sleep status?")
+peer_session(peer_name: "peer-b", message: "What's your current sleep status?")
 --> "I'm awake, last slept 6 hours ago."
 ```
 
-The remote instance processes the message through its full agent pipeline (model, memory, tools) and returns the response.
+The remote instance answers discussion-only: no tools, memory writes, or side effects. Pass `session_id` for follow-ups (ten exchanges max).
 
-### peer_delegate tool
+### peer_ask_help tool (delegation)
 
-For background work — fire-and-forget with result delivery via callback:
+For durable work with supervised ownership and terminal result delivery:
 
 ```
-peer_delegate(peer: "peer-b", goal: "Compile the iOS app", priority: "HIGH")
---> { local_card_id: 42, remote_task_id: 7 }
+peer_ask_help(peer: "peer-b", goal: "Compile the iOS app", priority: "HIGH")
 ```
 
-The remote peer completes the work and pushes the result back via callback. Local kanban card auto-updates.
+The remote peer accepts (or declines/defers) and works it through its supervised pipeline.
 
 ### Configuration
 

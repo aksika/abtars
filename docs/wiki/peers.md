@@ -2,15 +2,29 @@
 
 Multiple abTARS instances can communicate directly — agent-to-agent. One instance asks another a question or delegates a task, and gets a response.
 
+## Two lanes (caller-selected)
+
+| Intent | Tool | Receiver | Durable work |
+| --- | --- | --- | --- |
+| Quick discussion / Q&A, including follow-ups | `peer_session(peer_name, message, session_id?)` | Cardless chat turn | None — no card, contract, or Orc run |
+| Delegate work with durable ownership and results | `peer_ask_help(peer, goal, ...)` | Supervised execution | Proxy card, contract, review, terminal result |
+
+A one-sentence delegation is still delegation — use `peer_ask_help`. A long
+discussion is still chat — use `peer_session`. Transport reachability never
+chooses the lane: both ride the authenticated WS peer route. If no route is
+open you get an explicit `unavailable` error (never a silent HTTP retry);
+the route owner dials out and the other side accepts.
+
 ## How it works
 
-Each abTARS instance exposes an **Agent API** — an authenticated HTTPS endpoint on port 3100. Other instances call it using the `peer_ask` tool.
+Each abTARS instance exposes an **Agent API** — an authenticated endpoint
+(default port 7100) plus a persistent WS peer route to each enrolled peer:
 
 ```
-┌──────────┐   peer_ask    ┌──────────┐
-│ Instance A │ ──────────► │ Instance B │
-│ (WSL)    │ ◄──────────── │  (Mac)   │
-└──────────┘   response    └──────────┘
+┌──────────┐   peer_session / peer_ask_help   ┌──────────┐
+│ Instance A │ ──────────────────────────────► │ Instance B │
+│ (WSL)    │ ◄────────────────────────────── │  (Mac)   │
+└──────────┘   response over the same route   └──────────┘
 ```
 
 ## Security
@@ -24,16 +38,26 @@ Two independent layers:
 
 Both must pass. Compromising one doesn't break the other.
 
-## peer_ask tool
+## peer_session tool (quick chat)
 
-The agent uses `peer_ask` to talk to another instance:
+The agent uses `peer_session` for discussion:
 
 ```
-peer_ask(peer: "peer-b", message: "What's your current sleep status?")
+peer_session(peer_name: "peer-b", message: "What's your current sleep status?")
 → "I'm awake, last slept 6 hours ago."
 ```
 
-The remote instance processes the message through its full agent pipeline (model, memory, tools) and returns the response.
+The remote instance answers with a discussion-only turn: no tools, no memory
+writes, no file or config changes, no side effects. Anything needing action
+is answered with a pointer to `peer_ask_help`. Conversations persist up to
+ten exchanges (20 messages) with five-minute idle expiry; pass `session_id`
+for follow-ups, omit it for a new conversation.
+
+## peer_ask_help tool (delegation)
+
+The agent uses `peer_ask_help` to delegate durable work. The remote instance
+accepts (or declines/defers) and works it through its supervised pipeline,
+delivering a terminal result. See the lane table above.
 
 ## Configuration
 

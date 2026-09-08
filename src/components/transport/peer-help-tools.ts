@@ -32,7 +32,7 @@ async function resolveEnrolledPeers(names: string[]): Promise<string[]> {
 
 export const peerAskHelpTool: ToolDefinition = {
   name: "peer_ask_help",
-  description: "Ask a remote peer for help with a task. If peer is omitted, auto-selects an enrolled peer whose inventory matches required capabilities. The receiving peer independently decides whether to accept, decline, or defer.",
+  description: "Delegate durable work to a remote peer (lane 2: delegation, NOT chat). Always creates supervised work with acceptance, review, and terminal result delivery on the receiver. For quick discussion/Q&A with no work products, use peer_session instead. The receiving peer independently decides whether to accept, decline, or defer.",
   parameters: {
     type: "object",
     properties: {

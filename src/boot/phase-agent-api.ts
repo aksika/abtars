@@ -28,7 +28,8 @@ export async function phaseAgentApi(ctx: BootCtx): Promise<PhaseResult> {
   const notifyPeer = (msg: string): void => { sendNotification(ctx, msg); };
   setPeerActivityCallback(notifyPeer);
 
-  // #978: Create A2A platform adapter (routes peer chat through Spin → Orc)
+  // #978/#1786: A2A platform adapter — lane-1 shared P chat receiver.
+  // Delegation (lane 2) stays in PeerHelpService below.
   const { AgentApiAdapter } = await import("../platforms/agent-api/agent-api-adapter.js");
   const a2aAdapter = new AgentApiAdapter();
 
@@ -185,6 +186,20 @@ export async function phaseAgentApi(ctx: BootCtx): Promise<PhaseResult> {
 
         // Register broker request handler for help + remote Pi wire methods
         broker.registerRequestHandler(async (peer, method, payload, _frameId) => {
+          if (method === "peer.chat.v1") {
+            // #1786 lane 1: authenticated peer identity comes from the
+            // socket/signature (already verified) — never payload text.
+            const { parsePeerChatRequest } = await import("../components/peer-transport/peer-chat.js");
+            const parsed = parsePeerChatRequest(payload);
+            if (!parsed.ok) throw new Error(`invalid_request: ${parsed.detail}`);
+            const req = parsed.request;
+            if (req.deadline_at <= Date.now()) throw new Error("timeout: chat deadline already expired");
+            const text = await a2aAdapter.handlePeerChat(peer, req.session_id, {
+              messages: req.messages,
+              deadlineAt: req.deadline_at,
+            });
+            return { version: 1, text };
+          }
           if (method === "help.request.v1") return helpService.handleHelpRequest(peer, payload);
           if (method === "help.status.v1") return helpService.handleHelpStatus(peer, payload);
           if (method === "help.withdraw.v1") return helpService.handleHelpWithdraw(peer, payload);

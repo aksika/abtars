@@ -880,7 +880,7 @@ const taskTool: ToolDefinition = {
 
 const peerSessionTool: ToolDefinition = {
   name: "peer_session",
-  description: "Open or continue a peer-to-peer session with another agent. Messages persist across turns. Use only when the user explicitly asks to contact another agent.",
+  description: "Quick discussion with another agent (lane 1: chat, NOT delegation). Cardless Q&A over the peer route — no Kanban card, no Orc run. For durable work with results, use peer_ask_help instead. Use only when the user explicitly asks to contact another agent.",
   parameters: {
     type: "object",
     properties: {
@@ -897,9 +897,9 @@ const peerSessionTool: ToolDefinition = {
       return JSON.stringify({ error: "Relaying to other peers is not permitted for peer-originated requests. Peers communicate directly.", reason: "peer_relay_blocked" });
     }
     const { resolvePeerName } = await import("./peer-resolver.js");
-    const { callPeer } = await import("../peer-client.js");
+    const { callPeer, PeerCallError } = await import("../peer-client.js");
     const { loadPeerConfig } = await import("../peer-config.js");
-    const { getOrCreateSession, addTurn, isEnded, destroySession } = await import("../peer-sessions.js");
+    const { getOrCreateSession, addTurn, tryBeginTurn, endTurn, isEnded, destroySession } = await import("../peer-sessions.js");
 
     const peerNameRaw = stringValue(args.peer_name).trim();
     const message = stringValue(args.message).trim();
@@ -912,8 +912,15 @@ const peerSessionTool: ToolDefinition = {
     }
     const peerName = resolved.peer;
     const config = loadPeerConfig();
+    const callerId = context?.userId ?? "unknown";
 
-    const session = getOrCreateSession(stringValue(args.session_id).trim() || undefined, peerName);
+    // #1786: conversation ownership binds caller + peer. Unknown/expired IDs
+    // fail here; only omission allocates. Nothing is sent before this check.
+    const lookup = getOrCreateSession(stringValue(args.session_id).trim() || undefined, peerName, callerId);
+    if (!lookup.ok) {
+      return JSON.stringify({ error: lookup.message, code: lookup.code, ended: true });
+    }
+    const session = lookup.session;
 
     // Check turn cap before sending
     if (session.messages.length >= 20) {
@@ -921,13 +928,19 @@ const peerSessionTool: ToolDefinition = {
       return JSON.stringify({ session_id: session.id, response: "[SESSION_END] Turn limit reached.", ended: true, reason: "max-turns" });
     }
 
+    // Serialize: one in-flight turn per conversation.
+    if (!tryBeginTurn(session)) {
+      return JSON.stringify({ error: `Conversation ${session.id} already has a turn in flight`, code: "session_busy", session_id: session.id, ended: false });
+    }
+
     addTurn(session, "user", message);
 
-    // Build full conversation for peer (OpenAI messages format)
-    const prompt = session.messages.map(m => `${m.role === "user" ? "You" : "Peer"}: ${m.content}`).join("\n") + "\n\nRespond to the latest message.";
-
     try {
-      const response = await callPeer(peerName, prompt, config.maxHops);
+      // Requester-owned structured history — never flattened role text.
+      const response = await callPeer(peerName, message, config.maxHops, {
+        sessionId: session.id,
+        messages: session.messages.map(m => ({ role: m.role, content: m.content })),
+      });
       addTurn(session, "assistant", response);
       _peerActivityCb?.(`🤖 Agents: ${config.self.name} ↔ ${peerName} session. [turn ${session.messages.length}]`);
 
@@ -936,8 +949,11 @@ const peerSessionTool: ToolDefinition = {
 
       return JSON.stringify({ session_id: session.id, response, ended, reason });
     } catch (err) {
+      const code = err instanceof PeerCallError ? err.code : undefined;
       destroySession(session.id);
-      return JSON.stringify({ error: `peer_session failed: ${err instanceof Error ? err.message : String(err)}`, session_id: session.id, ended: true });
+      return JSON.stringify({ error: `peer_session failed: ${err instanceof Error ? err.message : String(err)}`, code, session_id: session.id, ended: true });
+    } finally {
+      endTurn(session);
     }
   },
 };

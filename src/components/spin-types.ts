@@ -223,6 +223,11 @@ export interface SpinRequest {
    *  shared settler wins successful validation and releases delivery. */
   deliveryReady?: boolean;
   priority?: string;
+  /**
+   * #1786: per-execution sandbox override. When present it replaces the
+   * transport default for schema presentation AND tool dispatch for this
+   * turn only. Peer chat passes the deny-all peer policy here.
+   */
   tools?: SandboxPolicy;
   timeoutMs?: number;
   /** #1506: absolute deadline owned by the scheduled caller. */
@@ -291,6 +296,12 @@ export interface SpinSessionSpec {
    *  Defaults to `fallback-chain`; sleep sets `configured-only`. */
   candidatePolicy?: CandidatePolicy;
   maxToolRounds?: number; // #1283: per-task circuit breaker override
+  /**
+   * #1786: per-execution sandbox override. When present it replaces the
+   * transport default for schema presentation AND tool dispatch for this
+   * turn only. Peer chat passes the deny-all peer policy here.
+   */
+  tools?: SandboxPolicy;
 
   // Delivery (continuation / pipeline)
   deliveryMode?: DeliveryMode;

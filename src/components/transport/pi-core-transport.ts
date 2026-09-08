@@ -489,7 +489,10 @@ export class PiCoreTransport implements IKiroTransport {
         executionId,
         userId: context?.userId ?? "unknown",
         signal: undefined,
-        sandboxPolicy: this.sandboxPolicy,
+        // #1786: per-execution override wins (peer deny-all); otherwise the
+        // transport-constructed default. Both presentation (below) and
+        // dispatch (executeToolCall via definitionToAgentTool) read this.
+        sandboxPolicy: context?.sandboxPolicy ?? this.sandboxPolicy,
         safety,
         onToolFailure: (diag) => {
           this._lastToolFailure = diag;

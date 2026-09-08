@@ -87,7 +87,7 @@ You (Telegram / Discord / API client)
 abTARS (bridge)
   ├── abmind (Soul — memory, in-process, multi-layer recall, encrypted)
   ├── Skills (core + self-authored during sleep + downloadable)
-  ├── Tools (browse, bash, MCP, peer_ask)
+  ├── Tools (browse, bash, MCP, peer_session, peer_ask_help)
   ├── Tasks (cron scheduler + retry + DoD checks)
   ├── Agent Swarm (Tribe — async background sessions, Orc/Worker delegation)
   │

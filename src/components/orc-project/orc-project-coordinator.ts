@@ -147,7 +147,7 @@ export class OrcProjectCoordinator {
       originKind: origin.originKind,
       cardSource: this.getRootIdentity(projectCardId).source,
       sourcePeer: origin.originPeer,
-    }, goal ?? `Define acceptance contract for project #${projectCardId}; call define_project_contract with project_card_id=${projectCardId}`);
+    }, goal ?? defaultAuthoringGoal(projectCardId));
   }
 
   /**
@@ -409,6 +409,21 @@ export function classifyFailedRelease(
     state: row.state,
     reason: validation.ok ? ("release_rejected" as const) : validation.reason,
   };
+}
+
+/**
+ * #1786: omitted-goal default carries the stored card goal so the authoring
+ * model sees the actual objective. Database failures propagate (never
+ * mistaken for a missing card); missing/blank goals use the generic text.
+ */
+function defaultAuthoringGoal(projectCardId: number): string {
+  const fallback = `Define acceptance contract for project #${projectCardId}; call define_project_contract with project_card_id=${projectCardId}`;
+  // Establish the database capability first: an outage must throw, never be
+  // mistaken for a missing card with a generic fallback.
+  requireTaskDatabase();
+  const goal = kanbanGetCard(projectCardId)?.goal;
+  if (!goal || goal.trim().length === 0) return fallback;
+  return `${goal.trim()}; call define_project_contract with project_card_id=${projectCardId}`;
 }
 
 function defaultRootIdentity(projectCardId: number): OrcRootIdentity {

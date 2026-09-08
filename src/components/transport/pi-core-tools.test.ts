@@ -388,3 +388,32 @@ describe("createPiAgentTools", () => {
     });
   });
 });
+
+describe("peer deny-all policy (#1786)", () => {
+  function peerContext(overrides?: Partial<PiCoreToolContext>): PiCoreToolContext {
+    return {
+      executionId: "exec_peer_1",
+      userId: "peer:molty",
+      sandboxPolicy: buildPolicy("peer"),
+      safety: createPiExecutionSafetyController(new FallbackPolicy([makeCandidate()], makeRegistry())),
+      memoryToolDeps: { current: null },
+      sessionType: "P",
+      ...overrides,
+    };
+  }
+
+  it("presents zero tool schemas to a peer-denied session", () => {
+    const tools = createPiAgentTools(peerContext());
+    expect(tools).toEqual([]);
+  });
+
+  it("denies forged direct dispatch without execution (peer_sandbox)", async () => {
+    const { executeToolCall: realExecute } = await vi.importActual<typeof import("./tool-registry.js")>("./tool-registry.js");
+    const out = await realExecute("peer_session", { peer_name: "kp", message: "hi" }, {
+      sandboxPolicy: buildPolicy("peer"),
+    } as never);
+    const parsed = JSON.parse(out);
+    expect(parsed.error).toMatch(/not available/);
+    expect(parsed.reason).toBe("peer_sandbox");
+  });
+});

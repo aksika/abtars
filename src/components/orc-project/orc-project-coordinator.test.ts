@@ -831,3 +831,66 @@ describe("#1728 review retry escalation", () => {
     expect(h.starts[0]!.spec.maxPromptRounds).toBe(25);
   });
 });
+
+describe("OrcProjectCoordinator omitted authoring goal (#1786)", () => {
+  const DISTINCTIVE = "zxq-distinctive-card-goal-1786";
+
+  async function seedCardWithGoal(goal: string | null): Promise<number> {
+    const { kanbanEnqueue } = await import("../tasks/kanban-board.js");
+    return kanbanEnqueue(`[help:molty] ${DISTINCTIVE}`, "peer", `req-${Date.now()}`, {
+      type: "remote",
+      goal: goal ?? undefined,
+      sourcePeer: "molty",
+    });
+  }
+
+  it("carries the stored card goal into the run row and emitted turn spec", async () => {
+    const h = makeHarness();
+    h.setRootIdentity({ source: "peer", sourcePeer: "molty" });
+    const cardId = await seedCardWithGoal(`Answer this: ${DISTINCTIVE} explain briefly`);
+    seedProject(h.store, cardId);
+
+    const result = h.coordinator.scheduleContractAuthoring(cardId);
+    expect(result.kind).toBe("claimed");
+
+    const row = h.store.db.prepare(`SELECT goal FROM orc_project_runs WHERE project_card_id = ?`).get(cardId) as any;
+    expect(row.goal).toContain(DISTINCTIVE);
+    expect(row.goal).toContain(`call define_project_contract with project_card_id=${cardId}`);
+
+    expect(h.starts).toHaveLength(1);
+    expect(h.starts[0]!.spec.goal).toContain(DISTINCTIVE);
+    expect(h.starts[0]!.spec.goal).toContain(`call define_project_contract with project_card_id=${cardId}`);
+  });
+
+  it("preserves an explicitly supplied goal", async () => {
+    const h = makeHarness();
+    h.setRootIdentity({ source: "peer", sourcePeer: "molty" });
+    const cardId = await seedCardWithGoal(`Answer this: ${DISTINCTIVE}`);
+    seedProject(h.store, cardId);
+
+    const result = h.coordinator.scheduleContractAuthoring(cardId, "explicit caller goal");
+    expect(result.kind).toBe("claimed");
+    const row = h.store.db.prepare(`SELECT goal FROM orc_project_runs WHERE project_card_id = ?`).get(cardId) as any;
+    expect(row.goal).toBe("explicit caller goal");
+    expect(h.starts[0]!.spec.goal).toBe("explicit caller goal");
+  });
+
+  it("falls back to generic text for blank and missing card goals", async () => {
+    const h = makeHarness();
+    h.setRootIdentity({ source: "peer", sourcePeer: "molty" });
+    const blankId = await seedCardWithGoal("   ");
+    seedProject(h.store, blankId);
+    expect(h.coordinator.scheduleContractAuthoring(blankId).kind).toBe("claimed");
+    const blankRow = h.store.db.prepare(`SELECT goal FROM orc_project_runs WHERE project_card_id = ?`).get(blankId) as any;
+    expect(blankRow.goal).toBe(
+      `Define acceptance contract for project #${blankId}; call define_project_contract with project_card_id=${blankId}`,
+    );
+
+    // Missing card entirely (no kanban row) — generic fallback, no throw.
+    const missingId = 999_991;
+    seedProject(h.store, missingId);
+    expect(h.coordinator.scheduleContractAuthoring(missingId).kind).toBe("claimed");
+    const missingRow = h.store.db.prepare(`SELECT goal FROM orc_project_runs WHERE project_card_id = ?`).get(missingId) as any;
+    expect(missingRow.goal).toContain(`project #${missingId}`);
+  });
+});

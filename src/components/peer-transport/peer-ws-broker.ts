@@ -20,6 +20,13 @@ export const MAX_BODY_BYTES = 524_288;     // 512 KiB body
 export const MAX_TIMESTAMP_STR_BYTES = 16; // "9999999999"
 export const HELP_METHODS = new Set(["help.request.v1", "help.status.v1", "help.withdraw.v1", "help.event.v1"]);
 export const PI_REQUEST_METHODS = new Set(["pi.events.list.v1", "pi.events.ack.v1", "pi.control.v1"]);
+// #1786: lane-1 quick chat — ephemeral (never outbox/durable). Membership only;
+// lifecycle is owned by sendEphemeralRequest + the boot chat receiver.
+export const CHAT_METHODS = new Set(["peer.chat.v1"]);
+
+// #1786: ephemeral chat bounds — default 60s, hard cap 120s.
+export const EPHEMERAL_DEFAULT_TIMEOUT_MS = 60_000;
+export const EPHEMERAL_MAX_TIMEOUT_MS = 120_000;
 
 const WIRE_TOKEN_RE = /^[A-Za-z0-9._:-]+$/;
 const NONCE_RE = /^[0-9a-f]{32}$/;
@@ -56,6 +63,17 @@ const OUTBOX_MAX_FILE_BYTES = 10 * 1024 * 1024;
 
 type PendingWaiter = { resolve: (v: unknown) => void; reject: (e: Error) => void; timer: ReturnType<typeof setTimeout> };
 
+// #1786: ephemeral (lane-1 chat) waiter — keyed peer:id, bound to the origin
+// socket generation. Never touches the durable outbox or the in-flight slot.
+interface EphemeralWaiter {
+  peer: string;
+  id: string;
+  gen: number;
+  resolve: (v: unknown) => void;
+  reject: (e: Error) => void;
+  timer: ReturnType<typeof setTimeout>;
+}
+
 interface InFlight {
   entryId: string;
   peer: string;
@@ -88,6 +106,9 @@ export class PeerWsBroker {
   private nonceStore: PeerNonceStore | null = null;
   private nextGen = 1; // global monotonic — survives peer state cleanup
   private peerActivity = new Map<string, number>(); // peer → lastActivityAt
+  // #1786: ephemeral chat waiters (peer:id → waiter) + one-running-chat guard.
+  private ephemeralWaiters = new Map<string, EphemeralWaiter>();
+  private ephemeralActive = new Set<string>();
 
   registerRequestHandler(handler: PeerRequestHandler): void {
     this.requestHandler = handler;
@@ -234,8 +255,83 @@ export class PeerWsBroker {
     });
   }
 
-  sendPush(peer: string, method: string, payload: unknown): boolean {
-    if (!PUSH_ALLOWLIST.has(method)) return false;
+  /**
+   * #1786: lane-1 ephemeral request (closed method set: CHAT_METHODS).
+   * Sends on an existing open authenticated socket and resolves only from a
+   * response on that origin socket. Never appends to the durable outbox,
+   * never occupies the in-flight slot, never retries. No route → immediate
+   * `unavailable` error. One running chat per peer → `busy`. Socket loss,
+   * deadline, or broker disposal ends the wait immediately.
+   */
+  async sendEphemeralRequest<T>(peer: string, method: string, payload: unknown, opts?: { timeoutMs?: number }): Promise<T> {
+    if (!CHAT_METHODS.has(method)) throw new Error(`Ephemeral request refused for non-chat method (${method})`);
+    const socket = this.bestSocket(peer);
+    if (!socket || socket.readyState !== WebSocket.OPEN) {
+      throw new Error(`unavailable: no open route to ${peer}`);
+    }
+    if (this.ephemeralActive.has(peer)) {
+      throw new Error(`busy: chat already running with ${peer}`);
+    }
+    const reg = this.socketRegistration(peer, socket);
+    if (!reg) throw new Error(`unavailable: no open route to ${peer}`);
+
+    const config = loadPeerConfig();
+    const id = `chat_${randomBytes(16).toString("hex")}`;
+    const body = JSON.stringify(payload);
+    const auth = signWsRequest(config.self.name, id, method, `/${method}`, body, config.self.signingKey);
+    const frame = JSON.stringify({
+      type: "request",
+      version: 1,
+      id,
+      method,
+      body,
+      auth: { peerId: config.self.name, ...auth },
+    });
+
+    const timeoutMs = Math.min(opts?.timeoutMs ?? EPHEMERAL_DEFAULT_TIMEOUT_MS, EPHEMERAL_MAX_TIMEOUT_MS);
+    const key = `${peer}:${id}`;
+    this.ephemeralActive.add(peer);
+    return new Promise<T>((resolve, reject) => {
+      const timer = setTimeout(() => {
+        this.ephemeralWaiters.delete(key);
+        this.ephemeralActive.delete(peer);
+        reject(new Error(`timeout: chat with ${peer} exceeded ${timeoutMs}ms`));
+      }, timeoutMs);
+      // Unref so a leaked waiter can never hold the process open.
+      (timer as unknown as { unref?: () => void }).unref?.();
+      this.ephemeralWaiters.set(key, {
+        peer, id, gen: reg.generation,
+        resolve: resolve as (v: unknown) => void,
+        reject, timer,
+      });
+      try {
+        socket.send(frame);
+      } catch (err) {
+        this.ephemeralWaiters.delete(key);
+        this.ephemeralActive.delete(peer);
+        clearTimeout(timer);
+        reject(err instanceof Error ? err : new Error(String(err)));
+      }
+    });
+  }
+
+  /** #1786: reject all ephemeral waiters (broker disposal). Durable state untouched. */
+  disposeEphemeral(reason = "broker disposed"): void {
+    for (const [, w] of this.ephemeralWaiters) {
+      clearTimeout(w.timer);
+      w.reject(new Error(reason));
+    }
+    this.ephemeralWaiters.clear();
+    this.ephemeralActive.clear();
+  }
+
+  private socketRegistration(peer: string, socket: WebSocket): PeerSocketRegistration | null {
+    const state = this.peers.get(peer);
+    if (!state) return null;
+    return state.sockets.find(s => s.socket === socket && s.socket.readyState === WebSocket.OPEN) ?? null;
+  }
+
+  sendPush(peer: string, method: string, payload: unknown): boolean {    if (!PUSH_ALLOWLIST.has(method)) return false;
     const socket = this.bestSocket(peer);
     if (!socket || socket.readyState !== WebSocket.OPEN) return false;
     if (method === "pi.lifecycle.v1") {
@@ -284,6 +380,7 @@ export class PeerWsBroker {
     this.routeListeners = [];
     this.requestHandler = null;
     this.pushHandler = null;
+    this.disposeEphemeral("broker reset");
   }
 
   // ── Private ──────────────────────────────────────────────────────────────
@@ -307,6 +404,15 @@ export class PeerWsBroker {
 
   private detachSocket(peer: string, direction: PeerSocketDirection, generation: number): void {
     const state = this.peers.get(peer);
+    // #1786: origin-socket loss ends ephemeral waits bound to it immediately.
+    for (const [key, w] of this.ephemeralWaiters) {
+      if (w.peer === peer && w.gen === generation) {
+        this.ephemeralWaiters.delete(key);
+        this.ephemeralActive.delete(peer);
+        clearTimeout(w.timer);
+        w.reject(new Error(`unavailable: route to ${peer} lost`));
+      }
+    }
     if (!state) return;
     const idx = state.sockets.findIndex(s => s.direction === direction && s.generation === generation);
     if (idx === -1) return;
@@ -348,6 +454,22 @@ export class PeerWsBroker {
       if (msg.type === "response" && msg.id) {
         const state = this.peers.get(peer);
         if (!state) return;
+
+        // #1786: ephemeral (lane-1) correlation first — tuple (peer, id, gen).
+        // Late responses after timeout/disposal find no waiter and are dropped.
+        const eph = this.ephemeralWaiters.get(`${peer}:${String(msg.id)}`);
+        if (eph) {
+          if (eph.gen !== gen) return; // never complete across socket generations
+          this.ephemeralWaiters.delete(`${peer}:${String(msg.id)}`);
+          this.ephemeralActive.delete(peer);
+          clearTimeout(eph.timer);
+          if (msg.error) {
+            eph.reject(new Error(typeof msg.error === "string" ? msg.error : (msg.error as { message?: string })?.message ?? "chat failed"));
+          } else {
+            eph.resolve(msg.payload);
+          }
+          return;
+        }
 
         if (state.inFlight && state.inFlight.entryId === msg.id) {
           state.outbox.acknowledge(msg.id);
@@ -426,7 +548,7 @@ export class PeerWsBroker {
       this.rejectRequest(peer, msg, gen, "invalid_frame", "Invalid request method");
       return;
     }
-    if (!HELP_METHODS.has(msg.method) && !PI_REQUEST_METHODS.has(msg.method)) {
+    if (!HELP_METHODS.has(msg.method) && !PI_REQUEST_METHODS.has(msg.method) && !CHAT_METHODS.has(msg.method)) {
       this.rejectRequest(peer, msg, gen, "unsupported_method", "Unsupported request method");
       return;
     }

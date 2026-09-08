@@ -49,6 +49,13 @@ export interface PromptRequestContext {
   executionScope?: ToolExecutionScope;
   /** #1527: durable context provider for Pi-core's exclusive before-message projection. */
   contextProvider?: PiDurableContextProvider;
+  /**
+   * #1786: per-execution sandbox override from Spin (`spec.tools`). When
+   * present the transport must prefer it over its constructed default for
+   * both tool schema presentation and dispatch. A transport that cannot
+   * honor it must reject before generation.
+   */
+  sandboxPolicy?: import("../tool-sandbox.js").SandboxPolicy;
   /** #1480: Orc invocation context for durable project ownership fencing. */
   orcContext?: import("../orc-project/orc-project-contracts.js").OrcInvocationContextV2;
   /** #1680: host-owned one-shot turn control for the bound Orc turn. The Pi
