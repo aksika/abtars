@@ -48,7 +48,7 @@ log_event() {
 
 clear_ownership_episode() {
   if [[ "${OWNERSHIP_EPISODE_OPEN:-0}" == "1" ]]; then
-    svc clear-ownership-episode 2>/dev/null || true
+    svc clear-ownership-episode >/dev/null 2>&1 || true
     OWNERSHIP_EPISODE_OPEN=0
     LAST_EVENT_KEY=""
   fi
@@ -95,7 +95,7 @@ if [[ "${ABTARS_WATCHDOG_SOURCE_ONLY:-0}" != "1" ]]; then
 
   # Record watchdog ownership of bridge.lock via the bundled helper (R2.2 — the
   # shell must not mutate JSON directly; this replaces the former inline python3).
-  svc set-watchdog-pid "$$" 2>/dev/null
+  svc set-watchdog-pid "$$" >/dev/null 2>&1 || true
 
   # Signal traps: set in-memory flags only (R4.1). Never kill/lock/mutate here.
   TERMINATE_FLAG=0
@@ -115,7 +115,7 @@ migrate_supervisor_state() {
 read_desired_state() { svc desired-state 2>/dev/null || echo "unavailable"; }
 
 handle_stopped() {
-  svc signal-bridge SIGTERM 2>/dev/null || true
+  svc signal-bridge SIGTERM >/dev/null 2>&1 || true
   logw "Watchdog exit: desiredState=stopped"
   exit 2
 }
@@ -139,8 +139,8 @@ apply_command() {
     stop)
       # Stop dominates (R3.3): desiredState is already = stopped. Terminate the
       # validated bridge, THEN ack, THEN exit 2.
-      svc signal-bridge SIGTERM 2>/dev/null || true
-      svc ack-command "$seq" 2>/dev/null
+      svc signal-bridge SIGTERM >/dev/null 2>&1 || true
+      svc ack-command "$seq" >/dev/null 2>&1 || true
       logw "Watchdog exit: command=stop"
       exit 2
       ;;
@@ -168,16 +168,16 @@ apply_command() {
       FENCE_PRED_IDENTITY="$EXCLUDE_IDENTITY"
       FENCE_TYPE="$type"
       REFUSAL_COUNT=0
-      svc signal-bridge SIGTERM 2>/dev/null || true
-      svc reset-restart-count "command:$type" 2>/dev/null
-      svc ack-command "$seq" 2>/dev/null
+      svc signal-bridge SIGTERM >/dev/null 2>&1 || true
+      svc reset-restart-count "command:$type" >/dev/null 2>&1 || true
+      svc ack-command "$seq" >/dev/null 2>&1 || true
       logw "Planned bridge restart: command=$type"
       PID=""
       PLANNED_RESTART=1
       # A new planned command supersedes any abandoned-transition report from
       # a previous fence (#1719 R4.1): the operator has acted.
       if [[ "${TRANSITION_FAILED_OPEN:-0}" == "1" ]]; then
-        svc clear-ownership-episode 2>/dev/null || true
+        svc clear-ownership-episode >/dev/null 2>&1 || true
         TRANSITION_FAILED_OPEN=0
       fi
       # Raise the transition fence (#1711 R7): observation-only through
@@ -188,7 +188,7 @@ apply_command() {
       ;;
     *)
       # Unknown command: ack and drop so the one-slot queue does not stall.
-      svc ack-command "$seq" 2>/dev/null
+      svc ack-command "$seq" >/dev/null 2>&1 || true
       return 0
       ;;
   esac
@@ -715,7 +715,7 @@ while true; do
         # late replacement after containment, or any completed transition —
         # the diagnostic latch clears; no permanent hidden hold may remain.
         if [[ "${TRANSITION_FAILED_OPEN:-0}" == "1" && "$_vpid" != "$FENCE_PRED_PID" ]]; then
-          svc clear-ownership-episode 2>/dev/null || true
+          svc clear-ownership-episode >/dev/null 2>&1 || true
           TRANSITION_FAILED_OPEN=0
         fi
         if [[ "$_vpid" != "$PID" ]]; then
@@ -748,7 +748,7 @@ except Exception:
           # durable marker, ONE log line, no repetition while unchanged. The
           # healthy-or-not question stays open; we never signal here.
           if [[ "${OWNERSHIP_EPISODE_OPEN:-0}" != "1" ]]; then
-            svc set-ownership-episode "validation-inconclusive:cached-pid=$PID" 2>/dev/null || true
+            svc set-ownership-episode "validation-inconclusive:cached-pid=$PID" >/dev/null 2>&1 || true
             OWNERSHIP_EPISODE_OPEN=1
             LAST_EVENT_KEY=""
             log_event "episode:$PID" "Ownership inconclusive after validation attempts — holding supervision of cached PID $PID"
@@ -811,7 +811,7 @@ except Exception:
     NOW=$(($(date +%s) * 1000))
     if [[ -n "$HB" ]] && (( (NOW - HB) / 1000 > STALE )); then
       DEATH_REASON="stale-heartbeat:$(( (NOW - HB) / 1000 ))s"
-      svc signal-bridge SIGKILL 2>/dev/null || true
+      svc signal-bridge SIGKILL >/dev/null 2>&1 || true
       break
     fi
 
@@ -819,7 +819,7 @@ except Exception:
     # this call restartCount/backoff never decay after a successful recovery.
     _health_now=$(date +%s)
     if (( _health_now - ${LAST_HEALTH_ACCOUNT:-0} >= 60 )); then
-      svc record-healthy 2>/dev/null || true
+      svc record-healthy >/dev/null 2>&1 || true
       LAST_HEALTH_ACCOUNT=$_health_now
     fi
 
@@ -871,7 +871,7 @@ except Exception:
     # path — without adoption the loop would keep re-detecting the dead child
     # PID against the predecessor's valid lock, forever.
     log_event "transition-failed:$FENCE_PRED_PID" "Transition failed: command=${FENCE_TYPE:-unknown} predecessor PID=$FENCE_PRED_PID survived $REFUSAL_COUNT replacement attempts — adopting predecessor; requested transition is abandoned"
-    svc set-ownership-episode "transition-failed:${FENCE_TYPE:-unknown} predecessor-pid=${FENCE_PRED_PID}" 2>/dev/null || true
+    svc set-ownership-episode "transition-failed:${FENCE_TYPE:-unknown} predecessor-pid=${FENCE_PRED_PID}" >/dev/null 2>&1 || true
     TRANSITION_FAILED_OPEN=1
     REFUSAL_COUNT=0
     if ! adopt_validated_bridge; then
@@ -886,8 +886,8 @@ except Exception:
   # (#1719) An ordinary outcome also breaks the consecutive-refusal sequence.
   REFUSAL_COUNT=0
   logw "Bridge died: $DEATH_REASON (PID=$PID)"
-  svc record-death "$DEATH_REASON" 2>/dev/null
-  svc record-healthy 2>/dev/null
+  svc record-death "$DEATH_REASON" >/dev/null 2>&1 || true
+  svc record-healthy >/dev/null 2>&1 || true
 
   BACKOFF_MS="$(svc get-backoff 2>/dev/null || echo 0)"
   if [[ "$BACKOFF_MS" -gt 0 ]]; then
