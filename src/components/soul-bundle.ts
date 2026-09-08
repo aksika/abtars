@@ -116,8 +116,12 @@ export function buildSoulBundle(type: SessionType, bundle?: SessionSoulBundle | 
     const identity = TYPE_IDENTITY[type];
     if (identity) parts.push(identity);
 
-    const skillsCatalog = readOr(join(abtarsHome(), "skills", "skills_catalog.md"));
-    if (skillsCatalog) parts.push(skillsCatalog);
+    // #1786: P answers peer chat with zero tools — the private skills catalog
+    // is neither needed nor disclosed to the answering turn.
+    if (type !== "P") {
+      const skillsCatalog = readOr(join(abtarsHome(), "skills", "skills_catalog.md"));
+      if (skillsCatalog) parts.push(skillsCatalog);
+    }
   }
 
   parts.push(buildCurrentTime());
