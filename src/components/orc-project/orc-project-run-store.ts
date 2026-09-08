@@ -18,6 +18,8 @@ import {
   DEFAULT_ORC_GUARDRAILS,
 } from "./orc-project-contracts.js";
 import { intentPolicyFor, readOrcProjectSnapshot } from "./orc-intent-policy.js";
+import { validateReportArtifact } from "../tasks/task-preflight.js";
+import { parseReportContractSnapshot } from "../tasks/task-state-store.js";
 import { logWarn } from "../logger.js";
 import { emitOrcAlert } from "./orc-alerts.js";
 import { getEffectiveOrcGuardrails } from "../sha/sha-policy.js";
@@ -512,18 +514,65 @@ export class OrcProjectRunStore {
         | { id: string; state: string; outcome: string | null; failure_code: string | null; started_at: string | null; salvage_for_run_id: string | null; goal: string; ownership_generation: number }
         | undefined;
       if (!newest) return { kind: "conflict" as const, reason: "salvage_ineligible" as const };
-      // If newest is successful primary or successful salvage → not needed
-      if (newest.outcome === "completed") {
+      // #1729 v2, 6b: the mechanical report check runs regardless of newest outcome.
+      // A valid report means synthesis already happened — review owns quality, so
+      // route to review. Anything else continues; "present file" alone never skips.
+      // FS + snapshot reads are synchronous (no interleaving in this process); the
+      // durable snapshot cell is re-read below only through this same immutable row.
+      // Legacy rows without a snapshot keep today's routing (not_needed) — the new
+      // trigger applies only to occurrences that went through the new preflight.
+      let snapshotPresent = false;
+      let reportValid = false;
+      try {
+        const snapRow = this.db.prepare(`SELECT report_contract_json, reserved_at FROM task_runs WHERE run_id = ?`).get(taskRunId) as
+          | { report_contract_json: string | null; reserved_at: number }
+          | undefined;
+        if (snapRow?.report_contract_json) {
+          let parsed: unknown;
+          try {
+            parsed = JSON.parse(snapRow.report_contract_json);
+          } catch { parsed = undefined; }
+          const snapshot = parseReportContractSnapshot(parsed);
+          if (snapshot) {
+            snapshotPresent = true;
+            const check = validateReportArtifact(snapshot.artifactPath, snapshot.baseline, {
+              artifactPath: snapshot.artifactPath,
+              artifactLabel: "",
+              requiredSections: snapshot.requiredSections,
+              minBytes: snapshot.minBytes,
+              requiredFiles: [],
+              executables: [],
+              tools: [],
+            }, snapRow.reserved_at, taskRunId);
+            reportValid = check.ok;
+          }
+        }
+      } catch { /* missing column/row → no evidence → today's routing below */ }
+      if (!snapshotPresent || reportValid) {
         return { kind: "conflict" as const, reason: "salvage_not_needed" as const };
       }
-      // If newest is a failed/cancelled/stale salvage (salvage marker not null) → exhausted
+      // #1729 v2, 6c: a marked newest row with a still-invalid report is bounded
+      // failure — covers failed/cancelled/stale salvage (v1) AND a completed
+      // synthesis row whose report is still missing (v2). No review, no retry.
       if (newest.salvage_for_run_id !== null) {
         return { kind: "conflict" as const, reason: "salvage_exhausted" as const };
       }
-      // Must be primary: salvage_for_run_id IS NULL, state released, outcome failed, started_at not null, failure code allowlisted
-      const allowedCodes = new Set(["prompt_round_limit", "provider_failure", "intent_postcondition_unsatisfied"]);
-      if (newest.salvage_for_run_id !== null || newest.state !== "released" || newest.outcome !== "failed" || !newest.started_at || !newest.failure_code || !allowedCodes.has(newest.failure_code)) {
-        return { kind: "conflict" as const, reason: "salvage_ineligible" as const };
+      // #1729 v2, 6d: two admission triggers over one mechanism. Failed newest
+      // keeps the v1 failure-code allowlist; completed newest (released + started,
+      // unmarked — no failure code exists) is the v2 completed-handoff trigger.
+      let admissionTrigger: "failed_primary" | "completed_handoff";
+      if (newest.outcome === "completed") {
+        if (newest.state !== "released" || !newest.started_at) {
+          return { kind: "conflict" as const, reason: "salvage_ineligible" as const };
+        }
+        admissionTrigger = "completed_handoff";
+      } else {
+        // Must be primary: salvage_for_run_id IS NULL, state released, outcome failed, started_at not null, failure code allowlisted
+        const allowedCodes = new Set(["prompt_round_limit", "provider_failure", "intent_postcondition_unsatisfied"]);
+        if (newest.state !== "released" || newest.outcome !== "failed" || !newest.started_at || !newest.failure_code || !allowedCodes.has(newest.failure_code)) {
+          return { kind: "conflict" as const, reason: "salvage_ineligible" as const };
+        }
+        admissionTrigger = "failed_primary";
       }
       const primaryRow = newest;
 
@@ -612,7 +661,9 @@ export class OrcProjectRunStore {
       const admittedOrigin = input.cardSource === "peer" ? "peer" : "local";
       const authenticatedPeer = input.originPeer ?? input.sourcePeer ?? null;
       const originPeer = admittedOrigin === "peer" ? authenticatedPeer : null;
-      const salvageGoal = `[SALVAGE SYNTHESIS] Project #${input.projectCardId} has accepted terminal Worker lanes. Do not spawn, retry, or cancel Workers. Read their durable results with check_workers, synthesize the final report, write the declared report artifact, then call yield_turn so the Reconciler can create the review case.\n\n${primaryRow.goal}`;
+      const salvageGoal = admissionTrigger === "completed_handoff"
+        ? `[SYNTHESIS] Project #${input.projectCardId} has accepted terminal Worker lanes and its primary execution completed at spawn handoff without writing the declared report. Do not spawn, retry, or cancel Workers. Read their durable results with check_workers, synthesize the final report, write the declared report artifact, then call yield_turn so the Reconciler can create the review case.\n\n${primaryRow.goal}`
+        : `[SALVAGE SYNTHESIS] Project #${input.projectCardId} has accepted terminal Worker lanes. Do not spawn, retry, or cancel Workers. Read their durable results with check_workers, synthesize the final report, write the declared report artifact, then call yield_turn so the Reconciler can create the review case.\n\n${primaryRow.goal}`;
       try {
         this.db.prepare(`
           INSERT INTO orc_project_runs

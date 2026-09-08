@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeAll, afterAll, beforeEach } from "vitest";
-import { mkdirSync, rmSync, existsSync } from "node:fs";
+import { mkdirSync, rmSync, existsSync, writeFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { vi } from "vitest";
@@ -388,5 +388,188 @@ describe("OrcProjectRunStore authoring counts (#1628)", () => {
     expect(store.lastAuthoringClaimAt(24, 1)).toBe(later);
     expect(store.lastAuthoringFailureCode(24, 2)).toBeNull();
     expect(store.lastAuthoringClaimAt(24, 2)).toBeNull();
+  });
+});
+
+describe("#1729 v2 synthesis admission", () => {
+  let seq = 5000;
+  const nextId = (): number => ++seq;
+  const isoFuture = (): string => new Date(Date.now() + 3_600_000).toISOString();
+  const isoNow = (): string => new Date().toISOString();
+
+  type Store = import("./orc-project-run-store.js").OrcProjectRunStore;
+
+  async function seedDeliveredProject(s: Store, opts: {
+    reportJson: string | null;
+    newest: { outcome: string; failureCode?: string; marked?: boolean; started?: boolean };
+    lanes?: number;
+  }): Promise<{ root: number; runId: string }> {
+    const kanban = await import("../tasks/kanban-board.js");
+    const review = await import("../project-acceptance/project-review-store.js");
+    const worker = await import("../worker-supervision-store.js");
+    void new review.ProjectReviewStore();
+    void new worker.WorkerSupervisionStore();
+    const root = kanban.kanbanEnqueue("Delivered project", "task", undefined, { type: "O", goal: "g" }) as number;
+    const runId = `run-${root}`;
+    const taskId = `task-${root}`;
+    s.db.prepare(`UPDATE kanban_board SET source_id = ?, due_at = ?, status = 'running' WHERE id = ?`).run(runId, isoFuture(), root);
+    seedProject(s, root, "executing");
+    const now = Date.now();
+    const cols = ["run_id", "task_id", "group_id", "attempt", "trigger", "occurrence_at", "reserved_at", "deadline_at", "phase", "last_progress_at", "progress_sequence", "card_id", "session_id", "execution_id", "terminal_request_json", "report_contract_json", "owner_pid", "owner_started_at"];
+    s.db.prepare(`INSERT INTO task_runs (${cols.join(", ")}) VALUES (${cols.map(() => "?").join(", ")})`).run(
+      runId, taskId, "g", 1, "schedule", now - 60_000, now - 60_000, now + 3_600_000, "executing", now, 0,
+      root, null, null, null, opts.reportJson, process.pid, null);
+    const lanes = opts.lanes ?? 2;
+    for (let i = 0; i < lanes; i++) {
+      const child = kanban.kanbanEnqueue(`lane ${i}`, "agent", undefined, { type: "W", parent_id: root }) as number;
+      s.db.prepare(`UPDATE kanban_board SET status = 'done' WHERE id = ?`).run(child);
+      const attemptId = `a_${root}_${i}`;
+      s.db.prepare(`INSERT INTO worker_attempts (id, card_id, contract_id, ordinal, executor_kind, executor_id, generation, lifecycle, status, started_at) VALUES (?, ?, ?, 1, 'spin-local', 'e1', 1, 'completed', 'done', ?)`)
+        .run(attemptId, child, `pc_${child}`, isoNow());
+      s.db.prepare(`INSERT INTO worker_results (attempt_id, envelope_json, envelope_digest, created_at) VALUES (?, '{}', 'd', ?)`).run(attemptId, isoNow());
+    }
+    const n = opts.newest;
+    s.db.prepare(`INSERT INTO orc_project_runs (id, intent_key, intent_kind, intent_ref, goal, project_card_id, project_generation, ownership_generation, owner_peer, owner_instance_id, global_sequence, origin_kind, origin_peer, task_run_id, salvage_for_run_id, state, outcome, failure_code, started_at, created_at, updated_at)
+      VALUES (?, ?, 'project_execution', NULL, ?, ?, 1, 1, 'local_peer', 'inst_1', NULL, 'local', NULL, ?, ?, 'released', ?, ?, ?, ?, ?)`)
+      .run(`or_${root}_1_x`, `execute:${root}:1`, `primary goal ${root}`, root, runId,
+        n.marked ? `or_${root}_0_x` : null, n.outcome, n.failureCode ?? null,
+        n.started === false ? null : isoNow(), isoNow(), isoNow());
+    // Production-faithful: the primary claim consumed ownership generation 1,
+    // so the synthesis claim allocates 2 (same intent key, distinct generation).
+    s.db.prepare(`INSERT OR IGNORE INTO orc_project_ownership_counters (project_card_id, next_generation) VALUES (?, 2)`).run(root);
+    return { root, runId };
+  }
+
+  const salvageInput = (root: number, runId: string) => ({
+    projectCardId: root,
+    taskRunId: runId,
+    cardSource: "task",
+    originKind: "local" as const,
+    sourcePeer: null,
+  });
+
+  const reportFile = (root: number): string => {
+    const dir = join(TEST_HOME, "workspace", `rep-${root}`);
+    mkdirSync(dir, { recursive: true });
+    const p = join(dir, "Daily-Briefing-2026-09-08.md");
+    writeFileSync(p, "# Daily Briefing\n\n## Stats\n\n- x\n");
+    return p;
+  };
+
+  const snapshotFor = (p: string, baseline: { existed: boolean; size?: number; mtimeMs?: number }): string =>
+    JSON.stringify({ artifactPath: p, minBytes: 10, requiredSections: ["# Daily Briefing", "## Stats"], baseline });
+
+  it("admits one synthesis turn for a completed primary with a missing report (2026-09-08 shape)", async () => {
+    const s = new OrcProjectRunStoreType();
+    ensureSupervisionTable(s);
+    const p = reportFile(nextId()); // path reserved but file never written
+    const missing = p + ".absent";
+    const { root, runId } = await seedDeliveredProject(s, {
+      reportJson: snapshotFor(missing, { existed: false }),
+      newest: { outcome: "completed" },
+    });
+    const result = s.claimSalvageExecution(salvageInput(root, runId), "local_peer", "inst_1");
+    expect(result.kind).toBe("claimed");
+    if (result.kind !== "claimed") return;
+    const row = s.getRun(result.context.runId);
+    expect(row?.salvage_for_run_id).toBe(`or_${root}_1_x`);
+    expect(row?.goal.startsWith("[SYNTHESIS]")).toBe(true);
+    expect(row?.goal).not.toContain("[SALVAGE SYNTHESIS]");
+  });
+
+  it("skips synthesis when the report is already valid", async () => {
+    const s = new OrcProjectRunStoreType();
+    ensureSupervisionTable(s);
+    const p = reportFile(nextId());
+    const { root, runId } = await seedDeliveredProject(s, {
+      reportJson: snapshotFor(p, { existed: false }),
+      newest: { outcome: "completed" },
+    });
+    const before = (s.db.prepare(`SELECT COUNT(*) AS n FROM orc_project_runs`).get() as { n: number }).n;
+    const result = s.claimSalvageExecution(salvageInput(root, runId), "local_peer", "inst_1");
+    expect(result.kind).toBe("conflict");
+    if (result.kind !== "conflict") return;
+    expect(result.reason).toBe("salvage_not_needed");
+    const after = (s.db.prepare(`SELECT COUNT(*) AS n FROM orc_project_runs`).get() as { n: number }).n;
+    expect(after).toBe(before);
+  });
+
+  it("admits synthesis for a stale prior-occurrence report at the same path", async () => {
+    const s = new OrcProjectRunStoreType();
+    ensureSupervisionTable(s);
+    const p = reportFile(nextId());
+    const st = statSync(p);
+    const { root, runId } = await seedDeliveredProject(s, {
+      reportJson: snapshotFor(p, { existed: true, size: st.size, mtimeMs: st.mtimeMs }),
+      newest: { outcome: "completed" },
+    });
+    const result = s.claimSalvageExecution(salvageInput(root, runId), "local_peer", "inst_1");
+    expect(result.kind).toBe("claimed");
+  });
+
+  it("bounds missing-output-after-synthesis as exhausted with no second turn", async () => {
+    const s = new OrcProjectRunStoreType();
+    ensureSupervisionTable(s);
+    const p = reportFile(nextId());
+    const missing = p + ".absent";
+    const { root, runId } = await seedDeliveredProject(s, {
+      reportJson: snapshotFor(missing, { existed: false }),
+      newest: { outcome: "completed" },
+    });
+    const first = s.claimSalvageExecution(salvageInput(root, runId), "local_peer", "inst_1");
+    expect(first.kind).toBe("claimed");
+    if (first.kind !== "claimed") return;
+    // Synthesis ran and released completed, but the report is still missing.
+    expect(s.release(first.context, "completed")).toBe(true);
+    const second = s.claimSalvageExecution(salvageInput(root, runId), "local_peer", "inst_1");
+    expect(second.kind).toBe("conflict");
+    if (second.kind !== "conflict") return;
+    expect(second.reason).toBe("salvage_exhausted");
+    const marked = (s.db.prepare(`SELECT COUNT(*) AS n FROM orc_project_runs WHERE project_card_id = ? AND salvage_for_run_id IS NOT NULL`).get(root) as { n: number }).n;
+    expect(marked).toBe(1);
+    const cases = (s.db.prepare(`SELECT COUNT(*) AS n FROM project_review_cases WHERE project_card_id = ?`).get(root) as { n: number }).n;
+    expect(cases).toBe(0);
+  });
+
+  it("keeps failed-primary salvage on the v1 path and goal", async () => {
+    const s = new OrcProjectRunStoreType();
+    ensureSupervisionTable(s);
+    const p = reportFile(nextId());
+    const missing = p + ".absent";
+    const { root, runId } = await seedDeliveredProject(s, {
+      reportJson: snapshotFor(missing, { existed: false }),
+      newest: { outcome: "failed", failureCode: "prompt_round_limit" },
+    });
+    const result = s.claimSalvageExecution(salvageInput(root, runId), "local_peer", "inst_1");
+    expect(result.kind).toBe("claimed");
+    if (result.kind !== "claimed") return;
+    expect(s.getRun(result.context.runId)?.goal.startsWith("[SALVAGE SYNTHESIS]")).toBe(true);
+  });
+
+  it("routes a failed primary with an already-valid report straight to review (v1 change)", async () => {
+    const s = new OrcProjectRunStoreType();
+    ensureSupervisionTable(s);
+    const p = reportFile(nextId());
+    const { root, runId } = await seedDeliveredProject(s, {
+      reportJson: snapshotFor(p, { existed: false }),
+      newest: { outcome: "failed", failureCode: "prompt_round_limit" },
+    });
+    const result = s.claimSalvageExecution(salvageInput(root, runId), "local_peer", "inst_1");
+    expect(result.kind).toBe("conflict");
+    if (result.kind !== "conflict") return;
+    expect(result.reason).toBe("salvage_not_needed");
+  });
+
+  it("treats legacy rows without a snapshot as no-evidence (today's routing)", async () => {
+    const s = new OrcProjectRunStoreType();
+    ensureSupervisionTable(s);
+    const { root, runId } = await seedDeliveredProject(s, {
+      reportJson: null,
+      newest: { outcome: "completed" },
+    });
+    const result = s.claimSalvageExecution(salvageInput(root, runId), "local_peer", "inst_1");
+    expect(result.kind).toBe("conflict");
+    if (result.kind !== "conflict") return;
+    expect(result.reason).toBe("salvage_not_needed");
   });
 });
