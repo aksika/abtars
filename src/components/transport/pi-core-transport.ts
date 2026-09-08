@@ -10,8 +10,8 @@ import { createPiAgentTools } from "./pi-core-tools.js";
 import type { PiCoreToolContext } from "./pi-core-tools.js";
 import { createPiExecutionSafetyController } from "./pi-core-safety.js";
 import type { SandboxPolicy } from "../tool-sandbox.js";
-import type { AgentMessage } from "./pi-core-types.js";
 import { createCurrentTurnMessage, PiCoreContractError } from "./pi-core-types.js";
+import type { PiExecutionContextSeed, PortTurnIdentity } from "./pi-port.js";
 import type { OutputObserver } from "../session-output-feed.js";
 import type { DurableContextProviderHolder } from "./pi-core-context.js";
 import { resolveCandidateModel, deriveCacheIdentity } from "./pi-ai-adapter.js";
@@ -389,6 +389,12 @@ export class PiCoreTransport implements IKiroTransport {
       // Use provided executionId or allocate a new one
       const executionId = context?.executionId ?? `${sessionKey}_${Date.now()}_${++executionSeq}`;
 
+      // #1777: entry identity is assembled once here. The seed below is the
+      // single product input shared by context projection and host startup —
+      // host identity and its first prompt both derive from it, so a
+      // mismatched host/projection identity cannot be introduced.
+      const identity: PortTurnIdentity = { executionId, sessionId: sessionKey };
+
       // #1748: cache identity — derived ONCE per transport from the first
       // session key (main) or the agent role scope (subagent), never per
       // turn, per execution, or on candidate rotation. Rotating models
@@ -416,8 +422,8 @@ export class PiCoreTransport implements IKiroTransport {
       // Build current-turn marker with image content
       const currentTurn = createCurrentTurnMessage(
         message,
-        executionId,
-        sessionKey,
+        identity.executionId,
+        identity.sessionId,
         durableIntent.mode === "durable" ? durableIntent.beforeMessageId : undefined,
         image ? [{ type: "image", mimeType: image.mime, data: image.base64 }] : undefined,
       );
@@ -508,15 +514,13 @@ export class PiCoreTransport implements IKiroTransport {
       };
       const tools = createPiAgentTools(toolContext);
 
-      // Build context projection with the shared durable provider when available
+      // Build context projection with the shared durable provider when available.
+      // #1777: one seed for both projection and host startup (see above).
+      const seed: PiExecutionContextSeed = { source, executionId: identity.executionId, currentTurn, volatileBlocks };
       const contextProjection = new PiCoreContextProjection(
-        { source, executionId, currentTurn, volatileBlocks },
+        seed,
         systemPrompt,
       );
-
-      const hostMessages: AgentMessage[] = [
-        currentTurn as unknown as AgentMessage,
-      ];
 
       // Collect response text and tool info from events
       let responseText = "";
@@ -524,12 +528,12 @@ export class PiCoreTransport implements IKiroTransport {
       const outputObserver: OutputObserver | undefined = context?.outputObserver;
 
       const host = new PiCoreExecutionHost({
-        executionId,
-        sessionId: sessionKey,
+        // #1777: seed-based startup — identity and first prompt derive from
+        // the same seed the projection consumes (see above).
+        seed,
         initialState: {
           systemPrompt,
           model: piModel,
-          messages: hostMessages,
           tools: tools as unknown as import("@earendil-works/pi-agent-core").AgentTool<any>[],
           // #1619: the clamped effective level for the initial model; Pi Agent
           // turns it into the first request's reasoning option.

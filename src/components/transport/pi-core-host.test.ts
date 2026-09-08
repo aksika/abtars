@@ -15,6 +15,7 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { PiCoreExecutionHost } from "./pi-core-host.js";
 import { DurableContextUnavailableError } from "./pi-core-context.js";
+import { createCurrentTurnMessage } from "./pi-core-types.js";
 import type { LoadedPiAgentCore, PiAgent, AgentEvent, StreamFn, PiAgentCoreModule } from "./pi-core-types.js";
 import type { InstructionLease } from "../spin-types.js";
 
@@ -100,12 +101,29 @@ function makeLoadedPiAgentCore(mockAgent: PiAgent): LoadedPiAgentCore {
 }
 
 describe("PiCoreExecutionHost", () => {
-  const defaultOpts = {
+  // #1777: the seed is the single startup input — host identity and the
+  // initial prompt both derive from it. No parallel executionId/sessionId/
+  // messages inputs exist anymore.
+  const defaultSeed = {
+    source: { mode: "ephemeral" as const, sessionKey: "session_1" },
     executionId: "exec_1",
-    sessionId: "session_1",
-    initialState: { systemPrompt: "You are a helpful assistant.", model: { id: "test-model" }, messages: [{ role: "user", content: "hello" }] },
+    currentTurn: createCurrentTurnMessage("hello", "exec_1", "session_1"),
+    volatileBlocks: [] as Array<{ kind: string; content: string }>,
+  };
+  const defaultOpts = {
+    seed: defaultSeed,
+    initialState: { systemPrompt: "You are a helpful assistant.", model: { id: "test-model" } },
     streamFn: vi.fn() as unknown as StreamFn,
   };
+
+  function seedFor(executionId: string, sessionId: string, text: string) {
+    return {
+      source: { mode: "ephemeral" as const, sessionKey: sessionId },
+      executionId,
+      currentTurn: createCurrentTurnMessage(text, executionId, sessionId),
+      volatileBlocks: [] as Array<{ kind: string; content: string }>,
+    };
+  }
 
   beforeEach(() => {
     vi.restoreAllMocks();
@@ -127,7 +145,10 @@ describe("PiCoreExecutionHost", () => {
     // enforceable here without introducing speculative module-level registry state.
     const host = new PiCoreExecutionHost(defaultOpts);
     expect(host.executionId).toBe("exec_1");
-    const host2 = new PiCoreExecutionHost({ ...defaultOpts, executionId: "exec_2" });
+    const host2 = new PiCoreExecutionHost({
+      ...defaultOpts,
+      seed: seedFor("exec_2", "session_1", "hello"),
+    });
     expect(host2.executionId).toBe("exec_2");
     expect(host.executionId).not.toBe(host2.executionId);
   });
@@ -154,10 +175,7 @@ describe("PiCoreExecutionHost", () => {
     };
     const host = new PiCoreExecutionHost({
       ...defaultOpts,
-      initialState: {
-        ...defaultOpts.initialState,
-        messages: [{ role: "user", content: "current turn" }],
-      },
+      seed: seedFor("exec_1", "session_1", "current turn"),
       contextProjection: projection as never,
       transformOptions: { hostGeneration: 0 },
     });
@@ -186,16 +204,23 @@ describe("PiCoreExecutionHost", () => {
       maxTokens: 128,
     };
     const host = new PiCoreExecutionHost({
-      executionId: "real_exec",
-      sessionId: "real_session",
-      initialState: { systemPrompt: "system", model, messages: [], tools: [] },
-      streamFn: vi.fn() as unknown as StreamFn,
+      seed: seedFor("real_exec", "real_session", "contract probe"),
+      initialState: { systemPrompt: "system", model, tools: [] },
+      // #1777: startup always prompts the seed's current turn, so the real
+      // Agent attempts a provider call here. No provider exists in this
+      // contract test — the refusal must surface as a terminal settlement,
+      // never a hang.
+      streamFn: (() => { throw new Error("no provider in contract test"); }) as unknown as StreamFn,
     });
     await host.start({
       module: { Agent: real.Agent },
       installation: { executable: "", packageRoot: "", version: "0.85.1", source: "path", pinStatus: "at-pin", moduleRoots: { ai: "", tui: "", agentCore: "" } },
     });
-    expect(host.state).toBe("running");
+    expect(host.isSettled).toBe(true);
+    // Observed against Pi 0.85.1: the real Agent surfaces the provider
+    // refusal as a terminal agent_end rather than hanging the prompt. The
+    // load-bearing pins are termination (never a hang) and safe cancel.
+    await expect(host.waitForSettlement()).resolves.toBe("agent_end");
     host.cancel();
     await host.waitForSettlement();
     expect(host.isSettled).toBe(true);
@@ -223,8 +248,8 @@ describe("PiCoreExecutionHost", () => {
   it("isolates concurrent executions", async () => {
     const { agent: agent1, resolvePrompt: resolvePrompt1 } = makeMockAgent();
     const { agent: agent2, resolvePrompt: resolvePrompt2 } = makeMockAgent();
-    const host1 = new PiCoreExecutionHost({ ...defaultOpts, executionId: "exec_1" });
-    const host2 = new PiCoreExecutionHost({ ...defaultOpts, executionId: "exec_2" });
+    const host1 = new PiCoreExecutionHost({ ...defaultOpts, seed: seedFor("exec_1", "session_1", "hello") });
+    const host2 = new PiCoreExecutionHost({ ...defaultOpts, seed: seedFor("exec_2", "session_1", "hello") });
     const loaded1 = makeLoadedPiAgentCore(agent1);
     const loaded2 = makeLoadedPiAgentCore(agent2);
 
@@ -540,29 +565,35 @@ describe("PiCoreExecutionHost", () => {
     expect(host.isSettled).toBe(true);
   });
 
-  it("#1622: a host started with no current-turn messages stays running (no invented run)", async () => {
-    const { agent } = makeMockAgent();
-    const host = new PiCoreExecutionHost({
-      ...defaultOpts,
-      initialState: { ...defaultOpts.initialState, messages: [] },
-    });
+  it("#1777: derives identity and the initial prompt from the seed", async () => {
+    // Replaces the removed `initialState.messages` input path: there is no
+    // host start without the seed's current turn, and no second identity.
+    const { agent, resolvePrompt } = makeMockAgent();
+    const seed = seedFor("exec_9", "session_9", "seeded hello");
+    const host = new PiCoreExecutionHost({ ...defaultOpts, seed });
+    expect(host.executionId).toBe("exec_9");
+    expect(host.sessionId).toBe("session_9");
     const loaded = makeLoadedPiAgentCore(agent);
 
-    await host.start(loaded);
-    expect(host.state).toBe("running");
-    expect(host.isSettled).toBe(false);
-    expect(agent.prompt).not.toHaveBeenCalled();
+    const startPromise = host.start(loaded).catch(() => {});
+    resolvePrompt();
+    await startPromise;
 
-    host.cancel();
-    await expect(host.waitForSettlement()).resolves.toBe("cancelled");
+    expect(agent.prompt).toHaveBeenCalledTimes(1);
+    expect(agent.prompt).toHaveBeenCalledWith([seed.currentTurn]);
   });
 });
 
 describe("#1619 host reasoning/context wiring", () => {
-  const localOpts = {
+  const localSeed = {
+    source: { mode: "ephemeral" as const, sessionKey: "session_1" },
     executionId: "exec_1",
-    sessionId: "session_1",
-    initialState: { systemPrompt: "You are a helpful assistant.", model: { id: "test-model" }, messages: [{ role: "user", content: "hello" }] },
+    currentTurn: createCurrentTurnMessage("hello", "exec_1", "session_1"),
+    volatileBlocks: [] as Array<{ kind: string; content: string }>,
+  };
+  const localOpts = {
+    seed: localSeed,
+    initialState: { systemPrompt: "You are a helpful assistant.", model: { id: "test-model" } },
     streamFn: vi.fn() as unknown as StreamFn,
   };
 

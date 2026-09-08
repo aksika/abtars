@@ -5,7 +5,7 @@ import type { AgentTool, AgentToolResult } from "./pi-core-types.js";
 export { PI_CORE_TOOL_RESULT_MAX_CHARS } from "./tool-result-limits.js";
 import type { PiExecutionSafetyController } from "./pi-core-safety.js";
 import { getToolDefinitions, executeToolCall, checkToolAvailability } from "./tool-registry.js";
-import type { ToolDefinition } from "./tool-registry.js";
+import type { PortToolDescriptor } from "./pi-port.js";
 import type { SandboxPolicy } from "../tool-sandbox.js";
 import { checkTool } from "../tool-sandbox.js";
 import { PiCoreToolExecutionError, parseToolResultToDiagnostic, buildUnknownDiagnostic } from "./tool-failure-diagnostic.js";
@@ -100,18 +100,26 @@ export function validatePiSchemaOrThrow(schema: Record<string, unknown>): void {
   }
 }
 
-function definitionToAgentTool(def: ToolDefinition, context: PiCoreToolContext): AgentTool {
-  validatePiSchemaOrThrow(def.parameters);
+/**
+ * #1777: the converter depends only on the descriptor portion of a registry
+ * definition (name/description/parameters). The full `ToolDefinition` stays
+ * with the registry — dispatch binds by tool name via `executeToolCall`, and
+ * a descriptor is presentation metadata, never authority to execute a tool.
+ * `ToolDefinition` remains assignable here; using a registry-only field
+ * inside this function is a compile error by construction.
+ */
+function definitionToAgentTool(descriptor: PortToolDescriptor, context: PiCoreToolContext): AgentTool {
+  validatePiSchemaOrThrow(descriptor.parameters);
 
-  const adapted = adaptParameters(def.parameters ?? {});
+  const adapted = adaptParameters(descriptor.parameters ?? {});
   const parameters = context.createUnsafeSchema
     ? context.createUnsafeSchema(adapted)
     : adapted;
 
   return {
-    name: def.name,
-    description: def.description,
-    label: def.name,
+    name: descriptor.name,
+    description: descriptor.description,
+    label: descriptor.name,
     parameters: parameters as import("typebox").TSchema,
     executionMode: "sequential",
 
@@ -123,7 +131,7 @@ function definitionToAgentTool(def: ToolDefinition, context: PiCoreToolContext):
       const params = rawParams && typeof rawParams === "object" && !Array.isArray(rawParams)
         ? rawParams as Record<string, unknown>
         : {};
-      const toolDecision = context.safety.beforeTool(def.name, params);
+      const toolDecision = context.safety.beforeTool(descriptor.name, params);
       if (toolDecision.decision === "skip") {
         return {
           content: [{ type: "text", text: "Tool call skipped — batch cancelled" }],
@@ -131,7 +139,7 @@ function definitionToAgentTool(def: ToolDefinition, context: PiCoreToolContext):
         };
       }
       if (toolDecision.decision === "error") {
-        const decisionDiag = buildUnknownDiagnostic(context.executionId, def.name, toolDecision.reason);
+        const decisionDiag = buildUnknownDiagnostic(context.executionId, descriptor.name, toolDecision.reason);
         context.onToolFailure?.(decisionDiag);
         throw new PiCoreToolExecutionError(decisionDiag);
       }
@@ -142,7 +150,7 @@ function definitionToAgentTool(def: ToolDefinition, context: PiCoreToolContext):
       let outcomeRecorded = false;
       let lastDiag: ToolFailureDiagnosticV1 | undefined;
       try {
-        const result = await executeToolCall(def.name, params, {
+        const result = await executeToolCall(descriptor.name, params, {
           userId: context.userId,
           executionId: context.executionId,
           signal: signal ?? context.signal,
@@ -164,13 +172,13 @@ function definitionToAgentTool(def: ToolDefinition, context: PiCoreToolContext):
           context.safety.requestStop(`intent satisfied: ${terminal.code}`);
         }
 
-        const diag = parseToolResultToDiagnostic(result, context.executionId, def.name);
+        const diag = parseToolResultToDiagnostic(result, context.executionId, descriptor.name);
         if (diag) {
           lastDiag = diag;
-          logWarn(TAG, `Tool ${def.name} failed [${diag.execution_id}]: ${diag.reason}${diag.command_fingerprint ? " fp:" + diag.command_fingerprint : ""}`);
+          logWarn(TAG, `Tool ${descriptor.name} failed [${diag.execution_id}]: ${diag.reason}${diag.command_fingerprint ? " fp:" + diag.command_fingerprint : ""}`);
         }
 
-        if (def.name === "memory_store") {
+        if (descriptor.name === "memory_store") {
           try {
             const parsed = JSON.parse(result) as { stored?: boolean };
             const classification = Number(params["classification"] ?? params["class"] ?? 1);
@@ -183,12 +191,12 @@ function definitionToAgentTool(def: ToolDefinition, context: PiCoreToolContext):
           }
         }
 
-        const outcome = context.safety.afterTool(def.name, result);
+        const outcome = context.safety.afterTool(descriptor.name, result);
         outcomeRecorded = true;
         if (outcome.decision === "error") {
           const finalDiag = lastDiag
             ? { ...lastDiag, reason: "repeated_failure" as const, safety_incident: "repeated_failure" as const }
-            : buildUnknownDiagnostic(context.executionId, def.name, outcome.reason);
+            : buildUnknownDiagnostic(context.executionId, descriptor.name, outcome.reason);
           context.onToolFailure?.(finalDiag);
           throw new PiCoreToolExecutionError(finalDiag);
         }
@@ -199,20 +207,20 @@ function definitionToAgentTool(def: ToolDefinition, context: PiCoreToolContext):
         context.onToolSuccess?.();
 
         return {
-          content: [{ type: "text", text: limitPiCoreToolResult(def.name, result) }],
-          details: { tool: def.name },
+          content: [{ type: "text", text: limitPiCoreToolResult(descriptor.name, result) }],
+          details: { tool: descriptor.name },
         };
       } catch (err) {
         if (err instanceof PiCoreToolExecutionError) throw err;
 
         const errorClass = err instanceof Error ? err.name : "unknown";
         const errorMsg = err instanceof Error ? err.message : String(err);
-        const fallbackDiag = buildUnknownDiagnostic(context.executionId, def.name, errorMsg);
+        const fallbackDiag = buildUnknownDiagnostic(context.executionId, descriptor.name, errorMsg);
         context.onToolFailure?.(fallbackDiag);
-        logWarn(TAG, `Tool ${def.name} execution failed [${context.executionId}] (${errorClass})`);
+        logWarn(TAG, `Tool ${descriptor.name} execution failed [${context.executionId}] (${errorClass})`);
 
         if (!outcomeRecorded) {
-          context.safety.afterTool(def.name, JSON.stringify({ error: errorClass }));
+          context.safety.afterTool(descriptor.name, JSON.stringify({ error: errorClass }));
         }
         throw new PiCoreToolExecutionError(fallbackDiag);
       }
