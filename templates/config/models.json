@@ -1,146 +1,14 @@
 {
-  "claude-opus-4.6": {
-    "contextWindow": 1000000,
-    "maxOutput": 16384,
-    "rank": 1,
-    "cost": {
-      "input": 2.2,
-      "output": 2.2
-    },
-    "transports": [
-      "kiro"
-    ]
-  },
-  "claude-sonnet-4.6": {
-    "contextWindow": 1000000,
-    "maxOutput": 16384,
-    "rank": 1,
-    "cost": {
-      "input": 1.3,
-      "output": 1.3
-    },
-    "transports": [
-      "kiro"
-    ]
-  },
-  "deepseek-3.2": {
-    "contextWindow": 128000,
-    "maxOutput": 8192,
-    "rank": 2,
-    "cost": {
-      "input": 0.25,
-      "output": 0.25
-    },
-    "transports": [
-      "kiro"
-    ]
-  },
-  "minimax-m2.5": {
-    "contextWindow": 128000,
-    "maxOutput": 8192,
-    "rank": 2,
-    "cost": {
-      "input": 0.25,
-      "output": 0.25
-    },
-    "transports": [
-      "kiro"
-    ]
-  },
-  "minimax-m2.1": {
-    "contextWindow": 128000,
-    "maxOutput": 8192,
-    "rank": 3,
-    "cost": {
-      "input": 0.15,
-      "output": 0.15
-    },
-    "transports": [
-      "kiro"
-    ]
-  },
-  "glm-5": {
-    "contextWindow": 128000,
-    "maxOutput": 8192,
-    "rank": 3,
-    "cost": {
-      "input": 0.5,
-      "output": 0.5
-    },
-    "transports": [
-      "kiro"
-    ]
-  },
-  "qwen3-coder-next": {
-    "contextWindow": 128000,
-    "maxOutput": 8192,
-    "rank": 3,
-    "cost": {
-      "input": 0.05,
-      "output": 0.05
-    },
-    "transports": [
-      "kiro"
-    ]
-  },
   "gemini-2.5-flash": {
     "contextWindow": 1000000,
     "maxOutput": 65536,
     "rank": 3,
     "cost": {
-      "input": 0.15,
-      "output": 0.6
+      "input": 1.5e-07,
+      "output": 6e-07
     },
     "transports": [
       "gemini"
-    ]
-  },
-  "gemini-2.5-pro": {
-    "contextWindow": 1000000,
-    "maxOutput": 65536,
-    "rank": 2,
-    "cost": {
-      "input": 1.25,
-      "output": 10
-    },
-    "transports": [
-      "gemini"
-    ]
-  },
-  "kimi-k2.5:cloud": {
-    "contextWindow": 262144,
-    "maxOutput": 16384,
-    "rank": 2,
-    "cost": {
-      "input": 0,
-      "output": 0
-    },
-    "transports": [
-      "ollama"
-    ]
-  },
-  "minimax-m2.5:cloud": {
-    "contextWindow": 128000,
-    "maxOutput": 8192,
-    "rank": 3,
-    "cost": {
-      "input": 0,
-      "output": 0
-    },
-    "transports": [
-      "ollama"
-    ]
-  },
-  "qwen3.5:cloud": {
-    "contextWindow": 131072,
-    "maxOutput": 8192,
-    "rank": 3,
-    "cost": {
-      "input": 0,
-      "output": 0
-    },
-    "transports": [
-      "ollama"
     ]
   },
   "google/gemma-4-26b-a4b-it:free": {
@@ -156,34 +24,6 @@
     ],
     "description": "MoE, 3.8B active/26B total, #6 open Arena AI ELO 1441, native tool calling, free, 256K context",
     "validatedAt": "2026-04-16"
-  },
-  "nemotron-3-super:cloud": {
-    "contextWindow": 262144,
-    "maxOutput": 16384,
-    "rank": 2,
-    "cost": {
-      "input": 0,
-      "output": 0
-    },
-    "transports": [
-      "ollama"
-    ],
-    "description": "Nvidia Nemotron 3 Super 120B MoE. Free Ollama cloud + OpenRouter.",
-    "validatedAt": "2026-04-24"
-  },
-  "inclusionai/ling-2.6-1t": {
-    "contextWindow": 262144,
-    "maxOutput": 16384,
-    "rank": 2,
-    "cost": {
-      "input": 0,
-      "output": 0
-    },
-    "transports": [
-      "openrouter"
-    ],
-    "description": "InclusionAI Ling 2.6 1T. Free OpenRouter. 262K context.",
-    "validatedAt": "2026-04-24"
   },
   "google/gemini-2.5-flash": {
     "contextWindow": 1048576,
@@ -229,8 +69,8 @@
     "maxOutput": 16384,
     "rank": 2,
     "cost": {
-      "input": 0.071,
-      "output": 0.1
+      "input": 7.099999999999999e-08,
+      "output": 1.0000000000000001e-07
     },
     "transports": [
       "openrouter"
@@ -263,21 +103,6 @@
     ],
     "description": "DeepSeek V4 Pro - strongest DeepSeek model. 1M context. $0.435/$0.87 per 1M tokens.",
     "validatedAt": "2026-07-10"
-  },
-  "qwen/qwen3-coder:free": {
-    "contextWindow": 1048576,
-    "maxOutput": 262000,
-    "rank": 2,
-    "cost": {
-      "input": 0,
-      "output": 0
-    },
-    "transports": [
-      "openrouter"
-    ],
-    "description": "Scouted 2026-07-10",
-    "validatedAt": "2026-07-10",
-    "status": "dead"
   },
   "nvidia/nemotron-3-ultra-550b-a55b:free": {
     "contextWindow": 1000000,
@@ -380,21 +205,6 @@
     "validatedAt": "2026-07-10",
     "status": "dead"
   },
-  "qwen/qwen3-next-80b-a3b-instruct:free": {
-    "contextWindow": 262144,
-    "maxOutput": 0,
-    "rank": 2,
-    "cost": {
-      "input": 0,
-      "output": 0
-    },
-    "transports": [
-      "openrouter"
-    ],
-    "description": "Scouted 2026-07-10",
-    "validatedAt": "2026-07-10",
-    "status": "dead"
-  },
   "cohere/north-mini-code:free": {
     "contextWindow": 256000,
     "maxOutput": 64000,
@@ -485,126 +295,6 @@
     "validatedAt": "2026-07-10",
     "status": "dead"
   },
-  "meta-llama/llama-3.2-3b-instruct:free": {
-    "contextWindow": 131072,
-    "maxOutput": 0,
-    "rank": 3,
-    "cost": {
-      "input": 0,
-      "output": 0
-    },
-    "transports": [
-      "openrouter"
-    ],
-    "description": "Scouted 2026-07-10",
-    "validatedAt": "2026-07-10",
-    "status": "dead"
-  },
-  "nousresearch/hermes-3-llama-3.1-405b:free": {
-    "contextWindow": 131072,
-    "maxOutput": 0,
-    "rank": 3,
-    "cost": {
-      "input": 0,
-      "output": 0
-    },
-    "transports": [
-      "openrouter"
-    ],
-    "description": "Scouted 2026-07-10",
-    "validatedAt": "2026-07-10",
-    "status": "dead"
-  },
-  "nvidia/nemotron-3.5-content-safety:free": {
-    "contextWindow": 128000,
-    "maxOutput": 8192,
-    "rank": 3,
-    "cost": {
-      "input": 0,
-      "output": 0
-    },
-    "transports": [
-      "openrouter"
-    ],
-    "description": "Scouted 2026-07-10",
-    "validatedAt": "2026-07-10",
-    "status": "dead"
-  },
-  "nvidia/nemotron-nano-12b-v2-vl:free": {
-    "contextWindow": 128000,
-    "maxOutput": 128000,
-    "rank": 3,
-    "cost": {
-      "input": 0,
-      "output": 0
-    },
-    "transports": [
-      "openrouter"
-    ],
-    "description": "Scouted 2026-07-10",
-    "validatedAt": "2026-07-10",
-    "status": "dead"
-  },
-  "nvidia/nemotron-nano-9b-v2:free": {
-    "contextWindow": 128000,
-    "maxOutput": 0,
-    "rank": 3,
-    "cost": {
-      "input": 0,
-      "output": 0
-    },
-    "transports": [
-      "openrouter"
-    ],
-    "description": "Scouted 2026-07-10",
-    "validatedAt": "2026-07-10",
-    "status": "dead"
-  },
-  "liquid/lfm-2.5-1.2b-thinking:free": {
-    "contextWindow": 32768,
-    "maxOutput": 0,
-    "rank": 3,
-    "cost": {
-      "input": 0,
-      "output": 0
-    },
-    "transports": [
-      "openrouter"
-    ],
-    "description": "Scouted 2026-07-10",
-    "validatedAt": "2026-07-10",
-    "status": "dead"
-  },
-  "liquid/lfm-2.5-1.2b-instruct:free": {
-    "contextWindow": 32768,
-    "maxOutput": 0,
-    "rank": 3,
-    "cost": {
-      "input": 0,
-      "output": 0
-    },
-    "transports": [
-      "openrouter"
-    ],
-    "description": "Scouted 2026-07-10",
-    "validatedAt": "2026-07-10",
-    "status": "dead"
-  },
-  "cognitivecomputations/dolphin-mistral-24b-venice-edition:free": {
-    "contextWindow": 32768,
-    "maxOutput": 0,
-    "rank": 3,
-    "cost": {
-      "input": 0,
-      "output": 0
-    },
-    "transports": [
-      "openrouter"
-    ],
-    "description": "Scouted 2026-07-10",
-    "validatedAt": "2026-07-10",
-    "status": "dead"
-  },
   "xiaomi/mimo-v2.5": {
     "contextWindow": 1048576,
     "maxOutput": 8192,
@@ -647,34 +337,6 @@
     "description": "OpenRouter leaderboard top 20 (rank 4)",
     "validatedAt": "2026-07-10"
   },
-  "anthropic/claude-opus-4.7": {
-    "contextWindow": 1000000,
-    "maxOutput": 16384,
-    "rank": 1,
-    "cost": {
-      "input": 5e-06,
-      "output": 2.5e-05
-    },
-    "transports": [
-      "openrouter"
-    ],
-    "description": "OpenRouter leaderboard top 20 (rank 6)",
-    "validatedAt": "2026-07-10"
-  },
-  "anthropic/claude-opus-4.8": {
-    "contextWindow": 1000000,
-    "maxOutput": 16384,
-    "rank": 1,
-    "cost": {
-      "input": 5e-06,
-      "output": 2.5e-05
-    },
-    "transports": [
-      "openrouter"
-    ],
-    "description": "OpenRouter leaderboard top 20 (rank 8)",
-    "validatedAt": "2026-07-10"
-  },
   "stepfun/step-3.7-flash": {
     "contextWindow": 256000,
     "maxOutput": 8192,
@@ -687,34 +349,6 @@
       "openrouter"
     ],
     "description": "OpenRouter leaderboard top 20 (rank 10)",
-    "validatedAt": "2026-07-10"
-  },
-  "anthropic/claude-sonnet-4.6": {
-    "contextWindow": 1000000,
-    "maxOutput": 16384,
-    "rank": 1,
-    "cost": {
-      "input": 3e-06,
-      "output": 1.5e-05
-    },
-    "transports": [
-      "openrouter"
-    ],
-    "description": "OpenRouter leaderboard top 20 (rank 11)",
-    "validatedAt": "2026-07-10"
-  },
-  "openai/gpt-5.5": {
-    "contextWindow": 1050000,
-    "maxOutput": 16384,
-    "rank": 1,
-    "cost": {
-      "input": 5e-06,
-      "output": 3e-05
-    },
-    "transports": [
-      "openrouter"
-    ],
-    "description": "OpenRouter leaderboard top 20 (rank 12)",
     "validatedAt": "2026-07-10"
   },
   "google/gemini-3-flash-preview": {
@@ -811,20 +445,6 @@
       "openrouter"
     ]
   },
-  "inclusionai/ling-2.6-1t:free": {
-    "contextWindow": 262144,
-    "maxOutput": 16384,
-    "rank": 2,
-    "cost": {
-      "input": 0,
-      "output": 0
-    },
-    "transports": [
-      "openrouter"
-    ],
-    "description": "InclusionAI Ling 2.6 1T. Free OpenRouter. 262K context.",
-    "validatedAt": "2026-04-24"
-  },
   "deepseek-v4-flash": {
     "contextWindow": 1000000,
     "maxOutput": 384000,
@@ -890,32 +510,6 @@
     ],
     "status": "alive"
   },
-  "minimax-m2.7": {
-    "contextWindow": 204800,
-    "maxOutput": 131072,
-    "rank": 2,
-    "cost": {
-      "input": 3e-07,
-      "output": 1.2e-06
-    },
-    "transports": [
-      "opencode-go"
-    ],
-    "status": "alive"
-  },
-  "kimi-k2.6": {
-    "contextWindow": 262144,
-    "maxOutput": 65536,
-    "rank": 2,
-    "cost": {
-      "input": 9.499999999999999e-07,
-      "output": 4e-06
-    },
-    "transports": [
-      "opencode-go"
-    ],
-    "status": "alive"
-  },
   "kimi-k2.7-code": {
     "contextWindow": 262144,
     "maxOutput": 262144,
@@ -936,19 +530,6 @@
     "cost": {
       "input": 3e-06,
       "output": 1.5e-05
-    },
-    "transports": [
-      "opencode-go"
-    ],
-    "status": "alive"
-  },
-  "glm-5.1": {
-    "contextWindow": 202752,
-    "maxOutput": 32768,
-    "rank": 1,
-    "cost": {
-      "input": 1.4e-06,
-      "output": 4.4e-06
     },
     "transports": [
       "opencode-go"
@@ -1058,5 +639,152 @@
       "tokenharbor"
     ],
     "status": "alive"
+  },
+  "z-ai/glm-5.3-flash": {
+    "contextWindow": 1048576,
+    "maxOutput": 131072,
+    "rank": 1,
+    "provider": "relace/fp4",
+    "cost": {
+      "input": 5e-08,
+      "output": 1.667e-07
+    },
+    "transports": [
+      "openrouter"
+    ],
+    "description": "Z.ai GLM 5.3 Flash - routed via relace/fp4",
+    "validatedAt": "2026-08-30"
+  },
+  "deepseek/deepseek-v4-flash-0731": {
+    "contextWindow": 1048576,
+    "maxOutput": 393216,
+    "rank": 1,
+    "provider": "open-inference/fp8",
+    "cost": {
+      "input": 3e-08,
+      "output": 1.6e-07
+    },
+    "transports": [
+      "openrouter"
+    ],
+    "description": "DeepSeek V4 Flash 0731 - routed via open-inference/fp8",
+    "validatedAt": "2026-08-30"
+  },
+  "tencent/hy4-preview": {
+    "contextWindow": 1048576,
+    "maxOutput": 64000,
+    "rank": 1,
+    "cost": {
+      "input": 8.34e-07,
+      "output": 2.501e-06
+    },
+    "transports": [
+      "openrouter"
+    ],
+    "validatedAt": "2026-09-07"
+  },
+  "openai/gpt-5.6-luna": {
+    "contextWindow": 1050000,
+    "maxOutput": 128000,
+    "rank": 1,
+    "cost": {
+      "input": 2e-07,
+      "output": 1.2e-06
+    },
+    "transports": [
+      "openrouter"
+    ],
+    "validatedAt": "2026-09-07"
+  },
+  "upstage/solar-pro4": {
+    "contextWindow": 524288,
+    "maxOutput": 131072,
+    "rank": 1,
+    "cost": {
+      "input": 3e-08,
+      "output": 1.2e-07
+    },
+    "transports": [
+      "openrouter"
+    ],
+    "validatedAt": "2026-09-07"
+  },
+  "meta/muse-spark-1.3-contributor": {
+    "contextWindow": 1048576,
+    "maxOutput": 943718,
+    "rank": 1,
+    "cost": {
+      "input": 1e-07,
+      "output": 2e-07
+    },
+    "transports": [
+      "openrouter"
+    ],
+    "validatedAt": "2026-09-07"
+  },
+  "minimax/minimax-m3:free": {
+    "contextWindow": 1048576,
+    "maxOutput": 943718,
+    "rank": 1,
+    "cost": {
+      "input": 0,
+      "output": 0
+    },
+    "transports": [
+      "openrouter"
+    ],
+    "validatedAt": "2026-09-07"
+  },
+  "nvidia/nemotron-3.5-lightning:free": {
+    "contextWindow": 1000000,
+    "maxOutput": 65536,
+    "rank": 1,
+    "cost": {
+      "input": 0,
+      "output": 0
+    },
+    "transports": [
+      "openrouter"
+    ],
+    "validatedAt": "2026-09-07"
+  },
+  "poolside/laguna-s-2.1:free": {
+    "contextWindow": 262144,
+    "maxOutput": 32768,
+    "rank": 2,
+    "cost": {
+      "input": 0,
+      "output": 0
+    },
+    "transports": [
+      "openrouter"
+    ],
+    "validatedAt": "2026-09-07"
+  },
+  "nvidia/nemotron-3.5-lightning": {
+    "contextWindow": 262144,
+    "maxOutput": 131072,
+    "rank": 2,
+    "cost": {
+      "input": 8e-08,
+      "output": 2e-07
+    },
+    "transports": [
+      "openrouter"
+    ],
+    "validatedAt": "2026-09-07"
+  },
+  "poolside/laguna-s-2.1": {
+    "contextWindow": 1048576,
+    "maxOutput": 131072,
+    "rank": 1,
+    "cost": {
+      "input": 9e-08,
+      "output": 1.8e-07
+    },
+    "transports": [
+      "openrouter"
+    ],
+    "validatedAt": "2026-09-07"
   }
 }
