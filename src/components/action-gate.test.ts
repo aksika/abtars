@@ -1,5 +1,5 @@
 import { mkdtempSync, rmSync, readFileSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { ActionGate, familyPattern, globToRegExp } from "./action-gate.js";
@@ -166,5 +166,72 @@ describe("ActionGate glob rules + families (#1771)", () => {
     expect(gate.removeRule(5)).toBe(false);
     expect(gate.removeRule(0)).toBe(true);
     expect(gate.listRules().map((r) => r.pattern)).toEqual(["b*"]);
+  });
+});
+
+describe("trusted-root seed defaults (REQUIREMENT: prompt-free allowed dirs)", () => {
+  let tmpDir: string;
+  let gate: ActionGate;
+  let notifyCalls: Array<{ text: string; buttons: Array<{ text: string; data: string }> }>;
+
+  beforeEach(() => {
+    tmpDir = mkdtempSync(join(tmpdir(), "actiongate-seed-"));
+    gate = new ActionGate(tmpDir);
+    notifyCalls = [];
+    gate.setNotify(async (text, buttons) => { notifyCalls.push({ text, buttons }); });
+  });
+  afterEach(() => { rmSync(tmpDir, { recursive: true, force: true }); });
+
+  it("builds cat/ls/find allows in tilde + absolute form per root", async () => {
+    const { buildDefaultSeedRules } = await import("./action-gate.js");
+    const r1 = join(homedir(), ".abtars-seedtest");
+    const seeds = buildDefaultSeedRules([r1, "/opt/outside-home"]);
+    const patterns = seeds.map((r) => r.pattern);
+    expect(patterns).toContain(`cat ${r1}*`);
+    expect(patterns).toContain("cat ~/.abtars-seedtest*");
+    expect(patterns).toContain("ls ~/.abtars-seedtest*");
+    expect(patterns).toContain("find ~/.abtars-seedtest*");
+    expect(patterns).toContain("find /opt/outside-home*");
+    // Outside-home roots get absolute form only (no fake tilde)
+    expect(patterns.some((p) => p.includes("~/opt"))).toBe(false);
+    expect(seeds.every((r) => r.category === "bash-auth" && r.action === "allow")).toBe(true);
+    // No interpreter seeds — an interactive python/node prompt stays correct
+    expect(patterns.some((p) => /^(python|node|bash|sh) /.test(p))).toBe(false);
+  });
+
+  it("ensureSeededDefaults is idempotent and allows an in-root find -exec chain silently", async () => {
+    const added = gate.ensureSeededDefaults();
+    expect(added.length).toBeGreaterThan(0);
+    expect(gate.ensureSeededDefaults()).toEqual([]);
+    const { abtarsHome } = await import("../paths.js");
+    const home = abtarsHome();
+    const chain =
+      `cat ${home}/config/peers.json 2>/dev/null || ` +
+      `find ${home} -maxdepth 3 -name "peers.json" -exec cat {} \\;`;
+    expect(await gate.requestAuth("bash-auth", chain, { mode: "interactive" })).toBe(true);
+    expect(notifyCalls.length).toBe(0);
+  });
+
+  it("user deny keeps precedence over seeds in both orders", async () => {
+    const { buildDefaultSeedRules } = await import("./action-gate.js");
+    const seedPattern = buildDefaultSeedRules()[0]!.pattern;
+    const probe = `${seedPattern.slice(0, -1)}/secret/x`;
+    // Order 1: seed first, user deny appended later wins
+    gate.ensureSeededDefaults();
+    const afterSeed = JSON.parse(readFileSync(join(tmpDir, "rules.json"), "utf-8")) as {
+      rules: Array<Record<string, string>>;
+    };
+    writeFileSync(join(tmpDir, "rules.json"), JSON.stringify({
+      rules: [...afterSeed.rules, { category: "bash-auth", pattern: seedPattern, action: "deny", createdAt: "t-deny" }],
+    }));
+    expect(await gate.requestAuth("bash-auth", probe, { mode: "interactive" })).toBe(false);
+    expect(notifyCalls.length).toBe(0);
+    // Order 2: user deny first — identical-pattern seed is skipped, deny stands
+    writeFileSync(join(tmpDir, "rules.json"), JSON.stringify({
+      rules: [{ category: "bash-auth", pattern: seedPattern, action: "deny", createdAt: "t-deny" }],
+    }));
+    expect(gate.ensureSeededDefaults()).not.toContain(seedPattern);
+    expect(await gate.requestAuth("bash-auth", probe, { mode: "interactive" })).toBe(false);
+    expect(notifyCalls.length).toBe(0);
   });
 });

@@ -5,10 +5,13 @@
 
 import { randomBytes } from "node:crypto";
 import { readFileSync, mkdirSync, appendFileSync, existsSync } from "node:fs";
-import { join } from "node:path";
+import { join, sep } from "node:path";
+import { homedir } from "node:os";
 import { logInfo, logWarn, logError } from "./logger.js";
 import { logAndSwallow } from "./log-and-swallow.js";
 import { atomicWriteSync } from "./atomic-write.js";
+import { abmindHome, abtarsHome } from "../paths.js";
+import { resolveReleasesDir } from "../cli/deploy-lib/paths.js";
 
 const TAG = "action-gate";
 
@@ -25,6 +28,8 @@ export interface AuthRule {
   pattern: string;
   action: "allow" | "deny";
   createdAt: string;
+  /** "seed" marks boot-seeded trusted-root defaults (user grants leave this unset). */
+  source?: "seed";
 }
 
 export interface AuthRequest {
@@ -100,6 +105,48 @@ export function familyPattern(cmd: string): string {
     }
   }
   return `${prefix}${exe}*`;
+}
+
+/**
+ * REQUIREMENT: the 3 allowed directories (abmind home, abtars home,
+ * releases dir — the same trusted-root set guardrails uses) are
+ * prompt-free by default. Read-only discovery verbs (`cat`/`ls`/`find`)
+ * scoped under any of them auto-allow in ActionGate, so even a command
+ * the tier classifier flags `auth-required` (e.g. a `find ... -exec`
+ * tail) never pages the master when everything it touches is in-root.
+ *
+ * Commands match as raw text with unexpanded `~`, so each root is seeded
+ * in both `~/...` and absolute form. Seed verbs stay read-only by shape;
+ * code interpreters (`python3`, `node`, ...) are deliberately NOT seeded —
+ * an interactive interpreter prompt is correct behavior. OS-level
+ * containment stays with seatbelt; this is the authorization nuisance
+ * filter, same philosophy as the #1771 family rules (which are broader:
+ * a user-pressed "Always allow" on `cat x` stores bare `cat*`).
+ */
+const SEED_VERBS = ["cat", "ls", "find"] as const;
+
+export function buildDefaultSeedRules(
+  roots: string[] = [abmindHome(), abtarsHome(), resolveReleasesDir()],
+): AuthRule[] {
+  const now = new Date().toISOString();
+  const rules: AuthRule[] = [];
+  const seen = new Set<string>();
+  for (const root of roots) {
+    const forms = new Set<string>([root]);
+    const home = homedir();
+    if (root === home) forms.add("~");
+    else if (root.startsWith(home + sep)) forms.add(`~/${root.slice(home.length + 1)}`);
+    for (const form of forms) {
+      for (const verb of SEED_VERBS) {
+        const pattern = `${verb} ${form}*`;
+        const key = `bash-auth\t${pattern}`;
+        if (seen.has(key)) continue;
+        seen.add(key);
+        rules.push({ category: "bash-auth", pattern, action: "allow", createdAt: now, source: "seed" });
+      }
+    }
+  }
+  return rules;
 }
 
 /**
@@ -256,6 +303,29 @@ export class ActionGate {
         resolve(false);
       });
     });
+  }
+
+  /**
+   * Idempotently ensure the trusted-root default allows exist.
+   * REQUIREMENT: inside the 3 allowed directories the guardrail never
+   * pages the master; the defaults ship in code and every boot (hence
+   * every update/restart) re-seeds whatever is missing.
+   *
+   * Seeds are PREPENDED, never appended, so a user's own rule always
+   * keeps last-match-wins precedence over them. A deny written with the
+   * IDENTICAL pattern string also wins: the seed key is already present
+   * and gets skipped here, leaving the deny as the only matching rule.
+   * Returns the patterns that were added (empty when already seeded).
+   */
+  ensureSeededDefaults(): string[] {
+    this.reloadRules();
+    const have = new Set(this.rules.map((r) => `${r.category}\t${r.pattern}`));
+    const missing = buildDefaultSeedRules().filter((r) => !have.has(`${r.category}\t${r.pattern}`));
+    if (missing.length === 0) return [];
+    this.rules.unshift(...missing);
+    this.writeRules();
+    logInfo(TAG, `Seeded ${missing.length} trusted-root default allows`);
+    return missing.map((r) => r.pattern);
   }
 
   /** Handle callback from Telegram button press. */

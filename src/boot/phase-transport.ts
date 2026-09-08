@@ -435,6 +435,12 @@ export async function buildTransport(ctx: BootCtx): Promise<PhaseResult> {
   ctx.actionGate = new ActionGate(authDir);
   setActionGate(ctx.actionGate);
   logDebug("main", "🔒 ActionGate wired");
+  // REQUIREMENT: the 3 allowed directories stay prompt-free by default —
+  // re-seed the trusted-root bash-auth allows on every boot (hence every
+  // update/restart). Idempotent: existing rules are never duplicated and a
+  // user's own deny always keeps precedence (see ensureSeededDefaults).
+  const seeded = ctx.actionGate.ensureSeededDefaults();
+  if (seeded.length > 0) logInfo("main", `🔓 Seeded ${seeded.length} trusted-root bash-auth allows`);
 
   // #1660: the shared host bash service + sealed handle store used by PiCore
   // and ACP. Resolution is late-bound to the memory runtime holder, so the

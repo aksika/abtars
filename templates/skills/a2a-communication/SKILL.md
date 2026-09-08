@@ -39,7 +39,11 @@ peer_ask_help(peer="<peer>", goal="Run 'abtars status' and report back")
 
 ## Available peers
 
-Check `~/.abtars/config/peers.json` for configured peer names. If no peers configured, the tool returns an error listing "(none)".
+Peer names come from `~/.abtars/config/peers.json`. Read it with the Read
+tool — never with bash. `cat`/`find` discovery chains (especially
+`find ... -exec`) trigger the Telegram authorization prompt on every host
+and block the turn. If no peers are configured, the peer tools return an
+error listing "(none)".
 
 ## Behavior
 
