@@ -116,7 +116,82 @@ describe("#1680 intent policy rows", () => {
     const execution = policyMod.intentPolicyFor("project_execution");
     expect(execution.completion({ ...emptySnapshot(), workerOwnedChild: true }).satisfied).toBe(true);
     expect(execution.completion({ ...emptySnapshot(), projectTerminal: true }).satisfied).toBe(true);
+    expect(execution.completion({ ...emptySnapshot(), allLanesTerminal: true }).satisfied).toBe(true);
+    expect(execution.completion({ ...emptySnapshot(), allLanesTerminal: true }).code).toBe("project_execution_handed_off");
     expect(execution.completion(emptySnapshot()).satisfied).toBe(false);
+  });
+});
+
+describe("#1789 hasAllLanesTerminal", () => {
+  async function ensureStores(): Promise<import("./orc-project-run-store.js").OrcProjectRunStore> {
+    // Mirror scheduled-synthesis.integration.test.ts: instantiate the stores so the
+    // shared task database schema exists before any kanban write.
+    const review = await import("../project-acceptance/project-review-store.js");
+    void new review.ProjectReviewStore();
+    const worker = await import("../worker-supervision-store.js");
+    void new worker.WorkerSupervisionStore();
+    return new runStoreMod.OrcProjectRunStore();
+  }
+
+  async function seedProject(statuses: string[]): Promise<number> {
+    await ensureStores();
+    const kanban = await import("../tasks/kanban-board.js");
+    const root = kanban.kanbanEnqueue("1789 root", "task", undefined, { type: "O", goal: "g" }) as number;
+    for (const [i, status] of statuses.entries()) {
+      const child = kanban.kanbanEnqueue(`1789 lane ${i} ${status}`, "agent", undefined, { type: "W", parent_id: root }) as number;
+      // Drive the lifecycle through the real transition helpers — never a raw
+      // status write, so every state here is production-reachable by construction.
+      if (status === "running") kanban.kanbanRunning(child);
+      if (status === "done" || status === "delivering" || status === "delivered") {
+        kanban.kanbanComplete(child, null, "lane summary");
+      }
+      if (status === "delivering" || status === "delivered") {
+        expect(kanban.kanbanClaimDelivery(child)).toBe(true);
+      }
+      if (status === "delivered") kanban.kanbanMarkDelivered(child);
+      if (status === "failed") kanban.kanbanFail(child, "lane failed");
+    }
+    return root;
+  }
+
+  function check(store: import("./orc-project-run-store.js").OrcProjectRunStore, root: number): boolean {
+    return policyMod.hasAllLanesTerminal(store.db, root);
+  }
+
+  it("table-driven over the full CardStatus union: terminal set admits, anything else waits", async () => {
+    // #1789 regression: `delivered` must be true (the shipped gate required transient
+    // `done` and could never fire); `delivering` must be false (it waits, identically
+    // at both layers).
+    const cases: Array<[string, boolean]> = [
+      ["queued", false],
+      ["running", false],
+      ["done", true],
+      ["failed", true],
+      ["delivering", false],
+      ["delivered", true],
+    ];
+    for (const [status, expected] of cases) {
+      const store = await ensureStores();
+      expect(check(store, await seedProject([status])), `${status} → ${expected}`).toBe(expected);
+    }
+    // Mixed rows: one non-terminal lane anywhere blocks.
+    expect(check(await ensureStores(), await seedProject(["delivered", "delivered", "running"]))).toBe(false);
+    expect(check(await ensureStores(), await seedProject(["delivered", "delivering"]))).toBe(false);
+    // Failed originals are terminal: a repaired set passes with no coverage machinery.
+    expect(check(await ensureStores(), await seedProject(["failed", "failed", "delivered", "delivered"]))).toBe(true);
+  });
+
+  it("zero children → false, so project_execution.completion cannot misread a handoff", async () => {
+    // Guard against the rejected hasNoWorkingLanes shape (COUNT(queued|running) == 0
+    // is true for zero children): an Orc turn that spawned nothing must report
+    // intent_postcondition_unsatisfied, never project_execution_handed_off.
+    const kanban = await import("../tasks/kanban-board.js");
+    const root = kanban.kanbanEnqueue("1789 childless root", "task", undefined, { type: "O", goal: "g" }) as number;
+    expect(check(await ensureStores(), root)).toBe(false);
+    const execution = policyMod.intentPolicyFor("project_execution");
+    expect(execution.completion({ ...emptySnapshot(), allLanesTerminal: false }).satisfied).toBe(false);
+    expect(execution.completion({ ...emptySnapshot(), allLanesTerminal: false }).code)
+      .toBe("intent_postcondition_unsatisfied");
   });
 });
 
@@ -131,7 +206,7 @@ function emptySnapshot(): import("./orc-intent-policy.js").OrcProjectSnapshot {
     inputRequestsOutstanding: false,
     ownerReadsComplete: true,
     workerOwnedChild: false,
-    acceptedTerminalChildrenReady: false,
+    allLanesTerminal: false,
   };
 }
 

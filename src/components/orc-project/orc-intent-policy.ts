@@ -32,8 +32,8 @@ export interface OrcProjectSnapshot {
   readonly ownerReadsComplete: boolean;
   /** A direct child card carrying a worker contract (Worker/repair ownership). */
   readonly workerOwnedChild: boolean;
-  /** #1729: every direct W child is done with a completed attempt and a result row. */
-  readonly acceptedTerminalChildrenReady: boolean;
+  /** #1789: at least one W lane exists and every W lane is terminal. */
+  readonly allLanesTerminal: boolean;
 }
 
 export interface OrcIntentCompletion {
@@ -121,8 +121,10 @@ const POLICIES: Record<OrcIntentKind, OrcIntentPolicy> = {
       && !s.inputRequestsOutstanding,
     // A durable owner (Worker/contribution/review) or a terminal project means
     // the execution intent has handed off; synthesis without any durable owner
-    // is unsatisfied. #1729: accepted terminal lanes also satisfy the salvage turn.
-    completion: (s) => s.projectTerminal || s.workerOwnedChild || s.contributionActive || s.openReviewCase || s.acceptedTerminalChildrenReady
+    // is unsatisfied. #1789: finished lane sets (≥1 lane, all terminal) also
+    // satisfy the salvage turn — but a project that never spawned any lane has
+    // not finished a work phase, so zero lanes must stay unsatisfied here.
+    completion: (s) => s.projectTerminal || s.workerOwnedChild || s.contributionActive || s.openReviewCase || s.allLanesTerminal
       ? { satisfied: true, code: "project_execution_handed_off" }
       : { satisfied: false, code: "intent_postcondition_unsatisfied" },
   },
@@ -215,26 +217,27 @@ export function orcToolAllowedOnIntent(toolName: string, intentKind: OrcIntentKi
 }
 
 /**
- * #1729: true when every direct W child is done with a completed attempt and a result.
+ * #1789: true when the project has at least one W lane and every W lane is
+ * terminal (`done`/`delivered`/`failed`). Deliberately mirrors
+ * `TERMINAL_CARD_STATUSES` in project-lifecycle-decision.ts so the decision
+ * layer and the claim transaction cannot disagree.
+ *
+ * Zero lanes → false: a project that never spawned has not finished a work
+ * phase, and `project_execution.completion` must not read that as a handoff.
+ * Never requires `done` specifically — `done` is transient (the delivery
+ * sweeper moves any done card to delivering/delivered), which is the #1789 bug.
  * Fail-closed: any read error, missing table, or zero children returns false.
  */
-export function hasAcceptedTerminalChildren(db: TaskDatabase, projectCardId: number): boolean {
+export function hasAllLanesTerminal(db: TaskDatabase, projectCardId: number): boolean {
   try {
-    const totalRow = db.prepare(`SELECT COUNT(*) AS n FROM kanban_board WHERE parent_id = ? AND type = 'W'`).get(projectCardId) as { n: number } | undefined;
-    const total = totalRow?.n ?? 0;
-    if (total === 0) return false;
-    const readyRow = db.prepare(`
-      SELECT COUNT(*) AS n FROM kanban_board AS k
-       WHERE k.parent_id = ? AND k.type = 'W' AND k.status = 'done'
-         AND EXISTS (
-           SELECT 1 FROM worker_attempts AS wa
-            WHERE wa.card_id = k.id
-              AND wa.ordinal = (SELECT MAX(ordinal) FROM worker_attempts WHERE card_id = k.id)
-              AND wa.lifecycle = 'completed'
-              AND EXISTS (SELECT 1 FROM worker_results AS wr WHERE wr.attempt_id = wa.id)
-         )
-    `).get(projectCardId) as { n: number } | undefined;
-    return (readyRow?.n ?? 0) === total;
+    const row = db.prepare(
+      `SELECT COUNT(*) AS total,
+              SUM(CASE WHEN status NOT IN ('done','delivered','failed') THEN 1 ELSE 0 END) AS pending
+         FROM kanban_board
+        WHERE parent_id = ? AND type = 'W'`
+    ).get(projectCardId) as { total: number; pending: number | null } | undefined;
+    if (!row || row.total === 0) return false;
+    return (row.pending ?? 1) === 0;
   } catch {
     return false;
   }
@@ -254,7 +257,7 @@ export function readOrcProjectSnapshot(db: TaskDatabase, projectCardId: number):
   let inputRequestsOutstanding = false;
   let ownerReadsComplete = true;
   let workerOwnedChild = false;
-  let acceptedTerminalChildrenReady = false;
+  let allLanesTerminal = false;
 
   try {
     const sup = db.prepare(`SELECT state, generation FROM project_supervision WHERE project_card_id = ?`).get(projectCardId) as { state: string; generation: number } | undefined;
@@ -305,7 +308,7 @@ export function readOrcProjectSnapshot(db: TaskDatabase, projectCardId: number):
   } catch { ownerReadsComplete = false; }
 
   try {
-    acceptedTerminalChildrenReady = hasAcceptedTerminalChildren(db, projectCardId);
+    allLanesTerminal = hasAllLanesTerminal(db, projectCardId);
   } catch { /* fail closed */ }
 
   return {
@@ -318,7 +321,7 @@ export function readOrcProjectSnapshot(db: TaskDatabase, projectCardId: number):
     inputRequestsOutstanding,
     ownerReadsComplete,
     workerOwnedChild,
-    acceptedTerminalChildrenReady,
+    allLanesTerminal,
   };
 }
 

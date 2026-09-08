@@ -1,8 +1,8 @@
 import { join } from "node:path";
 import { existsSync, readFileSync } from "node:fs";
 import { abtarsHome } from "../../paths.js";
-import { logInfo, logWarn } from "../logger.js";
-import { advanceRun, requestRunTerminal, readState, persistReportContract } from "./task-state-store.js";
+import { logDebug, logInfo, logWarn } from "../logger.js";
+import { advanceRun, requestRunTerminal, readState, persistReportContract, readReportContract } from "./task-state-store.js";
 import { preflightTask, validateReportArtifact } from "./task-preflight.js";
 import type { TaskToolRegistry } from "./task-preflight.js";
 import { settleRunOnce } from "./task-run-settler.js";
@@ -162,7 +162,15 @@ export class ScheduledTaskRunner {
           requiredSections: preflight.report.requiredSections,
           baseline: preflight.artifactBaseline ?? { existed: false },
         })) {
-          logWarn(TAG, `Report-contract snapshot not persisted for "${entry.id}" run ${runId} — synthesis admission falls back to review routing`);
+          // #1789: the CAS write loses in three cases — already persisted
+          // (benign reattach), run already finished, or a genuinely lost write.
+          // Re-read the cell so the benign case does not warn: only a still-absent
+          // snapshot means synthesis admission actually falls back to review routing.
+          if (readReportContract(runId) !== undefined) {
+            logDebug(TAG, `Report-contract snapshot already persisted for "${entry.id}" run ${runId} (reattach)`);
+          } else {
+            logWarn(TAG, `Report-contract snapshot not persisted for "${entry.id}" run ${runId} — synthesis admission falls back to review routing`);
+          }
         }
       }
 

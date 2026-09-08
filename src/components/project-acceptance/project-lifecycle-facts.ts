@@ -15,7 +15,6 @@ import { kanbanGetCard, kanbanGetChildren } from "../tasks/kanban-board.js";
 import { delegatedCriterionIds } from "./project-contract.js";
 import { hasLiveContributionForProject } from "../peer-help/contribution-store.js";
 import { scheduledOccurrenceState } from "../tasks/scheduled-occurrence-gate.js";
-import { hasAcceptedTerminalChildren } from "../orc-project/orc-intent-policy.js";
 import { ProjectReviewStore } from "./project-review-store.js";
 import { OrcProjectRunStore } from "../orc-project/orc-project-run-store.js";
 import { WorkerSupervisionStore } from "../worker-supervision-store.js";
@@ -102,7 +101,6 @@ export interface ProjectLifecycleFacts {
   readonly hasLiveContribution: boolean;
   readonly cardFuseOpen: boolean;
   readonly bridgeFuseOpen: boolean;
-  readonly acceptedTerminalChildrenReady: boolean;
 }
 
 export type GatherResult =
@@ -590,18 +588,6 @@ export function gatherProjectLifecycleFacts(
       }
     }
 
-    // ── acceptedTerminalChildrenReady ────────────────────────────────────
-    let acceptedTerminalChildrenReady = false;
-    try {
-      acceptedTerminalChildrenReady = hasAcceptedTerminalChildren(db as unknown as import("../tasks/kanban-board.js").TaskDatabase, projectCardId);
-    } catch {
-      acceptedTerminalChildrenReady = false;
-    }
-    // In test, children may be mocked but DB empty, so hasAcceptedTerminalChildren would be false incorrectly.
-    // If children are mocked as terminal and hasContract false, we should still consider salvage eligibility?
-    // For test "creates review case for executing project with all terminal children", children are done/failed but no worker contracts, so acceptedTerminalChildrenReady should be false, and decision should be create_review, not attempt_salvage.
-    // That's fine.
-
     const facts: ProjectLifecycleFacts = {
       projectCardId,
       root,
@@ -618,7 +604,6 @@ export function gatherProjectLifecycleFacts(
       hasLiveContribution,
       cardFuseOpen,
       bridgeFuseOpen,
-      acceptedTerminalChildrenReady,
     };
 
     return { facts };
@@ -659,7 +644,6 @@ export function createTestFacts(overrides: Partial<ProjectLifecycleFacts> & { pr
     hasLiveContribution: overrides.hasLiveContribution ?? false,
     cardFuseOpen: overrides.cardFuseOpen ?? false,
     bridgeFuseOpen: overrides.bridgeFuseOpen ?? false,
-    acceptedTerminalChildrenReady: overrides.acceptedTerminalChildrenReady ?? false,
   };
   if ("supervision" in overrides && overrides.supervision === undefined) {
     // @ts-expect-error deliberate deletion for invalid-state tests
@@ -702,6 +686,5 @@ export function createEmptyFacts(projectCardId: number): ProjectLifecycleFacts {
     hasLiveContribution: false,
     cardFuseOpen: false,
     bridgeFuseOpen: false,
-    acceptedTerminalChildrenReady: false,
   };
 }

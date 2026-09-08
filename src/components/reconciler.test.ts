@@ -307,20 +307,7 @@ vi.mock("./peer-help/contribution-store.js", () => ({
 // ── Import after mocks ─────────────────────────────────────────────────────────
 
 let mod: typeof import("./reconciler.js");
-let reviewStoreMock: {
-  contractExists: ReturnType<typeof vi.fn>;
-  getSupervision: ReturnType<typeof vi.fn>;
-  ensureAwaitingContract: ReturnType<typeof vi.fn>;
-  initializeSupervision: ReturnType<typeof vi.fn>;
-  getContractByProjectCardId: ReturnType<typeof vi.fn>;
-  getLatestOpenCase: ReturnType<typeof vi.fn>;
-  stateTransition: ReturnType<typeof vi.fn>;
-  getLatestDecisionForProject: ReturnType<typeof vi.fn>;
-  getAnsweredInputRequests: ReturnType<typeof vi.fn>;
-  getPendingInputRequests: ReturnType<typeof vi.fn>;
-  clearInputNotice: ReturnType<typeof vi.fn>;
-  setState: ReturnType<typeof vi.fn>;
-};
+let reviewStoreMock: ReturnType<typeof makeReviewStoreMock>;
 
 // ── #1554: deterministic generation startup for the mocked environment ─────
 
@@ -427,7 +414,7 @@ async function swapTestGeneration(
     inputRequestsOutstanding: false,
     ownerReadsComplete: true,
     workerOwnedChild: false,
-    acceptedTerminalChildrenReady: false,
+    allLanesTerminal: false,
   });
   spawnChildMock.mockReset();
   mod = await import("./reconciler.js");
@@ -865,6 +852,60 @@ describe("Reconciler — #1411 domain guard", () => {
       expect(reviewClaims).toEqual([[1, 1, "rc_test_1"]]);
       expect(dispatchMock).not.toHaveBeenCalledWith(expect.objectContaining({ type: "O", cardId: 1 }));
       expect(kanbanCompleteMock).not.toHaveBeenCalled();
+    });
+
+    it("#1789 Rule 14 removal: salvage_not_needed still yields a review case via the reconciler", async () => {
+      // #1789 regression: with Rule 14 deleted, an executing project with terminal
+      // children decides attempt_salvage; when admission reports salvage_not_needed
+      // (report already valid), the reconciler — not a decision rule — creates the
+      // review case. Asserted here at the reconciler boundary, not the decision layer.
+      reviewStoreMock.contractExists.mockReturnValue(true);
+      reviewStoreMock.getSupervision.mockReturnValue({
+        project_card_id: 1,
+        contract_id: "pc_test_1",
+        state: "executing",
+        generation: 1,
+        review_round: 0,
+        repair_round: 0,
+        active_review_case_id: null,
+        accepted_decision_id: null,
+        blocked_reason: null,
+        updated_at: new Date().toISOString(),
+      });
+      reviewStoreMock.stateTransition
+        .mockReturnValueOnce(true)
+        .mockReturnValueOnce(true);
+      reviewStoreMock.getLatestOpenCase.mockReturnValue(undefined);
+
+      const card = makeCard({
+        id: 1, status: "running", type: "O",
+      });
+      kanbanGetCardMock.mockReturnValue(card);
+      kanbanGetChildrenMock.mockReturnValue([
+        { ...makeCard({ id: 2, status: "delivered", type: "W" }), parent_id: 1 },
+        { ...makeCard({ id: 3, status: "delivered", type: "W" }), parent_id: 1 },
+      ]);
+
+      const salvageCalls: number[] = [];
+      await swapTestGeneration({
+        coordinator: {
+          getStore: makeFakeRunStore,
+          scheduleContractAuthoring: () => ({ kind: "busy" as const, activeRunId: "or_unused" }),
+          scheduleProjectExecution: () => ({ kind: "busy" as const, activeRunId: "or_unused" }),
+          scheduleProjectSalvage: (projectCardId: number) => {
+            salvageCalls.push(projectCardId);
+            return { kind: "conflict" as const, reason: "salvage_not_needed" as const };
+          },
+          scheduleReview: () => ({ kind: "busy" as const, activeRunId: "or_review" }),
+        } as never,
+      });
+
+      mod.requestReconcile(1);
+      await flush();
+
+      expect(salvageCalls).toEqual([1]);
+      expect(reviewStoreMock.insertReviewCase).toHaveBeenCalled();
+      expect(reviewStoreMock.insertReviewRequest).toHaveBeenCalledWith(1, "rc_test_1", 1, undefined, { projectCardId: 1, projectGeneration: 1 });
     });
 
     it("project with all-terminal children but no contract does not auto-complete (legacy removed)", async () => {
@@ -2272,7 +2313,7 @@ describe("Reconciler — #1546 scheduled-root driver", () => {
       inputRequestsOutstanding: false,
       ownerReadsComplete: true,
       workerOwnedChild: true,
-      acceptedTerminalChildrenReady: false,
+      allLanesTerminal: false,
     });
 
     mod.requestReconcile(1);
@@ -2293,8 +2334,8 @@ describe("Reconciler — #1546 scheduled-root driver", () => {
     // Same setup and same claim result; the snapshot re-read at the decision
     // point shows the owner is gone (its attempt settled and the card
     // transitioned between claim and re-read) — the safety net must still
-    // fire. An all-terminal child card would instead route to create_review,
-    // so the child stays queued exactly as in the incident.
+    // fire. An all-terminal child card would instead route to attempt_salvage
+    // (Rule 14 is deleted), so the child stays queued exactly as in the incident.
     setupExecutingProject({
       children: [{ ...makeCard({ id: 2, status: "queued", type: "W" }), parent_id: 1 }],
       attemptLifecycle: "failed",
@@ -2309,7 +2350,7 @@ describe("Reconciler — #1546 scheduled-root driver", () => {
       inputRequestsOutstanding: false,
       ownerReadsComplete: true,
       workerOwnedChild: false,
-      acceptedTerminalChildrenReady: false,
+      allLanesTerminal: false,
     });
 
     mod.requestReconcile(1);
@@ -2341,7 +2382,7 @@ describe("Reconciler — #1546 scheduled-root driver", () => {
       inputRequestsOutstanding: false,
       ownerReadsComplete: false,
       workerOwnedChild: false,
-      acceptedTerminalChildrenReady: false,
+      allLanesTerminal: false,
     });
 
     mod.requestReconcile(1);

@@ -17,7 +17,7 @@ import {
   BRIDGE_ROWS_5M_WINDOW_MS,
   DEFAULT_ORC_GUARDRAILS,
 } from "./orc-project-contracts.js";
-import { intentPolicyFor, readOrcProjectSnapshot } from "./orc-intent-policy.js";
+import { hasAllLanesTerminal, intentPolicyFor, readOrcProjectSnapshot } from "./orc-intent-policy.js";
 import { validateReportArtifact } from "../tasks/task-preflight.js";
 import { parseReportContractSnapshot } from "../tasks/task-state-store.js";
 import { logWarn } from "../logger.js";
@@ -484,22 +484,13 @@ export class OrcProjectRunStore {
       } catch {
         return { kind: "conflict" as const, reason: "salvage_ineligible" as const };
       }
+      // #1789: the work phase is over when at least one W lane exists and every
+      // W lane is terminal (done/delivered/failed) — deliberately the same
+      // meaning as the decision layer's childrenTerminal, so the layers cannot
+      // disagree. Never requires `done` specifically: `done` is transient (the
+      // delivery sweeper moves it to delivering/delivered).
       try {
-        const totalRow = this.db.prepare(`SELECT COUNT(*) AS n FROM kanban_board WHERE parent_id = ? AND type = 'W'`).get(input.projectCardId) as { n: number } | undefined;
-        const total = totalRow?.n ?? 0;
-        if (total === 0) return { kind: "conflict" as const, reason: "salvage_ineligible" as const };
-        const readyRow = this.db.prepare(`
-          SELECT COUNT(*) AS n FROM kanban_board AS k
-           WHERE k.parent_id = ? AND k.type = 'W' AND k.status = 'done'
-             AND EXISTS (
-               SELECT 1 FROM worker_attempts AS wa
-                WHERE wa.card_id = k.id
-                  AND wa.ordinal = (SELECT MAX(ordinal) FROM worker_attempts WHERE card_id = k.id)
-                  AND wa.lifecycle = 'completed'
-                  AND EXISTS (SELECT 1 FROM worker_results AS wr WHERE wr.attempt_id = wa.id)
-             )
-        `).get(input.projectCardId) as { n: number } | undefined;
-        if ((readyRow?.n ?? 0) !== total) return { kind: "conflict" as const, reason: "salvage_ineligible" as const };
+        if (!hasAllLanesTerminal(this.db, input.projectCardId)) return { kind: "conflict" as const, reason: "salvage_ineligible" as const };
       } catch {
         return { kind: "conflict" as const, reason: "salvage_ineligible" as const };
       }

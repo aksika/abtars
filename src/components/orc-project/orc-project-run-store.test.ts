@@ -403,6 +403,9 @@ describe("#1729 v2 synthesis admission", () => {
     reportJson: string | null;
     newest: { outcome: string; failureCode?: string; marked?: boolean; started?: boolean };
     lanes?: number;
+    /** #1789: when provided, lanes are driven through the real kanban transition
+        helpers (never a raw status write) to exactly these statuses. */
+    laneStatuses?: string[];
   }): Promise<{ root: number; runId: string }> {
     const kanban = await import("../tasks/kanban-board.js");
     const review = await import("../project-acceptance/project-review-store.js");
@@ -413,20 +416,52 @@ describe("#1729 v2 synthesis admission", () => {
     const runId = `run-${root}`;
     const taskId = `task-${root}`;
     s.db.prepare(`UPDATE kanban_board SET source_id = ?, due_at = ?, status = 'running' WHERE id = ?`).run(runId, isoFuture(), root);
-    seedProject(s, root, "executing");
+    // Card-scoped slate: earlier tests in this file seed fixed card ids that can
+    // collide with autoincrement roots (INSERT OR IGNORE supervision, stale run
+    // rows tripping card fuse windows, stale ownership counters colliding on the
+    // UNIQUE(project_card_id, ownership_generation) index). A fresh root owns
+    // none of that history; finished tests never re-read it.
+    s.db.prepare(`DELETE FROM orc_project_runs WHERE project_card_id = ?`).run(root);
+    s.db.prepare(`DELETE FROM orc_fuse_state WHERE scope = ?`).run(`card:${root}`);
+    s.db.prepare(`DELETE FROM orc_project_ownership_counters WHERE project_card_id = ?`).run(root);
+    s.db.prepare(`INSERT INTO project_supervision (project_card_id, contract_id, state, generation, updated_at)
+      VALUES (?, '', 'executing', 1, ?) ON CONFLICT(project_card_id) DO UPDATE SET state = 'executing'`).run(root, isoNow());
+    // Bridge-wide start/row windows count every run row in this shared test
+    // database, so late-file tests trip them through no fault of their own.
+    // Reset the bridge window baseline to "now" for every fresh root.
+    try {
+      const maxSeq = (s.db.prepare(`SELECT COALESCE(MAX(global_sequence), 0) AS m FROM orc_project_runs`).get() as { m: number }).m;
+      s.db.prepare(`INSERT INTO orc_fuse_state (scope, cleared_global_sequence) VALUES ('bridge', ?)
+        ON CONFLICT(scope) DO UPDATE SET cleared_global_sequence = excluded.cleared_global_sequence, opened_at = NULL`).run(maxSeq);
+    } catch { /* fuse table absent — nothing to clear */ }
     const now = Date.now();
     const cols = ["run_id", "task_id", "group_id", "attempt", "trigger", "occurrence_at", "reserved_at", "deadline_at", "phase", "last_progress_at", "progress_sequence", "card_id", "session_id", "execution_id", "terminal_request_json", "report_contract_json", "owner_pid", "owner_started_at"];
     s.db.prepare(`INSERT INTO task_runs (${cols.join(", ")}) VALUES (${cols.map(() => "?").join(", ")})`).run(
       runId, taskId, "g", 1, "schedule", now - 60_000, now - 60_000, now + 3_600_000, "executing", now, 0,
       root, null, null, null, opts.reportJson, process.pid, null);
     const lanes = opts.lanes ?? 2;
-    for (let i = 0; i < lanes; i++) {
-      const child = kanban.kanbanEnqueue(`lane ${i}`, "agent", undefined, { type: "W", parent_id: root }) as number;
-      s.db.prepare(`UPDATE kanban_board SET status = 'done' WHERE id = ?`).run(child);
-      const attemptId = `a_${root}_${i}`;
-      s.db.prepare(`INSERT INTO worker_attempts (id, card_id, contract_id, ordinal, executor_kind, executor_id, generation, lifecycle, status, started_at) VALUES (?, ?, ?, 1, 'spin-local', 'e1', 1, 'completed', 'done', ?)`)
-        .run(attemptId, child, `pc_${child}`, isoNow());
-      s.db.prepare(`INSERT INTO worker_results (attempt_id, envelope_json, envelope_digest, created_at) VALUES (?, '{}', 'd', ?)`).run(attemptId, isoNow());
+    if (opts.laneStatuses) {
+      for (const [i, status] of opts.laneStatuses.entries()) {
+        const child = kanban.kanbanEnqueue(`lane ${i} ${status}`, "agent", undefined, { type: "W", parent_id: root }) as number;
+        if (status === "running") kanban.kanbanRunning(child);
+        if (status === "done" || status === "delivering" || status === "delivered") {
+          kanban.kanbanComplete(child, null, "lane summary");
+        }
+        if (status === "delivering" || status === "delivered") {
+          if (!kanban.kanbanClaimDelivery(child)) throw new Error(`delivery claim failed for lane ${i}`);
+        }
+        if (status === "delivered") kanban.kanbanMarkDelivered(child);
+        if (status === "failed") kanban.kanbanFail(child, "lane failed");
+      }
+    } else {
+      for (let i = 0; i < lanes; i++) {
+        const child = kanban.kanbanEnqueue(`lane ${i}`, "agent", undefined, { type: "W", parent_id: root }) as number;
+        s.db.prepare(`UPDATE kanban_board SET status = 'done' WHERE id = ?`).run(child);
+        const attemptId = `a_${root}_${i}`;
+        s.db.prepare(`INSERT INTO worker_attempts (id, card_id, contract_id, ordinal, executor_kind, executor_id, generation, lifecycle, status, started_at) VALUES (?, ?, ?, 1, 'spin-local', 'e1', 1, 'completed', 'done', ?)`)
+          .run(attemptId, child, `pc_${child}`, isoNow());
+        s.db.prepare(`INSERT INTO worker_results (attempt_id, envelope_json, envelope_digest, created_at) VALUES (?, '{}', 'd', ?)`).run(attemptId, isoNow());
+      }
     }
     const n = opts.newest;
     s.db.prepare(`INSERT INTO orc_project_runs (id, intent_key, intent_kind, intent_ref, goal, project_card_id, project_generation, ownership_generation, owner_peer, owner_instance_id, global_sequence, origin_kind, origin_peer, task_run_id, salvage_for_run_id, state, outcome, failure_code, started_at, created_at, updated_at)
@@ -571,5 +606,42 @@ describe("#1729 v2 synthesis admission", () => {
     expect(result.kind).toBe("conflict");
     if (result.kind !== "conflict") return;
     expect(result.reason).toBe("salvage_not_needed");
+  });
+
+  it("#1789 admits the KP-35 repair shape: failed originals plus delivered repairs", async () => {
+    // #1789 regression: 2 failed lanes + 4 delivered (2 originals + 2 repairs),
+    // nothing in flight, report missing → the claim must admit. The shipped
+    // `status = 'done'` gate read 0 ready of 6 and refused. Lanes are driven
+    // through the real transition helpers; no attempt/result rows are seeded,
+    // proving the new gate depends on lane status alone.
+    const s = new OrcProjectRunStoreType();
+    ensureSupervisionTable(s);
+    const p = reportFile(nextId());
+    const missing = p + ".absent";
+    const { root, runId } = await seedDeliveredProject(s, {
+      reportJson: snapshotFor(missing, { existed: false }),
+      newest: { outcome: "completed" },
+      laneStatuses: ["failed", "delivered", "failed", "delivered", "delivered", "delivered"],
+    });
+    const result = s.claimSalvageExecution(salvageInput(root, runId), "local_peer", "inst_1");
+    expect(result.kind).toBe("claimed");
+  });
+
+  it("#1789 refuses while any lane is queued, running, or delivering", async () => {
+    for (const status of ["queued", "running", "delivering"]) {
+      const s = new OrcProjectRunStoreType();
+      ensureSupervisionTable(s);
+      const p = reportFile(nextId());
+      const missing = p + ".absent";
+      const { root, runId } = await seedDeliveredProject(s, {
+        reportJson: snapshotFor(missing, { existed: false }),
+        newest: { outcome: "completed" },
+        laneStatuses: ["delivered", status],
+      });
+      const result = s.claimSalvageExecution(salvageInput(root, runId), "local_peer", "inst_1");
+      expect(result.kind, status).toBe("conflict");
+      if (result.kind !== "conflict") continue;
+      expect(result.reason).toBe("salvage_ineligible");
+    }
   });
 });

@@ -262,28 +262,20 @@ export function deriveProjectLifecycleDecision(facts: ProjectLifecycleFacts): Pr
     };
   }
 
-  // Rule 13: executing + terminal children, salvage eligibility possible → attempt_salvage
-  // Salvage eligibility: executing, children terminal, acceptedTerminalChildrenReady true, at least one child, no live run, no open case
+  // Rule 13: executing + terminal children → attempt_salvage.
+  // #1789: childrenTerminal (every child in done/delivered/failed) already IS
+  // "work phase over" — it implies no lane is queued/running, so no further
+  // readiness conjunct belongs here. The admission transaction re-checks
+  // readiness (hasAllLanesTerminal, same meaning) plus the report check; its
+  // not_needed/ineligible refusals route to createReviewCase in the reconciler.
   if (supervisionState === "executing") {
     const childrenTerminal = facts.children.length > 0 && facts.children.every(c => isTerminalStatus(c.status));
     const zeroChildrenOrcOnly = facts.children.length === 0 && hasNoDelegatedCriteria(facts);
     const terminalReadiness = childrenTerminal || zeroChildrenOrcOnly;
-    if (terminalReadiness && facts.acceptedTerminalChildrenReady) {
-      // No open review case and no live run already confirmed; check at least one child and accepted
+    if (terminalReadiness) {
+      // No open review case and no live run already confirmed above.
       return {
         kind: "attempt_salvage",
-        evidence: { supervisionState },
-      };
-    }
-  }
-
-  // Rule 14: executing + terminal children (zero allowed for Orc-only) → create_review
-  if (supervisionState === "executing") {
-    const childrenTerminal = facts.children.length > 0 && facts.children.every(c => isTerminalStatus(c.status));
-    const zeroChildrenOrcOnly = facts.children.length === 0 && hasNoDelegatedCriteria(facts);
-    if (childrenTerminal || zeroChildrenOrcOnly) {
-      return {
-        kind: "create_review",
         evidence: { supervisionState },
       };
     }

@@ -84,7 +84,12 @@ describe("#1729 v2 synthesis journey", () => {
       root, null, null, null, snapshot, process.pid, null);
     for (let i = 0; i < 2; i++) {
       const child = kanban.kanbanEnqueue(`lane ${i}`, "agent", undefined, { type: "W", parent_id: root }) as number;
-      store.db.prepare(`UPDATE kanban_board SET status = 'done' WHERE id = ?`).run(child);
+      // #1789: drive the production lifecycle through the real transition helpers —
+      // never a raw status write. Lanes end `delivered` (where production's sweeper
+      // leaves them), not the transient `done` the old fixture hand-seeded.
+      kanban.kanbanComplete(child, null, "lane summary");
+      if (!kanban.kanbanClaimDelivery(child)) throw new Error(`delivery claim failed for lane ${i}`);
+      kanban.kanbanMarkDelivered(child);
       const attemptId = `ja_${root}_${i}`;
       store.db.prepare(`INSERT INTO worker_attempts (id, card_id, contract_id, ordinal, executor_kind, executor_id, generation, lifecycle, status, started_at) VALUES (?, ?, ?, 1, 'spin-local', 'e1', 1, 'completed', 'done', ?)`)
         .run(attemptId, child, `pc_${child}`, isoNow());
@@ -143,6 +148,32 @@ describe("#1729 v2 synthesis journey", () => {
     // the live owner wins — no second turn is admitted.
     const dup = store.claimSalvageExecution(claimInput(root, runId), "local_peer", "inst_1");
     expect(dup.kind).toBe("busy");
+    expect(markedCount(root)).toBe(1);
+  });
+
+  it("#1789 KP-35 repair shape: failed originals plus delivered repairs still admit synthesis", async () => {
+    // Production shape that the shipped gate could never admit: 2 failed lanes +
+    // 4 delivered (2 originals + 2 repairs), nothing in flight, report missing.
+    const { root, runId } = await seedHandoffProject();
+    const extra: Array<[string, "failed" | "delivered"]> = [
+      ["repair-a-failed", "failed"],
+      ["repair-a-retry", "delivered"],
+      ["repair-b-failed", "failed"],
+      ["repair-b-retry", "delivered"],
+    ];
+    for (const [name, status] of extra) {
+      const child = kanban.kanbanEnqueue(name, "agent", undefined, { type: "W", parent_id: root }) as number;
+      if (status === "failed") {
+        kanban.kanbanFail(child, "lane failed");
+      } else {
+        kanban.kanbanComplete(child, null, "lane summary");
+        if (!kanban.kanbanClaimDelivery(child)) throw new Error(`delivery claim failed for ${name}`);
+        kanban.kanbanMarkDelivered(child);
+      }
+    }
+    expect(decide(root)).toMatchObject({ kind: "attempt_salvage" });
+    const first = store.claimSalvageExecution(claimInput(root, runId), "local_peer", "inst_1");
+    expect(first.kind).toBe("claimed");
     expect(markedCount(root)).toBe(1);
   });
 });

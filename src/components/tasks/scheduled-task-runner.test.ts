@@ -14,6 +14,7 @@ vi.mock("./task-state-store.js", () => ({
   advanceNextRun: vi.fn(),
   readLastPromptAt: vi.fn(() => 0),
   persistReportContract: vi.fn(() => true),
+  readReportContract: vi.fn(() => undefined),
 }));
 vi.mock("./kanban-board.js", () => ({
   kanbanComplete: vi.fn(),
@@ -276,6 +277,80 @@ describe("ScheduledTaskRunner #1516 orchestration dispatch", () => {
     expect(outcome.status).toBe("success");
     expect(projectRunner.mock.calls[0]![0].reportArtifactPath).toBe("/tmp/daily.md");
     expect(mockedSettle).toHaveBeenCalledWith(expect.objectContaining({ attachResult: true }));
+  });
+});
+
+describe("ScheduledTaskRunner #1789 report-contract snapshot log split", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockedSettle.mockClear();
+  });
+
+  function reportEntry(id: string): any {
+    const entry = makeEntry(id);
+    entry.orchestration = { maxAgents: 2 };
+    entry.delivery = "report";
+    return entry;
+  }
+
+  async function mockPreflightOk(): Promise<void> {
+    const preflightMod = await import("./task-preflight.js");
+    vi.mocked(preflightMod.preflightTask).mockReturnValue({
+      ok: true,
+      report: {
+        artifactPath: "/tmp/daily.md",
+        artifactLabel: "/tmp/daily.md",
+        requiredSections: ["# Summary"],
+        minBytes: 100,
+        requiredFiles: [],
+        executables: [],
+        tools: [],
+      },
+      artifactBaseline: { existed: false },
+    });
+    vi.mocked(preflightMod.validateReportArtifact).mockReturnValue({ ok: true, size: 1234 });
+  }
+
+  it("benign reattach (snapshot present after lost CAS race) logs debug, not warn", async () => {
+    await mockPreflightOk();
+    const storeMod = await import("./task-state-store.js");
+    vi.mocked(storeMod.persistReportContract).mockReturnValue(false);
+    vi.mocked(storeMod.readReportContract).mockReturnValue({
+      snapshot: { artifactPath: "/tmp/daily.md", minBytes: 100, requiredSections: ["# Summary"], baseline: { existed: false } },
+      reservedAt: Date.now(),
+    });
+    const loggerMod = await import("../logger.js");
+    const debugSpy = vi.spyOn(loggerMod, "logDebug").mockImplementation(() => {});
+    const warnSpy = vi.spyOn(loggerMod, "logWarn").mockImplementation(() => {});
+    try {
+      const projectRunner = vi.fn(async () => ({ cardId: 8, result: "synthesis" }));
+      const runner = new ScheduledTaskRunner({ agentRunner: undefined, projectRunner });
+      const outcome = await runner.run(reportEntry("reattach-report"), makeReservation("reattach-report"));
+      expect(outcome.status).toBe("success");
+      expect(debugSpy).toHaveBeenCalledWith("scheduled-task-runner", expect.stringContaining("already persisted"));
+      expect(warnSpy).not.toHaveBeenCalledWith("scheduled-task-runner", expect.stringContaining("falls back to review routing"));
+    } finally {
+      debugSpy.mockRestore();
+      warnSpy.mockRestore();
+    }
+  });
+
+  it("genuinely lost write (snapshot absent) keeps the warn", async () => {
+    await mockPreflightOk();
+    const storeMod = await import("./task-state-store.js");
+    vi.mocked(storeMod.persistReportContract).mockReturnValue(false);
+    vi.mocked(storeMod.readReportContract).mockReturnValue(undefined);
+    const loggerMod = await import("../logger.js");
+    const warnSpy = vi.spyOn(loggerMod, "logWarn").mockImplementation(() => {});
+    try {
+      const projectRunner = vi.fn(async () => ({ cardId: 8, result: "synthesis" }));
+      const runner = new ScheduledTaskRunner({ agentRunner: undefined, projectRunner });
+      const outcome = await runner.run(reportEntry("lost-report"), makeReservation("lost-report"));
+      expect(outcome.status).toBe("success");
+      expect(warnSpy).toHaveBeenCalledWith("scheduled-task-runner", expect.stringContaining("falls back to review routing"));
+    } finally {
+      warnSpy.mockRestore();
+    }
   });
 });
 

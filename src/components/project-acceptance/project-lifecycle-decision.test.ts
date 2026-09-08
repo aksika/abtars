@@ -67,7 +67,6 @@ describe("project-lifecycle-decision", () => {
       supervision: { state: "executing", generation: 1, repair_round: 0 },
       children: [{ cardId: 2, status: "done", type: "W", parentId: 1, hasContract: false }],
       liveOrcRun: { runId: "or1", intentKind: "project_execution", state: "running", projectGeneration: 1, salvageForRunId: null, startedAt: "2026-01-01", outcome: null },
-      acceptedTerminalChildrenReady: false,
     });
     const d = deriveProjectLifecycleDecision(facts);
     expect(d.kind).toBe("delegate");
@@ -91,29 +90,35 @@ describe("project-lifecycle-decision", () => {
     if (d.kind === "delegate") expect(d.owner).toBe("contribution_wait");
   });
 
-  it("rule 13: attempt_salvage before create_review", () => {
+  it("rule 13: attempt_salvage for terminal children (no readiness conjunct)", () => {
     const facts = createTestFacts({
       projectCardId: 1,
       supervision: { state: "executing", generation: 1, repair_round: 0 },
       children: [{ cardId: 2, status: "done", type: "W", parentId: 1, hasContract: true, latestAttempt: { id: "a1", lifecycle: "completed" } }],
-      acceptedTerminalChildrenReady: true,
     });
     const d = deriveProjectLifecycleDecision(facts);
     expect(d.kind).toBe("attempt_salvage");
   });
 
-  it("rule 14: create_review when terminal children and no salvage readiness", () => {
-    const facts = createTestFacts({
-      projectCardId: 1,
-      supervision: { state: "executing", generation: 1, repair_round: 0 },
-      children: [{ cardId: 2, status: "done", type: "W", parentId: 1, hasContract: false }],
-      acceptedTerminalChildrenReady: false,
-    });
-    const d = deriveProjectLifecycleDecision(facts);
-    expect(d.kind).toBe("create_review");
+  it("#1789: terminal children route to attempt_salvage for every terminal status (Rule 14 deleted)", () => {
+    // #1789 regression: `delivered` lanes previously fell through to create_review
+    // because the deleted conjunct required transient `done`. Now the decision is
+    // attempt_salvage for done/delivered/failed alike; review routing comes from the
+    // reconciler's attempt_salvage branch (salvage_not_needed → createReviewCase).
+    for (const status of ["done", "delivered", "failed"]) {
+      const facts = createTestFacts({
+        projectCardId: 1,
+        supervision: { state: "executing", generation: 1, repair_round: 0 },
+        children: [{ cardId: 2, status, type: "W", parentId: 1, hasContract: false }],
+      });
+      expect(deriveProjectLifecycleDecision(facts).kind, status).toBe("attempt_salvage");
+    }
   });
 
-  it("rule 14: Orc-only zero children → create_review", () => {
+  it("#1789: Orc-only zero children route to attempt_salvage (review via reconciler)", () => {
+    // Previously Rule 14 create_review. The claim transaction refuses childless
+    // projects (hasAllLanesTerminal → false → salvage_ineligible) and the reconciler
+    // creates the review case — asserted at that boundary, not here.
     const facts = createTestFacts({
       projectCardId: 1,
       supervision: { state: "executing", generation: 1, repair_round: 0 },
@@ -121,7 +126,7 @@ describe("project-lifecycle-decision", () => {
       contract: { exists: true, hasDelegatedCriteria: false },
     });
     const d = deriveProjectLifecycleDecision(facts);
-    expect(d.kind).toBe("create_review");
+    expect(d.kind).toBe("attempt_salvage");
   });
 
   it("rule 15: claim_execution continuation", () => {
