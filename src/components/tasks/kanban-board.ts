@@ -14,6 +14,7 @@ import { logSwarmTrace } from "../swarm-trace.js";
 import { isValidSessionType } from "../spin-profiles.js";
 import { initTaskStateSchema } from "./task-state-schema.js";
 import { initTaskHistorySchema } from "./task-history-schema.js";
+import { initWorkflowSchema } from "../orc-project/workflow-schema.js";
 import { addColumnIfMissing } from "../../utils/sqlite-migrate.js";
 
 // better-sqlite3 is external (native module, resolved from ~/.local/lib/node_modules/)
@@ -199,6 +200,9 @@ function db(): SqliteDb | null {
     // #1568: bounded, indexed run-history table. After task-state init because
     // the retention exclusion queries task_runs.
     initTaskHistorySchema(wrapTaskDatabase(_db));
+    // #1792: durable workflow-runner sibling tables (same shared database,
+    // same open path; task_runs/worker_attempts ownership unchanged).
+    initWorkflowSchema(wrapTaskDatabase(_db));
   } catch {
     logWarn("kanban", "better-sqlite3 not available — kanban features disabled (run: abtars deps install)");
     _db = null;
