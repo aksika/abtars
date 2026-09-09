@@ -271,3 +271,227 @@ describe("WorkflowRunner Task 2", () => {
     expect(tick2.ownerless).toContain(bare.runId);
   });
 });
+
+describe("WorkflowRunner Task 3 — planning jobs and review verdicts", () => {
+  let runner: Runner;
+  let store: Store;
+
+  beforeEach(() => {
+    ({ runner, store } = makeRunner());
+    for (const t of ["workflow_ingress", "workflow_deliveries", "workflow_commands", "workflow_budgets", "workflow_node_deps", "workflow_nodes", "workflow_plan_revisions", "workflow_operations", "workflow_runs"]) {
+      store.db.exec(`DELETE FROM ${t}`);
+    }
+    store.db.exec(`
+      CREATE TABLE IF NOT EXISTS worker_attempts (
+        id TEXT PRIMARY KEY, card_id INTEGER NOT NULL, contract_id TEXT NOT NULL,
+        ordinal INTEGER NOT NULL, executor_kind TEXT NOT NULL, executor_id TEXT NOT NULL,
+        status TEXT NOT NULL, started_at TEXT NOT NULL,
+        lifecycle TEXT NOT NULL DEFAULT 'pending',
+        root_project_card_id INTEGER, root_project_generation INTEGER,
+        UNIQUE(card_id, ordinal)
+      );
+      CREATE TABLE IF NOT EXISTS project_input_requests (
+        id TEXT PRIMARY KEY, project_card_id INTEGER NOT NULL,
+        review_case_id TEXT NOT NULL, question TEXT NOT NULL,
+        affected_criterion_ids TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'pending',
+        created_at TEXT NOT NULL
+      );
+    `);
+  });
+
+  const reviewPlan = (): Proposal => ({
+    requiredOutputs: ["report"],
+    nodes: [
+      { label: "a", kind: "work", instructions: "research", capability: "research", outputs: ["notes"], acceptance: ["thorough"], dependsOn: [] },
+      { label: "s", kind: "synthesis", instructions: "draft", capability: "write", outputs: ["report"], acceptance: ["complete"], dependsOn: ["a"] },
+      { label: "r", kind: "review", instructions: "judge", capability: "general", outputs: [], acceptance: [], dependsOn: ["s"] },
+    ],
+  });
+
+  /** Drive work+synthesis to completion so the review node dispatches. */
+  function completeToReview(runId: string, acc: { nodeIds: string[] }, ports: ReturnType<typeof jobPorts>["ports"]): string {
+    runner.drain(10, ports);
+    runner.attemptSucceeded(runId, acc.nodeIds[0] as string, "att-a", "{}");
+    runner.drain(10, ports);
+    runner.attemptSucceeded(runId, acc.nodeIds[1] as string, "att-s", "{}");
+    runner.drain(10, ports);
+    return acc.nodeIds[2] as string;
+  }
+
+  function jobPorts() {
+    const dispatched: Array<{ nodeId: string; action: string }> = [];
+    const reviews: Array<{ nodeId: string; brief: import("./orc-workflow-runner.js").ReviewBrief }> = [];
+    const plannings: Array<{ nodeId: string; purpose: string }> = [];
+    const ports = {
+      executor: {
+        name: "fake-exec",
+        dispatch: (cmd: { nodeId: string; action: string }) => {
+          dispatched.push({ nodeId: cmd.nodeId, action: cmd.action });
+        },
+      },
+      reviewer: {
+        name: "fake-reviewer",
+        startReview: (cmd: { nodeId: string }, brief: import("./orc-workflow-runner.js").ReviewBrief) => {
+          reviews.push({ nodeId: cmd.nodeId, brief });
+        },
+      },
+      planner: {
+        name: "fake-planner",
+        startPlanning: (cmd: { nodeId: string }, input: { purpose: string }) => {
+          plannings.push({ nodeId: cmd.nodeId, purpose: input.purpose });
+        },
+      },
+    };
+    return { ports, dispatched, reviews, plannings };
+  }
+
+  it("review accept creates a durable delivery obligation without succeeding the run", () => {
+    const run = admit(runner, seedCard(store));
+    const acc = runner.acceptPlan(run.runId, reviewPlan());
+    const { ports, dispatched, reviews } = jobPorts();
+    const rNode = completeToReview(run.runId, acc, ports);
+    expect(dispatched.map((d) => d.nodeId)).toEqual([acc.nodeIds[0], acc.nodeIds[1]]);
+    expect(reviews.length).toBe(1);
+    const brief = reviews[0]?.brief;
+    expect(brief?.requiredOutputs).toEqual(["report"]);
+    expect(brief?.criteriaByNode["a"]).toEqual(["thorough"]);
+    expect(brief?.evidenceIds).toEqual(expect.arrayContaining(["att-a", "att-s"]));
+    expect(brief?.request.title).toMatch(/wf-rcard-/);
+    expect(runner.submitVerdict(run.runId, rNode, { verdict: "accept" })).toBe("accepted");
+    // Accepted content with unacknowledged delivery is NOT success yet.
+    expect(store.getRun(run.runId)?.state).not.toBe("succeeded");
+    expect(store.hasPendingDelivery(run.runId)).toBe(true);
+    const cmds = store.db.prepare(`SELECT action FROM workflow_commands WHERE run_id = ? AND action = 'deliver'`).all(run.runId);
+    expect(cmds.length).toBe(1);
+  });
+
+  it("changes_required queues bounded repair; re-review accepts only the repaired revision", () => {
+    const run = admit(runner, seedCard(store));
+    const acc = runner.acceptPlan(run.runId, reviewPlan());
+    const { ports, reviews } = jobPorts();
+    const rNode = completeToReview(run.runId, acc, ports);
+    expect(reviews.length).toBe(1);
+    const out = runner.submitVerdict(run.runId, rNode, {
+      verdict: "changes_required", defects: [{ criterion: "thorough", detail: "missing sources" }],
+    });
+    expect(out).toBe("repair_queued");
+    // Original review node stays open across the repair revision.
+    const repairPlan: Proposal = {
+      requiredOutputs: ["report"],
+      nodes: [
+        { label: "fix", kind: "work", instructions: "add sources", capability: "research", outputs: ["notes"], acceptance: ["thorough"], dependsOn: [] },
+      ],
+    };
+    const rev2 = runner.submitPlanProposal(run.runId, repairPlan, { baseRevision: 1 });
+    expect(rev2.revision).toBe(2);
+    const rev1Review = store.listNodes(run.runId, 1).find((n) => n["node_id"] === rNode);
+    expect(rev1Review?.["status"]).toBe("running");
+    runner.drain(10, ports);
+    runner.attemptSucceeded(run.runId, rev2.nodeIds[0] as string, "att-fix", "{}");
+    // Re-review on the ORIGINAL node judges the repaired revision and accepts.
+    expect(runner.submitVerdict(run.runId, rNode, { verdict: "accept" })).toBe("accepted");
+    const verdict = JSON.parse(
+      (store.listNodes(run.runId, 1).find((n) => n["node_id"] === rNode)?.["outcome"] as string),
+    ) as { judgedRevision: number };
+    expect(verdict.judgedRevision).toBe(2);
+  });
+
+  it("repair exhaustion and malformed verdicts fail explicitly, never silently", () => {
+    const run = admit(runner, seedCard(store), { review_repair: 1, protocol_correction: 1 } as Partial<Record<BudgetScope, number>>);
+    const acc = runner.acceptPlan(run.runId, reviewPlan());
+    const { ports } = jobPorts();
+    const rNode = completeToReview(run.runId, acc, ports);
+    expect(runner.submitVerdict(run.runId, rNode, {
+      verdict: "changes_required", defects: [{ criterion: "thorough", detail: "thin" }],
+    })).toBe("repair_queued");
+    expect(runner.submitVerdict(run.runId, rNode, {
+      verdict: "changes_required", defects: [{ criterion: "thorough", detail: "still thin" }],
+    })).toBe("failed");
+    expect(store.getRun(run.runId)?.state).toBe("failed");
+
+    const run2 = admit(runner, seedCard(store), { protocol_correction: 1 } as Partial<Record<BudgetScope, number>>);
+    const acc2 = runner.acceptPlan(run2.runId, reviewPlan());
+    const { ports: ports2, reviews: reviews2 } = jobPorts();
+    const r2 = completeToReview(run2.runId, acc2, ports2);
+    expect(reviews2.length).toBe(1);
+    expect(runner.submitVerdict(run2.runId, r2, { verdict: "changes_required", defects: [] })).toBe("correction_queued");
+    // Correction requeues the review command; the reviewer gets a second brief.
+    expect(runner.drain(10, ports2)).toBe(1);
+    expect(reviews2.length).toBe(2);
+    expect(runner.submitVerdict(run2.runId, r2, { verdict: "changes_required", defects: [{ criterion: "nope", detail: "x" }] })).toBe("failed");
+    expect(store.getRun(run2.runId)?.state).toBe("failed");
+  });
+
+  it("cannot_assess fails the review with its reason", () => {
+    const run = admit(runner, seedCard(store));
+    const acc = runner.acceptPlan(run.runId, reviewPlan());
+    const { ports } = jobPorts();
+    const rNode = completeToReview(run.runId, acc, ports);
+    expect(runner.submitVerdict(run.runId, rNode, { verdict: "cannot_assess", reason: "artifact unreadable" })).toBe("unassessable");
+    expect(store.getRun(run.runId)?.state).toBe("failed");
+  });
+
+  it("next-wave planning appends a revision and completes its authoring node", () => {
+    const run = admit(runner, seedCard(store));
+    const wave1: Proposal = {
+      requiredOutputs: ["notes"],
+      nodes: [
+        { label: "a", kind: "work", instructions: "research", capability: "research", outputs: ["notes"], acceptance: ["done"], dependsOn: [] },
+        { label: "p", kind: "planning", instructions: "plan wave 2", capability: "general", outputs: [], acceptance: [], dependsOn: ["a"] },
+      ],
+    };
+    const acc = runner.acceptPlan(run.runId, wave1);
+    const { ports, plannings } = jobPorts();
+    runner.drain(10, ports);
+    runner.attemptSucceeded(run.runId, acc.nodeIds[0] as string, "att-a", "{}");
+    runner.drain(10, ports);
+    expect(plannings.length).toBe(1);
+    expect(plannings[0]?.purpose).toBe("next_wave");
+    const wave2: Proposal = {
+      requiredOutputs: ["notes", "report"],
+      nodes: [
+        { label: "s", kind: "synthesis", instructions: "write", capability: "write", outputs: ["report"], acceptance: ["done"], dependsOn: [] },
+      ],
+    };
+    const rev2 = runner.submitPlanProposal(run.runId, wave2, {
+      baseRevision: 1, completesNode: { revision: 1, nodeId: acc.nodeIds[1] as string, outcome: "proposed" },
+    });
+    expect(rev2.revision).toBe(2);
+    // Authoring planning node completed (not cancelled); wave-2 work queued.
+    const pNode = store.listNodes(run.runId, 1).find((n) => n["node_id"] === acc.nodeIds[1]);
+    expect(pNode?.["status"]).toBe("succeeded");
+    expect(store.getRun(run.runId)?.state).toBe("dispatched");
+  });
+
+  it("acceptance weakening is rejected without side effects", () => {
+    const run = admit(runner, seedCard(store));
+    runner.acceptPlan(run.runId, reviewPlan());
+    const narrow: Proposal = {
+      requiredOutputs: ["notes"],
+      nodes: [
+        { label: "x", kind: "work", instructions: "do", capability: "general", outputs: ["notes"], acceptance: ["done"], dependsOn: [] },
+      ],
+    };
+    expect(() => runner.submitPlanProposal(run.runId, narrow, { baseRevision: 1 })).toThrow(/weakens acceptance.*report/);
+    expect(store.currentRevision(run.runId)).toBe(1);
+    // The admission's own queued command is untouched; the rejected revision
+    // queued nothing.
+    expect(store.countRunCommands(run.runId, "pending")).toBe(1);
+  });
+
+  it("single ExecutionPort keeps legacy dispatch-everything behavior", () => {
+    const run = admit(runner, seedCard(store));
+    runner.acceptPlan(run.runId, reviewPlan());
+    const { port, dispatched } = fakePort();
+    runner.drain(10, port);
+    expect(dispatched.length).toBe(1);
+    runner.attemptSucceeded(run.runId, dispatched[0]?.nodeId as string, "att-a", "{}");
+    runner.drain(10, port);
+    expect(dispatched.length).toBe(2);
+    runner.attemptSucceeded(run.runId, dispatched[1]?.nodeId as string, "att-s", "{}");
+    runner.drain(10, port);
+    // Review command also flows to the single port (pre-cutover compat).
+    expect(dispatched.length).toBe(3);
+  });
+});

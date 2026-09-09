@@ -86,7 +86,7 @@ CREATE TABLE IF NOT EXISTS workflow_operations (
 CREATE INDEX IF NOT EXISTS idx_workflow_operations_run
   ON workflow_operations(run_id, status);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_workflow_operations_single_open
-  ON workflow_operations(run_id, kind) WHERE status IN ('pending','claimed','running');
+  ON workflow_operations(run_id, kind, revision) WHERE status IN ('pending','claimed','running');
 
 CREATE TABLE IF NOT EXISTS workflow_budgets (
   run_id TEXT NOT NULL,

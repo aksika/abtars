@@ -182,13 +182,16 @@ describe("WorkflowStore", () => {
     expect(store.consumeBudget(run.runId, "work_retry")).toBe(false);
   });
 
-  it("single-open-operation index rejects a second open op of the same kind", () => {
+  it("single-open-operation index rejects a second open op of the same kind+revision", () => {
     const card = seedCard(store);
     const { row: run } = admit(store, card, "cop-c7");
-    store.upsertOperation({ opId: "op-1", runId: run.runId, kind: "review", status: "pending" });
-    expect(() => store.upsertOperation({ opId: "op-2", runId: run.runId, kind: "review", status: "pending" })).toThrow(/UNIQUE/);
-    store.upsertOperation({ opId: "op-1", runId: run.runId, kind: "review", status: "failed" });
-    store.upsertOperation({ opId: "op-3", runId: run.runId, kind: "review", status: "pending" });
+    store.upsertOperation({ opId: "op-1", runId: run.runId, kind: "review", revision: 1, status: "pending" });
+    expect(() => store.upsertOperation({ opId: "op-2", runId: run.runId, kind: "review", revision: 1, status: "pending" })).toThrow(/UNIQUE/);
+    // Same kind in a different revision is a different job: allowed.
+    store.upsertOperation({ opId: "op-3", runId: run.runId, kind: "review", revision: 2, status: "pending" });
+    // Terminal release frees the slot for the same revision.
+    store.upsertOperation({ opId: "op-1", runId: run.runId, kind: "review", revision: 1, status: "failed" });
+    store.upsertOperation({ opId: "op-4", runId: run.runId, kind: "review", revision: 1, status: "pending" });
   });
 
   it("probeRun reports all seven signals", () => {

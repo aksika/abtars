@@ -424,8 +424,7 @@ export class WorkflowStore {
     return Number(row.c);
   }
 
-  countRunCommands(runId: string, status?: CommandStatus): number {
-    const row = status === undefined
+  countRunCommands(runId: string, status?: CommandStatus): number {    const row = status === undefined
       ? (this.db.prepare(`SELECT COUNT(*) AS c FROM workflow_commands WHERE run_id = ?`).get(runId) as { c: number })
       : (this.db
           .prepare(`SELECT COUNT(*) AS c FROM workflow_commands WHERE run_id = ? AND status = ?`)
@@ -485,24 +484,36 @@ export class WorkflowStore {
       .run(cmd.runId, cmd.generation, cmd.nodeId, cmd.action, cmd.ordinal, cmd.payloadJson);
   }
 
+  /**
+   * One delivery obligation per (run, review node); re-acceptance refreshes it.
+   * PK-targeted upsert: a malformed obligation still raises.
+   */
   insertDelivery(runId: string, nodeId: string, obligationJson: string): void {
     this.db
       .prepare(
         `INSERT INTO workflow_deliveries (run_id, node_id, obligation_json, outcome,
           attempts, created_at, updated_at)
-         VALUES (?, ?, ?, 'pending', 0, datetime('now'), datetime('now'))`,
+         VALUES (?, ?, ?, 'pending', 0, datetime('now'), datetime('now'))
+         ON CONFLICT(run_id, node_id) DO UPDATE SET obligation_json = excluded.obligation_json,
+           updated_at = datetime('now')`,
       )
       .run(runId, nodeId, obligationJson);
   }
 
-  setDeliveryOutcome(runId: string, nodeId: string, outcome: "acknowledged" | "failed" | "unknown", receiptJson: string | null): void {
-    const res = this.db
+  setDeliveryOutcome(runId: string, nodeId: string, outcome: "acknowledged" | "failed" | "unknown", receiptJson: string | null): void {    const res = this.db
       .prepare(
         `UPDATE workflow_deliveries SET outcome = ?, receipt_json = COALESCE(?, receipt_json),
           updated_at = datetime('now') WHERE run_id = ? AND node_id = ?`,
       )
       .run(outcome, receiptJson, runId, nodeId);
     if (res.changes !== 1) throw new Error(`workflow store: delivery ${runId}/${nodeId} missing`);
+  }
+
+  hasPendingDelivery(runId: string): boolean {
+    const row = this.db
+      .prepare(`SELECT EXISTS(SELECT 1 FROM workflow_deliveries WHERE run_id = ? AND outcome = 'pending') AS v`)
+      .get(runId) as { v: number };
+    return Number(row.v) === 1;
   }
 
   upsertOperation(op: {
@@ -563,6 +574,38 @@ export class WorkflowStore {
       .prepare(`UPDATE workflow_budgets SET consumed = consumed + 1 WHERE run_id = ? AND scope = ? AND consumed < allowed`)
       .run(runId, scope);
     return res.changes === 1;
+  }
+
+  readBudgets(runId: string): Record<BudgetScope, { allowed: number; consumed: number }> {
+    const rows = this.db
+      .prepare(`SELECT scope, allowed, consumed FROM workflow_budgets WHERE run_id = ?`)
+      .all(runId) as Array<Record<string, unknown>>;
+    const out = {} as Record<BudgetScope, { allowed: number; consumed: number }>;
+    for (const r of rows) {
+      out[r["scope"] as BudgetScope] = { allowed: Number(r["allowed"]), consumed: Number(r["consumed"]) };
+    }
+    return out;
+  }
+
+  /**
+   * Cancel non-terminal nodes of superseded revisions (replacement never
+   * rewrites running work). Review-kind nodes are spared: a review verdict
+   * spans revisions by design (re-review judges the new revision on the same
+   * node). Callers may spare additional nodes (e.g. the planning node whose
+   * proposal is being admitted — it completes instead).
+   */
+  cancelPriorNodes(runId: string, revision: number, spareNodeIds: string[] = []): number {
+    const spare = spareNodeIds.length > 0
+      ? `AND node_id NOT IN (${spareNodeIds.map(() => "?").join(",")})`
+      : ``;
+    const res = this.db
+      .prepare(
+        `UPDATE workflow_nodes SET status = 'cancelled', updated_at = datetime('now')
+         WHERE run_id = ? AND revision < ? AND status IN ('queued','running')
+           AND kind <> 'review' ${spare}`,
+      )
+      .run(runId, revision, ...spareNodeIds);
+    return res.changes;
   }
 
   drainPendingCommands(limit: number): CommandRow[] {
