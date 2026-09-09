@@ -415,12 +415,29 @@ function longProofReply(marker: string, chars: number): string {
 }
 
 /**
+ * #1787: exclusive cursor for "rows this scenario caused", derived from the
+ * store's own newest row rather than the test process's clock. `timestamp >
+ * cursor` then excludes everything already durable and admits everything
+ * written afterwards, with no cross-process clock comparison — a bridge
+ * stamp landing in the same millisecond as the scenario start can no longer
+ * permanently exclude the first turn. Bounded to 1 row: the query returns
+ * the newest `limit` rows, so limit=1 is exactly max(timestamp) for a few
+ * bytes. Empty store yields 0 (admits everything, and nothing foreign can
+ * exist to admit).
+ */
+async function durableReadCursor(ctx: PiAcceptanceContext): Promise<number> {
+  const newest = await ctx.owner.conversationRows(MASTER_USER_ID, 0, 1);
+  const row = newest[0];
+  return row === undefined ? 0 : row.timestamp;
+}
+
+/**
  * Five large normal turns followed by manual /compact must produce a durable
  * checkpoint that the next turn's projected context consumes — without making
  * Pi's transcript a second durable authority and without duplicating rows.
  */
 async function durableCompaction(ctx: PiAcceptanceContext): Promise<void> {
-  const since = Date.now();
+  const since = await durableReadCursor(ctx);
   const turnMarkers: string[] = [];
   const replyMarkers: string[] = [];
 
@@ -753,7 +770,7 @@ async function ownerRecovery(ctx: PiAcceptanceContext): Promise<void> {
 async function bridgeRestart(ctx: PiAcceptanceContext): Promise<void> {
   const a1 = ctx.markers.next("B1A");
   const a3 = ctx.markers.next("B3A");
-  const preRestart = Date.now() - 1000;
+  const preRestart = await durableReadCursor(ctx);
 
   // The bridge may still be renegotiating memory after the owner recovery;
   // retry on the bounded unavailability reply like the recovery scenario.
