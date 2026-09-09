@@ -22,6 +22,7 @@
           "port": { "type": "number" },
           "verifyKey": { "type": "string", "description": "Base64 Ed25519 public key for signature verification" },
           "trust": { "type": "number", "description": "Trust level: 0=enrolled, 1=trusted, 2=owner" },
+          "maxClass": { "type": "integer", "minimum": 0, "maximum": 3, "description": "Disclosure ceiling: 0=UNCLASSIFIED, 1=RESTRICTED, 2=CONFIDENTIAL, 3=SECRET (recalled as max 2 — SECRET never leaves over A2A). Absent defaults to 0." },
           "mode": { "type": "string", "enum": ["signed"] },
           "allowedTools": { "type": "array", "items": { "type": "string" } },
           "allowedRead": { "type": "array", "items": { "type": "string" } },

@@ -683,13 +683,26 @@ const memoryRecallTool: ToolDefinition = {
     try {
       const t0 = Date.now();
       const userId = context?.userId ?? getMasterUserId();
-      const { loadUsers } = await import("../user-registry.js");
-      const userEntry = loadUsers().byUserId.get(userId);
+      // #1790: peer identities resolve their disclosure ceiling from
+      // peers.json via the single cap helper — never from the user registry
+      // (peer:* ids have no UserEntry) and never from model arguments
+      // (the schema exposes no identity/capability fields). Peer lookup takes
+      // precedence even if a users.json entry happens to use that ID.
+      // Human path is unchanged.
+      let maxClassification: number;
+      if (userId.startsWith("peer:")) {
+        const { getPeerRecallCap } = await import("../peer-config.js");
+        maxClassification = getPeerRecallCap(userId.slice("peer:".length));
+      } else {
+        const { loadUsers } = await import("../user-registry.js");
+        const userEntry = loadUsers().byUserId.get(userId);
+        maxClassification = userEntry?.maxClass ?? 1;
+      }
       const result = await runtime.recall({
         query: stringValue(args["query"]),
         userId,
         limit: parseInt(stringValue(args["limit"] ?? "10"), 10),
-        maxClassification: userEntry?.maxClass ?? 1,
+        maxClassification,
       });
       import("../metrics-collector.js").then(({ recordLatency }) => recordLatency("recall", Date.now() - t0)).catch(err => logAndSwallow(TAG, "record recall latency", err));
       return JSON.stringify(result);

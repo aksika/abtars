@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
-import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -18,7 +18,7 @@ import { createClientRuntime } from "../memory-runtime.js";
 import { MemoryStoreQuota } from "../memory-store-quota.js";
 import { resolveNativeDep } from "../../utils/lazy-require.js";
 import type { MemoryToolDependenciesHolder } from "../memory-store-quota.js";
-import { setUserRegistryOverride } from "../user-registry.js";
+import { setUserRegistryOverride, type UserEntry } from "../user-registry.js";
 
 function mockAbmindClient(caps: { methods: string[]; features: Record<string, string> }) {
   const { AbmindClient } = {} as any;
@@ -792,5 +792,121 @@ describe("send_document — #1663 unattended scheduled execution denial", () => 
     });
     expect(JSON.parse(result).ok).toBe(true);
     expect(sendSpy).toHaveBeenCalledOnce();
+  });
+});
+
+// ── #1790 peer recall cap: real handler + real temporary peer config ────────
+// Only the memory client boundary is mocked; the cap is captured from the
+// outgoing recall request. Proves abtars policy wiring, not backend filtering.
+
+describe("memory_recall peer clearance cap (#1790)", () => {
+  let homeDir: string;
+  let savedHome: string | undefined;
+  let quotaDir: string;
+  let quota: MemoryStoreQuota;
+  let holder: MemoryToolDependenciesHolder;
+  let client: ReturnType<typeof mockAbmindClient>;
+
+  beforeEach(async () => {
+    vi.clearAllMocks();
+    savedHome = process.env.ABTARS_HOME;
+    homeDir = mkdtempSync(join(tmpdir(), "abtars-peer-cap-"));
+    mkdirSync(join(homeDir, "config"), { recursive: true });
+    writeFileSync(join(homeDir, "config", "peers.json"), JSON.stringify({
+      self: { name: "kp-test", signingKey: "k", tribeToken: "t" },
+      peers: {
+        plain: { host: "10.0.0.1", port: 7100, verifyKey: "k1" },
+        low: { host: "10.0.0.2", port: 7100, verifyKey: "k2", maxClass: 1 },
+        conf: { host: "10.0.0.3", port: 7100, verifyKey: "k3", maxClass: 2 },
+        sealed: { host: "10.0.0.4", port: 7100, verifyKey: "k4", maxClass: 3 },
+        molty: { host: "10.0.0.5", port: 7100, verifyKey: "k5", maxClass: 1 },
+        Molty: { host: "10.0.0.6", port: 7100, verifyKey: "k6", maxClass: 2 },
+      },
+    }));
+    process.env.ABTARS_HOME = homeDir;
+    const { clearPeerConfigCache } = await import("../peer-config.js");
+    clearPeerConfigCache();
+    quotaDir = mkdtempSync(join(tmpdir(), "abtars-tool-quota-"));
+    quota = new MemoryStoreQuota({ dbPath: join(quotaDir, "quota.db") });
+    holder = { current: null as unknown as NonNullable<MemoryToolDependenciesHolder["current"]> };
+    client = mockAbmindClient({
+      methods: ["private.recall"],
+      features: { private_read: "true", private_write: "false" },
+    });
+    holder.current = { runtime: createClientRuntime(client as never), quota };
+    // A colliding users.json entry must lose to the peer lookup; the human
+    // entries pin the unchanged non-peer behavior.
+    const colliding: UserEntry = { userId: "peer:molty", role: "user", maxClass: 0, tools: [], platforms: {} };
+    const master: UserEntry = { userId: "master-1", role: "master", maxClass: 1, tools: [], platforms: {} };
+    setUserRegistryOverride({
+      users: [colliding, master],
+      byPlatformId: new Map(),
+      byUserId: new Map([["peer:molty", colliding], ["master-1", master]]),
+    });
+  });
+
+  afterEach(async () => {
+    const { clearPeerConfigCache } = await import("../peer-config.js");
+    clearPeerConfigCache();
+    if (savedHome === undefined) delete process.env.ABTARS_HOME;
+    else process.env.ABTARS_HOME = savedHome;
+    quota.close();
+    rmSync(quotaDir, { recursive: true, force: true });
+    rmSync(homeDir, { recursive: true, force: true });
+    holder.current = null;
+    setUserRegistryOverride(null);
+  });
+
+  function lastRecallRequest(): Record<string, unknown> {
+    const calls = vi.mocked(client.privateMemory.recall).mock.calls;
+    expect(calls.length).toBeGreaterThan(0);
+    return calls[calls.length - 1]![0] as Record<string, unknown>;
+  }
+
+  async function recallAs(userId: string, args: Record<string, unknown> = { query: "q" }) {
+    const raw = await executeToolCall("memory_recall", args, { userId, sessionType: "A", memoryToolDeps: holder });
+    const parsed = JSON.parse(raw) as { hits?: unknown };
+    expect(parsed.hits).toBeDefined();
+  }
+
+  it("absent maxClass recalls at 0, not the old fixed-1 fallback", async () => {
+    await recallAs("peer:plain");
+    expect(lastRecallRequest()).toMatchObject({ userId: "peer:plain", maxClassification: 0 });
+  });
+
+  it("unknown peer recalls at 0", async () => {
+    await recallAs("peer:nobody");
+    expect(lastRecallRequest()).toMatchObject({ userId: "peer:nobody", maxClassification: 0 });
+  });
+
+  it("explicit maxClass 1 and 2 forward unchanged", async () => {
+    await recallAs("peer:low");
+    expect(lastRecallRequest()).toMatchObject({ userId: "peer:low", maxClassification: 1 });
+    await recallAs("peer:conf");
+    expect(lastRecallRequest()).toMatchObject({ userId: "peer:conf", maxClassification: 2 });
+  });
+
+  it("declared maxClass 3 recalls at 2 — SECRET never leaves", async () => {
+    await recallAs("peer:sealed");
+    expect(lastRecallRequest()).toMatchObject({ userId: "peer:sealed", maxClassification: 2 });
+  });
+
+  it("peer lookup is case-sensitive and wins over a colliding user-registry ID", async () => {
+    await recallAs("peer:molty");
+    expect(lastRecallRequest()).toMatchObject({ userId: "peer:molty", maxClassification: 1 });
+    await recallAs("peer:Molty");
+    expect(lastRecallRequest()).toMatchObject({ userId: "peer:Molty", maxClassification: 2 });
+  });
+
+  it("configured-human and unknown-human behavior is unchanged", async () => {
+    await recallAs("master-1");
+    expect(lastRecallRequest()).toMatchObject({ userId: "master-1", maxClassification: 1 });
+    await recallAs("stranger");
+    expect(lastRecallRequest()).toMatchObject({ userId: "stranger", maxClassification: 1 });
+  });
+
+  it("model-supplied maxClass/userId arguments cannot override context/config", async () => {
+    await recallAs("peer:low", { query: "q", maxClassification: 3, userId: "peer:conf" });
+    expect(lastRecallRequest()).toMatchObject({ userId: "peer:low", maxClassification: 1 });
   });
 });

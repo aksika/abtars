@@ -140,6 +140,99 @@ describe("peer-config schema", () => {
   });
 });
 
+describe("peer-config maxClass (#1790)", () => {
+  function writePeers(peers: Record<string, unknown>): void {
+    const p = join(TEST_HOME, "config", "peers.json");
+    writeFileSync(p, JSON.stringify({
+      self: { name: "KP", signingKey: "k", tribeToken: "t" },
+      peers,
+    }));
+  }
+
+  async function freshLogger() {
+    const logger = await import("./logger.js");
+    vi.mocked(logger.logWarn).mockClear();
+    return logger;
+  }
+
+  it("absent maxClass normalizes to 0 silently", async () => {
+    writePeers({ molty: { host: "1.2.3.4", port: 7100, verifyKey: "pub", trust: 1 } });
+    const { loadPeerConfig, getPeerMaxClass, getPeerRecallCap } = await freshImport();
+    const logger = await freshLogger();
+    const config = loadPeerConfig();
+    expect(config.peers["molty"]?.maxClass).toBe(0);
+    expect(getPeerMaxClass("molty")).toBe(0);
+    expect(getPeerRecallCap("molty")).toBe(0);
+    expect(logger.logWarn).not.toHaveBeenCalled();
+  });
+
+  it.each([0, 1, 2, 3])("preserves declared maxClass %i", async (level) => {
+    writePeers({ molty: { host: "1.2.3.4", port: 7100, verifyKey: "pub", maxClass: level } });
+    const { loadPeerConfig, getPeerMaxClass } = await freshImport();
+    await freshLogger();
+    expect(loadPeerConfig().peers["molty"]?.maxClass).toBe(level);
+    expect(getPeerMaxClass("molty")).toBe(level);
+  });
+
+  it.each([
+    { raw: null }, { raw: "2" }, { raw: true }, { raw: {} }, { raw: [] },
+    { raw: -1 }, { raw: 4 }, { raw: 2.9 }, { raw: 3.5 },
+  ])(
+    "invalid maxClass $raw defaults to 0 with a warning naming the peer",
+    async ({ raw }) => {
+      writePeers({ badpeer: { host: "1.2.3.4", port: 7100, verifyKey: "pub", maxClass: raw } });
+      const { loadPeerConfig, getPeerMaxClass, getPeerRecallCap } = await freshImport();
+      const logger = await freshLogger();
+      const config = loadPeerConfig();
+      expect(config.peers["badpeer"]?.maxClass).toBe(0);
+      expect(getPeerMaxClass("badpeer")).toBe(0);
+      expect(getPeerRecallCap("badpeer")).toBe(0);
+      expect(logger.logWarn).toHaveBeenCalledTimes(1);
+      expect(logger.logWarn).toHaveBeenCalledWith("peer-config", expect.stringContaining("badpeer"));
+    },
+  );
+
+  it("recall cap clamps declared 3 to 2 and is 0 for unknown peers", async () => {
+    writePeers({
+      sealed: { host: "1.2.3.4", port: 7100, verifyKey: "pub", maxClass: 3 },
+      conf: { host: "1.2.3.5", port: 7100, verifyKey: "pub", maxClass: 2 },
+    });
+    const { getPeerMaxClass, getPeerRecallCap } = await freshImport();
+    await freshLogger();
+    expect(getPeerMaxClass("sealed")).toBe(3);
+    expect(getPeerRecallCap("sealed")).toBe(2);
+    expect(getPeerRecallCap("conf")).toBe(2);
+    expect(getPeerMaxClass("nobody")).toBe(0);
+    expect(getPeerRecallCap("nobody")).toBe(0);
+  });
+
+  it("peer lookup is case-sensitive and ignores inherited keys", async () => {
+    writePeers({ Molty: { host: "1.2.3.4", port: 7100, verifyKey: "pub", maxClass: 2 } });
+    const { getPeerMaxClass, getPeerRecallCap } = await freshImport();
+    await freshLogger();
+    expect(getPeerMaxClass("Molty")).toBe(2);
+    expect(getPeerMaxClass("molty")).toBe(0);
+    expect(getPeerRecallCap("molty")).toBe(0);
+    expect(getPeerMaxClass("toString")).toBe(0);
+  });
+
+  it("cached reads do not re-warn; cleared cache reloads changed clearance", async () => {
+    writePeers({ molty: { host: "1.2.3.4", port: 7100, verifyKey: "pub", maxClass: 7 } });
+    const mod = await freshImport();
+    const logger = await freshLogger();
+    expect(mod.loadPeerConfig().peers["molty"]?.maxClass).toBe(0);
+    expect(logger.logWarn).toHaveBeenCalledTimes(1);
+    // Cached second load: same value, no second warning.
+    expect(mod.loadPeerConfig().peers["molty"]?.maxClass).toBe(0);
+    expect(logger.logWarn).toHaveBeenCalledTimes(1);
+    // Changed file + cleared cache: new value loads.
+    writePeers({ molty: { host: "1.2.3.4", port: 7100, verifyKey: "pub", maxClass: 2 } });
+    mod.clearPeerConfigCache();
+    expect(mod.loadPeerConfig().peers["molty"]?.maxClass).toBe(2);
+    expect(mod.getPeerRecallCap("molty")).toBe(2);
+  });
+});
+
 describe("deriveVerifyKey", () => {
   it("derives a stable public key from a generated signing key", async () => {
     const { loadPeerConfig, deriveVerifyKey } = await freshImport();

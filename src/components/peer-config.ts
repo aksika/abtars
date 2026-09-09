@@ -23,6 +23,8 @@ export interface PeerEntry {
   port: number;
   verifyKey: string;                    // Ed25519 public key (base64 SPKI DER) — auth + TLS anchor
   trust?: number;                       // default 0; 1=enrolled, 2=trusted, >=3=owner
+  /** #1790: disclosure ceiling 0-3. Absent normalizes to 0. Never a recall cap by itself — use getPeerRecallCap(). */
+  maxClass?: 0 | 1 | 2 | 3;
   mode?: "signed";                      // require body-sig for relayed content
   allowedTools?: string[];
   allowedRead?: string[];
@@ -132,6 +134,7 @@ export function loadPeerConfig(): PeerConfig {
             port: e.port,
             verifyKey: e.verifyKey,
             ...(typeof e.trust === "number" ? { trust: e.trust } : {}),
+            maxClass: normalizePeerMaxClass(e.maxClass, name),
             ...(e.mode === "signed" ? { mode: "signed" as const } : {}),
             ...(Array.isArray(e.allowedTools) ? { allowedTools: e.allowedTools as string[] } : {}),
             ...(Array.isArray(e.allowedRead) ? { allowedRead: e.allowedRead as string[] } : {}),
@@ -168,6 +171,42 @@ export function loadPeerConfig(): PeerConfig {
     };
     return _config;
   }
+}
+
+/**
+ * #1790: normalize a peer's declared disclosure ceiling. Accepts exactly the
+ * integers 0-3 (2.0 is the integer 2 in JSON). Absent returns 0 silently —
+ * that is the documented default. Anything else (null, strings, booleans,
+ * floats, out-of-range, objects) returns 0 with one warning naming the peer.
+ * Fail-closed: never resolve upward. Raw values are never logged.
+ */
+function normalizePeerMaxClass(raw: unknown, peerName: string): 0 | 1 | 2 | 3 {
+  if (raw === undefined) return 0;
+  if (raw === 0 || raw === 1 || raw === 2 || raw === 3) return raw;
+  logWarn(TAG, `Peer '${peerName}' has invalid maxClass — defaulting to 0`);
+  return 0;
+}
+
+/**
+ * #1790: declared disclosure ceiling for an enrolled peer. Unknown names
+ * (including inherited object keys, which are never enrolled peers) return 0.
+ * Exact case-sensitive match. Values were normalized at load, so this never
+ * re-warns.
+ */
+export function getPeerMaxClass(peerName: string): 0 | 1 | 2 | 3 {
+  const peers = loadPeerConfig().peers;
+  if (!Object.prototype.hasOwnProperty.call(peers, peerName)) return 0;
+  return peers[peerName]?.maxClass ?? 0;
+}
+
+/**
+ * #1790: effective recall ceiling for A2A answers from this peer. SECRET (3)
+ * never leaves over A2A: declared 3 recalls as 2. This is the only abtars
+ * peer-cap calculation — call sites must not roll their own clamp.
+ */
+export function getPeerRecallCap(peerName: string): 0 | 1 | 2 {
+  const declared = getPeerMaxClass(peerName);
+  return (declared >= 3 ? 2 : declared) as 0 | 1 | 2;
 }
 
 export function clearPeerConfigCache(): void { _config = null; }

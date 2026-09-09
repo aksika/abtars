@@ -1,6 +1,14 @@
 {
   "self": { "name": "default" },
-  "peers": {},
+  "peers": {
+    "peer-b": {
+      "host": "192.0.2.10",
+      "port": 7100,
+      "verifyKey": "<peer-b Ed25519 public key (base64 SPKI DER)>",
+      "trust": 1,
+      "maxClass": 1
+    }
+  },
   "maxHops": 12,
   "timeoutMs": 60000
 }

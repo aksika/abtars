@@ -89,8 +89,16 @@ delivering a terminal result. See the lane table above.
 | `peers.<name>.port` | Peer's Agent API port (default 3100) |
 | `peers.<name>.token` | Shared secret for JWT auth |
 | `peers.<name>.verifyKey` | Peer's public key for JWT verification |
+| `peers.<name>.maxClass` | Disclosure ceiling 0–3 (default 0 when absent; invalid values also default to 0). Effective A2A recall cap is min(maxClass, 2) — SECRET never leaves. |
 | `peers.<name>.certFingerprint` | Peer's TLS cert SHA-256 fingerprint |
 | `peers.<name>.certPem` | Peer's full TLS certificate (PEM) |
+
+A peer only ever receives memories at or below its `maxClass` through the
+peer-identity recall boundary (absent or invalid `maxClass` means 0,
+UNCLASSIFIED-only). `maxClass` is a disclosure ceiling, not a permission:
+class-2 rows still require ownership by the recalling peer principal, and it
+enables no recall on the tool-free lane-1 chat turn. SECRET (3) is never
+returned to a peer at any level.
 
 ## Setting up TLS certificates
 

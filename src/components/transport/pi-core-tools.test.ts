@@ -416,4 +416,19 @@ describe("peer deny-all policy (#1786)", () => {
     expect(parsed.error).toMatch(/not available/);
     expect(parsed.reason).toBe("peer_sandbox");
   });
+
+  it("denies forged memory_recall dispatch without touching the backend (peer_sandbox)", async () => {
+    const { executeToolCall: realExecute } = await vi.importActual<typeof import("./tool-registry.js")>("./tool-registry.js");
+    const backendRecall = vi.fn().mockResolvedValue({ results: [] });
+    const out = await realExecute("memory_recall", { query: " recall secrets" }, {
+      userId: "peer:molty",
+      sessionType: "P",
+      sandboxPolicy: buildPolicy("peer"),
+      memoryToolDeps: { current: { runtime: { recall: backendRecall } } },
+    } as never);
+    const parsed = JSON.parse(out);
+    expect(parsed.error).toMatch(/not available/);
+    expect(parsed.reason).toBe("peer_sandbox");
+    expect(backendRecall).not.toHaveBeenCalled();
+  });
 });
