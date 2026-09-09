@@ -159,6 +159,23 @@ export class ProjectReviewValidator {
       }
     }
 
+    // #1791: a captured final report is case evidence. Register its stable id
+    // globally, and criterion-locally wherever the assembler listed it
+    // (Orc-owned criteria only — the assembler never attaches it to delegated
+    // criteria, so citing it as delegated-worker proof fails the compatibility
+    // check below). Negative observations register nothing.
+    const reportEvidence = caseSnapshot.report_evidence;
+    if (reportEvidence?.state === "captured") {
+      validEvidenceIds.add(reportEvidence.evidence_id);
+      for (const ci of caseSnapshot.criterion_inputs) {
+        if (ci.artifact_observation_ids.includes(reportEvidence.evidence_id)) {
+          const criterionEvidence = evidenceIdsByCriterion.get(ci.criterion_id) ?? new Set<string>();
+          criterionEvidence.add(reportEvidence.evidence_id);
+          evidenceIdsByCriterion.set(ci.criterion_id, criterionEvidence);
+        }
+      }
+    }
+
     // Evidence references in decisions must be known
     for (const c of decision.criteria) {
       const compatibleEvidenceIds = evidenceIdsByCriterion.get(c.criterion_id);
@@ -174,6 +191,17 @@ export class ProjectReviewValidator {
       for (const eid of cc.evidence_ids) {
         if (!validEvidenceIds.has(eid)) {
           errors.push(error("bad_reference", `$.contradictions[${cc.id}].evidence_ids`, `unknown evidence id "${eid}"`));
+        }
+      }
+    }
+    // #1791: output references are checked against the case's known ids, like
+    // criterion and contradiction references. A captured report id cited for an
+    // output resolves here; unknown or foreign ids fail instead of riding
+    // along silently.
+    for (const o of decision.outputs) {
+      for (const eid of o.evidence_ids) {
+        if (!validEvidenceIds.has(eid)) {
+          errors.push(error("bad_reference", `$.outputs[${o.output_id}].evidence_ids`, `unknown evidence id "${eid}"`));
         }
       }
     }

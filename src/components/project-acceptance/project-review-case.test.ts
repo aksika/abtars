@@ -725,3 +725,84 @@ describe("ReviewCaseAssembler #1656 contract-level evidence", () => {
     expect(input.artifact_observation_ids).toEqual([`attempt:${a.attemptId}:artifact:a1`]);
   });
 });
+
+describe("ReviewCaseAssembler #1791 report evidence observations", () => {
+  const RUN_COLS = ["run_id", "task_id", "group_id", "attempt", "trigger", "occurrence_at", "reserved_at", "deadline_at", "phase", "last_progress_at", "progress_sequence", "card_id", "session_id", "execution_id", "terminal_request_json", "report_contract_json", "owner_pid", "owner_started_at"];
+
+  async function setupOrcOnly(source: string, sourceId?: string): Promise<{ rootCardId: number; runId: string }> {
+    const kanban = await import("../tasks/kanban-board.js");
+    const reviewStoreMod = await import("./project-review-store.js");
+    const rootCardId = kanban.kanbanEnqueue("root", source, sourceId, { type: "O" });
+    const reviewStore = new reviewStoreMod.ProjectReviewStore();
+    reviewStore.insertContract(makeRootContractV2(rootCardId, [{ id: "q1", required: true, execution_owner: "orc" }]));
+    reviewStore.initializeSupervision(rootCardId, `pc_rca_${rootCardId}`, "executing");
+    return { rootCardId, runId: sourceId ?? "" };
+  }
+
+  function insertRun(db: { prepare: (sql: string) => { run: (...a: unknown[]) => unknown } }, run: { runId: string; cardId: number | null; contractJson: string | null }): void {
+    const now = Date.now();
+    db.prepare(`INSERT INTO task_runs (${RUN_COLS.join(", ")}) VALUES (${RUN_COLS.map(() => "?").join(", ")})`).run(
+      run.runId, "t", "g", 1, "schedule", now - 60_000, now - 60_000, now + 3_600_000, "executing", now, 0,
+      run.cardId, null, null, null, run.contractJson, process.pid, null);
+  }
+
+  async function assemble(rootCardId: number): Promise<ReviewCaseSnapshot> {
+    const { ReviewCaseAssembler } = await import("./project-review-case.js");
+    const snap = await new ReviewCaseAssembler().assembleCase(rootCardId, 1, 1);
+    expect("error" in snap).toBe(false);
+    return snap as ReviewCaseSnapshot;
+  }
+
+  it("unscheduled root projects observe not_applicable without touching task_runs", async () => {
+    const { rootCardId } = await setupOrcOnly("agent");
+    const snap = await assemble(rootCardId);
+    expect(snap.report_evidence).toEqual({ state: "not_applicable", reason: "unscheduled_project" });
+  });
+
+  it("task-sourced root without an occurrence row observes occurrence_missing", async () => {
+    const { rootCardId } = await setupOrcOnly("task", `run-norow-${Date.now()}`);
+    const snap = await assemble(rootCardId);
+    expect(snap.report_evidence).toMatchObject({ state: "unavailable", code: "occurrence_missing" });
+  });
+
+  it("occurrence bound to another card observes occurrence_mismatch", async () => {
+    const { rootCardId, runId } = await setupOrcOnly("task", `run-mismatch-${Date.now()}`);
+    const kanban = await import("../tasks/kanban-board.js");
+    insertRun(kanban.requireTaskDatabase(), { runId, cardId: rootCardId + 1000, contractJson: null });
+    const snap = await assemble(rootCardId);
+    expect(snap.report_evidence).toMatchObject({ state: "unavailable", code: "occurrence_mismatch" });
+  });
+
+  it("malformed snapshot observes snapshot_invalid, never absence", async () => {
+    const { rootCardId, runId } = await setupOrcOnly("task", `run-malformed-${Date.now()}`);
+    const kanban = await import("../tasks/kanban-board.js");
+    insertRun(kanban.requireTaskDatabase(), { runId, cardId: rootCardId, contractJson: "{oops" });
+    const snap = await assemble(rootCardId);
+    expect(snap.report_evidence).toMatchObject({ state: "unavailable", code: "snapshot_invalid" });
+  });
+
+  it("null snapshot observes not_applicable/no_report_contract", async () => {
+    const { rootCardId, runId } = await setupOrcOnly("task", `run-nocontract-${Date.now()}`);
+    const kanban = await import("../tasks/kanban-board.js");
+    insertRun(kanban.requireTaskDatabase(), { runId, cardId: rootCardId, contractJson: null });
+    const snap = await assemble(rootCardId);
+    expect(snap.report_evidence).toEqual({ state: "not_applicable", reason: "no_report_contract" });
+  });
+
+  it("declared report with no file observes invalid/artifact_not_found", async () => {
+    const { rootCardId, runId } = await setupOrcOnly("task", `run-nofile-${Date.now()}`);
+    const kanban = await import("../tasks/kanban-board.js");
+    insertRun(kanban.requireTaskDatabase(), {
+      runId,
+      cardId: rootCardId,
+      contractJson: JSON.stringify({
+        artifactPath: join(TEST_HOME, "workspace", "ghost.md"),
+        minBytes: 1, requiredSections: [], baseline: { existed: false },
+      }),
+    });
+    const snap = await assemble(rootCardId);
+    expect(snap.report_evidence).toMatchObject({ state: "invalid", code: "artifact_not_found", run_id: runId });
+    // no positive id is registered anywhere
+    expect(snap.criterion_inputs.find(c => c.criterion_id === "q1")!.artifact_observation_ids).toEqual([]);
+  });
+});

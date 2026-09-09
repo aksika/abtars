@@ -114,7 +114,46 @@ export interface ReviewCaseSnapshot {
   // Bounds
   evidence_ref_count: number;
   contradiction_count: number;
+
+  /**
+   * #1791: closed observation of the occurrence's declared final report,
+   * captured once at assembly from the persisted report-contract snapshot.
+   * Absent on rows stored before this field existed — those cases have no
+   * captured observation and must never be enriched from today's filesystem.
+   */
+  report_evidence?: ReportEvidenceObservation;
 }
+
+export type ReportEvidenceUnavailableCode =
+  | "occurrence_missing"
+  | "occurrence_mismatch"
+  | "snapshot_invalid"
+  | "report_read_failed"
+  | "report_changed_during_capture"
+  | "report_too_large"
+  | "report_encoding_invalid";
+
+/**
+ * #1791: discriminated report observation. Only `captured` creates positive
+ * evidence (one stable id); every other state explains why review has no
+ * report without masquerading errors as absence.
+ */
+export type ReportEvidenceObservation =
+  | { state: "not_applicable"; reason: "unscheduled_project" | "no_report_contract" }
+  | { state: "unavailable"; code: ReportEvidenceUnavailableCode; run_id?: string; path?: string }
+  | { state: "invalid"; code: string; run_id: string; path: string }
+  | {
+    state: "captured";
+    evidence_id: string;
+    run_id: string;
+    path: string;
+    captured_at: string;
+    digest: string;
+    size_bytes: number;
+    mtime_ms: number;
+    validation: { ok: true };
+    content: string;
+  };
 
 // ── Assembler ─────────────────────────────────────────────────────────────────
 
@@ -175,7 +214,7 @@ export class ReviewCaseAssembler {
     if (!supervision) return { error: `no supervision state for project ${projectCardId}` };
 
     // Load children via ESM dynamic import (vitest mock intercepts these)
-    const { kanbanGetChildren } = await import("../tasks/kanban-board.js") as typeof import("../tasks/kanban-board.js");
+    const { kanbanGetChildren, kanbanGetCard, requireTaskDatabase } = await import("../tasks/kanban-board.js") as typeof import("../tasks/kanban-board.js");
     const children = kanbanGetChildren(projectCardId);
 
     // Also gather peer contribution cards linked to this project
@@ -434,6 +473,20 @@ export class ReviewCaseAssembler {
       try { return require("../tasks/kanban-board.js").kanbanGetCard(projectCardId); } catch { return null; }
     })();
 
+    // #1791: capture the occurrence's declared final report (if any) as case
+    // evidence, then register its id on Orc-owned criteria only — never on
+    // delegated criteria, never as Worker proof.
+    const reportEvidence = await this.resolveReportEvidence(
+      projectCardId, kanbanGetCard, requireTaskDatabase,
+    );
+    if (reportEvidence.state === "captured") {
+      for (const input of criterionInputs) {
+        if (input.execution_owner === "orc" && !input.artifact_observation_ids.includes(reportEvidence.evidence_id)) {
+          input.artifact_observation_ids.push(reportEvidence.evidence_id);
+        }
+      }
+    }
+
     // Count total evidence references across all criterion inputs
     const evidenceRefCount = criterionInputs.reduce((sum, ci) => {
       return sum + ci.observed_evidence_ids.length + ci.failed_or_inconclusive_check_ids.length + ci.artifact_observation_ids.length;
@@ -467,6 +520,96 @@ export class ReviewCaseAssembler {
       },
       evidence_ref_count: evidenceRefCount,
       contradiction_count: contradictionCandidates.length,
+      report_evidence: reportEvidence,
+    };
+  }
+
+  /**
+   * #1791: resolve the occurrence's declared final report into a closed
+   * observation. Binding is exact: the root card must be task-sourced (its
+   * `source_id` is the occurrence run id) and `task_runs.card_id` must match
+   * the project — never the current catalog, latest run by task name, or a
+   * guessed workspace path. Freshness/baseline checks are admission's
+   * (freshness is observed, not writer provenance). This reader never revives
+   * runs and never throws: terminal/generation fencing stays with case
+   * creation authority.
+   */
+  private async resolveReportEvidence(
+    projectCardId: number,
+    kanbanGetCard: (id: number) => { source: string; source_id: string | null } | undefined,
+    requireTaskDatabase: () => { prepare: (sql: string) => { get: (...args: unknown[]) => unknown } },
+  ): Promise<ReportEvidenceObservation> {
+    let card;
+    try {
+      card = kanbanGetCard(projectCardId);
+    } catch (err) {
+      logAndSwallow(TAG, "read root card for report evidence", err);
+      return { state: "unavailable", code: "occurrence_missing" };
+    }
+    if (!card || card.source !== "task" || !card.source_id || card.source_id.length === 0) {
+      return { state: "not_applicable", reason: "unscheduled_project" };
+    }
+    const runId = card.source_id;
+
+    let row;
+    try {
+      const db = requireTaskDatabase();
+      row = db.prepare(
+        "SELECT run_id, card_id, reserved_at, report_contract_json FROM task_runs WHERE run_id = ?",
+      ).get(runId) as
+        | { run_id: string; card_id: number | null; reserved_at: number; report_contract_json: string | null }
+        | undefined;
+    } catch (err) {
+      logAndSwallow(TAG, "read occurrence row for report evidence", err);
+      return { state: "unavailable", code: "report_read_failed", run_id: runId };
+    }
+    if (!row) return { state: "unavailable", code: "occurrence_missing", run_id: runId };
+    if (row.card_id !== projectCardId) {
+      return { state: "unavailable", code: "occurrence_mismatch", run_id: runId };
+    }
+    if (typeof row.reserved_at !== "number" || !Number.isFinite(row.reserved_at)) {
+      return { state: "unavailable", code: "snapshot_invalid", run_id: runId };
+    }
+    if (row.report_contract_json === null) {
+      return { state: "not_applicable", reason: "no_report_contract" };
+    }
+
+    const { parseReportContractSnapshot } = await import("../tasks/task-state-store.js") as typeof import("../tasks/task-state-store.js");
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(row.report_contract_json);
+    } catch {
+      return { state: "unavailable", code: "snapshot_invalid", run_id: runId };
+    }
+    const snapshot = parseReportContractSnapshot(parsed);
+    if (!snapshot || snapshot.artifactPath.length === 0) {
+      return { state: "unavailable", code: "snapshot_invalid", run_id: runId };
+    }
+
+    const { captureReportArtifact } = await import("../tasks/task-preflight.js") as typeof import("../tasks/task-preflight.js");
+    const capture = captureReportArtifact(
+      snapshot.artifactPath,
+      { minBytes: snapshot.minBytes, requiredSections: snapshot.requiredSections, baseline: snapshot.baseline },
+      row.reserved_at,
+    );
+    if (!capture.ok) {
+      if (capture.kind === "invalid") {
+        return { state: "invalid", code: capture.code, run_id: runId, path: snapshot.artifactPath };
+      }
+      return { state: "unavailable", code: capture.code, run_id: runId, path: snapshot.artifactPath };
+    }
+    const digest = `sha256:${capture.digest}`;
+    return {
+      state: "captured",
+      evidence_id: `report:${runId}:${digest}`,
+      run_id: runId,
+      path: snapshot.artifactPath,
+      captured_at: new Date().toISOString(),
+      digest,
+      size_bytes: capture.sizeBytes,
+      mtime_ms: capture.mtimeMs,
+      validation: { ok: true },
+      content: capture.content,
     };
   }
 }
@@ -511,6 +654,13 @@ export interface ProjectReviewBriefV1 {
   outputs: Array<{ output_id: string; description: string; kind: string; required: boolean }>;
   contradictions: ContradictionCandidate[];
   children: ProjectReviewChildBriefV1[];
+  /**
+   * #1791: the occurrence's declared-report observation, projected once from
+   * the immutable case. Carries the full content on `captured` (stored once,
+   * never reread from the filesystem) and the closed negative states
+   * otherwise. Absent on cases assembled before this field existed.
+   */
+  report_evidence?: ReportEvidenceObservation;
   /** #1686: legal repair source contracts — mapped child contracts of this
    * case with the root criteria they cover. A repair item must reference one
    * of these and may only affect criteria the source covers. */
@@ -695,6 +845,7 @@ export function projectReviewBrief(
         outputs,
         contradictions,
         children,
+        report_evidence: snapshot.report_evidence ? { ...snapshot.report_evidence } : undefined,
         repair_sources: repairSources,
         peer_claims: peerClaims,
         uncovered_criteria: [...snapshot.uncovered_criteria],

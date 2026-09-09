@@ -1,11 +1,11 @@
 import { describe, it, expect } from "vitest";
-import { preflightTask, validateReportArtifact } from "./task-preflight.js";
+import { preflightTask, validateReportArtifact, captureReportArtifact, REPORT_CAPTURE_MAX_BYTES } from "./task-preflight.js";
 import { getToolDescriptor } from "../transport/tool-registry.js";
 import type { ScheduledTask } from "./task-types.js";
 import type { ToolExecutionScope } from "./task-package.js";
 import { currentTestSandbox } from "../../test-support/runtime-isolation.js";
 import { localDate } from "../../utils/date.js";
-import { writeFileSync } from "node:fs";
+import { writeFileSync, mkdirSync, symlinkSync, chmodSync } from "node:fs";
 import { join } from "node:path";
 
 function makeReportEntry(id: string, tools: string[]): ScheduledTask & { kind: "agent" } {
@@ -90,6 +90,93 @@ describe("preflightTask tool verification (#1535)", () => {
     if (!result.ok) {
       expect(result.code).toBe("required_tool_unregistered");
       expect(result.safeDetail).toContain("tool registry unavailable");
+    }
+  });
+});
+
+describe("captureReportArtifact bounded consistent capture (#1791)", () => {
+  const contract = { minBytes: 10, requiredSections: ["# Title"], baseline: { existed: false } };
+
+  function capScope(id: string): string {
+    const workspace = join(currentTestSandbox().abtarsHome, "workspace", id);
+    return workspace;
+  }
+
+  it("captures a valid report with content, digest, and size over the same bytes", () => {
+    const dir = capScope("cap-valid");
+    mkdirSync(dir, { recursive: true });
+    const p = join(dir, "R.md");
+    const body = "# Title\n\nbody body body\n";
+    writeFileSync(p, body, "utf-8");
+    const got = captureReportArtifact(p, contract, Date.now());
+    expect(got.ok).toBe(true);
+    if (!got.ok) return;
+    expect(got.content).toBe(body);
+    expect(got.sizeBytes).toBe(Buffer.byteLength(body, "utf-8"));
+    expect(got.digest).toMatch(/^[0-9a-f]{64}$/);
+  });
+
+  it("maps absent and stale files to invalid observations with mechanical codes", () => {
+    const missing = captureReportArtifact(join(capScope("cap-miss"), "No.md"), contract, Date.now());
+    expect(missing).toMatchObject({ ok: false, kind: "invalid", code: "artifact_not_found" });
+
+    const dir = capScope("cap-stale");
+    mkdirSync(dir, { recursive: true });
+    const p = join(dir, "R.md");
+    writeFileSync(p, "# Title\n\nbody body body\n", "utf-8");
+    const stale = captureReportArtifact(p, contract, Date.now() + 3_600_000);
+    expect(stale).toMatchObject({ ok: false, kind: "invalid", code: "artifact_stale_mtime" });
+  });
+
+  it("rejects oversized reports without content at the exact boundary", () => {
+    const dir = capScope("cap-size");
+    mkdirSync(dir, { recursive: true });
+    const okPath = join(dir, "Ok.md");
+    const head = "# Title\n";
+    writeFileSync(okPath, head + "x".repeat(REPORT_CAPTURE_MAX_BYTES - head.length), "utf-8");
+    const ok = captureReportArtifact(okPath, { minBytes: 1, requiredSections: ["# Title"], baseline: { existed: false } }, Date.now());
+    expect(ok.ok).toBe(true);
+
+    const bigPath = join(dir, "Big.md");
+    writeFileSync(bigPath, head + "x".repeat(REPORT_CAPTURE_MAX_BYTES - head.length + 1), "utf-8");
+    const big = captureReportArtifact(bigPath, { minBytes: 1, requiredSections: ["# Title"], baseline: { existed: false } }, Date.now());
+    expect(big).toMatchObject({ ok: false, kind: "unavailable", code: "report_too_large" });
+    if (!big.ok) expect("content" in big).toBe(false);
+  });
+
+  it("rejects symlinks consistently with the mechanical validator", () => {
+    const dir = capScope("cap-link");
+    mkdirSync(dir, { recursive: true });
+    const target = join(dir, "R.md");
+    writeFileSync(target, "# Title\n\nbody body body\n", "utf-8");
+    const link = join(dir, "L.md");
+    symlinkSync(target, link);
+    const got = captureReportArtifact(link, contract, Date.now());
+    expect(got).toMatchObject({ ok: false, kind: "invalid", code: "artifact_not_regular_file" });
+  });
+
+  it("rejects non-UTF8 bytes without content", () => {
+    const dir = capScope("cap-enc");
+    mkdirSync(dir, { recursive: true });
+    const p = join(dir, "R.md");
+    writeFileSync(p, Buffer.from([0x23, 0x20, 0x54, 0xff, 0xfe, 0x0a]));
+    const got = captureReportArtifact(p, { minBytes: 1, requiredSections: [], baseline: { existed: false } }, Date.now());
+    expect(got).toMatchObject({ ok: false, kind: "unavailable", code: "report_encoding_invalid" });
+  });
+
+  it("maps unreadable files to report_read_failed, never to absence", () => {
+    // Root bypasses permission bits, so this can only prove the mapping away from root.
+    if (typeof process.getuid === "function" && process.getuid() === 0) return;
+    const dir = capScope("cap-perm");
+    mkdirSync(dir, { recursive: true });
+    const p = join(dir, "R.md");
+    writeFileSync(p, "# Title\n\nbody body body\n", "utf-8");
+    chmodSync(p, 0o000);
+    try {
+      const got = captureReportArtifact(p, contract, Date.now());
+      expect(got).toMatchObject({ ok: false, kind: "unavailable", code: "report_read_failed" });
+    } finally {
+      chmodSync(p, 0o600);
     }
   });
 });
