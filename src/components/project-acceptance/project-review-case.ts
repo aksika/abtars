@@ -544,10 +544,16 @@ export class ReviewCaseAssembler {
       card = kanbanGetCard(projectCardId);
     } catch (err) {
       logAndSwallow(TAG, "read root card for report evidence", err);
-      return { state: "unavailable", code: "occurrence_missing" };
+      return { state: "unavailable", code: "report_read_failed" };
     }
-    if (!card || card.source !== "task" || !card.source_id || card.source_id.length === 0) {
+    if (!card || card.source !== "task") {
       return { state: "not_applicable", reason: "unscheduled_project" };
+    }
+    // A task-sourced card with empty source identity is a broken occurrence
+    // binding, not an unscheduled project — report it as unavailable so the
+    // gap is visible instead of masquerading as "no contract".
+    if (!card.source_id || card.source_id.length === 0) {
+      return { state: "unavailable", code: "occurrence_missing" };
     }
     const runId = card.source_id;
 

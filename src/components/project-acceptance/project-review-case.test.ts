@@ -759,6 +759,12 @@ describe("ReviewCaseAssembler #1791 report evidence observations", () => {
     expect(snap.report_evidence).toEqual({ state: "not_applicable", reason: "unscheduled_project" });
   });
 
+  it("task-sourced root with empty source identity observes occurrence_missing, not not_applicable", async () => {
+    const { rootCardId } = await setupOrcOnly("task", "");
+    const snap = await assemble(rootCardId);
+    expect(snap.report_evidence).toEqual({ state: "unavailable", code: "occurrence_missing" });
+  });
+
   it("task-sourced root without an occurrence row observes occurrence_missing", async () => {
     const { rootCardId } = await setupOrcOnly("task", `run-norow-${Date.now()}`);
     const snap = await assemble(rootCardId);

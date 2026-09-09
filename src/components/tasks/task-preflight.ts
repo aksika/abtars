@@ -365,9 +365,12 @@ export function captureReportArtifact(
     let total = 0;
     const buf = Buffer.alloc(8192);
     for (;;) {
+      // Never buffer more than limit + 1 bytes: the +1 distinguishes an
+      // exactly-at-limit report (accepted) from overflow (rejected).
+      const want = Math.min(buf.length, REPORT_CAPTURE_MAX_BYTES + 1 - total);
       let n: number;
       try {
-        n = readSync(fd, buf, 0, buf.length, null);
+        n = readSync(fd, buf, 0, want, null);
       } catch (err) {
         const code = (err as NodeJS.ErrnoException)?.code;
         return { ok: false, kind: "unavailable", code: "report_read_failed", reason: `cannot read artifact: ${code ?? "unknown"}` };
