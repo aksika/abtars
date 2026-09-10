@@ -1060,6 +1060,27 @@ export class WorkflowRunner {
   // ── drain + recovery + audit ──────────────────────────────────────────
 
   /**
+   * Submit a claim inspection with the audit-derived identity
+   * (`inspect-<token>-<gen>`): identical resubmission dedupes, each
+   * (claim, gen) applies at most once via gen fencing.
+   */
+  submitClaimInspection(runId: string, token: string, gen: number): CommitResult {
+    const run = this.store.getRun(runId);
+    if (!run) throw new Error(`workflow runner: run ${runId} missing`);
+    const cmd = this.store.findCommandByToken(token);
+    if (!cmd || cmd.runId !== runId) throw new Error(`workflow runner: claim token not found for run ${runId}`);
+    const key = { nodeId: cmd.nodeId, action: cmd.action, ordinal: cmd.ordinal, generation: cmd.generation };
+    const payloadJson = JSON.stringify({ kind: "ClaimExpired", body: { key, expectedGen: gen } });
+    const event: RunnerIngress = {
+      eventId: `inspect-${token}-${gen}`,
+      runId,
+      payloadHash: createHash("sha256").update(payloadJson).digest("hex"),
+      payloadJson, generation: run.generation, stateVersion: run.stateVersion,
+    };
+    return this.applyClaimExpired(run, key, gen, event);
+  }
+
+  /**
    * Commit a worker-settlement outcome with an EXPLICIT ingress identity
    * (settlement joint commit and recovery redrive). The caller owns
    * idempotency: settlement uses `attempt-<id>-<lifecycle>`, recovery reuses

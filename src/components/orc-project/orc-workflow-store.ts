@@ -678,6 +678,14 @@ export class WorkflowStore {
     return row ? rowToCommand(row) : null;
   }
 
+  /** Find a claimed command by fencing token (tokens are unique per claim). */
+  findCommandByToken(token: string): CommandRow | null {
+    const row = this.db
+      .prepare(`SELECT * FROM workflow_commands WHERE claim_token = ?`)
+      .get(token) as Record<string, unknown> | undefined;
+    return row ? rowToCommand(row) : null;
+  }
+
   findPendingCommand(runId: string, nodeId: string, action: CommandAction): CommandRow | null {
     const row = this.db
       .prepare(

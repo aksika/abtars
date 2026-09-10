@@ -110,7 +110,7 @@ CREATE TABLE IF NOT EXISTS workflow_commands (
   claimed_at TEXT,
   done_at TEXT,
   owner TEXT,
-  claim_token TEXT,
+  claim_token TEXT UNIQUE,
   inspect_gen INTEGER NOT NULL DEFAULT 0,
   consecutive_inconclusive INTEGER NOT NULL DEFAULT 0,
   next_inspection_at TEXT,
