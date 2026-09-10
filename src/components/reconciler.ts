@@ -55,6 +55,16 @@ export type RecoveryAttemptResult =
       readonly outcome: "settled" | "already_resolved";
     }
   | {
+      // #1792: a live runner-owned attempt is not process-bound to the
+      // reconciler generation — the workflow driver (nerve drain + bounded
+      // audit) owns its continuation across reconciler restarts. Boot
+      // recovery must not time it out; the joint commit advances it on
+      // settlement. Orphaned attempts (no live run) keep legacy treatment.
+      readonly kind: "runner_owned";
+      readonly attemptId: string;
+      readonly cardId: number;
+    }
+  | {
       readonly kind: "inspectable";
       readonly attemptId: string;
       readonly cardId: number;
@@ -491,6 +501,18 @@ function projectAttemptCard(
   attempt: { id: string; generation: number },
   summary: string,
 ): void {
+  // #1792: the dispatch pump reads its card snapshot at pass start while
+  // settlement commits mid-pass on another stack — re-read at decision time
+  // and never re-decide a terminal card. A done card whose attempt completed
+  // was terminalized by its owner (settleLane/spin/Pi settlement); failing it
+  // here on a stale snapshot resurrects settled work. The never-transitioned
+  // case (Pi lanes) always presents queued/running and is unaffected.
+  try {
+    const current = db.prepare(`SELECT status FROM kanban_board WHERE id = ?`).get(cardId) as { status: string } | undefined;
+    if (current && (current.status === "done" || current.status === "failed" || current.status === "delivered")) return;
+  } catch {
+    // Unreadable card: fall through to the CAS below, which fails closed.
+  }
   if (to === "done") {
     kanbanTransition({
       cardId,
@@ -1142,6 +1164,19 @@ async function runAttemptRecovery(generation: ReconcilerGeneration, coordinatorR
   const results: RecoveryAttemptResult[] = [];
   let recovered = 0;
   for (const attempt of active) {
+    // #1792: runner-owned live attempts survive reconciler-generation
+    // turnover (see kind documentation above). Check before the policy
+    // branch so process_bound settlement never claims them.
+    try {
+      if (isRunnerManagedCard(attempt.card_id)) {
+        logInfo(TAG, `Boot recovery: attempt ${attempt.id} runner-owned — leaving for the workflow driver`);
+        results.push({ kind: "runner_owned", attemptId: attempt.id, cardId: attempt.card_id });
+        continue;
+      }
+    } catch {
+      // Runner lookup unavailable: fall through to the legacy path rather
+      // than dropping recovery handling entirely.
+    }
     const policy = resolveSchedulingPolicy(attempt.executor_kind);
     if (policy.recovery === "process_bound") {
       const bootResult = store.terminalSettlement({

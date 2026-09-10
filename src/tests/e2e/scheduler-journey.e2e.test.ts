@@ -1294,12 +1294,13 @@ describe("#1539 scheduler E2E — journey 12: terminal O project reattach across
       // records no turn.
       await waitFor(() => stateStore.readState("project-task")?.activeRun?.runId === firstRunId && stateStore.readState("project-task")?.activeRun?.cardId !== undefined);
       expect(fixture2.fixture.lastTurn).toBe("none");
-      // #1792: supervision is runner-owned now — it stays awaiting_contract
-      // while lanes run and lands accepted/blocked only at terminal projection.
-      // The pending lane survives the restart; the reattached run completes it
-      // through the real result-commit path, never a fresh authoring turn.
+      // #1792: supervision is runner-owned now — first dispatch moves it to
+      // executing (claim fence) and it lands accepted/blocked only at
+      // terminal projection. The pending lane survives the restart; the
+      // reattached run completes it through the real result-commit path,
+      // never a fresh authoring turn.
       const supAfterRestart = new reviewStoreMod.ProjectReviewStore().getSupervision(rootCardId);
-      expect(supAfterRestart?.state).toBe("awaiting_contract");
+      expect(supAfterRestart?.state).toBe("executing");
       expect(fixture2.fixture.lastTurn).toBe("none");
       fixture2.fixture.adoptRoot(rootCardId);
       fixture2.fixture.completeWorkers();
