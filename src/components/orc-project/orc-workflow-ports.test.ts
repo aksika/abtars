@@ -165,6 +165,7 @@ describe("WorkflowPorts", () => {
   });
 
   it("reviewer backend forwards the verdict for host application", async () => {
+
     const run = admit(runner, seedCard(store));
     const judged: Proposal = {
       requiredOutputs: ["report"],
@@ -195,5 +196,89 @@ describe("WorkflowPorts", () => {
     const node = store.listNodes(run.runId, 1).find((n) => n["node_id"] === rNode);
     expect(node?.["status"]).toBe("failed");
     expect(store.getRun(run.runId)?.state).toBe("failed");
+  });
+
+  it("reviewer prompt carries the goal and criterion ids (AstraMaster-8)", async () => {
+    const run = admit(runner, seedCard(store));
+    const judged: Proposal = {
+      requiredOutputs: ["report"],
+      nodes: [
+        { label: "a", kind: "work", instructions: "research", capability: "research", outputs: ["notes"], acceptance: ["thorough"], dependsOn: [] },
+        { label: "s", kind: "synthesis", instructions: "draft", capability: "write", outputs: ["report"], acceptance: ["complete"], dependsOn: ["a"] },
+        { label: "r", kind: "review", instructions: "judge", capability: "general", outputs: [], acceptance: [], dependsOn: ["s"] },
+      ],
+    };
+    const acc = runner.acceptPlan(run.runId, judged);
+    const prompts: string[] = [];
+    const backend = new Ports.SpinReviewerBackend({
+      runner,
+      callModel: async (prompt: string) => {
+        prompts.push(prompt);
+        return JSON.stringify({ verdict: "accept" });
+      },
+    });
+    const rNode = acc.nodeIds[2] as string;
+    const cmd = {
+      runId: run.runId, generation: 1, nodeId: rNode, action: "review" as const, ordinal: 0,
+      status: "claimed" as const, payloadJson: JSON.stringify({ nodeId: rNode, revision: 1 }),
+      createdAt: "", claimedAt: "", doneAt: null, owner: "spin-reviewer", claimToken: "t",
+      inspectGen: 0, consecutiveInconclusive: 0, nextInspectionAt: null,
+    };
+    backend.startReview(cmd, runner.assembleBrief(run.runId, 1, rNode));
+    await new Promise((r) => setTimeout(r, 50));
+    expect(prompts.length).toBe(1);
+    // Valid criticism needs exact criterion ids and the goal: both present.
+    expect(prompts[0]).toContain("Acceptance criteria by node");
+    expect(prompts[0]).toContain("thorough");
+    expect(prompts[0]).toContain("complete");
+    expect(prompts[0]).toContain("Goal:");
+  });
+
+  it("backends wake the drain on settlement, not on failure (AstraMaster-3)", async () => {
+    const run = admit(runner, seedCard(store));
+    let wakes = 0;
+    const backend = new Ports.SpinPlannerBackend({
+      runner,
+      callModel: async () => JSON.stringify({
+        nodes: [
+          { label: "a", kind: "work", instructions: "do", capability: "general", outputs: ["o"], acceptance: ["done"], dependsOn: [] },
+        ],
+        requiredOutputs: ["o"],
+      }),
+      onSettled: () => { wakes++; },
+    });
+    const cmd = {
+      runId: run.runId, generation: 1, nodeId: "__plan__", action: "plan" as const, ordinal: 0,
+      status: "claimed" as const, payloadJson: "{}",
+      createdAt: "", claimedAt: "", doneAt: null, owner: "spin-planner", claimToken: "t",
+      inspectGen: 0, consecutiveInconclusive: 0, nextInspectionAt: null,
+    };
+    store.queueCommand({ runId: run.runId, generation: 1, nodeId: "__plan__", action: "plan", ordinal: 0, payloadJson: "{}" });
+    store.claimCommand({ runId: run.runId, generation: 1, nodeId: "__plan__", action: "plan", ordinal: 0 }, "spin-planner");
+    backend.startPlanning(cmd, {
+      runId: run.runId, revision: null, purpose: "initial", defects: [],
+      requiredOutputs: ["o"], nodeId: "__plan__",
+    });
+    await new Promise((r) => setTimeout(r, 50));
+    expect(store.currentRevision(run.runId)).toBe(1);
+    expect(wakes).toBe(1);
+
+    // Persistent model failure: nothing new queued, no wake (lease expiry +
+    // inspection own recovery — no phantom drain).
+    const run2 = admit(runner, seedCard(store));
+    let wakes2 = 0;
+    const failing = new Ports.SpinPlannerBackend({
+      runner,
+      callModel: async () => "not json at all",
+      onSettled: () => { wakes2++; },
+    });
+    store.queueCommand({ runId: run2.runId, generation: 1, nodeId: "__plan__", action: "plan", ordinal: 0, payloadJson: "{}" });
+    store.claimCommand({ runId: run2.runId, generation: 1, nodeId: "__plan__", action: "plan", ordinal: 0 }, "spin-planner");
+    failing.startPlanning(cmd, {
+      runId: run2.runId, revision: null, purpose: "initial", defects: [],
+      requiredOutputs: ["o"], nodeId: "__plan__",
+    });
+    await new Promise((r) => setTimeout(r, 50));
+    expect(wakes2).toBe(0);
   });
 });

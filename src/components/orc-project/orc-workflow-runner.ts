@@ -363,10 +363,39 @@ export class WorkflowRunner {
         this.queueForNode(runId, run.generation, revision, nodeId, byId.get(nodeId)?.kind ?? "work", {});
         queued++;
       }
+      // AstraMaster-1: a plan with no review node would otherwise succeed on
+      // worker outcomes alone. The host appends one mandatory review.
+      this.appendHostReviewIfMissing(runId, run.generation, revision);
       return { nextState: "dispatched" as const };
     });
     if (res.disposition === "conflict") throw new Error(`workflow runner: ${res.diagnostics}`);
     return { revision, nodeIds: hostIds, queued };
+  }
+
+  /**
+   * Mandatory semantic review (AstraMaster-1): every revision needs an open
+   * review node, or terminal evaluation succeeds on worker output alone with
+   * no verdict and no delivery obligation. The model prompt asks only for
+   * work/synthesis nodes, so the host appends `n{rev}_host_review` (an id no
+   * model proposal can collide with: proposal ids always carry a numeric
+   * index segment) depending on all work/synthesis nodes of the revision.
+   * Skipped when any revision already has an open review (repair waves
+   * re-review on the original node — see maybeQueueReReview).
+   */
+  private appendHostReviewIfMissing(runId: string, generation: number, revision: number): void {
+    for (let rev = 1; rev <= revision; rev++) {
+      if (this.store.listNodes(runId, rev).some((n) => n["kind"] === "review"
+        && (n["status"] === "queued" || n["status"] === "running"))) return;
+    }
+    const nodeId = `n${revision}_host_review`;
+    this.store.insertNodes([{ runId, revision, nodeId, kind: "review" }]);
+    const work = this.store.listNodes(runId, revision)
+      .filter((n) => n["kind"] === "work" || n["kind"] === "synthesis")
+      .map((n) => n["node_id"] as string);
+    this.store.insertDeps(work.map((dep) => ({ runId, revision, nodeId, dependsOn: dep })));
+    if (!this.store.hasUnsatisfiedDeps(runId, revision, nodeId)) {
+      this.queueForNode(runId, generation, revision, nodeId, "review", {});
+    }
   }
 
   // ── worker completion (live path builds a fresh event; recovery replays
@@ -474,6 +503,8 @@ export class WorkflowRunner {
   submitPlanProposal(runId: string, proposal: PlanProposal, opts?: {
     baseRevision?: number; opId?: string;
     completesNode?: { revision: number; nodeId: string; outcome: string };
+    /** Failed-round identity for rejection retry (the backend's command). */
+    planRound?: { nodeId: string; ordinal: number; payloadJson: string };
   }): AcceptedPlan {
     const run = this.requireLive(runId);
     const current = this.store.currentRevision(runId);
@@ -488,6 +519,32 @@ export class WorkflowRunner {
         if (!ok) {
           if (opts?.opId) this.store.upsertOperation({ opId: opts.opId, runId, kind: "planning", status: "failed", resultJson: text });
           return { nextState: "failed" as const, failureCode: "plan_rejected", failureReason: text };
+        }
+        // Budget remains: the failed round must not strand the run. The
+        // backend that reported it is done (it throws past this call), so
+        // supersede its command and requeue the same planning round for a
+        // fresh model attempt — bounded by the budget consumed above.
+        // (Without this, rejection + swallowed backend error left a claimed
+        // command whose inspection could only fail the run as no_workers.)
+        if (opts?.planRound) {
+          const pr = opts.planRound;
+          this.store.supersedeCommand({ runId, generation: run.generation, nodeId: pr.nodeId, action: "plan", ordinal: pr.ordinal });
+          let opId = opts.opId;
+          try {
+            const parsed = JSON.parse(pr.payloadJson) as { opId?: unknown };
+            if (typeof parsed.opId === "string") opId = parsed.opId;
+          } catch {
+            // Unparseable payload: fall back to the deterministic op id.
+          }
+          this.store.upsertOperation({
+            opId: opId ?? opIdFor(runId, current, pr.nodeId), runId, kind: "planning",
+            status: "pending", resultJson: JSON.stringify({ purpose: "retry" }),
+          });
+          this.store.queueCommand({
+            runId, generation: run.generation, nodeId: pr.nodeId, action: "plan",
+            ordinal: this.store.nextCommandOrdinal(runId, run.generation, pr.nodeId, "plan"),
+            payloadJson: pr.payloadJson,
+          });
         }
         return { nextState: "planning" as const };
       });
@@ -541,6 +598,10 @@ export class WorkflowRunner {
         this.queueForNode(runId, run.generation, revision, nodeId, byId.get(nodeId)?.kind ?? "work", {});
         queued++;
       }
+      // Mandatory review applies to repair/next-wave revisions too (a repair
+      // proposal carries work nodes only; the original review stays open, so
+      // this is normally a no-op — see appendHostReviewIfMissing).
+      this.appendHostReviewIfMissing(runId, run.generation, revision);
       if (opts?.opId) this.store.upsertOperation({ opId: opts.opId, runId, kind: "planning", revision, status: "succeeded" });
       return { nextState: "dispatched" as const };
     });
@@ -962,7 +1023,7 @@ export class WorkflowRunner {
             this.queueForNode(run.runId, run.generation, rev, next, this.nodeKindOf(run.runId, rev, next), {});
           }
           finish();
-          return this.evaluateTerminal(run.runId, rev);
+          return this.settleWithReReview(run.runId, run.generation, rev);
         }
         // Did the CLAIMED round run? Compare attempt start against claim time
         // (60s grace for clock skew). Proven older → the round never started →
@@ -1084,8 +1145,12 @@ export class WorkflowRunner {
       this.store.cancelCommand({ runId, generation: run.generation, nodeId, action: "dispatch", ordinal });
       if (this.isOptionalNode(runId, rev, nodeId)) {
         this.store.setNodeOutcome(runId, rev, nodeId, "skipped", `resource refused: ${resource}`);
-        this.store.satisfyDependents(runId, rev, nodeId);
-        return this.evaluateTerminal(runId, rev);
+        // AstraMaster-5 (same as the optional-failure path): released
+        // dependents need commands queued, not just satisfied deps.
+        for (const next of this.store.satisfyDependents(runId, rev, nodeId)) {
+          this.queueForNode(runId, run.generation, rev, next, this.nodeKindOf(runId, rev, next), {});
+        }
+        return this.settleWithReReview(runId, run.generation, rev);
       }
       // Required work refused: fail fast AND cancel the run's leftover pending
       // commands so no drain rediscovers them (the run is terminal; the audit
@@ -1595,11 +1660,19 @@ export class WorkflowRunner {
     ownerless: string[];
     dueInspections: Array<{ runId: string; claimToken: string; inspectGen: number }>;
   } {
-    const roots = this.store.listAuditRoots(cursor, 100);
+    // AstraMaster-6: the cursor ratcheted forward and never wrapped, so each
+    // run was inspected exactly once per driver lifetime — a claim expiring
+    // after its first inspection never received expiry recovery. Wrap once
+    // per call: every live run is revisited at least every full scan.
+    let roots = this.store.listAuditRoots(cursor, 100);
+    let nextCursor = cursor;
+    if (roots.length === 0 && cursor > 0) {
+      roots = this.store.listAuditRoots(0, 100);
+      nextCursor = 0;
+    }
     const lawful: string[] = [];
     const ownerless: string[] = [];
     const dueInspections: Array<{ runId: string; claimToken: string; inspectGen: number }> = [];
-    let nextCursor = cursor;
     for (const root of roots) {
       nextCursor = Math.max(nextCursor, root.rootCardId);
       // Admitted/planning runs await plan admission (a durable planning command
@@ -1609,13 +1682,19 @@ export class WorkflowRunner {
         continue;
       }
       const p = this.store.probeRun(root.runId, root.rootCardId);
+      // AstraMaster-7: due claims are inspected even when an open operation
+      // is also present. Previously openOp counted as lawful ownership first
+      // and shadowed the due claim — an abandoned model job (op row stuck
+      // running, backend gone) wedged its run forever.
+      if (p.dueClaim) {
+        for (const d of this.store.dueInspections(root.runId, 10)) {
+          dueInspections.push({ runId: root.runId, claimToken: d.claimToken, inspectGen: d.inspectGen });
+        }
+      }
       if (p.pending || p.freshClaim || p.liveAttempt || p.pendingInput || p.openOp || p.pendingDelivery) {
         lawful.push(root.runId);
       } else if (p.dueClaim) {
         lawful.push(root.runId); // suspect claim under inspection — never failure.
-        for (const d of this.store.dueInspections(root.runId, 10)) {
-          dueInspections.push({ runId: root.runId, claimToken: d.claimToken, inspectGen: d.inspectGen });
-        }
       } else {
         ownerless.push(root.runId);
       }
@@ -1692,8 +1771,43 @@ export class WorkflowRunner {
       for (const next of unblocked) {
         this.queueForNode(run.runId, run.generation, revision, next, kinds.get(next) ?? "work", {});
       }
-      return this.evaluateTerminal(run.runId, revision);
+      return this.settleWithReReview(run.runId, run.generation, revision);
     });
+  }
+
+  /**
+   * Terminal evaluation plus repair re-review (AstraMaster-4): a
+   * changes_required verdict leaves the original review node running across
+   * the repair revision, and nothing else re-queues it — the revision loop
+   * in evaluateTerminal would hold the run non-terminal forever. When the
+   * evaluation is non-terminal only because of such a stranded review, queue
+   * a fresh review command for it. Bounded: every re-review verdict consumes
+   * the review_repair budget on the way back through submitVerdict.
+   */
+  private settleWithReReview(runId: string, generation: number, revision: number, failureCause?: string): TransitionEffect {
+    const effect = this.evaluateTerminal(runId, revision, failureCause);
+    if (!effect.nextState) this.maybeQueueReReview(runId, generation);
+    return effect;
+  }
+
+  private maybeQueueReReview(runId: string, generation: number): void {
+    const current = this.store.currentRevision(runId);
+    // The latest revision must be fully worked before re-review judges it.
+    if (this.store.listNodes(runId, current).some((n) => n["status"] === "queued" || n["status"] === "running")) return;
+    for (let rev = current - 1; rev >= 1; rev--) {
+      for (const row of this.store.listNodes(runId, rev)) {
+        if (row["kind"] !== "review") continue;
+        const status = row["status"] as string;
+        if (status !== "queued" && status !== "running") continue;
+        const nodeId = row["node_id"] as string;
+        // Idempotent: nodes with an open review command are skipped (same
+        // pattern as the SHA-handoff review redispatch).
+        if (this.store.hasCommand(runId, nodeId, "review", "pending")) continue;
+        if (status === "running" && this.store.hasCommand(runId, nodeId, "review", "claimed")) continue;
+        this.queueForNode(runId, generation, rev, nodeId, "review", {},
+          this.store.nextCommandOrdinal(runId, generation, nodeId, "review"));
+      }
+    }
   }
 
   private applyAttemptFailed(
@@ -1716,11 +1830,15 @@ export class WorkflowRunner {
       if (optional) {
         // Explicit optional-input policy: release dependents to proceed
         // without the optional input (never silently skip required work).
-        this.store.satisfyDependents(run.runId, revision, nodeId);
+        // AstraMaster-5: the unblocked nodes need commands, not just
+        // satisfied deps — the success path queues them, so does this one.
+        for (const next of this.store.satisfyDependents(run.runId, revision, nodeId)) {
+          this.queueForNode(run.runId, run.generation, revision, next, this.nodeKindOf(run.runId, revision, next), {});
+        }
       } else {
         this.store.skipDependents(run.runId, revision, nodeId);
       }
-      return this.evaluateTerminal(run.runId, revision, `node ${nodeId} failed: ${cause}`);
+      return this.settleWithReReview(run.runId, run.generation, revision, `node ${nodeId} failed: ${cause}`);
     });
   }
 

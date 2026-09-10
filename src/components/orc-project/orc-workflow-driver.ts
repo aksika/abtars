@@ -16,6 +16,7 @@ import { logWarn } from "../logger.js";
 import { WorkflowRunner, boundText, type DrainPorts, type ExecutionPort } from "./orc-workflow-runner.js";
 import { WorkflowStore } from "./orc-workflow-store.js";
 import {
+  ChannelDeliverySender,
   RoutingWorkflowWorkerPort,
   SpinPlannerBackend,
   SpinReviewerBackend,
@@ -52,8 +53,12 @@ export function startWorkflowDriver(deps: {
   const runner = new WorkflowRunner(store, workflowCapabilities());
   const ports: DrainPorts = deps.ports ?? {
     executor: new RoutingWorkflowWorkerPort({ runner, db: deps.db }),
-    reviewer: new SpinReviewerBackend({ runner, callModel: deps.callModel }),
-    planner: new SpinPlannerBackend({ runner, callModel: deps.callModel }),
+    reviewer: new SpinReviewerBackend({ runner, callModel: deps.callModel, onSettled: () => drainWake("model:verdict") }),
+    planner: new SpinPlannerBackend({ runner, callModel: deps.callModel, onSettled: () => drainWake("model:proposal") }),
+    // AstraMaster-2: production delivery is connected — without a sender the
+    // drain routes deliver commands into the worker executor, which throws
+    // (a review node is in no plan revision) and wedges the run.
+    delivery: new ChannelDeliverySender({ runner }),
   };
   let cursor = deps.cursor ?? 0;
   let stopped = false;

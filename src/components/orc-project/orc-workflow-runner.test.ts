@@ -59,6 +59,29 @@ function admit(runner: Runner, card: number, budgets?: Partial<Record<BudgetScop
   }).run;
 }
 
+/**
+ * Finish a run through the mandatory host review + delivery obligation:
+ * work-only plans can no longer succeed on worker outcomes alone
+ * (AstraMaster-1/2). Drains the pending review command through the given
+ * port, accepts the verdict, and acks delivery with a trivial sender.
+ */
+function acceptAndDeliver(
+  runId: string,
+  drain: () => number,
+  senderName = "test-sender",
+): void {
+  drain();
+  const review = store.listNodes(runId, store.currentRevision(runId))
+    .find((n) => n["kind"] === "review")?.["node_id"] as string;
+  expect(review).toBeTruthy();
+  expect(runner.submitVerdict(runId, review, { verdict: "accept" })).toBe("accepted");
+  const sender = {
+    name: senderName,
+    send: (_doc: { runId: string; nodeId: string; obligation: string; idempotenceKey: string }) => "receipt-test",
+  };
+  expect(runner.executeDelivery(runId, review, sender)).toBe("acknowledged");
+}
+
 const twoLane = (): Proposal => ({
   requiredOutputs: ["report"],
   nodes: [
@@ -126,8 +149,10 @@ describe("WorkflowRunner Task 2", () => {
     runner.attemptSucceeded(run.runId, acc.nodeIds[1] as string, "att-b", "{}");
     expect(runner.drain(10, port)).toBe(1);
     expect(dispatched[dispatched.length - 1]?.nodeId).toBe(acc.nodeIds[2]);
-    // Complete C: run succeeds with no ownerless residue.
+    // Complete C: the host review (mandatory for work-only plans) unblocks.
     runner.attemptSucceeded(run.runId, acc.nodeIds[2] as string, "att-c", "{}");
+    expect(runner.drain(10, port)).toBe(1);
+    acceptAndDeliver(run.runId, () => runner.drain(10, port));
     expect(store.getRun(run.runId)?.state).toBe("succeeded");
     const tick = runner.auditTick(0);
     expect(tick.ownerless).not.toContain(run.runId);
@@ -244,24 +269,106 @@ describe("WorkflowRunner Task 2", () => {
     const sId = acc.nodeIds[2] as string;
     expect(runner.drain(10, port)).toBe(1);
     runner.attemptSucceeded(run.runId, sId, "att-s", "{}");
+    // Optional-input policy held (S ran without opt); mandatory review +
+    // delivery still gate success.
+    acceptAndDeliver(run.runId, () => runner.drain(10, port));
     expect(store.getRun(run.runId)?.state).toBe("succeeded");
+  });
+
+  it("optional failure queues the released dependent (AstraMaster-5)", () => {
+    const run = admit(runner, seedCard(store));
+    const proposal: Proposal = {
+      requiredOutputs: ["report"],
+      nodes: [
+        { label: "opt", kind: "work", instructions: "nice", capability: "general", outputs: ["extra"], acceptance: ["done"], dependsOn: [], optional: true },
+        { label: "s", kind: "synthesis", instructions: "write", capability: "write", outputs: ["report"], acceptance: ["done"], dependsOn: ["opt"] },
+      ],
+    };
+    const acc = runner.acceptPlan(run.runId, proposal);
+    const { port, dispatched } = fakePort();
+    expect(runner.drain(10, port)).toBe(1);
+    runner.attemptFailed(run.runId, acc.nodeIds[0] as string, "att-o", "meh", false);
+    // The dependent was released AND given a command (previously the dep
+    // row was satisfied but no command was queued — S stayed queued forever).
+    expect(runner.drain(10, port)).toBe(1);
+    expect(dispatched[dispatched.length - 1]?.nodeId).toBe(acc.nodeIds[1]);
+    runner.attemptSucceeded(run.runId, acc.nodeIds[1] as string, "att-s", "{}");
+    acceptAndDeliver(run.runId, () => runner.drain(10, port));
+    expect(store.getRun(run.runId)?.state).toBe("succeeded");
+  });
+
+  it("audit wraps the cursor so live runs are revisited (AstraMaster-6)", () => {
+    const run = admit(runner, seedCard(store));
+    runner.acceptPlan(run.runId, twoLane());
+    const first = runner.auditTick(0);
+    expect(first.lawful).toContain(run.runId);
+    expect(first.checked).toBeGreaterThan(0);
+    // Cursor at the end previously meant "never inspect again".
+    const second = runner.auditTick(first.nextCursor);
+    expect(second.checked).toBeGreaterThan(0);
+    expect(second.lawful).toContain(run.runId);
+  });
+
+  it("due claims are inspected even with an open operation (AstraMaster-7)", () => {
+    const run = admit(runner, seedCard(store));
+    runner.acceptPlan(run.runId, twoLane());
+    const { port } = fakePort();
+    expect(runner.drain(10, port)).toBe(2);
+    // Age both claims past inspection AND leave a model op open (an
+    // abandoned backend: op row stuck running, worker gone). Previously the
+    // open op counted as lawful ownership first and shadowed the due claims.
+    store.db.prepare(`UPDATE workflow_commands SET next_inspection_at = datetime('now','-10 minutes') WHERE run_id = ?`).run(run.runId);
+    store.upsertOperation({ opId: `op-${run.runId}-ghost`, runId: run.runId, kind: "planning", status: "running" });
+    const tick = runner.auditTick(0);
+    expect(tick.lawful).toContain(run.runId);
+    expect(tick.dueInspections.length).toBe(2);
+  });
+
+  it("rejected proposal with budget requeues the planning round (rejection retry)", () => {
+    const run = admit(runner, seedCard(store));
+    const bad: Proposal = {
+      requiredOutputs: ["ghost"],
+      nodes: [
+        { label: "x", kind: "work", instructions: "do", capability: "general", outputs: ["o"], acceptance: ["done"], dependsOn: [] },
+      ],
+    };
+    // A backend reporting this rejection passes its round identity; the run
+    // must get a fresh planning command, not a stranded claimed one.
+    store.queueCommand({
+      runId: run.runId, generation: 1, nodeId: "__plan__", action: "plan", ordinal: 0, payloadJson: "{}",
+    });
+    store.claimCommand({ runId: run.runId, generation: 1, nodeId: "__plan__", action: "plan", ordinal: 0 }, "spin-planner");
+    expect(() => runner.submitPlanProposal(run.runId, bad, {
+      planRound: { nodeId: "__plan__", ordinal: 0, payloadJson: "{}" },
+    })).toThrow(/plan revision rejected/);
+    expect(store.getRun(run.runId)?.state).toBe("planning");
+    const retry = store.findPendingCommand(run.runId, "__plan__", "plan");
+    expect(retry).not.toBeNull();
+    expect(retry?.ordinal).toBe(1);
+    expect(store.hasCommand(run.runId, "__plan__", "plan", "claimed")).toBe(false);
+    // The retry round admits a valid proposal normally.
+    const acc = runner.submitPlanProposal(run.runId, twoLane());
+    expect(acc.revision).toBe(1);
   });
 
   it("duplicate and stale completions cannot duplicate work or resurrect runs", () => {
     const run = admit(runner, seedCard(store));
     const acc = runner.acceptPlan(run.runId, twoLane());
+    const { port } = fakePort();
     const a = acc.nodeIds[0] as string;
     const b = acc.nodeIds[1] as string;
     runner.attemptSucceeded(run.runId, a, "att-a", "{}");
     // Stale completion for an already-succeeded node is rejected loudly.
     expect(() => runner.attemptSucceeded(run.runId, a, "att-a-late", "{}")).toThrow(/conflicts with completion/);
-    // Finish the run, then prove terminal runs reject late results.
+    // Finish the run through mandatory review + delivery, then prove
+    // terminal runs reject late results.
     runner.attemptSucceeded(run.runId, b, "att-b", "{}");
     runner.attemptSucceeded(run.runId, acc.nodeIds[2] as string, "att-c", "{}");
+    acceptAndDeliver(run.runId, () => runner.drain(10, port));
     expect(store.getRun(run.runId)?.state).toBe("succeeded");
     expect(() => runner.attemptSucceeded(run.runId, b, "att-late", "{}")).toThrow(/terminal.*late result rejected/);
     const cmds = store.db.prepare(`SELECT COUNT(*) AS c FROM workflow_commands WHERE run_id = ?`).get(run.runId) as { c: number };
-    expect(Number(cmds.c)).toBe(3);
+    expect(Number(cmds.c)).toBe(5); // 3 dispatch + host review + deliver
   });
 
   it("restart after commit-before-wake loses no command", () => {

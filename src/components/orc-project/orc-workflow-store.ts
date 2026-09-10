@@ -735,6 +735,24 @@ export class WorkflowStore {
     return res.changes === 1;
   }
 
+  /**
+   * Supersede a failed round's command whether pending or still claimed by
+   * the reporter (plan-revision rejection retry): the backend that reported
+   * the rejection is done with the command, and leaving a claimed row
+   * behind would invite a later inspection of a superseded round.
+   */
+  supersedeCommand(key: CommandKey): boolean {
+    const res = this.db
+      .prepare(
+        `UPDATE workflow_commands SET status = 'cancelled', done_at = datetime('now'),
+          next_inspection_at = NULL
+         WHERE run_id = ? AND generation = ? AND node_id = ? AND action = ? AND ordinal = ?
+           AND status IN ('pending','claimed')`,
+      )
+      .run(key.runId, key.generation, key.nodeId, key.action, key.ordinal);
+    return res.changes === 1;
+  }
+
   findRunByCard(rootCardId: number): WorkflowRunRow | null {
     const row = this.db
       .prepare(

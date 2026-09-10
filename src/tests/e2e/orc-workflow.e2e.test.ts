@@ -46,6 +46,7 @@ afterAll(() => {
 
 type Runner = import("../../components/orc-project/orc-workflow-runner.js").WorkflowRunner;
 type Store = import("../../components/orc-project/orc-workflow-store.js").WorkflowStore;
+type ReviewVerdict = import("../../components/orc-project/orc-workflow-runner.js").ReviewVerdict;
 type Proposal = import("../../components/orc-project/orc-workflow-runner.js").PlanProposal;
 type BudgetScope = import("../../components/orc-project/orc-workflow-store.js").BudgetScope;
 type ReviewBrief = import("../../components/orc-project/orc-workflow-runner.js").ReviewBrief;
@@ -515,5 +516,136 @@ describe("orc-workflow E2E (Task 6)", () => {
     expect(runner.startupRecovery().redrivenIngress).toBe(0);
     const disp = store.db.prepare(`SELECT disposition FROM workflow_ingress WHERE event_id = 'sha-crash-1'`).get() as { disposition: string };
     expect(["applied", "noop"]).toContain(disp.disposition);
+  });
+
+  /**
+   * Scripted model backends that act ONLY through the production ingress
+   * paths (submitPlanProposal / submitVerdict, like SpinPlannerBackend /
+   * SpinReviewerBackend do). The test bodies below never call those ingress
+   * methods directly: they only drain and settle dispatched work — proving
+   * the wiring progresses autonomously (AstraMaster acceptance: drains,
+   * verdicts, and delivery are not manually driven).
+   */
+  function autoPorts(initial: Proposal, opts?: {
+    repair?: Proposal; rejectFirstReview?: boolean;
+  }) {
+    let reviews = 0;
+    const complete = (cmd: CommandRow, owner: string) => {
+      const key = { runId: cmd.runId, generation: cmd.generation, nodeId: cmd.nodeId, action: cmd.action, ordinal: cmd.ordinal };
+      const live = store.getCommand(key);
+      if (live && live.status === "claimed") {
+        store.completeCommand(key, live.owner ?? owner, live.claimToken ?? "");
+      }
+    };
+    const ports = {
+      executor: {
+        name: "auto-exec",
+        dispatch: (_cmd: CommandRow) => {
+          // Worker execution happens outside the runner; the drive loop
+          // settles dispatched work through attemptSucceeded ingress.
+        },
+      },
+      reviewer: {
+        name: "auto-reviewer",
+        startReview: (cmd: CommandRow, _brief: ReviewBrief) => {
+          reviews++;
+          const verdict: ReviewVerdict = opts?.rejectFirstReview === true && reviews === 1
+            ? { verdict: "changes_required", defects: [{ criterion: "done", detail: "too thin" }] }
+            : { verdict: "accept" };
+          runner.submitVerdict(cmd.runId, cmd.nodeId, verdict);
+          complete(cmd, "auto-reviewer");
+        },
+      },
+      planner: {
+        name: "auto-planner",
+        startPlanning: (cmd: CommandRow, input: unknown) => {
+          const purpose = (input as { purpose?: string }).purpose ?? "initial";
+          const proposal = purpose === "initial" ? initial : (opts?.repair ?? initial);
+          const parsed = JSON.parse(cmd.payloadJson) as { revision?: number | null; opId?: string };
+          runner.submitPlanProposal(cmd.runId, proposal, {
+            ...(parsed.revision != null ? { baseRevision: store.currentRevision(cmd.runId) } : {}),
+            ...(parsed.opId ? { opId: parsed.opId } : {}),
+            planRound: { nodeId: cmd.nodeId, ordinal: cmd.ordinal, payloadJson: cmd.payloadJson },
+          });
+          complete(cmd, "auto-planner");
+        },
+      },
+      delivery: {
+        name: "auto-sender",
+        send: (doc: { runId: string; nodeId: string; obligation: string; idempotenceKey: string }) => `receipt:${doc.idempotenceKey}`,
+      },
+    };
+    return { ports };
+  }
+
+  /** Drive ONLY drain + worker settlement until the run is terminal. */
+  function driveAutonomous(runId: string, ports: Parameters<Runner["drain"]>[1], maxPasses = 40): void {
+    const completed = new Set<string>();
+    let guard = 0;
+    while (!["succeeded", "failed", "cancelled"].includes(store.getRun(runId)?.state ?? "") && guard++ < maxPasses) {
+      runner.drain(10, ports);
+      const rev = store.currentRevision(runId);
+      if (rev === 0) continue;
+      for (const n of store.listNodes(runId, rev)) {
+        const nid = n["node_id"] as string;
+        if ((n["kind"] === "work" || n["kind"] === "synthesis") && n["status"] === "running" && !completed.has(`${rev}:${nid}`)) {
+          completed.add(`${rev}:${nid}`);
+          runner.attemptSucceeded(runId, nid, `att-${rev}-${nid}`, "{}");
+        }
+      }
+    }
+  }
+
+  // Journey 11: full autonomous run — admission to delivered success with the
+  // test driving ONLY drain + worker settlement. Covers AstraMaster-1 (the
+  // mandatory host review appears although the plan has none), -2 (delivery
+  // flows through the drain to the sender — no standalone executeDelivery),
+  // and -3 (no manual wakes; planner/reviewer completions chain forward).
+  it("autonomous run: plan, work, host review, and drain delivery succeed without manual ingress", () => {
+    const card = seedCard(store);
+    copSeq++;
+    const admitted = runner.admitSupervised({ rootCardId: card, source: "agent" });
+    expect(admitted.kind).toBe("admitted");
+    const runId = admitted.runId as string;
+    const { ports } = autoPorts(twoLane());
+    driveAutonomous(runId, ports);
+    expect(store.getRun(runId)?.state).toBe("succeeded");
+    // The plan proposed no review: the host appended one, it judged, and
+    // the delivery obligation was acknowledged through the drain.
+    const review = store.listNodes(runId, 1).find((n) => n["kind"] === "review");
+    expect(review?.["node_id"]).toBe("n1_host_review");
+    expect(review?.["status"]).toBe("succeeded");
+    const delivery = store.db.prepare(`SELECT outcome FROM workflow_deliveries WHERE run_id = ?`).get(runId) as { outcome: string };
+    expect(delivery.outcome).toBe("acknowledged");
+  });
+
+  // Journey 12: autonomous repair — changes_required, repair wave, and
+  // re-review with NO manual second verdict. Covers AstraMaster-4: after
+  // the repair workers complete, the drain finds a queued review command
+  // for the original node (previously nothing queued it and the run
+  // stalled with the old review running).
+  it("autonomous repair: changes_required re-reviews on the original node without manual driving", () => {
+    const card = seedCard(store);
+    copSeq++;
+    const admitted = runner.admitSupervised({ rootCardId: card, source: "agent" });
+    const runId = admitted.runId as string;
+    const repair: Proposal = {
+      requiredOutputs: ["report"],
+      nodes: [
+        { label: "fix", kind: "work", instructions: "thicken", capability: "research", outputs: ["report"], acceptance: ["done"], dependsOn: [] },
+      ],
+    };
+    const { ports } = autoPorts(twoLane(), { repair, rejectFirstReview: true });
+    driveAutonomous(runId, ports);
+    expect(store.getRun(runId)?.state).toBe("succeeded");
+    // The original review node judged the repair revision (rev 2).
+    const review = store.listNodes(runId, 1).find((n) => n["kind"] === "review");
+    const outcome = JSON.parse((review?.["outcome"] as string)) as { judgedRevision: number };
+    expect(outcome.judgedRevision).toBe(2);
+    // Two review commands ran autonomously (initial verdict + re-review).
+    const reviews = store.db.prepare(
+      `SELECT COUNT(*) AS c FROM workflow_commands WHERE run_id = ? AND action = 'review' AND status = 'done'`,
+    ).get(runId) as { c: number };
+    expect(Number(reviews.c)).toBe(2);
   });
 });

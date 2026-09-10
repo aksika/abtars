@@ -27,10 +27,12 @@
  */
 import { ProjectReviewStore } from "../project-acceptance/project-review-store.js";
 import { WorkerSupervisionService } from "../worker-supervision-service.js";
+import { channelPostOnce } from "../tasks/kanban-channel.js";
 import { loadPiConfig } from "../pi-executor/config.js";
 import {
   WorkflowRunner,
   boundText,
+  type DeliverySender,
   type ExecutionPort,
   type PlanProposal,
   type PlannerBackend,
@@ -93,7 +95,11 @@ function reviewPrompt(brief: ReviewBrief): string {
     "changes_required defects must each link an exact criterion id and describe the concrete defect.",
     "You may read the artifact files listed; do not invent evidence you did not read.",
     `Request: ${brief.request.title}`,
+    // AstraMaster-8: the reviewer was never shown the goal or the criterion
+    // ids, yet valid criticism requires exact ids — include both.
+    `Goal: ${brief.request.goal ?? brief.request.title}`,
     `Required outputs: ${brief.requiredOutputs.join(", ")}`,
+    `Acceptance criteria by node (defect criterion ids must be exact strings from this map): ${JSON.stringify(brief.criteriaByNode)}`,
     `Candidate revision: ${brief.revision}`,
     `Nodes: ${JSON.stringify(brief.nodes)}`,
     `Failures observed: ${JSON.stringify(brief.failures)}`,
@@ -419,10 +425,12 @@ export class SpinPlannerBackend implements PlannerBackend {
   readonly name = "spin-planner";
   private readonly runner: WorkflowRunner;
   private readonly callModel: ModelCall;
+  private readonly onSettled: () => void;
 
-  constructor(deps: { runner: WorkflowRunner; callModel: ModelCall }) {
+  constructor(deps: { runner: WorkflowRunner; callModel: ModelCall; onSettled?: () => void }) {
     this.runner = deps.runner;
     this.callModel = deps.callModel;
+    this.onSettled = deps.onSettled ?? (() => {});
   }
 
   startPlanning(cmd: CommandRow, input: PlanningInput): void {
@@ -465,6 +473,10 @@ export class SpinPlannerBackend implements PlannerBackend {
         completesNode: input.purpose === "next_wave"
           ? { revision: input.revision ?? base, nodeId: input.nodeId, outcome: "proposed" }
           : undefined,
+        // Failed-round identity: a rejected proposal requeues this same
+        // round (runner-side, bounded by plan_revision) instead of stranding
+        // a claimed command the swallowed error below would abandon.
+        planRound: { nodeId: cmd.nodeId, ordinal: cmd.ordinal, payloadJson: cmd.payloadJson },
       });
       // Complete our claim: the proposal is admitted.
       const key = { runId: cmd.runId, generation: cmd.generation, nodeId: cmd.nodeId, action: cmd.action, ordinal: cmd.ordinal };
@@ -472,6 +484,10 @@ export class SpinPlannerBackend implements PlannerBackend {
       if (live && live.status === "claimed") {
         store.completeCommand(key, live.owner ?? this.name, live.claimToken ?? "");
       }
+      // AstraMaster-3: the newly queued work (dispatch/review commands) needs
+      // a drain. The driver only listens for card events, so without this
+      // wake the run waits for the periodic audit.
+      this.onSettled();
       return;
     }
   }
@@ -490,10 +506,12 @@ export class SpinReviewerBackend implements ReviewBackend {
   readonly name = "spin-reviewer";
   private readonly runner: WorkflowRunner;
   private readonly callModel: ModelCall;
+  private readonly onSettled: () => void;
 
-  constructor(deps: { runner: WorkflowRunner; callModel: ModelCall }) {
+  constructor(deps: { runner: WorkflowRunner; callModel: ModelCall; onSettled?: () => void }) {
     this.runner = deps.runner;
     this.callModel = deps.callModel;
+    this.onSettled = deps.onSettled ?? (() => {});
   }
 
   startReview(cmd: CommandRow, brief: ReviewBrief): void {
@@ -521,7 +539,63 @@ export class SpinReviewerBackend implements ReviewBackend {
       if (live && live.status === "claimed") {
         this.runner.store.completeCommand(key, live.owner ?? this.name, live.claimToken ?? "");
       }
+      // AstraMaster-3: an accept queues delivery, changes_required queues
+      // repair planning — both need a drain wake, not just the audit.
+      this.onSettled();
       return;
     }
+  }
+}
+
+/**
+ * Production delivery sender (AstraMaster-2): hands the accepted output to
+ * the operator-visible pipeline. The drain supports a sender, but the
+ * driver never provided one — deliver commands fell into the worker
+ * executor, which threw (a review node is in no plan revision), leaving the
+ * obligation pending and the hasPendingDelivery gate wedging the run.
+ *
+ * The send posts the accepted-output manifest to the root card's channel
+ * with the idempotence key as the once-only source ref: retries collapse to
+ * "duplicate" (still acknowledged), and the durable receipt carries the
+ * manifest for the terminal projections, which write result_summary /
+ * result_path onto the card for kanban-delivery + scheduled settlement.
+ */
+export class ChannelDeliverySender implements DeliverySender {
+  readonly name = "channel-delivery";
+  private readonly runner: WorkflowRunner;
+
+  constructor(deps: { runner: WorkflowRunner }) {
+    this.runner = deps.runner;
+  }
+
+  send(doc: { runId: string; nodeId: string; obligation: string; idempotenceKey: string }): string {
+    const run = this.runner.store.getRun(doc.runId);
+    if (!run) throw new Error(`channel delivery: run ${doc.runId} missing`);
+    let revision = this.runner.store.currentRevision(doc.runId);
+    try {
+      const parsed = JSON.parse(doc.obligation) as { revision?: unknown };
+      if (typeof parsed.revision === "number") revision = parsed.revision;
+    } catch {
+      // Unparseable obligation: manifest the current revision instead.
+    }
+    const produced: string[] = [];
+    for (const n of this.runner.store.listNodes(doc.runId, revision)) {
+      if (n["status"] !== "succeeded" || typeof n["outcome"] !== "string") continue;
+      const match = (n["outcome"] as string).match(/"artifact"\s*:\s*"([^"]+)"/)
+        ?? (n["outcome"] as string).match(/"result_path"\s*:\s*"([^"]+)"/)
+        ?? (n["outcome"] as string).match(/"path"\s*:\s*"([^"]+)"/);
+      produced.push(`${n["node_id"] as string}:${match?.[1] ?? "ok"}`);
+    }
+    const manifest = [
+      `Workflow run ${doc.runId} revision ${revision} accepted (review ${doc.nodeId}).`,
+      `Produced: ${produced.length > 0 ? produced.join(", ") : "none recorded"}.`,
+    ].join(" ");
+    const posted = channelPostOnce({
+      cardId: run.rootCardId, from: "workflow-runner", to: "ALL",
+      message: manifest, msgType: "delivery",
+      sourceRef: `wf-delivery:${doc.idempotenceKey}`,
+    });
+    if (posted === "unavailable") throw new Error("channel delivery: store unavailable");
+    return JSON.stringify({ posted, cardId: run.rootCardId, idempotenceKey: doc.idempotenceKey, manifest });
   }
 }

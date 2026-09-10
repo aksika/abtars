@@ -50,7 +50,7 @@ function simplePlan() {
   };
 }
 
-/** Complete every node successfully (review-free plans settle synchronously). */
+/** Complete every node successfully, then pass mandatory review + delivery. */
 async function succeedRun(
   runner: import("../orc-project/orc-workflow-runner.js").WorkflowRunner,
   runId: string,
@@ -60,6 +60,13 @@ async function succeedRun(
   for (const nodeId of acc.nodeIds) {
     runner.attemptSucceeded(runId, nodeId, `att-${nodeId}`, "{}");
   }
+  // Work-only plans carry a mandatory host review plus a delivery
+  // obligation (AstraMaster-1/2): accept it and ack delivery so the run
+  // reaches terminal success like production does through the drain.
+  const review = runner.store.listNodes(runId, runner.store.currentRevision(runId))
+    .find((n) => n["kind"] === "review")?.["node_id"] as string;
+  runner.submitVerdict(runId, review, { verdict: "accept" });
+  runner.executeDelivery(runId, review, { name: "test-sender", send: () => "receipt-test" });
   return acc.nodeIds as string[];
 }
 
