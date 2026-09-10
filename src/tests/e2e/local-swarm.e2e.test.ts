@@ -122,8 +122,10 @@ describe("Local Swarm E2E", () => {
         workerContracts: 3,
         workerAttempts: 3,
         workerResults: 3,
-        reviewCases: 1,
-        reviewDecisions: 1,
+        // #1792: review lives in the runner now (submitVerdict/terminal
+        // projection) — no reconciler-authored review cases/decisions.
+        reviewCases: 0,
+        reviewDecisions: 0,
         outboundDeliveries: 1,
       });
       expect(result.terminal).toEqual({ projectState: "accepted", cardStatus: "delivered", deliveryResult: "sent" });

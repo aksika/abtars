@@ -1,21 +1,39 @@
 /**
- * scheduled-project-fixture.ts — #1548 test-only scriptable external
- * Orc/provider boundary for scheduled projects.
+ * scheduled-project-fixture.ts — #1792 test-only scriptable provider/executor
+ * boundary for scheduled projects.
  *
- * Retains the real scheduled runner, CronQueue reservation, review store,
- * Kanban database, executor leases, wake sources, and shared settlement path.
- * Only the Orc "model turn" (startPort) is scripted: it writes the same
- * durable rows a real Orc would — acceptance contract, supervision state,
- * worker cards, review case, and terminal decision.
+ * Composition mirrors `orc-workflow.e2e.test.ts`: the REAL production chain
+ * stays intact — scheduled admission (`WorkflowRunner.admitSupervised` via the
+ * real `scheduledProjectRunner`), the shared WorkflowStore/task database,
+ * worker creation/binding (`WorkflowWorkerPort`), result commit
+ * (`collectAndSettle`/`terminalSettlement` joint commit into the runner),
+ * review (`submitVerdict`), delivery obligations, terminal projections, and
+ * the scheduled settler. Deterministic fixtures replace ONLY the model
+ * responses (plan proposal + review verdict content, chosen by this script at
+ * the planner/reviewer boundary) and worker execution (the reconciler
+ * generation's pass-through adapter holds claims; this fixture settles them).
  *
- * The harness resets modules per test (vi.resetModules + ABTARS_HOME tmpdir),
- * so every production module is injected by the journey rather than imported
- * here.
+ * Retired #1792: the old scripted Orc turn (direct contract/supervision/worker
+ * DB writes + `kanbanComplete`/`lifecycleTransition` advancement). Nothing
+ * here writes project phase, supervision state, review cases/decisions, or
+ * worker lifecycles directly — those are runner/settlement-owned now.
  */
 
+import { WorkflowRunner } from "../../components/orc-project/orc-workflow-runner.js";
+import type {
+  PlanProposal,
+  PlannerBackend,
+  PlanningInput,
+  ReviewBackend,
+  ReviewBrief,
+  ReviewVerdict,
+} from "../../components/orc-project/orc-workflow-runner.js";
+import { WorkflowStore } from "../../components/orc-project/orc-workflow-store.js";
+import type { CommandRow } from "../../components/orc-project/orc-workflow-store.js";
+import { WorkflowWorkerPort } from "../../components/orc-project/orc-workflow-ports.js";
 import type { OrcProjectCoordinator } from "../../components/orc-project/orc-project-coordinator.js";
+import type { ExecutorKind } from "../../components/worker-executor-identity.js";
 import type { OrcInvocationContextV2 } from "../../components/orc-project/orc-project-contracts.js";
-import type { ProjectAcceptanceContractV1 } from "../../components/project-acceptance/project-contract.js";
 
 export interface FixtureModules {
   OrcProjectCoordinator: typeof import("../../components/orc-project/orc-project-coordinator.js").OrcProjectCoordinator;
@@ -29,62 +47,62 @@ export interface FixtureModules {
 export type FailOrcMode = "empty" | "terminal_tool" | "round_limit" | null;
 
 export interface ScheduledProjectScript {
-  /** Assert the admitted root is in a valid lifecycle state (Stage-1 subset). */
+  /** Assert the admitted run reached a lifecycle state (runner-native). */
   reach(state: "executing" | "awaiting_contract" | "review_requested" | "needs_input"): Promise<{ runId: string; rootCardId: number }>;
-  /** The scripted Orc dies on its next authoring/review turn. */
+  /** The scripted planner dies on its next planning turn. */
   failOrc(mode: FailOrcMode): void;
-  /** Complete every running worker card as done. */
+  /** Settle every dispatched worker lane completed (real result commit). */
   completeWorkers(): void;
-  /** Fail every running worker card. */
+  /** Settle every dispatched worker lane failed (real result commit). */
   failWorkers(): void;
-  /** #1751: complete one worker lane by index (insertion order). */
+  /** #1751: settle one worker lane completed by index (node order). */
   completeWorker(index: number): void;
-  /** #1751: fail one worker lane by index (insertion order). */
+  /** #1751: settle one worker lane failed by index (node order). */
   failWorker(index: number): void;
-  /** Insert an open review case and settle it accepted (fires card:done). */
+  /** Submit accept on the open review node (no-op when held or already terminal). */
   accept(): void;
-  /** Insert an open review case and settle it blocked (fires card:failed). */
+  /** Submit cannot_assess on the open review node (no-op when already terminal). */
   block(reason: string): void;
   /** Mark the supervised root retryable (status queued + durable next_retry_at). */
   retryRoot(error: string): void;
-  /** Adopt an existing root card (reattach cells where the fixture never authored). */
+  /** Adopt an existing root card (pin discovery to it). */
   adoptRoot(rootCardId: number): void;
   /** Scripted review-turn behavior: accept, demand input, or die. */
   setReviewMode(mode: "accept" | "needs_input" | "blocked" | "repair" | "die"): void;
-  /** Answer the pending input request. */
+  /** Answer the pending input request, then submit the resume-accept verdict. */
   answerInput(text: string): void;
   /**
    * #1644: claim an Orc run for the project now (the stale-turn holder) and
-   * pause the turn before any spawn. The claimed run is what a terminal
-   * settlement must supersede; releaseStaleSpawn() then proves the paused
-   * spawn loses its project authority.
+   * keep it. The claimed run is what a terminal settlement supersedes or
+   * fences; releaseStaleSpawn() then proves the stale spawn loses its
+   * project authority.
    */
   armStaleSpawn(goal: string): { runId: string; projectGeneration: number } | { error: string };
-  /** #1644: release the paused stale spawn after terminal settlement — the
-   *  child creation must be rejected by the project authority (typed error,
+  /** #1644: attempt the stale spawn after terminal settlement — the child
+   *  creation must be rejected by the project authority (typed error,
    *  no durable child/contract/attempt). */
   releaseStaleSpawn(): { rejected: boolean; error?: string };
   /** #1644: submit a late worker result after terminal settlement — must be
    *  rejected as stale by the attempt/project authority. */
   submitLateWorkerResult(cardId: number, attemptId: string): { settled: boolean; summary: string; stale?: boolean; budgetViolation?: boolean };
   holdAcceptance: boolean;
-  /** Last scripted turn outcome. */
+  /** Last scripted boundary outcome. */
   lastTurn: "authored" | "reviewed" | "input_requested" | "failed" | "none";
 }
 
 export interface ScheduledProjectFixtureOptions {
-  /** Workers spawned at contract authoring; kept running until completed. */
+  /** Work lanes in the scripted initial plan; settled via the fixture. */
   workerCount?: number;
-  /** When set, the authoring turn dies without writing the contract. */
+  /** When set, the scripted planner dies without proposing. */
   failOrcMode?: FailOrcMode;
   /** When set, accept() refuses to settle (acceptance held). */
   holdAcceptance?: boolean;
   /** Scripted review-turn decision. */
   reviewMode?: "accept" | "needs_input" | "blocked" | "repair" | "die";
-  /** Limits carried into every authored worker contract. */
+  /** Limits patched into every dispatched worker contract (scripted contract shaping). */
   workerLimits?: { max_duration_ms?: number; max_tokens?: number };
-  /** #1656: author a v2 root contract with an optional second delegated
-   *  criterion (c2). Worker 0 maps to c1; every later worker maps to c2. */
+  /** #1656: script a v2-shaped plan with an optional second lane (lane 1
+   *  optional; every later lane maps to the optional input). */
   v2RootContract?: boolean;
 }
 
@@ -96,6 +114,10 @@ const DEFAULT_OPTIONS = {
   workerLimits: undefined as { max_duration_ms?: number; max_tokens?: number } | undefined,
   v2RootContract: false,
 };
+
+/** Acceptance strings the scripted plan publishes (defect linkage reads these back). */
+const LANE_ACCEPTANCE = "lane delivers its committed output";
+const REPAIR_ACCEPTANCE = "repair rework delivers its committed output";
 
 export function makeScheduledProjectFixture(
   modules: FixtureModules,
@@ -109,55 +131,372 @@ export function makeScheduledProjectFixture(
     reviewMode: options.reviewMode,
     lastTurn: "none" as ScheduledProjectScript["lastTurn"],
     admittedRoot: undefined as number | undefined,
+    limitsPatchedForRun: undefined as string | undefined,
     staleSpawn: undefined as { goal: string; context: OrcInvocationContextV2 } | undefined,
-    // #1686: durable contract ids of the authoring-turn lane Workers — the
-    // repair item must reference one of them as its source contract.
-    laneContractIds: [] as string[],
   };
 
-  const workersOfRoot = (): ReturnType<typeof kanban.kanbanGetChildren> => {
-    if (state.admittedRoot === undefined) return [];
-    return kanban.kanbanGetChildren(state.admittedRoot).filter(c => c.type === "W");
-  };
+  const store = new WorkflowStore();
+  const runner = new WorkflowRunner(store);
 
-  // #1751: the produced report discloses every lane outcome — a failed
-  // optional lane is visible in the acceptance snapshot, never hidden.
-  const laneSnapshot = (): Array<{ cardId: number; status: string; goal: string | null }> =>
-    kanban.kanbanGetChildren(state.admittedRoot!)
-      .filter(c => c.type === "W")
-      .map(c => ({ cardId: c.id, status: c.status, goal: c.goal ?? null }));
+  // ── scripted provider boundary (proposal/verdict content only) ──────────
+  // Synchronous like orc-workflow.e2e's scriptedPorts: the model TEXT is
+  // faked; identities, budgets, authority, and result application stay in the
+  // runner. Production backends (SpinPlannerBackend/SpinReviewerBackend +
+  // callModel, wired in orc-workflow-driver.ts) remain the live path.
 
-  const reviewAndDecide = (kind: "accept" | "block", reason?: string): void => {
-    const rootId = state.admittedRoot!;
-    const store = new ReviewStore();
-    const supervision = store.getSupervision(rootId);
-    if (!supervision) throw new Error(`fixture: no supervision for root #${rootId}`);
-    // #1554: the driver may have settled the project already (review dispatch
-    // is driver-owned); an explicit fixture accept after that is a no-op.
-    if (supervision.state === "accepted" || supervision.state === "blocked") return;
-    const round = supervision.review_round + 1;
-    const snapshot = {
-      summary: "all worker outcomes terminal",
-      lanes: laneSnapshot(),
+  /** The per-lane file outputs of the scripted initial plan. */
+  function laneOutputs(): string[] {
+    return Array.from({ length: Math.max(1, options.workerCount) }, (_, i) => `out/lane-${i}.md`);
+  }
+
+  function initialProposal(): PlanProposal {
+    const count = Math.max(1, options.workerCount);
+    // Each lane declares its own file output (ref `out/lane-<i>.md`): the
+    // port turns declared outputs into required file artifacts, so lane
+    // evidence is per-lane files the settler can observe. No logical outputs:
+    // a pathless output observes as missing and would fail every lane.
+    const lanes = Array.from({ length: count }, (_, i) => ({
+      label: `lane-${i}`,
+      kind: "work" as const,
+      instructions: `Work lane ${i}`,
+      capability: "general",
+      outputs: [`out/lane-${i}.md`],
+      acceptance: [LANE_ACCEPTANCE],
+      dependsOn: [] as string[],
+      ...(options.v2RootContract && i > 0 ? { optional: true } : {}),
+    }));
+    return {
+      requiredOutputs: laneOutputs(),
+      nodes: [
+        ...lanes,
+        {
+          label: "review",
+          kind: "review" as const,
+          instructions: "judge the candidate revision",
+          capability: "general",
+          outputs: [] as string[],
+          acceptance: [] as string[],
+          dependsOn: lanes.map((l) => l.label),
+        },
+      ],
     };
-    const { id: caseId } = store.insertReviewCase(rootId, supervision.generation, round, snapshot, `sd_${rootId}_${round}`);
-    if (kind === "accept") {
-      store.settleAcceptance(rootId, caseId, { action: "accept", synthesis: "fixture acceptance" }, "fixture accepted");
-      try { nerve.fire("card:done", rootId); } catch { /* best effort */ }
-    } else {
-      store.settleBlocked(rootId, caseId, { action: "blocked", reason: reason ?? "fixture blocked" }, reason ?? "fixture blocked");
-      try { nerve.fire("card:failed", rootId); } catch { /* best effort */ }
+  }
+
+  function repairProposal(): PlanProposal {
+    return {
+      // Same required outputs as the initial plan (monotonic acceptance);
+      // coverage carries from the cumulative prior outputs. The repair lane
+      // re-declares the lane files (contract validation requires an evidence
+      // path per criterion); unsettled evidence only fails the lane's
+      // criteria, never the completion itself.
+      requiredOutputs: laneOutputs(),
+      nodes: [
+        {
+          label: "fix",
+          kind: "work" as const,
+          instructions: "repair rework",
+          capability: "general",
+          outputs: laneOutputs(),
+          acceptance: [REPAIR_ACCEPTANCE],
+          dependsOn: [] as string[],
+        },
+      ],
+    };
+  }
+
+  /** Complete a drain-claimed job command inline (the scripted model already answered). */
+  function completeClaim(cmd: CommandRow, owner: string): void {
+    const live = store.getCommand({
+      runId: cmd.runId, generation: cmd.generation,
+      nodeId: cmd.nodeId, action: cmd.action, ordinal: cmd.ordinal,
+    });
+    if (live && live.status === "claimed") {
+      store.completeCommand(
+        {
+          runId: cmd.runId, generation: cmd.generation,
+          nodeId: cmd.nodeId, action: cmd.action, ordinal: cmd.ordinal,
+        },
+        live.owner ?? owner,
+        live.claimToken ?? "",
+      );
     }
+  }
+
+  const planner: PlannerBackend = {
+    name: "fixture-planner",
+    startPlanning(cmd: CommandRow, input: PlanningInput): void {
+      if (state.failOrcMode) {
+        state.lastTurn = "failed";
+        return; // the planner dies before proposing — the claim hangs for inspection
+      }
+      const proposal = input.purpose === "repair" ? repairProposal() : initialProposal();
+      const current = store.currentRevision(cmd.runId);
+      runner.submitPlanProposal(cmd.runId, proposal, {
+        baseRevision: input.purpose === "initial" ? undefined : (input.revision ?? current),
+        opId: input.opId,
+      });
+      state.lastTurn = input.purpose === "initial" ? "authored" : "reviewed";
+      completeClaim(cmd, "fixture-planner");
+    },
   };
 
-  const terminalizeAttempts = (cardId: number, lifecycle: "completed" | "failed"): void => {
-    try {
-      const store = new WorkerStore();
-      for (const attempt of store.getAttemptsForCard(cardId)) {
-        store.lifecycleTransition(attempt.id, ["pending", "claimed", "running"], lifecycle);
+  const reviewer: ReviewBackend = {
+    name: "fixture-reviewer",
+    startReview(cmd: CommandRow, _brief: ReviewBrief): void {
+      if (state.failOrcMode || state.reviewMode === "die") {
+        state.lastTurn = "failed";
+        return; // dead reviewer turn — the claim hangs for inspection
       }
-    } catch { /* best effort */ }
+      if (state.reviewMode === "needs_input") {
+        runner.requestInput(cmd.runId, "confirm the deliverable scope", [LANE_ACCEPTANCE]);
+        state.lastTurn = "input_requested";
+        return;
+      }
+      if (state.reviewMode === "accept" && state.holdAcceptance) {
+        return; // held: the verdict stays pending until fixture.accept()
+      }
+      const verdict: ReviewVerdict = state.reviewMode === "accept"
+        ? { verdict: "accept" }
+        : state.reviewMode === "blocked"
+          ? { verdict: "cannot_assess", reason: "fixture review blocked" }
+          : {
+              verdict: "changes_required",
+              defects: [{ criterion: LANE_ACCEPTANCE, detail: "synthesis missing sources" }],
+            };
+      runner.submitVerdict(cmd.runId, cmd.nodeId, verdict);
+      state.lastTurn = "reviewed";
+      completeClaim(cmd, "fixture-reviewer");
+    },
   };
+
+  const ports = {
+    executor: new WorkflowWorkerPort({ runner }),
+    reviewer,
+    planner,
+    delivery: {
+      name: "fixture-delivery",
+      send: () => "fixture-receipt",
+    },
+  };
+
+  // Guarded reentrant pump: nerve wakes fire synchronously inside drain
+  // (child creation, projections), so nested pumps collapse into one loop.
+  // Loops until a pass dispatches nothing — verdicts queue repair/delivery
+  // work mid-drain with no nerve wake, so one pump() fully converges.
+  let pumping = false;
+  let repump = false;
+  function pump(): void {
+    if (pumping) {
+      repump = true;
+      return;
+    }
+    pumping = true;
+    try {
+      for (let pass = 0; pass < 25; pass++) {
+        repump = false;
+        let dispatched = 0;
+        try {
+          dispatched = runner.drain(50, ports);
+        } catch (err) {
+          // Port errors resolve into run state (failed/refused), never throw
+          // past the fixture pump; journeys assert the durable outcome. Log
+          // boundedly so a wedged dispatch is diagnosable, not silent.
+          try {
+            process.stderr.write(`fixture-pump: contained ${err instanceof Error ? err.message.slice(0, 300) : String(err).slice(0, 300)}\n`);
+          } catch {
+            // Logging must never break the pump.
+          }
+        }
+        if (!repump && dispatched === 0) break;
+      }
+    } finally {
+      pumping = false;
+    }
+  }
+
+  const onWake = (): void => {
+    pump();
+  };
+  nerve.on("card:queued", onWake);
+  nerve.on("card:done", onWake);
+  nerve.on("card:failed", onWake);
+
+  // ── run discovery + reads ───────────────────────────────────────────────
+
+  /** The production-admitted scheduled run (the scheduled runner admits; the
+   *  fixture discovers — never fabricates — the admission). */
+  function discoverRoot(): number | undefined {
+    if (state.admittedRoot !== undefined) return state.admittedRoot;
+    try {
+      const row = store.db
+        .prepare(`SELECT root_card_id FROM workflow_runs WHERE root_kind = 'scheduled' ORDER BY rowid DESC LIMIT 1`)
+        .get() as { root_card_id: number } | undefined;
+      return row?.root_card_id;
+    } catch {
+      return undefined;
+    }
+  }
+
+  function currentRun(): { runId: string; rootCardId: number; revision: number } | undefined {
+    const rootCardId = discoverRoot();
+    if (rootCardId === undefined) return undefined;
+    const run = store.findLatestRunByCard(rootCardId);
+    if (!run) return undefined;
+    return { runId: run.runId, rootCardId, revision: store.currentRevision(run.runId) };
+  }
+
+  /** Patch scripted contract limits into dispatched worker contracts (#1588). */
+  function patchWorkerLimits(runId: string, revision: number): void {
+    if (!options.workerLimits || state.limitsPatchedForRun === runId) return;
+    const wb = new WorkerStore();
+    for (const node of store.listNodes(runId, revision)) {
+      if (node["kind"] !== "work" && node["kind"] !== "synthesis") continue;
+      const cardId = node["worker_card_id"] as number | null;
+      if (cardId == null) continue;
+      const contract = wb.getContractByCardId(cardId);
+      if (!contract) continue;
+      try {
+        const parsed = JSON.parse(contract.contract_json) as Record<string, unknown>;
+        parsed["limits"] = { ...(options.workerLimits as Record<string, number>) };
+        wb.db.prepare(`UPDATE worker_contracts SET contract_json = ? WHERE id = ?`)
+          .run(JSON.stringify(parsed), contract.id);
+      } catch {
+        // Best effort: the lane still settles; only the binding-limit fact is lost.
+      }
+    }
+    state.limitsPatchedForRun = runId;
+  }
+
+  /** Open work/synthesis nodes of the current revision, in node order. */
+  function openWorkNodes(): Array<{ nodeId: string; cardId: number | null }> {
+    const cur = currentRun();
+    if (!cur) return [];
+    return store.listNodes(cur.runId, cur.revision)
+      .filter((n) => (n["kind"] === "work" || n["kind"] === "synthesis")
+        && (n["status"] === "queued" || n["status"] === "running"))
+      .map((n) => ({ nodeId: n["node_id"] as string, cardId: n["worker_card_id"] as number | null }));
+  }
+
+  /** All work/synthesis nodes of the current revision, in node order. */
+  function allWorkNodes(): Array<{ nodeId: string }> {
+    const cur = currentRun();
+    if (!cur) return [];
+    return store.listNodes(cur.runId, cur.revision)
+      .filter((n) => n["kind"] === "work" || n["kind"] === "synthesis")
+      .map((n) => ({ nodeId: n["node_id"] as string }));
+  }
+
+  /** The open review node (newest revision first), if the run awaits a verdict. */
+  function openReviewNode(): { runId: string; nodeId: string } | undefined {
+    const cur = currentRun();
+    if (!cur) return undefined;
+    // A verdict is due only once the revision's work settled — never while
+    // lanes are still dispatched (in particular, never a fresh accept while a
+    // repair wave is outstanding).
+    const openWork = store.listNodes(cur.runId, cur.revision).some(
+      (n) => (n["kind"] === "work" || n["kind"] === "synthesis")
+        && (n["status"] === "queued" || n["status"] === "running"),
+    );
+    if (openWork) return undefined;
+    for (let rev = cur.revision; rev >= 1; rev--) {
+      const found = store.listNodes(cur.runId, rev).find(
+        (n) => n["kind"] === "review" && (n["status"] === "queued" || n["status"] === "running"),
+      );
+      if (found) return { runId: cur.runId, nodeId: found["node_id"] as string };
+    }
+    return undefined;
+  }
+
+  function workspaceCwd(rootCardId: number): string | undefined {
+    try {
+      return new ReviewStore().getWorkspaceScope(rootCardId)?.cwd;
+    } catch {
+      return undefined;
+    }
+  }
+
+  /** Ensure the lane attempt is claimed so terminal settlement accepts it. */
+  function ensureClaimed(cardId: number): { id: string; generation: number } {
+    const wb = new WorkerStore();
+    const latest = wb.getLatestAttempt(cardId);
+    if (!latest) throw new Error(`fixture: no attempt for worker card #${cardId}`);
+    if (latest.lifecycle === "pending") {
+      try {
+        const claim = wb.claimAttempt(
+          cardId, latest.contract_id,
+          latest.executor_kind as ExecutorKind,
+          latest.executor_id,
+          latest.generation || 1,
+        );
+        if (claim) wb.markAttemptRunning(claim.attemptId);
+      } catch {
+        // The reconciler pump may hold the claim — settlement reads the row.
+      }
+    }
+    const fresh = wb.getLatestAttempt(cardId);
+    if (!fresh) throw new Error(`fixture: attempt vanished for worker card #${cardId}`);
+    return { id: fresh.id, generation: fresh.generation || 1 };
+  }
+
+  function settleLane(cardId: number, lifecycle: "completed" | "failed"): void {
+    const cur = currentRun();
+    const cwd = cur ? workspaceCwd(cur.rootCardId) : undefined;
+    if (lifecycle === "completed") {
+      const attempt = ensureClaimed(cardId);
+      const outcome = new WorkerSvc().collectAndSettle(
+        cardId, "<summary>lane finished</summary>", cwd, attempt.id, attempt.generation,
+      );
+      if (!outcome.settled) {
+        throw new Error(`fixture.completeWorkers: lane #${cardId} refused settlement (${outcome.summary})`);
+      }
+      kanban.kanbanComplete(cardId, null, "worker complete");
+      return;
+    }
+    const wb = new WorkerStore();
+    const latest = wb.getLatestAttempt(cardId);
+    if (!latest) throw new Error(`fixture.failWorkers: no attempt for worker card #${cardId}`);
+    if (latest.lifecycle === "pending") ensureClaimed(cardId);
+    const attempt = wb.getLatestAttempt(cardId);
+    if (!attempt) throw new Error(`fixture.failWorkers: attempt vanished for worker card #${cardId}`);
+    const settled = wb.terminalSettlement({
+      attemptId: attempt.id, expectedGeneration: attempt.generation || 1,
+      desiredState: "failed", stableReason: "worker failed",
+    });
+    if (settled.kind !== "settled" && settled.kind !== "replayed") {
+      throw new Error(`fixture.failWorkers: lane #${cardId} refused failure settlement (${settled.kind})`);
+    }
+    kanban.kanbanFail(cardId, "worker failed");
+  }
+
+  function settleNode(nodeId: string, lifecycle: "completed" | "failed"): void {
+    const cur = currentRun();
+    if (!cur) throw new Error("fixture: no admitted run to settle workers for");
+    pump();
+    const node = store.listNodes(cur.runId, store.currentRevision(cur.runId))
+      .find((n) => n["node_id"] === nodeId);
+    const cardId = node?.["worker_card_id"] as number | null | undefined;
+    if (cardId == null) throw new Error(`fixture: node ${nodeId} has no dispatched worker yet`);
+    settleLane(cardId, lifecycle);
+    pump();
+  }
+
+  function verdictOnOpen(action: "accept" | "cannot_assess", reason?: string): void {
+    const open = openReviewNode();
+    if (!open) {
+      // The runner may have settled already (verdict committed by the
+      // scripted reviewer, or the run terminalized another way) — explicit
+      // fixture acceptance after that is a no-op.
+      const cur = currentRun();
+      if (cur && store.getRun(cur.runId) && ["succeeded", "failed", "cancelled"].includes(store.getRun(cur.runId)?.state ?? "")) return;
+      throw new Error("fixture: no open review node and run is not terminal");
+    }
+    runner.submitVerdict(
+      open.runId, open.nodeId,
+      action === "accept" ? { verdict: "accept" } : { verdict: "cannot_assess", reason: reason ?? "fixture blocked" },
+    );
+    state.lastTurn = "reviewed";
+    pump();
+  }
 
   const script: ScheduledProjectScript = {
     get holdAcceptance(): boolean {
@@ -170,56 +509,85 @@ export function makeScheduledProjectFixture(
       return state.lastTurn;
     },
     reach: async (stateName) => {
-      const rootCardId = state.admittedRoot;
-      if (!rootCardId) throw new Error("fixture.reach: admission has not completed");
-      const card = kanban.kanbanGetCard(rootCardId);
+      pump();
+      const cur = currentRun();
+      if (!cur) throw new Error("fixture.reach: admission has not completed");
+      if (options.workerLimits) patchWorkerLimits(cur.runId, cur.revision);
+      const card = kanban.kanbanGetCard(cur.rootCardId);
       const runId = card?.source_id ?? undefined;
-      if (!runId) throw new Error(`fixture.reach: root #${rootCardId} has no run source_id`);
-      const actual = new ReviewStore().getSupervision(rootCardId)?.state ?? "none";
-      if (actual !== stateName) {
-        throw new Error(`fixture.reach("${stateName}"): supervision is ${actual}, not ${stateName} — invalid fixture shape`);
+      if (!runId) throw new Error(`fixture.reach: root #${cur.rootCardId} has no run source_id`);
+      const run = store.getRun(cur.runId);
+      // "executing" means planned AND dispatched: every work lane owns a
+      // worker card (the old authoring turn spawned lanes atomically).
+      const lanes = store.listNodes(cur.runId, cur.revision)
+        .filter((n) => n["kind"] === "work" || n["kind"] === "synthesis");
+      const dispatched = lanes.length > 0 && lanes.every((n) => (n["worker_card_id"] as number | null) != null);
+      const matched = stateName === "executing"
+        ? (cur.revision >= 1 && dispatched && run !== null && !["succeeded", "failed", "cancelled"].includes(run.state))
+        : stateName === "awaiting_contract"
+          ? cur.revision === 0
+          : stateName === "needs_input"
+            ? run?.state === "awaiting_input"
+            : openReviewNode() !== undefined;
+      if (!matched) {
+        throw new Error(`fixture.reach("${stateName}"): run ${cur.runId} state=${run?.state ?? "none"} revision=${cur.revision} — invalid fixture shape`);
       }
-      return { runId, rootCardId };
+      return { runId, rootCardId: cur.rootCardId };
     },
     failOrc: (mode) => { state.failOrcMode = mode; },
     completeWorkers: () => {
-      for (const child of workersOfRoot()) {
-        kanban.kanbanComplete(child.id, null, "worker complete");
-        terminalizeAttempts(child.id, "completed");
+      for (const node of openWorkNodes()) {
+        if (node.cardId == null) {
+          pump();
+          const reread = openWorkNodes().find((n) => n.nodeId === node.nodeId);
+          if (reread?.cardId == null) throw new Error(`fixture.completeWorkers: node ${node.nodeId} has no dispatched worker yet`);
+          settleLane(reread.cardId, "completed");
+        } else {
+          settleLane(node.cardId, "completed");
+        }
       }
+      pump();
     },
     failWorkers: () => {
-      for (const child of workersOfRoot()) {
-        kanban.kanbanFail(child.id, "worker failed");
-        terminalizeAttempts(child.id, "failed");
+      for (const node of openWorkNodes()) {
+        if (node.cardId == null) {
+          pump();
+          const reread = openWorkNodes().find((n) => n.nodeId === node.nodeId);
+          if (reread?.cardId == null) throw new Error(`fixture.failWorkers: node ${node.nodeId} has no dispatched worker yet`);
+          settleLane(reread.cardId, "failed");
+        } else {
+          settleLane(node.cardId, "failed");
+        }
       }
+      pump();
     },
     completeWorker: (index) => {
-      const child = workersOfRoot()[index];
-      if (!child) throw new Error(`fixture.completeWorker: no worker lane ${index}`);
-      kanban.kanbanComplete(child.id, null, "worker complete");
-      terminalizeAttempts(child.id, "completed");
+      pump();
+      const node = allWorkNodes()[index];
+      if (!node) throw new Error(`fixture.completeWorker: no worker lane ${index}`);
+      settleNode(node.nodeId, "completed");
     },
     failWorker: (index) => {
-      const child = workersOfRoot()[index];
-      if (!child) throw new Error(`fixture.failWorker: no worker lane ${index}`);
-      kanban.kanbanFail(child.id, "worker failed");
-      terminalizeAttempts(child.id, "failed");
+      pump();
+      const node = allWorkNodes()[index];
+      if (!node) throw new Error(`fixture.failWorker: no worker lane ${index}`);
+      settleNode(node.nodeId, "failed");
     },
     accept: () => {
       if (state.holdAcceptance) return;
-      reviewAndDecide("accept");
+      verdictOnOpen("accept");
     },
     block: (reason) => {
-      reviewAndDecide("block", reason);
+      verdictOnOpen("cannot_assess", reason);
     },
     retryRoot: (error) => {
       // kanbanRetryOrFail computes the exponential backoff (10s base, capped
       // 300s) and persists status=queued + next_retry_at — the durable retry
       // continuation the wake sources serve. Cells control the due time by
       // advancing the journey clock.
-      if (state.admittedRoot === undefined) throw new Error("fixture.retryRoot: no admitted root");
-      kanban.kanbanRetryOrFail(state.admittedRoot, error);
+      const root = discoverRoot();
+      if (root === undefined) throw new Error("fixture.retryRoot: no admitted root");
+      kanban.kanbanRetryOrFail(root, error);
     },
     adoptRoot: (rootCardId) => {
       state.admittedRoot = rootCardId;
@@ -228,14 +596,20 @@ export function makeScheduledProjectFixture(
       state.reviewMode = mode;
     },
     answerInput: (text) => {
-      if (state.admittedRoot === undefined) throw new Error("fixture.answerInput: no admitted root");
-      const store = new ReviewStore();
-      const pending = store.getPendingInputRequestsForProject(state.admittedRoot);
-      if (pending.length === 0) throw new Error(`fixture.answerInput: no pending input for root #${state.admittedRoot}`);
-      for (const req of pending) store.answerInputRequest(req.id, text);
+      const root = discoverRoot();
+      if (root === undefined) throw new Error("fixture.answerInput: no admitted root");
+      const cur = currentRun();
+      if (!cur) throw new Error("fixture.answerInput: no admitted run");
+      const pending = new ReviewStore().getPendingInputRequestsForProject(root);
+      if (pending.length === 0) throw new Error(`fixture.answerInput: no pending input for root #${root}`);
+      // The scripted resume turn: answer through the runner (durable answer
+      // row + executing resume), then accept on the still-open review node.
+      for (const req of pending) runner.answerInput(req.id, text);
+      state.lastTurn = "reviewed";
+      verdictOnOpen("accept");
     },
     armStaleSpawn: (goal) => {
-      const rootId = state.admittedRoot;
+      const rootId = discoverRoot();
       if (rootId === undefined) return { error: "armStaleSpawn: no admitted root" };
       const supervision = new ReviewStore().getSupervision(rootId);
       if (!supervision) return { error: "armStaleSpawn: no supervision" };
@@ -257,7 +631,7 @@ export function makeScheduledProjectFixture(
     },
     releaseStaleSpawn: () => {
       const stale = state.staleSpawn;
-      const rootId = state.admittedRoot;
+      const rootId = discoverRoot();
       if (!stale || rootId === undefined) return { rejected: false, error: "releaseStaleSpawn: no armed stale spawn" };
       const svc = new WorkerSvc();
       const result = svc.createChild(stale.goal, rootId, "stale-orc", {
@@ -279,220 +653,7 @@ export function makeScheduledProjectFixture(
     },
   };
 
-  // #1792: the coordinator schedule/startPort dispatch path is retired — the
-  // runner dispatches all work now. The scripted turn below is preserved
-  // verbatim for the e2e-fixture port workstream (slice 2); nothing invokes
-  // it until that port rewires these journeys to runner admission.
-  const scriptedOrcTurn = async (spec: import("../../components/orc-project/orc-project-contracts.js").OrcTurnSpec): Promise<void> => {
-      const context = spec.context;
-      const goal = spec.goal;
-      const projectId = context.projectCardId;
-      state.admittedRoot = projectId;
-      const store = new ReviewStore();
-      const supervision = store.getSupervision(projectId);
-      // Each scripted turn mirrors a complete real Orc session: it claims the
-      // intent (via the real run store), performs its durable writes, then
-      // releases the claim so the next intent can be promoted.
-      const finish = (outcome: "completed" | "failed"): void => {
-        try { orc.getStore().release(context, outcome); } catch { /* best effort */ }
-      };
-      if (!supervision || supervision.state === "awaiting_contract") {
-        if (state.failOrcMode) {
-          state.lastTurn = "failed";
-          finish("failed");
-          return; // the Orc dies before producing the contract
-        }
-        const contract = buildContract(projectId, goal, options.v2RootContract ?? false);
-        store.insertContract(contract);
-        store.initializeSupervision(projectId, contract.id);
-        for (let i = 0; i < options.workerCount; i++) {
-          const workerId = kanban.kanbanEnqueue(`fixture-worker-${i}`, "agent", undefined, {
-            parent_id: projectId,
-            type: "W",
-            goal: `Work lane ${i}`,
-            delivery: "silent",
-          });
-          if (workerId !== 0) {
-            kanban.kanbanRunning(workerId);
-            // R5: a valid worker-owned executing state carries a contract and
-            // a claimed running attempt, not just a running card.
-            try {
-              const svc = new WorkerSvc();
-              const created = svc.createChild(`Work lane ${i}`, projectId, "fixture-orc", {
-                cardId: workerId,
-                criteria: [{ id: `w${i}`, description: "lane done" }],
-                expectedArtifacts: [{ id: `a${i}`, kind: "file", ref: `out/lane-${i}.md`, required: true, criterion_ids: [`w${i}`] }],
-                supportsRootCriteria: [options.v2RootContract ? (i === 0 ? "c1" : "c2") : "c1"],
-                limits: options.workerLimits,
-                attemptId: `att_fixture_${workerId}`,
-              });
-              if (!("error" in created)) {
-                state.laneContractIds.push(created.contract.id);
-                const pending = new WorkerStore().getAttempt(created.attemptId);
-                const claim = pending
-                  ? new WorkerStore().claimAttempt(workerId, created.contract.id, pending.executor_kind, pending.executor_id, 1)
-                  : null;
-                if (claim) new WorkerStore().markAttemptRunning(claim.attemptId);
-              }
-            } catch { /* best effort — the card alone still carries custody */ }
-          }
-        }
-        state.lastTurn = "authored";
-        finish("completed");
-        return;
-      }
-      // Review turn (formerly driven by scheduleReview /
-      // dispatchPendingReviewRequests — preserved for the runner-admission
-      // port): decide accept, needs_input, or die according to the script.
-      // decide accept, needs_input, or die according to the script.
-      if (state.failOrcMode || state.reviewMode === "die") {
-        state.lastTurn = "failed";
-        finish("failed");
-        return;
-      }
-      const openCase = store.getLatestOpenCase(projectId);
-      if (!openCase) {
-        state.lastTurn = "failed"; // no review case to decide — nothing owned
-        finish("failed");
-        return;
-      }
-      if (state.reviewMode === "repair") {
-        // #1673: production ordering — the review tool settles the repair
-        // inside the turn (advancing the supervision generation), and the
-        // turn's terminal release happens afterwards. release() is terminal
-        // cleanup of the run's own row; it must not run before the settle,
-        // which is exactly the ordering that wedged the global Orc slot.
-        // #1686: the repair item references the durable source contract of
-        // the lane it repairs — a repair without a usable source can never
-        // authorize a Worker.
-        const sourceContractId = state.laneContractIds[0] ?? "";
-        store.settleRepair(projectId, openCase.id, {
-          action: "repair",
-          repair: { items: [{ id: "r1", source_contract_id: sourceContractId, affected_criterion_ids: ["c1"], strategy: "rework", required_evidence: "synthesis", capabilities: [], budget: { max_attempts: 1 } }] },
-        }, supervision.generation, 0);
-        // The reconciler would spawn repair workers via spin.spawnChild; the
-        // fixture creates the valid repair worker rows directly, carrying the
-        // #1686 item marker and the source lineage.
-        const repairWorkerId = kanban.kanbanEnqueue("fixture-repair-worker", "agent", undefined, {
-          parent_id: projectId,
-          type: "W",
-          goal: "Repair: rework [repair-item:r1]",
-          delivery: "silent",
-        });
-        if (repairWorkerId !== 0) {
-          kanban.kanbanRunning(repairWorkerId);
-          try {
-            const svc = new WorkerSvc();
-            const created = svc.createChild("Repair: rework [repair-item:r1]", projectId, "fixture-orc", {
-              cardId: repairWorkerId,
-              criteria: [{ id: "w1", description: "repair done" }],
-              expectedArtifacts: [{ id: "a1", kind: "file", ref: "out/repair.md", required: true, criterion_ids: ["w1"] }],
-              // #1604: the repair item names the affected root criterion.
-              supportsRootCriteria: ["c1"],
-              limits: options.workerLimits,
-              attemptId: `att_fixture_repair_${repairWorkerId}`,
-              // #1686: lineage points at the source contract the item names.
-              revisionMeta: {
-                revision: 1,
-                root_contract_id: sourceContractId,
-                parent_contract_id: sourceContractId,
-                retry_context: {
-                  directive_id: "repair-item:r1",
-                  mode: "repair",
-                  instruction: "rework",
-                  do_not_repeat: [],
-                  prior_evidence_ids: [],
-                  failed_criterion_ids: ["c1"],
-                  unresolved_risks: [],
-                  required_evidence: "synthesis",
-                },
-              },
-            });
-            if (!("error" in created)) {
-              const pending = new WorkerStore().getAttempt(created.attemptId);
-              const claim = pending
-                ? new WorkerStore().claimAttempt(repairWorkerId, created.contract.id, pending.executor_kind, pending.executor_id, 1)
-                : null;
-              if (claim) new WorkerStore().markAttemptRunning(claim.attemptId);
-            }
-          } catch { /* best effort */ }
-        }
-        state.lastTurn = "reviewed";
-        finish("completed");
-        return;
-      }
-      if (state.reviewMode === "blocked") {
-        store.settleBlocked(projectId, openCase.id, { action: "blocked", reason: "fixture review blocked" }, "fixture review blocked");
-        try { nerve.fire("card:failed", projectId); } catch { /* best effort */ }
-        state.lastTurn = "reviewed";
-        finish("completed");
-        return;
-      }
-      if (state.reviewMode === "needs_input") {
-        store.settleNeedsInput(projectId, openCase.id, { action: "needs_input" }, {
-          question: "confirm the deliverable scope",
-          affectedCriterionIds: ["c1"],
-          expectedResponseKind: "text",
-        });
-        state.lastTurn = "input_requested";
-        finish("completed");
-        return;
-      }
-      if (state.holdAcceptance) {
-        // #1554: with the Reconciler live, review dispatch is driver-owned —
-        // the scripted turn must honor the hold: release the claim without a
-        // decision; the ownership-released event re-wakes and re-dispatches
-        // once the hold clears.
-        finish("completed");
-        return;
-      }
-      store.settleAcceptance(projectId, openCase.id, {
-        action: "accept",
-        synthesis: "orc review accept",
-        lanes: laneSnapshot(),
-      }, "orc review accept");
-      try { nerve.fire("card:done", projectId); } catch { /* best effort */ }
-      state.lastTurn = "reviewed";
-      finish("completed");
-    };
-  void scriptedOrcTurn;
-
   const orc = new OrcCtor({});
 
   return { fixture: script, orc };
-}
-
-function buildContract(projectCardId: number, goal: string, v2RootContract = false): ProjectAcceptanceContractV1 {
-  if (v2RootContract) {
-    return {
-      schema_version: 2,
-      id: `fixture_contract_${projectCardId}_${Date.now()}`,
-      digest: `fixture_digest_${projectCardId}`,
-      project_card_id: projectCardId,
-      goal: goal.slice(0, 500),
-      criteria: [
-        { id: "c1", description: "Task goal met", required: true, execution_owner: "delegated", evidence_expectation: "synthesis" },
-        { id: "c2", description: "Optional extra lane", required: false, execution_owner: "delegated", evidence_expectation: "synthesis" },
-      ],
-      required_outputs: [],
-      constraints: [],
-      limits: { max_review_rounds: 1, max_repair_rounds: 1 },
-      provenance: { requested_by: "scheduler", authored_by: "fixture-orc", created_at: new Date().toISOString() },
-    } as unknown as ProjectAcceptanceContractV1;
-  }
-  const id = `fixture_contract_${projectCardId}_${Date.now()}`;
-  return {
-    schema_version: 1,
-    id,
-    digest: `fixture_digest_${projectCardId}`,
-    project_card_id: projectCardId,
-    goal: goal.slice(0, 500),
-    criteria: [
-      { id: "c1", description: "Task goal met", required: true, evidence_expectation: "synthesis" },
-    ],
-    required_outputs: [],
-    constraints: [],
-    limits: { max_review_rounds: 1, max_repair_rounds: 1 },
-    provenance: { requested_by: "scheduler", authored_by: "fixture-orc", created_at: new Date().toISOString() },
-  };
 }

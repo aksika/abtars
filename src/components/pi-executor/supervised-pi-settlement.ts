@@ -8,16 +8,32 @@
  * which owns the Worker-attempt terminal settlement via the canonical
  * WorkerSupervisionStore.settleAttemptInTransaction body.
  *
- * Supervised settlement NEVER transitions the W card from the Pi lane and
- * NEVER calls the standalone PiRunStore.settleTerminal() (which owns the
- * Pi-card transition).
+ * Supervised settlement transitions the W card from the Pi lane with the same
+ * criteria-verdict semantics Spin's finishSpin uses (completed + exact-contract
+ * acceptance → done; otherwise failed; never resurrect terminal cards;
+ * idempotent under replay) and never calls the standalone
+ * PiRunStore.settleTerminal() (which owns the Pi-card transition).
+ *
+ * Why the #1638 "never transitions the W card" invariant is retired: its
+ * consumer was reconciler child-reconciliation (dispatchOnePass terminal
+ * projection queued→done/failed from the durable attempt state). The #1792
+ * cutover deleted supervised ownership inference and O-root reconciliation —
+ * deriveAction returns early for O-roots and the dispatch pump only scans
+ * queued cards — so a Pi W-card that settles while running (or whose root is
+ * runner-owned) orphans with no owner. Without a settlement-owned projection
+ * the card never reaches done/failed, review never queues via the joint
+ * commit's successor, and the run stalls. The Pi lane therefore owns its W-card
+ * terminal projection atomically with the attempt + runner successor (same
+ * transaction, same acceptance predicate as Spin).
  */
 import type { PiRunStore, PiTerminalMetadata, PiTerminalOutcome } from "./pi-run-store.js";
 import type { PiRunStatus } from "./types.js";
 import type { WorkerSupervisionStore } from "../worker-supervision-store.js";
 import type { WorkerResultEnvelopeV1, WorkerAcceptanceContractV1 } from "../worker-contract.js";
+import { acceptancePassed } from "../worker-contract.js";
 import { evaluateWorkerEvidence, type WorkerEvidenceEvaluation } from "../worker-evidence-verifier.js";
 import { logWarn } from "../logger.js";
+import { kanbanTransition, sqliteNow } from "../tasks/kanban-board.js";
 import { validatePersistedSession, resolveAndValidateWorkspace, type PiExecutorConfig, type SessionProof } from "./config.js";
 
 const TAG = "supervised-pi-settlement";
@@ -187,6 +203,58 @@ export class SupervisedPiSettlement {
           return { kind: "conflict", reason: `worker settlement ${settlement.kind}` };
         }
 
+        // #1792 Task 5: W-card terminal projection owned by the Pi lane (same
+        // transaction as the run row + attempt + runner successor). Same
+        // criteria-verdict semantics Spin's finishSpin uses: completed with
+        // exact-contract acceptance → done; otherwise failed. Never resurrect
+        // terminal cards (queued/running only); idempotent under replay (the
+        // replay path above returns before reaching here, and an already-
+        // terminal card yields a no-op CAS here).
+        try {
+          const resultRow = this.workerStore.getResultByAttempt(attempt.id);
+          const settledContractRow = this.workerStore.getContract(attempt.contract_id);
+          let passed = false;
+          if (desiredState === "completed" && resultRow && settledContractRow) {
+            try {
+              const contract = JSON.parse(settledContractRow.contract_json) as WorkerAcceptanceContractV1;
+              passed = acceptancePassed(contract, resultRow.envelope);
+            } catch {
+              passed = false;
+            }
+          }
+          const summary = desiredState === "completed"
+            ? (passed ? "Pi execution completed" : "Pi completed without passing acceptance")
+            : `pi_${input.outcome}`;
+          if (passed) {
+            kanbanTransition({
+              cardId: attempt.card_id,
+              from: ["queued", "running"],
+              to: "done",
+              actor: "settle_done",
+              reason: "Pi worker settlement complete",
+              attemptId: attempt.id,
+              claimGeneration: attempt.generation || 1,
+              fields: {
+                result_summary: summary.slice(0, 4000),
+                completed_at: sqliteNow(),
+              },
+            }, this.workerStore.db);
+          } else {
+            kanbanTransition({
+              cardId: attempt.card_id,
+              from: ["queued", "running"],
+              to: "failed",
+              actor: "settle_failed",
+              reason: "Pi worker settlement failed",
+              attemptId: attempt.id,
+              claimGeneration: attempt.generation || 1,
+              fields: { error: summary.slice(0, 1000), completed_at: sqliteNow() },
+            }, this.workerStore.db);
+          }
+        } catch (err) {
+          logWarn(TAG, `Pi W-card projection contained for ${input.runId}: ${err instanceof Error ? err.message : String(err)}`);
+        }
+
         // Release the workspace claim (generation-fenced) inside the same
         // transaction when a canonical path was supplied.
         if (input.canonicalPath) {
@@ -210,10 +278,11 @@ export class SupervisedPiSettlement {
   /**
    * #1647 — Typed interruption of a live Pi generation. With a Worker
    * binding, the run row is interrupted with the truthful proof and the
-   * Worker attempt settles as failed in ONE transaction (the W card is owned
-   * by the attempt, never by the Pi lane). Without a binding, standalone
-   * runs use the paired PiRunStore.interruptGeneration; a supervised run
-   * without a binding fails closed and is left for boot recovery.
+   * Worker attempt settles as failed in ONE transaction (the W-card terminal
+   * projection is owned by this Pi lane, atomically with the attempt — see
+   * the #1792 note above). Without a binding, standalone runs use the paired
+   * PiRunStore.interruptGeneration; a supervised run without a binding fails
+   * closed and is left for boot recovery.
    */
   interruptPiExecution(input: {
     runId: string;
@@ -268,6 +337,23 @@ export class SupervisedPiSettlement {
           // Roll back the run-row interruption too — the pair must commit
           // atomically.
           throw new Error(`supervised interruption: worker settlement ${settlement.kind}`);
+        }
+
+        // #1792: W-card failed projection owned by the Pi lane (same
+        // transaction; never resurrect terminal cards).
+        try {
+          kanbanTransition({
+            cardId: attempt.card_id,
+            from: ["queued", "running"],
+            to: "failed",
+            actor: "settle_failed",
+            reason: "Pi worker interrupted",
+            attemptId: attempt.id,
+            claimGeneration: attempt.generation || 1,
+            fields: { error: "pi_interrupted".slice(0, 1000), completed_at: sqliteNow() },
+          }, this.workerStore.db);
+        } catch (err) {
+          logWarn(TAG, `Pi W-card projection contained for ${input.runId}: ${err instanceof Error ? err.message : String(err)}`);
         }
 
         // Generation-fenced workspace release inside the same transaction.
@@ -378,6 +464,24 @@ export class SupervisedPiSettlement {
         });
         if (settlement.kind === "stale" || settlement.kind === "conflict") {
           return { suspended: false, reason: `settlement ${settlement.kind}` };
+        }
+
+        // #1792: W-card failed projection owned by the Pi lane (same
+        // transaction; never resurrect terminal cards). The failed W card is
+        // the reviewable evidence Orc answers; the retry re-queues the card.
+        try {
+          kanbanTransition({
+            cardId: attempt.card_id,
+            from: ["queued", "running"],
+            to: "failed",
+            actor: "settle_failed",
+            reason: "Pi worker asked for input",
+            attemptId: attempt.id,
+            claimGeneration: attempt.generation || 1,
+            fields: { error: `pi_input_requested:${input.requestId.slice(0, 40)}`.slice(0, 1000), completed_at: sqliteNow() },
+          }, this.workerStore.db);
+        } catch (err) {
+          logWarn(TAG, `Pi W-card projection contained for ${input.runId}: ${err instanceof Error ? err.message : String(err)}`);
         }
 
         if (canonicalPath) {

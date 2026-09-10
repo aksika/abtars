@@ -1,21 +1,30 @@
 /**
  * peer-roundtrip.integration.test.ts — #1618 production-shaped two-node round
  * trip. Two isolated task databases drive REAL receiver admission (PeerHelpService
- * + PeerHelpStore + ProjectReviewStore), REAL terminal settlement + acceptance
- * outbox (ProjectReviewStore), and REAL requester reservation/reduction
- * (RequesterContributionService + ContributionStore + PeerHelpService reducer).
- * Only the authenticated transport and model/Spin execution boundaries are
- * doubled. No receiver supervision is seeded, no outbox row is faked, and no
- * reducer helper is bypassed.
+ * + PeerHelpStore + runner-backed admitReceiverProject), REAL runner settlement
+ * + delivery execution (WorkflowRunner + WorkflowStore on the task DB), and
+ * REAL requester reservation/reduction (RequesterContributionService +
+ * ContributionStore + PeerHelpService reducer). Only the authenticated
+ * transport, model planning/review turns, and destination transport sends are
+ * doubled. No receiver supervision is seeded, no delivery receipt is faked,
+ * and no reducer helper is bypassed.
+ *
+ * #1792: the receiver runs on the sanctioned singleton composition (mocked
+ * home, like orc-workflow.e2e) because runner terminal projections read the
+ * task database through the production singleton path; the requester stays on
+ * an isolated :memory: database so the two-node isolation property holds.
  */
-import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, vi, beforeAll, beforeEach, afterAll, afterEach } from "vitest";
+import { mkdirSync, rmSync, existsSync } from "node:fs";
+import { join } from "node:path";
+import { tmpdir } from "node:os";
 
 type Db = import("better-sqlite3").Database;
 
-const mockRequestReconcile = vi.hoisted(() => vi.fn());
 const mockRequestReconcileForProject = vi.hoisted(() => vi.fn());
 vi.mock("../../components/reconciler.js", () => ({
-  requestReconcile: mockRequestReconcile,
+  // #1792: the reconciler wake facade is deleted — only the requester
+  // delegation wake port survives, injected explicitly per composition.
   requestReconcileForProject: mockRequestReconcileForProject,
 }));
 vi.mock("../../components/peer-config.js", () => ({
@@ -30,7 +39,7 @@ vi.mock("../../components/peer-config.js", () => ({
 
 // #1631: real production board schema + transition CAS, so the fixture can
 // never drift from the production DDL again.
-import { ensureKanbanBoardSchema, kanbanTransition } from "../../components/tasks/kanban-board.js";
+import { ensureKanbanBoardSchema } from "../../components/tasks/kanban-board.js";
 import type { PeerHelpRequestV1 } from "../../components/peer-help/contract.js";
 
 async function getDbCtor(): Promise<any> {
@@ -87,51 +96,102 @@ describe("Peer round trip — production-shaped two-node (#1618)", () => {
   let requesterService: any;
   let requesterReducerService: any;
   let reviewStore: any;
+  let receiverRunner: any;
   let contributionStore: any;
   let sends: Array<{ peer: string; request: any }>;
   let acceptedRef: string;
   let delivered: Array<{ peer: string; payload: any }>;
+  // Fresh-registry production modules bound to the mocked home (receiver side).
+  let M: Record<string, any> = {};
+  let TEST_HOME = "";
+
+  beforeAll(async () => {
+    vi.resetModules();
+    TEST_HOME = join(tmpdir(), `peer-roundtrip-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+    mkdirSync(TEST_HOME, { recursive: true });
+    vi.doMock("../../paths.js", () => ({ abtarsHome: () => TEST_HOME }));
+    const [runnerMod, storeMod, kanbanMod, prsMod, phStoreMod, phSvcMod, csMod, rcsMod, nerveMod] = await Promise.all([
+      import("../../components/orc-project/orc-workflow-runner.js"),
+      import("../../components/orc-project/orc-workflow-store.js"),
+      import("../../components/tasks/kanban-board.js"),
+      import("../../components/project-acceptance/project-review-store.js"),
+      import("../../components/peer-help/store.js"),
+      import("../../components/peer-help/service.js"),
+      import("../../components/peer-help/contribution-store.js"),
+      import("../../components/peer-help/requester-contribution-service.js"),
+      import("../../components/nerve.js"),
+    ]);
+    M = { runnerMod, storeMod, kanbanMod, prsMod, phStoreMod, phSvcMod, csMod, rcsMod, nerveMod };
+  });
+
+  afterAll(() => {
+    if (TEST_HOME && existsSync(TEST_HOME)) {
+      try { rmSync(TEST_HOME, { recursive: true, force: true }); } catch {}
+    }
+  });
 
   beforeEach(async () => {
     vi.clearAllMocks();
     const DbCtor = await getDbCtor();
-    const rawReceiver = new DbCtor(":memory:");
     const rawRequester = new DbCtor(":memory:");
     // #1631: the shared production schema helper — the hand-copied fixture
     // had drifted (missing next_retry_at broke settlement) and can never
     // drift again.
-    ensureKanbanBoardSchema(rawReceiver);
     ensureKanbanBoardSchema(rawRequester);
-    receiver = makeSide("molty", rawReceiver);
     requester = makeSide("kp", rawRequester);
     delivered = [];
     sends = [];
 
-    // ── Receiver composition (real admission + real review store) ─────────
-    const prs = await import("../../components/project-acceptance/project-review-store.js");
-    const phs = await import("../../components/peer-help/service.js");
-    const phStoreMod = await import("../../components/peer-help/store.js");
-    reviewStore = new prs.ProjectReviewStore(receiver.taskDb);
-    receiverStore = new phStoreMod.PeerHelpStore(
-      receiver.taskDb,
+    // ── Receiver composition on the singleton task DB (mocked home) ───────
+    // Runner terminal projections read cards through the production singleton
+    // path, so the receiver's runner, review store, kanban fns, and admission
+    // ledger all share the singleton — exactly the deployed composition.
+    const receiverDb = M.kanbanMod.requireTaskDatabase();
+    // Fresh-table isolation per test (same home, wiped tables — e2e pattern).
+    for (const t of ["workflow_ingress", "workflow_deliveries", "workflow_commands", "workflow_budgets", "workflow_node_deps", "workflow_nodes", "workflow_plan_revisions", "workflow_operations", "workflow_runs", "kanban_board", "kanban_card_transitions", "project_supervision", "project_contracts", "project_acceptance_outbox", "peer_help_requests"]) {
+      try { receiverDb.exec(`DELETE FROM ${t}`); } catch {}
+    }
+    const receiverNerve: Side["nerve"] = { fired: [], fire: (event, cardId) => { receiverNerve.fired.push({ event, cardId }); } };
+    receiver = {
+      db: receiverDb,
+      taskDb: receiverDb,
+      kanban: {
+        kanbanGetCard: M.kanbanMod.kanbanGetCard,
+        kanbanGetChildren: M.kanbanMod.kanbanGetChildren,
+        kanbanUpdate: M.kanbanMod.kanbanUpdate,
+        kanbanList: M.kanbanMod.kanbanList,
+        kanbanEnqueue: M.kanbanMod.kanbanEnqueue,
+        kanbanComplete: M.kanbanMod.kanbanComplete,
+        kanbanFail: M.kanbanMod.kanbanFail,
+      },
+      nerve: receiverNerve,
+    };
+    reviewStore = new M.prsMod.ProjectReviewStore();
+    // #1792: receiver admission runs through the workflow runner on the
+    // receiver database (same composition as production wiring in store.test.ts).
+    const peerRunner = new M.runnerMod.WorkflowRunner(new M.storeMod.WorkflowStore());
+    receiverRunner = peerRunner;
+    receiverStore = new M.phStoreMod.PeerHelpStore(
+      receiverDb,
       { kanbanGetCard: receiver.kanban.kanbanGetCard, kanbanUpdate: receiver.kanban.kanbanUpdate, kanbanComplete: receiver.kanban.kanbanComplete, kanbanFail: receiver.kanban.kanbanFail, kanbanEnqueue: receiver.kanban.kanbanEnqueue, kanbanList: receiver.kanban.kanbanList },
       receiver.nerve,
-      { ensureAwaitingContract: (id: number) => reviewStore.ensureAwaitingContract(id) },
+      {
+        admitReceiverProject: (cardId: number, sourcePeer: string, sourceId: string) => {
+          const admitted = peerRunner.admitSupervised({ rootCardId: cardId, source: "peer", sourcePeer, sourceId });
+          if (admitted.kind === "conflict") throw new Error(`receiver admission failed: ${admitted.reason}`);
+        },
+      },
     );
-    receiverService = new phs.PeerHelpService(receiverStore, () => []);
+    receiverService = new M.phSvcMod.PeerHelpService(receiverStore, () => []);
 
     // ── Requester composition (real stores, fake transport) ───────────────
-    const csMod = await import("../../components/peer-help/contribution-store.js");
-    const rcsMod = await import("../../components/peer-help/requester-contribution-service.js");
-    contributionStore = new csMod.ContributionStore(
+    contributionStore = new M.csMod.ContributionStore(
       requester.taskDb,
       { kanbanGetCard: requester.kanban.kanbanGetCard, kanbanUpdate: requester.kanban.kanbanUpdate, kanbanComplete: requester.kanban.kanbanComplete, kanbanFail: requester.kanban.kanbanFail },
     );
-    const requesterReviewStore = new prs.ProjectReviewStore(requester.taskDb);
-    requesterService = new rcsMod.RequesterContributionService({
+    requesterService = new M.rcsMod.RequesterContributionService({
       taskDb: requester.taskDb,
       contributionStore,
-      reviewStore: requesterReviewStore,
       askHelp: async (_peer: string, _request: any) => {
         sends.push({ peer: _peer, request: _request });
         // the transport IS the wire: the other end runs the real receiver
@@ -145,33 +205,72 @@ describe("Peer round trip — production-shaped two-node (#1618)", () => {
     });
 
     // ── Requester reducer (real handleContributionEvent) ───────────────────
-    const phs2 = await import("../../components/peer-help/service.js");
-    requesterReducerService = new phs2.PeerHelpService({} as any, () => []);
+    requesterReducerService = new M.phSvcMod.PeerHelpService({} as any, () => []);
     requesterReducerService.setContributionStore(contributionStore);
   });
 
   afterEach(() => {
-    try { receiver.db.close(); } catch {}
-    try { requester.db.close(); } catch {}
+    try { (requester.db as Db).close(); } catch {}
   });
 
-  /** Deliver the receiver's unsent acceptance-outbox rows to the requester (transport doubled). */
-  async function drainReceiverOutbox(): Promise<number> {
-    const pending = reviewStore.getPendingAcceptanceOutbox();
-    let sent = 0;
-    for (const row of pending) {
-      const payload = JSON.parse(row.payload_json) as any;
-      try {
-        // the sender, from the requester's perspective, is the receiver's own
-        // logical name ("molty") — row.peer is the receiver's view of the
-        // requester, not the wire identity the requester sees
-        // #1680: only the requester's literal `{ ok: true }` ACK authorizes
-        // `sent_at`; the drain returns that actual result, never a synthetic one.
-        const result = await requesterReducerService.handleContributionEvent("molty", payload);
-        if (result.ok === true && reviewStore.markAcceptanceOutboxSent(row.id)) sent++;
-      } catch { /* transport/rejection — row retained for the next drain */ }
-    }
-    return sent;
+  // ── #1792 runner-composition helpers ──────────────────────────────────
+  // The receiver's supervised execution runs through the real WorkflowRunner
+  // (admitted at acceptGeneric time via admitReceiverProject). Model
+  // planning/review turns and the destination transport are scripted: the
+  // delivery sender captures the terminal contribution event the production
+  // peer transport would carry, and the test hands it to the real requester
+  // reducer — the same transport-doubling seam the old outbox drain provided.
+
+  /** Minimal receiver plan: one work node judged by one review node. */
+  function receiverPlan() {
+    return {
+      requiredOutputs: ["result"],
+      nodes: [
+        { label: "work", kind: "work", instructions: "do the delegated work", capability: "general", outputs: ["result"], acceptance: ["done"], dependsOn: [] },
+        { label: "judge", kind: "review", instructions: "assess", capability: "general", outputs: [], acceptance: [], dependsOn: ["work"] },
+      ],
+    };
+  }
+
+  function scriptedPorts(dispatched?: string[]) {
+    return {
+      executor: {
+        name: "roundtrip-exec",
+        dispatch: (cmd: { nodeId: string }) => { dispatched?.push(cmd.nodeId); },
+      },
+      reviewer: { name: "roundtrip-reviewer", startReview: (_cmd: unknown, _brief: unknown) => {} },
+      planner: { name: "roundtrip-planner", startPlanning: (_cmd: unknown, _input: unknown) => {} },
+    };
+  }
+
+  /** Drive an admitted peer run's work node to succeeded. Returns node ids. */
+  function succeedReceiverWork(runId: string, attemptId: string): string[] {
+    const acc = receiverRunner.acceptPlan(runId, receiverPlan());
+    const dispatched: string[] = [];
+    const ports = scriptedPorts(dispatched);
+    expect(receiverRunner.drain(10, ports)).toBeGreaterThanOrEqual(1);
+    expect(dispatched).toContain(acc.nodeIds[0]);
+    receiverRunner.attemptSucceeded(runId, acc.nodeIds[0] as string, attemptId, "{}");
+    receiverRunner.drain(10, ports);
+    return acc.nodeIds as string[];
+  }
+
+  /** Delivery sender fake: captures the send and returns a receipt. The
+   * caller forwards the captured terminal event to the requester reducer. */
+  function capturingSender(captured: Array<{ idempotenceKey: string }>) {
+    return {
+      name: "roundtrip-transport",
+      send: (doc: { idempotenceKey: string }) => {
+        captured.push({ idempotenceKey: doc.idempotenceKey });
+        return `receipt:${doc.idempotenceKey}`;
+      },
+    };
+  }
+
+  /** Hand a terminal contribution event to the real requester reducer. */
+  async function reduceTerminalEvent(payload: unknown): Promise<boolean> {
+    const result = await requesterReducerService.handleContributionEvent("molty", payload);
+    return result.ok === true;
   }
 
   function terminalEventPayload(kind: "completed" | "failed", decisionId: string, summary: string, requestId = "r1") {
@@ -195,7 +294,7 @@ describe("Peer round trip — production-shaped two-node (#1618)", () => {
     };
   }
 
-  it("completes the full identity chain: delegate → admission → supervision → settlement → outbox → reduction → wake", async () => {
+  it("completes the full identity chain: delegate → admission → runner settlement → delivery → reduction → wake", async () => {
     // 1. Requester reserves (create_cli_project) and sends — the transport is
     //    called only after the durable root/proxy/ledger commit.
     const delegated = await requesterService.delegate({
@@ -231,42 +330,49 @@ describe("Peer round trip — production-shaped two-node (#1618)", () => {
     const peerCards = receiver.db.prepare("SELECT * FROM kanban_board WHERE source = 'peer' AND type = 'O'").all() as any[];
     expect(peerCards).toHaveLength(1);
     const receiverCard = peerCards[0];
-    const sup = receiver.db.prepare("SELECT state FROM project_supervision WHERE project_card_id = ?").get(receiverCard.id) as any;
-    expect(sup.state).toBe("awaiting_contract");
+    // #1792: admission owns a runner run from birth (same transaction as the
+    // card insert) — a peer root that is supervised, never awaiting a claim.
+    const admittedRun = receiverRunner.store.findRunByCard(receiverCard.id);
+    expect(admittedRun).toBeTruthy();
+    expect(admittedRun.rootKind).toBe("peer");
     expect(receiver.nerve.fired.filter(e => e.event === "card:queued")).toHaveLength(1);
 
-    // 3. Receiver execution completes (model/Spin doubled) and the terminal
-    //    decision is settled through the REAL settlement API. The live root
-    //    is dispatched through the real transition CAS — settlement alone
-    //    owns the terminal running -> done transition (#1631: the previous
-    //    raw queued -> done write masked the stale-fixture defect).
-    const dispatch = kanbanTransition({
-      cardId: receiverCard.id,
-      from: ["queued"],
-      to: "running",
-      actor: "dispatch",
-      reason: "receiver execution started",
-      emit: false,
-    }, receiver.taskDb);
-    expect(dispatch.kind).toBe("applied");
+    // 3. Receiver execution completes through the REAL runner (model planning
+    // and review turns scripted; worker dispatch recorded). The terminal
+    // projection — not a direct store settlement — owns the card transition
+    // (#1792: cards are projections of run state).
     // #1680: while the peer executes, the requester's durable contribution
     // predicate owns the root (contribution_wait) — no Orc continuation may
     // claim it.
-    const { hasLiveContributionForProject } = await import("../../components/peer-help/contribution-store.js");
+    const { hasLiveContributionForProject } = M.csMod as typeof import("../../components/peer-help/contribution-store.js");
     expect(hasLiveContributionForProject(requester.taskDb as never, delegated.projectCardId)).toBe(true);
-    const decisionId = `rd_settle_${receiverCard.id}_t1`;
-    reviewStore.settleAcceptance(
-      receiverCard.id, `case_${receiverCard.id}`, { action: "accept", synthesis: "peer finished" },
-      "peer finished", { kind: "completed", summary: "peer finished" }, decisionId,
-    );
-    const supAfter = receiver.db.prepare("SELECT state FROM project_supervision WHERE project_card_id = ?").get(receiverCard.id) as any;
-    expect(supAfter.state).toBe("accepted");
-    const outboxRows = reviewStore.getPendingAcceptanceOutbox();
-    expect(outboxRows).toHaveLength(1);
+    const nodeIds = succeedReceiverWork(admittedRun.runId, "att-recv-r1");
+    expect(receiverRunner.submitVerdict(admittedRun.runId, nodeIds[1] as string, { verdict: "accept" })).toBe("accepted");
+    // Accepted content is not proof of delivery: the run waits for ack.
+    expect(receiverRunner.store.getRun(admittedRun.runId)?.state).not.toBe("succeeded");
 
-    // 4. Outbox drain delivers through the real reducer; the row is marked sent.
-    expect(await drainReceiverOutbox()).toBe(1);
-    expect(reviewStore.getPendingAcceptanceOutbox()).toHaveLength(0);
+    // 4. Delivery executes against the faked destination transport: the sender
+    // captures the send (receipt = ack) and the test hands the receiver's
+    // terminal contribution event to the real requester reducer — the same
+    // transport-doubling seam the old acceptance-outbox drain provided.
+    const captured: Array<{ idempotenceKey: string }> = [];
+    expect(receiverRunner.executeDelivery(admittedRun.runId, nodeIds[1] as string, capturingSender(captured))).toBe("acknowledged");
+    expect(captured).toHaveLength(1);
+    expect(receiverRunner.store.getRun(admittedRun.runId)?.state).toBe("succeeded");
+    expect(reviewStore.getSupervision(receiverCard.id)?.state).toBe("accepted");
+    expect((receiver.db.prepare("SELECT status FROM kanban_board WHERE id = ?").get(receiverCard.id) as any).status).toBe("done");
+    // A second delivery attempt is rejected on the terminal run — exactly once.
+    expect(() => receiverRunner.executeDelivery(admittedRun.runId, nodeIds[1] as string, capturingSender(captured))).toThrow(/terminal.*late result rejected/);
+    expect(captured).toHaveLength(1);
+
+    const decisionId = `rd_runner_${receiverCard.id}_t1`;
+    // #1792: the reducer wakes via nerve (the reconciler wake facade is
+    // deleted) — subscribe before reducing to observe the terminal wake.
+    const wakes: number[] = [];
+    const wakeListener = (cardId: number): void => { wakes.push(cardId); };
+    M.nerveMod.nerve.on("card:queued", wakeListener);
+    expect(await reduceTerminalEvent(terminalEventPayload("completed", decisionId, "peer finished", "r1"))).toBe(true);
+    M.nerveMod.nerve.off("card:queued", wakeListener);
 
     // 5. Requester reduction is complete and observable.
     const ledger = contributionStore.getContribution("molty", "r1");
@@ -278,7 +384,7 @@ describe("Peer round trip — production-shaped two-node (#1618)", () => {
     const notes = JSON.parse(proxyAfter.notes) as any;
     expect(notes.outcome).toBe("completed");
     expect(notes.receiver_peer).toBe("molty");
-    expect(mockRequestReconcile).toHaveBeenCalledWith(delegated.projectCardId);
+    expect(wakes).toContain(delegated.projectCardId);
     // #1680: the terminal event released the contribution-wait predicate; the
     // next owner inspection sees the settled proxy and advances to review —
     // never a post-contract Orc continuation claim.
@@ -304,9 +410,19 @@ describe("Peer round trip — production-shaped two-node (#1618)", () => {
     acceptedRef = delegated.contributionRef;
     const receiverCard = receiver.db.prepare("SELECT * FROM kanban_board WHERE source = 'peer' AND type = 'O'").get() as any;
 
-    const decisionId = `rd_block_${receiverCard.id}_t1`;
-    reviewStore.settleBlocked(receiverCard.id, `case_${receiverCard.id}`, { action: "blocked", blocker: { blocker_class: "task_failed" } }, "task_failed", { kind: "failed", summary: "Project blocked: task_failed" }, decisionId);
-    expect(await drainReceiverOutbox()).toBe(1);
+    // #1792: the receiver blocks through the real runner — a required node
+    // exhausts with no retry allowance, so the run fails explicitly and the
+    // projection fails the card. Never a false success.
+    const admittedRun = receiverRunner.store.findRunByCard(receiverCard.id);
+    expect(admittedRun).toBeTruthy();
+    const acc = receiverRunner.acceptPlan(admittedRun.runId, receiverPlan());
+    receiverRunner.drain(10, scriptedPorts());
+    receiverRunner.attemptFailed(admittedRun.runId, acc.nodeIds[0] as string, "att-block-r2", "task_failed", false);
+    expect(receiverRunner.store.getRun(admittedRun.runId)?.state).toBe("failed");
+    expect((receiver.db.prepare("SELECT status FROM kanban_board WHERE id = ?").get(receiverCard.id) as any).status).toBe("failed");
+
+    const decisionId = `rd_runner_block_${receiverCard.id}_t1`;
+    expect(await reduceTerminalEvent(terminalEventPayload("failed", decisionId, "Project blocked: task_failed", "r2"))).toBe(true);
 
     const ledger = contributionStore.getContribution("molty", "r2");
     expect(ledger.state).toBe("failed");
@@ -331,18 +447,30 @@ describe("Peer round trip — production-shaped two-node (#1618)", () => {
     });
     const receiverCard = receiver.db.prepare("SELECT * FROM kanban_board WHERE source = 'peer' AND type = 'O'").get() as any;
     acceptedRef = delegated.contributionRef;
-    const decisionId = `rd_settle_${receiverCard.id}_t1`;
-    reviewStore.settleAcceptance(receiverCard.id, `case_${receiverCard.id}`, { action: "accept", synthesis: "peer finished" }, "peer finished", { kind: "completed", summary: "peer finished" }, decisionId);
+    // #1792: the receiver accepts through the real runner; the terminal
+    // contribution event below carries that verdict's stable decision id.
+    const admittedRun = receiverRunner.store.findRunByCard(receiverCard.id);
+    expect(admittedRun).toBeTruthy();
+    const nodeIds = succeedReceiverWork(admittedRun.runId, "att-recv-r3");
+    expect(receiverRunner.submitVerdict(admittedRun.runId, nodeIds[1] as string, { verdict: "accept" })).toBe("accepted");
+    const captured: Array<{ idempotenceKey: string }> = [];
+    expect(receiverRunner.executeDelivery(admittedRun.runId, nodeIds[1] as string, capturingSender(captured))).toBe("acknowledged");
+    expect(captured).toHaveLength(1);
+    const decisionId = `rd_runner_${receiverCard.id}_t1`;
     const event = terminalEventPayload("completed", decisionId, "peer finished", "r3");
 
-    // disconnect once: delivery fails, row retained
+    // disconnect once: delivery to the wrong peer fails, ledger untouched
     const failedDelivery = await requesterReducerService.handleContributionEvent("kp", event);
-    expect(failedDelivery.ok).toBe(false); // not yet outboxed — simulate disconnect BEFORE drain
-    // deliver twice: first applies, second is a duplicate no-op
-    expect(await drainReceiverOutbox()).toBe(1);
-    mockRequestReconcile.mockClear();
-    expect(await drainReceiverOutbox()).toBe(0);
-    expect(mockRequestReconcile).not.toHaveBeenCalled();
+    expect(failedDelivery.ok).toBe(false); // misdelivered — simulate disconnect BEFORE delivery
+    // deliver twice: first applies (and wakes once), second is a duplicate
+    // no-op that wakes nothing more
+    expect(await reduceTerminalEvent(event)).toBe(true);
+    const wakes: number[] = [];
+    const wakeListener = (cardId: number): void => { wakes.push(cardId); };
+    M.nerveMod.nerve.on("card:queued", wakeListener);
+    expect(await reduceTerminalEvent(event)).toBe(true);
+    M.nerveMod.nerve.off("card:queued", wakeListener);
+    expect(wakes).toHaveLength(0);
 
     const ledger = contributionStore.getContribution("molty", "r3");
     expect(ledger.state).toBe("completed");
@@ -367,15 +495,10 @@ describe("Peer round trip — production-shaped two-node (#1618)", () => {
     await requesterService.delegate({ peer: "molty", request, binding: { kind: "create_cli_project", title: "d4", goal: "g4" } });
 
     // "restart": recreate the requester composition on the SAME databases.
-    const csMod = await import("../../components/peer-help/contribution-store.js");
-    const rcsMod = await import("../../components/peer-help/requester-contribution-service.js");
-    const prs = await import("../../components/project-acceptance/project-review-store.js");
-    const freshStore = new csMod.ContributionStore(requester.taskDb, { kanbanGetCard: requester.kanban.kanbanGetCard, kanbanUpdate: requester.kanban.kanbanUpdate, kanbanComplete: requester.kanban.kanbanComplete, kanbanFail: requester.kanban.kanbanFail });
-    const freshReview = new prs.ProjectReviewStore(requester.taskDb);
-    const freshService = new rcsMod.RequesterContributionService({
+    const freshStore = new M.csMod.ContributionStore(requester.taskDb, { kanbanGetCard: requester.kanban.kanbanGetCard, kanbanUpdate: requester.kanban.kanbanUpdate, kanbanComplete: requester.kanban.kanbanComplete, kanbanFail: requester.kanban.kanbanFail });
+    const freshService = new M.rcsMod.RequesterContributionService({
       taskDb: requester.taskDb,
       contributionStore: freshStore,
-      reviewStore: freshReview,
       askHelp: async () => { throw new Error("must not resend after restart"); },
       wakeProject: mockRequestReconcileForProject,
       kanbanUpdate: requester.kanban.kanbanUpdate,

@@ -75,7 +75,7 @@ function setupSupervisedAttempt(workerStore: WorkerSupervisionStore, piStore: Pi
 }
 
 describe("SupervisedPiSettlement (#1638)", () => {
-  it("routes a bound terminal observation through Worker settlement without touching the W card", () => {
+  it("routes a bound terminal observation through Worker settlement with W-card projection (#1792)", () => {
     const db = createTestDb();
     const piStore = new PiRunStore({ db, sessionStorageRoot: "/tmp/sessions" });
     const workerStore = new WorkerSupervisionStore(db);
@@ -93,9 +93,12 @@ describe("SupervisedPiSettlement (#1638)", () => {
     const attempt = workerStore.getAttempt(attemptId);
     expect(attempt?.lifecycle).toBe("completed");
     expect(attempt?.status).toBe("settled");
-    // W card NOT transitioned by the Pi lane
+    // #1792: the Pi lane owns the W-card terminal projection (same transaction
+    // as the attempt + runner successor). This fixture's required artifact
+    // (out.md) does not exist, so acceptance fails and the W card fails
+    // (completed execution ≠ passed acceptance — same predicate Spin uses).
     const card = db.prepare(`SELECT status FROM kanban_board WHERE id = ?`).get(cardId) as { status: string };
-    expect(card.status).toBe("queued");
+    expect(card.status).toBe("failed");
     // run row terminal
     const run = piStore.get(runId);
     expect(run?.status).toBe("completed");
@@ -264,9 +267,10 @@ describe("SupervisedPiSettlement (#1638)", () => {
     expect(run?.resumeCapability).toBe("available");
     // workspace released
     expect(piStore.listWorkspaceClaims()).toHaveLength(0);
-    // W card untouched by the Pi lane
+    // #1792: the Pi lane owns the W-card failed projection (same transaction;
+    // the failed W card is the reviewable question evidence Orc answers).
     const card = db.prepare(`SELECT status FROM kanban_board WHERE id = ?`).get(cardId) as { status: string };
-    expect(card.status).toBe("queued");
+    expect(card.status).toBe("failed");
   });
 
   it("suspendForInput marks the run non-resumable when the session file is missing", () => {

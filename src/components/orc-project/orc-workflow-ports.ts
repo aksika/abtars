@@ -13,9 +13,21 @@
  * resolver picks the executor at child creation, and the reconciler dispatch
  * pump starts pending attempts (capacity/backpressure unchanged). The port
  * only creates the child, binds it to the node, and wakes the pump.
+ *
+ * Pi transport portability (#1792 Task 5, #1638): the Pi worker port mirrors
+ * the Spin worker port's creation/binding sequence with a workspace alias so
+ * the contract-derived intent resolver picks pi/pi-coding; the existing
+ * PiExecutorAdapter boundary (via the reconciler dispatch pump) starts the
+ * attempt, binds the Pi run resource, and settles through
+ * SupervisedPiSettlement. Capability routing is minimal and explicit (below):
+ * a node whose spec.capability names Pi goes to the Pi port, Spin default
+ * otherwise. The plan schema carries no alias field, so a Pi capability that
+ * is itself a configured Pi workspace alias carries the workspace; a generic
+ * Pi capability (pi-coding/pi) resolves to the first configured alias.
  */
 import { ProjectReviewStore } from "../project-acceptance/project-review-store.js";
 import { WorkerSupervisionService } from "../worker-supervision-service.js";
+import { loadPiConfig } from "../pi-executor/config.js";
 import {
   WorkflowRunner,
   boundText,
@@ -182,6 +194,194 @@ export class WorkflowWorkerPort implements ExecutionPort {
     }
     store.bindNodeWorker(cmd.runId, revision, cmd.nodeId, created.cardId, created.attemptId);
     this.wakePump();
+  }
+}
+
+/**
+ * Whether a plan capability names Pi execution (minimal explicit routing).
+ *
+ * The plan schema carries no workspace-alias field, so Pi-ness travels in
+ * spec.capability: a generic Pi capability (pi-coding/pi/pi-*) or a
+ * capability that is itself a configured Pi workspace alias routes to the Pi
+ * port; everything else (including "general" and Spin synonyms) stays Spin.
+ * "spin" contains the substring "pi" — never use substring matching here.
+ */
+export function isPiCapability(capability: string | undefined | null): boolean {
+  if (!capability || capability.length === 0) return false;
+  if (capability === "pi-coding" || capability === "pi") return true;
+  if (capability.startsWith("pi-")) return true;
+  // A capability that names a configured Pi workspace alias is Pi work
+  // with its workspace carried in the capability (plan schema has no alias
+  // field). Configuration absence fails closed to Spin — never route to Pi
+  // without a resolvable workspace. The try/catch keeps routing total when
+  // Pi config is unreadable.
+  try {
+    const config = loadPiConfig();
+    if (config && capability in config.workspaceAliases) return true;
+  } catch {
+    // Unreadable config: not Pi by alias (generic Pi names above still apply,
+    // and dispatch will fail closed if no workspace resolves).
+  }
+  return false;
+}
+
+/**
+ * Resolve the Pi workspace alias for a Pi-routed node spec.
+ *
+ * A Pi capability that is itself a configured alias carries the workspace
+ * directly; a generic Pi capability (pi-coding/pi) resolves to the first
+ * configured alias. Returns undefined when no workspace resolves — the
+ * caller fails closed (never silently falls back to Spin; the reconciler
+ * pump settles the coding child as pi_executor_unavailable).
+ */
+export function resolvePiWorkspaceAlias(capability: string | undefined | null): string | undefined {
+  try {
+    const config = loadPiConfig();
+    if (!config) return undefined;
+    const aliases = Object.keys(config.workspaceAliases);
+    if (aliases.length === 0) return undefined;
+    if (capability && capability in config.workspaceAliases) return capability;
+    if (isPiCapability(capability)) return aliases[0];
+    return undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/** Runner capabilities for production admission (general + Pi). */
+export function workflowCapabilities(): string[] {
+  const caps = new Set<string>(["general", "pi-coding", "pi"]);
+  try {
+    const config = loadPiConfig();
+    if (config) {
+      for (const alias of Object.keys(config.workspaceAliases)) caps.add(alias);
+    }
+  } catch {
+    // Config unreadable: generic Pi names still route (dispatch fails closed).
+  }
+  return [...caps];
+}
+
+export interface PiPortDeps {
+  runner: WorkflowRunner;
+  db?: TaskDatabase;
+  wakePump?: () => void;
+  /** Test seam: resolve the workspace alias for a node spec (default: capability-derived). */
+  workspaceAliasFor?: (spec: { capability?: string }) => string | undefined;
+}
+
+/**
+ * Pi execution port (#1792 Task 5, #1638): mirrors WorkflowWorkerPort's
+ * creation/binding sequence (criteria/expected-artifacts from the plan spec
+ * via WorkerSupervisionService.createChild with the runner authority) with a
+ * workspace alias so the contract-derived intent resolver picks pi/pi-coding.
+ * The existing PiExecutorAdapter boundary (via the reconciler dispatch pump)
+ * starts the attempt, binds the Pi run resource (bindExecutorResource), and
+ * settles through SupervisedPiSettlement — the port only creates, binds the
+ * node worker (worker_card_id linkage for the joint commit's findNodeByCard),
+ * and wakes the pump. Never falls back to Spin: an unresolvable workspace
+ * throws a visible WorkflowDispatchError (the pump settles coding children
+ * without a live Pi service as pi_executor_unavailable).
+ */
+export class WorkflowPiPort implements ExecutionPort {
+  readonly name = "workflow-pi-worker";
+  private readonly runner: WorkflowRunner;
+  private readonly workers: WorkerSupervisionService;
+  private readonly reviewStore: ProjectReviewStore;
+  private readonly wakePump: () => void;
+  private readonly workspaceAliasFor?: (spec: { capability?: string }) => string | undefined;
+
+  constructor(deps: PiPortDeps) {
+    this.runner = deps.runner;
+    this.workers = new WorkerSupervisionService(deps.db);
+    this.reviewStore = new ProjectReviewStore(deps.db);
+    this.wakePump = deps.wakePump ?? (() => {});
+    this.workspaceAliasFor = deps.workspaceAliasFor;
+  }
+
+  dispatch(cmd: CommandRow): void {
+    const store = this.runner.store;
+    const run = store.getRun(cmd.runId);
+    if (!run) throw new WorkflowDispatchError(cmd.nodeId, `run ${cmd.runId} missing`);
+    const payload = JSON.parse(cmd.payloadJson) as { nodeId: string; revision: number };
+    const revision = Number(payload.revision);
+    const spec = this.runner.planNodeSpec(cmd.runId, revision, cmd.nodeId);
+    if (!spec) throw new WorkflowDispatchError(cmd.nodeId, "node missing from its plan revision");
+    this.reviewStore.ensureAwaitingContract(run.rootCardId);
+    const sup = this.reviewStore.getSupervision(run.rootCardId);
+    if (!sup || sup.state === "accepted" || sup.state === "blocked") {
+      throw new WorkflowDispatchError(cmd.nodeId, `supervision not dispatchable (state ${sup?.state ?? "missing"})`);
+    }
+    const workspaceAlias = this.workspaceAliasFor
+      ? this.workspaceAliasFor(spec)
+      : resolvePiWorkspaceAlias(spec.capability);
+    if (!workspaceAlias) {
+      throw new WorkflowDispatchError(cmd.nodeId, `pi workspace unresolvable for capability ${spec.capability ?? "(none)"}`);
+    }
+    const criteria = (spec.acceptance ?? []).map((a, i) => ({ id: `${cmd.nodeId}-c${i}`, description: a }));
+    const criterionIds = criteria.map((c) => c.id);
+    const artifacts = (spec.outputs ?? []).map((o, i) => ({
+      id: `${cmd.nodeId}-o${i}`,
+      kind: (o.includes("/") || o.includes(".")) ? ("file" as const) : ("logical" as const),
+      ref: o, required: true as const, criterion_ids: [...criterionIds],
+    }));
+    const created = this.workers.createChild(
+      spec.instructions, run.rootCardId, "workflow-runner",
+      {
+        criteria,
+        expectedArtifacts: artifacts,
+        requiredCapabilities: spec.capability ? [spec.capability] : [],
+        supportsRootCriteria: [],
+        workspaceAlias,
+        authority: {
+          projectCardId: run.rootCardId,
+          projectGeneration: sup.generation,
+          scheduledRunId: run.scheduledRunId ?? undefined,
+        },
+      },
+    );
+    if ("error" in created) {
+      throw new WorkflowDispatchError(cmd.nodeId, boundText(created.error, 500));
+    }
+    // Same worker_card_id linkage the Spin port writes: the settlement joint
+    // commit's findNodeByCard reads worker_card_id to resolve the node.
+    store.bindNodeWorker(cmd.runId, revision, cmd.nodeId, created.cardId, created.attemptId);
+    this.wakePump();
+  }
+}
+
+/**
+ * Capability-routed executor (Spin default, Pi when the node spec names Pi).
+ * Reads the node spec for the dispatched command and delegates to the Pi or
+ * Spin port. Minimal and explicit: isPiCapability decides, no
+ * natural-language classification, no fallback reinterpretation.
+ */
+export class RoutingWorkflowWorkerPort implements ExecutionPort {
+  readonly name = "workflow-worker-routing";
+  private readonly runner: WorkflowRunner;
+  private readonly spinPort: WorkflowWorkerPort;
+  private readonly piPort: WorkflowPiPort;
+
+  constructor(deps: { runner: WorkflowRunner; db?: TaskDatabase; wakePump?: () => void; workspaceAliasFor?: (spec: { capability?: string }) => string | undefined }) {
+    this.runner = deps.runner;
+    this.spinPort = new WorkflowWorkerPort({ runner: deps.runner, db: deps.db, wakePump: deps.wakePump });
+    this.piPort = new WorkflowPiPort({ runner: deps.runner, db: deps.db, wakePump: deps.wakePump, workspaceAliasFor: deps.workspaceAliasFor });
+  }
+
+  dispatch(cmd: CommandRow): void {
+    let capability: string | undefined;
+    try {
+      const payload = JSON.parse(cmd.payloadJson) as { nodeId: string; revision: number };
+      const spec = this.runner.planNodeSpec(cmd.runId, Number(payload.revision), cmd.nodeId);
+      capability = spec?.capability;
+    } catch {
+      capability = undefined;
+    }
+    if (isPiCapability(capability)) {
+      this.piPort.dispatch(cmd);
+      return;
+    }
+    this.spinPort.dispatch(cmd);
   }
 }
 

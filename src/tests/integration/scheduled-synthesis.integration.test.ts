@@ -1,360 +1,325 @@
-import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
-import { mkdirSync, rmSync, writeFileSync } from "node:fs";
-import { createHash } from "node:crypto";
+/**
+ * scheduled-synthesis.integration.test.ts — #1792 writer-node + partial-evidence
+ * journeys (replaces the retired salvage-admission suite).
+ *
+ * Disposition (design.md "Test disposition"): salvage admission assertions are
+ * replaced with explicit writer-node and partial-evidence policy journeys.
+ * Synthesis is now an explicit writer node kind ("work"|"synthesis"|"planning"|
+ * "review"|"delivery") in runner plans — there is no separate salvage lifecycle
+ * authority, so `claimSalvageExecution` pins nothing production does anymore
+ * and is not exercised here. The deleted salvage-assertion themes map as:
+ * - "lanes done → synthesis turn writes the report → review, never a second
+ *   turn" → writer node writes the artifact, review judges the recorded
+ *   outcome, and second-turn attempts are rejected loudly.
+ * - "a live synthesis turn owns the project" → idempotent admission (duplicate
+ *   wakes return the same run) and exactly-once attempt application.
+ * - "#1791 report handoff" → the reviewer brief carries the writer outcome as
+ *   citable evidence; the deleted `get_project_review_case` Orc tool path
+ *   (getOrcTools() is now empty) is replaced by `assembleBrief` + verdict.
+ * - "KP-35 repair shape" → partial-evidence policy: optional failures resolve
+ *   explicitly, required failures settle, allowPartial succeeds on produced
+ *   outputs, and writer validation rejects empty acceptance.
+ *
+ * Composition mirrors orc-workflow.e2e (green): real WorkflowRunner/
+ * WorkflowStore/task DB over a mocked home with a seeded scheduled occurrence;
+ * only the model planning/review turns, worker execution, destination
+ * transport, and the clock are scripted.
+ */
+import { describe, it, expect, beforeAll, afterAll, beforeEach } from "vitest";
+import { mkdirSync, rmSync, existsSync, writeFileSync, readFileSync, rmSync as rmFile } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
+import { createHash } from "node:crypto";
+import { vi } from "vitest";
 
-/**
- * #1729 v2 journey acceptance (the Astrabro gate): the 2026-09-08 ordering defect
- * was Rule 13 → admission → review with no synthesis turn in between. This file
- * reproduces the actual journey through the real salvage-claim chain
- * with the internal production composition real; only the Orc turn itself is
- * simulated (write the report file + release the row — the durable effects of a
- * synthesis turn, which is all the admission layer can observe).
- */
-describe("#1729 v2 synthesis journey", () => {
-  let home: string;
-  let store: import("../../components/orc-project/orc-project-run-store.js").OrcProjectRunStore;
-  let ReviewStore: typeof import("../../components/project-acceptance/project-review-store.js").ProjectReviewStore;
-  let kanban: typeof import("../../components/tasks/kanban-board.js");
+let TEST_HOME: string;
+let ARTIFACTS: string;
+let RunnerType: typeof import("../../components/orc-project/orc-workflow-runner.js").WorkflowRunner;
+let StoreType: typeof import("../../components/orc-project/orc-workflow-store.js").WorkflowStore;
 
-  beforeEach(async () => {
-    vi.resetModules();
-    home = join(tmpdir(), `abtars-synth-journey-${Date.now()}-${Math.random().toString(36).slice(2)}`);
-    mkdirSync(home, { recursive: true });
-    vi.doMock("../../paths.js", () => ({ abtarsHome: () => home }));
-    kanban = await import("../../components/tasks/kanban-board.js");
-    const review = await import("../../components/project-acceptance/project-review-store.js");
-    ReviewStore = review.ProjectReviewStore;
-    void new ReviewStore();
-    const worker = await import("../../components/worker-supervision-store.js");
-    void new worker.WorkerSupervisionStore();
-    const runStore = await import("../../components/orc-project/orc-project-run-store.js");
-    store = new runStore.OrcProjectRunStore();
-  });
+beforeAll(async () => {
+  vi.resetModules();
+  TEST_HOME = join(tmpdir(), `synth-journey-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+  ARTIFACTS = join(TEST_HOME, "artifacts");
+  mkdirSync(ARTIFACTS, { recursive: true });
+  vi.doMock("../../paths.js", () => ({ abtarsHome: () => TEST_HOME }));
+  const runnerMod = await import("../../components/orc-project/orc-workflow-runner.js");
+  const storeMod = await import("../../components/orc-project/orc-workflow-store.js");
+  RunnerType = runnerMod.WorkflowRunner;
+  StoreType = storeMod.WorkflowStore;
+});
 
-  afterEach(() => {
-    rmSync(home, { recursive: true, force: true });
-  });
-
-  const isoFuture = (): string => new Date(Date.now() + 3_600_000).toISOString();
-  const isoNow = (): string => new Date().toISOString();
-
-  /** Delivered-lane project whose primary completed at handoff; report snapshot persisted, file absent. */
-  async function seedHandoffProject(): Promise<{ root: number; runId: string; reportPath: string }> {
-    const root = kanban.kanbanEnqueue("Journey project", "task", undefined, { type: "O", goal: "g" }) as number;
-    const runId = `jrun-${root}`;
-    store.db.prepare(`UPDATE kanban_board SET source_id = ?, due_at = ?, status = 'running' WHERE id = ?`).run(runId, isoFuture(), root);
-    store.db.exec(`CREATE TABLE IF NOT EXISTS project_supervision (
-      project_card_id INTEGER PRIMARY KEY, contract_id TEXT, state TEXT NOT NULL DEFAULT 'executing',
-      generation INTEGER NOT NULL DEFAULT 1, review_round INTEGER NOT NULL DEFAULT 0, repair_round INTEGER NOT NULL DEFAULT 0,
-      active_review_case_id TEXT, accepted_decision_id TEXT, blocked_reason TEXT, updated_at TEXT NOT NULL);`);
-    store.db.prepare(`INSERT INTO project_supervision (project_card_id, contract_id, state, generation, updated_at) VALUES (?, 'pc', 'executing', 1, ?)`)
-      .run(root, isoNow());
-    new ReviewStore().insertContract({
-      schema_version: 2,
-      id: "pc",
-      digest: `d-${root}`,
-      project_card_id: root,
-      goal: "g",
-      criteria: [
-        { id: "lane1", description: "lane one", required: false, execution_owner: "delegated", evidence_expectation: "observed" },
-        { id: "lane2", description: "lane two", required: false, execution_owner: "delegated", evidence_expectation: "observed" },
-        { id: "orc-synthesis", description: "synthesis", required: true, execution_owner: "orc", evidence_expectation: "synthesis" },
-      ],
-      required_outputs: [{ id: "briefing", description: "report", kind: "file", required: true }],
-      constraints: [],
-      limits: { hard_deadline_at: undefined, max_tokens: undefined, max_cost: undefined, max_review_rounds: 5, max_repair_rounds: 3 },
-      provenance: { requested_by: "user", authored_by: "orc", created_at: isoNow() },
-    } as never);
-    const dir = join(home, "workspace", `journey-${root}`);
-    mkdirSync(dir, { recursive: true });
-    const reportPath = join(dir, "Daily-Briefing-2026-09-08.md");
-    const now = Date.now();
-    const snapshot = JSON.stringify({
-      artifactPath: reportPath, minBytes: 10,
-      requiredSections: ["# Daily Briefing", "## Stats"], baseline: { existed: false },
-    });
-    const cols = ["run_id", "task_id", "group_id", "attempt", "trigger", "occurrence_at", "reserved_at", "deadline_at", "phase", "last_progress_at", "progress_sequence", "card_id", "session_id", "execution_id", "terminal_request_json", "report_contract_json", "owner_pid", "owner_started_at"];
-    store.db.prepare(`INSERT INTO task_runs (${cols.join(", ")}) VALUES (${cols.map(() => "?").join(", ")})`).run(
-      runId, `jt-${root}`, "g", 1, "schedule", now - 60_000, now - 60_000, now + 3_600_000, "executing", now, 0,
-      root, null, null, null, snapshot, process.pid, null);
-    for (let i = 0; i < 2; i++) {
-      const child = kanban.kanbanEnqueue(`lane ${i}`, "agent", undefined, { type: "W", parent_id: root }) as number;
-      // #1789: drive the production lifecycle through the real transition helpers —
-      // never a raw status write. Lanes end `delivered` (where production's sweeper
-      // leaves them), not the transient `done` the old fixture hand-seeded.
-      kanban.kanbanComplete(child, null, "lane summary");
-      if (!kanban.kanbanClaimDelivery(child)) throw new Error(`delivery claim failed for lane ${i}`);
-      kanban.kanbanMarkDelivered(child);
-      const attemptId = `ja_${root}_${i}`;
-      store.db.prepare(`INSERT INTO worker_attempts (id, card_id, contract_id, ordinal, executor_kind, executor_id, generation, lifecycle, status, started_at) VALUES (?, ?, ?, 1, 'spin-local', 'e1', 1, 'completed', 'done', ?)`)
-        .run(attemptId, child, `pc_${child}`, isoNow());
-      store.db.prepare(`INSERT INTO worker_results (attempt_id, envelope_json, envelope_digest, created_at) VALUES (?, '{}', 'd', ?)`).run(attemptId, isoNow());
-    }
-    store.db.prepare(`INSERT INTO orc_project_runs (id, intent_key, intent_kind, intent_ref, goal, project_card_id, project_generation, ownership_generation, owner_peer, owner_instance_id, global_sequence, origin_kind, origin_peer, task_run_id, salvage_for_run_id, state, outcome, failure_code, started_at, created_at, updated_at)
-      VALUES (?, ?, 'project_execution', NULL, ?, ?, 1, 1, 'local_peer', 'inst_1', NULL, 'local', NULL, ?, NULL, 'released', 'completed', NULL, ?, ?, ?)`)
-      .run(`or_${root}_1_x`, `execute:${root}:1`, `primary goal ${root}`, root, runId, isoNow(), isoNow(), isoNow());
-    store.db.prepare(`INSERT OR IGNORE INTO orc_project_ownership_counters (project_card_id, next_generation) VALUES (?, 2)`).run(root);
-    return { root, runId, reportPath };
+afterAll(() => {
+  if (existsSync(TEST_HOME)) {
+    try { rmSync(TEST_HOME, { recursive: true, force: true }); } catch {}
   }
+});
 
-  const claimInput = (root: number, runId: string) => ({
-    projectCardId: root, taskRunId: runId, cardSource: "task", originKind: "local" as const, sourcePeer: null,
+type Runner = import("../../components/orc-project/orc-workflow-runner.js").WorkflowRunner;
+type Store = import("../../components/orc-project/orc-workflow-store.js").WorkflowStore;
+type Proposal = import("../../components/orc-project/orc-workflow-runner.js").PlanProposal;
+
+let cardSeq = 30000;
+let runSeq = 0;
+
+function makeRunner(): { runner: Runner; store: Store } {
+  const store = new StoreType();
+  const runner = new RunnerType(store, ["general", "research", "write"]);
+  return { runner, store };
+}
+
+/** Scheduled root card carrying the occurrence correlation (e2e pattern). */
+function seedCard(store: Store, runId: string): number {
+  const id = cardSeq++;
+  store.db.prepare(`INSERT INTO kanban_board (id, title, source, source_id, type, status, goal) VALUES (?, ?, ?, ?, 'O', 'running', ?)`)
+    .run(id, `synth-journey-${id}`, "task", runId, `deliver report ${id}`);
+  return id;
+}
+
+/** Reserved occurrence at the scheduling boundary (production input shape). */
+function seedOccurrence(store: Store, taskId: string, runId: string): void {
+  store.db.prepare(`INSERT OR IGNORE INTO task_state (task_id) VALUES (?)`).run(taskId);
+  store.db.prepare(
+    `INSERT INTO task_runs (run_id, task_id, group_id, attempt, trigger, occurrence_at,
+      reserved_at, deadline_at, phase, last_progress_at, owner_pid)
+     VALUES (?, ?, ?, 1, 'schedule', 1000, 1000, 9999999999, 'executing', 1000, 123456)`,
+  ).run(runId, taskId, taskId);
+}
+
+function admitScheduled(runner: Runner, store: Store, taskId: string) {
+  runSeq++;
+  const runId = `synth-run-${runSeq}`;
+  const card = seedCard(store, runId);
+  seedOccurrence(store, taskId, runId);
+  const admitted = runner.admitSupervised({ rootCardId: card, source: "task", sourceId: runId, scheduledRunId: runId });
+  expect(admitted.kind).not.toBe("conflict");
+  return { runId: admitted.runId as string, card, rootKind: admitted.rootKind };
+}
+
+function writeArtifact(name: string, content: string): string {
+  const path = join(ARTIFACTS, name);
+  writeFileSync(path, content);
+  return path;
+}
+
+function digestOf(content: string): string {
+  return `sha256:${createHash("sha256").update(content, "utf-8").digest("hex")}`;
+}
+
+function scriptedPorts(dispatched?: string[]) {
+  return {
+    executor: {
+      name: "synth-exec",
+      dispatch: (cmd: { nodeId: string }) => { dispatched?.push(cmd.nodeId); },
+    },
+    reviewer: {
+      name: "synth-reviewer",
+      startReview: (_cmd: unknown, _brief: unknown) => {},
+    },
+    planner: {
+      name: "synth-planner",
+      startPlanning: (_cmd: unknown, _input: unknown) => {},
+    },
+  };
+}
+
+/** Two research lanes + an explicit writer node + a review node. */
+const lanesPlusWriter = (): Proposal => ({
+  requiredOutputs: ["report"],
+  nodes: [
+    { label: "lane-a", kind: "work", instructions: "research a", capability: "research", outputs: ["notes-a"], acceptance: ["thorough"], dependsOn: [] },
+    { label: "lane-b", kind: "work", instructions: "research b", capability: "research", outputs: ["notes-b"], acceptance: ["thorough"], dependsOn: [] },
+    { label: "writer", kind: "synthesis", instructions: "meld lanes into the dossier", capability: "write", outputs: ["report"], acceptance: ["complete"], dependsOn: ["lane-a", "lane-b"] },
+    { label: "judge", kind: "review", instructions: "assess", capability: "general", outputs: [], acceptance: [], dependsOn: ["writer"] },
+  ],
+});
+
+describe("#1792 synthesis writer-node journeys (replaces salvage admission)", () => {
+  let runner: Runner;
+  let store: Store;
+
+  beforeEach(() => {
+    ({ runner, store } = makeRunner());
+    for (const t of ["workflow_ingress", "workflow_deliveries", "workflow_commands", "workflow_budgets", "workflow_node_deps", "workflow_nodes", "workflow_plan_revisions", "workflow_operations", "workflow_runs"]) {
+      store.db.exec(`DELETE FROM ${t}`);
+    }
   });
 
-  const markedCount = (root: number): number =>
-    (store.db.prepare(`SELECT COUNT(*) AS n FROM orc_project_runs WHERE project_card_id = ? AND salvage_for_run_id IS NOT NULL`).get(root) as { n: number }).n;
+  it("lanes done → explicit writer node produces the report → review accepts, never a second writer turn", () => {
+    const { runId, card } = admitScheduled(runner, store, "daily-dossier");
+    const acc = runner.acceptPlan(runId, lanesPlusWriter());
+    const dispatched: string[] = [];
+    const ports = scriptedPorts(dispatched);
+    runner.drain(10, ports);
+    expect(dispatched).toContain(acc.nodeIds[0]);
+    expect(dispatched).toContain(acc.nodeIds[1]);
+    expect(dispatched).not.toContain(acc.nodeIds[2]);
 
-  it("lanes done → one synthesis turn writes the report → review path, never a second turn", async () => {
-    const { root, runId, reportPath } = await seedHandoffProject();
+    runner.attemptSucceeded(runId, acc.nodeIds[0] as string, "att-lane-a", "{}");
+    runner.attemptSucceeded(runId, acc.nodeIds[1] as string, "att-lane-b", "{}");
+    runner.drain(10, ports);
+    // Both lanes terminal: the writer — and only the writer — is now queued.
+    expect(dispatched).toContain(acc.nodeIds[2]);
 
-    // Round 1: lanes terminal, no report — salvage admission must claim the synthesis turn.
-    const first = store.claimSalvageExecution(claimInput(root, runId), "local_peer", "inst_1");
-    expect(first.kind).toBe("claimed");
-    if (first.kind !== "claimed") return;
-    expect(markedCount(root)).toBe(1);
+    // The writer turn's durable effects: report written, outcome recorded.
+    const body = "# Dossier\n\n## Findings\n\n- melded lane evidence\n";
+    const reportPath = writeArtifact(`dossier-${runId}.md`, body);
+    runner.attemptSucceeded(
+      runId, acc.nodeIds[2] as string, "att-writer",
+      JSON.stringify({ artifact: reportPath, digest: digestOf(body) }),
+    );
+    runner.drain(10, ports);
 
-    // The synthesis turn's durable effects: report written, turn released.
-    writeFileSync(reportPath, "# Daily Briefing\n\n## Stats\n\n- x\n");
-    expect(store.release(first.context, "completed")).toBe(true);
+    // Review judges the RECORDED writer outcome, reading the actual artifact.
+    const brief = runner.assembleBrief(runId, 1, acc.nodeIds[3] as string);
+    const writerOutcome = JSON.parse(
+      (brief.nodes.find((n) => n.nodeId === acc.nodeIds[2])?.outcome ?? "{}") as string,
+    ) as { artifact?: string; digest?: string };
+    expect(writerOutcome.artifact).toBe(reportPath);
+    expect(writerOutcome.digest).toBe(digestOf(body));
+    expect(readFileSync(writerOutcome.artifact as string, "utf8")).toContain("## Findings");
 
-    // Round 2: same lanes, report now valid — admission must step aside for review.
-    const second = store.claimSalvageExecution(claimInput(root, runId), "local_peer", "inst_1");
-    expect(second.kind).toBe("conflict");
-    if (second.kind !== "conflict") return;
-    expect(second.reason).toBe("salvage_not_needed");
-    expect(markedCount(root)).toBe(1);
+    expect(runner.submitVerdict(runId, acc.nodeIds[3] as string, { verdict: "accept" })).toBe("accepted");
+    // Accepted content is not proof of delivery: the run waits for ack.
+    expect(store.getRun(runId)?.state).not.toBe("succeeded");
+    const sender = { name: "synth-sender", send: (doc: { idempotenceKey: string }) => `receipt:${doc.idempotenceKey}` };
+    expect(runner.executeDelivery(runId, acc.nodeIds[3] as string, sender)).toBe("acknowledged");
+    expect(store.getRun(runId)?.state).toBe("succeeded");
+
+    const cardRow = store.db.prepare(`SELECT status, result_summary FROM kanban_board WHERE id = ?`).get(card) as { status: string; result_summary: string | null };
+    expect(cardRow.status).toBe("done");
+    expect(typeof cardRow.result_summary).toBe("string");
+    expect(runner.auditTick(0).ownerless).not.toContain(runId);
+
+    // Never a second writer turn: the initial plan is single-shot, and late
+    // writer results on the terminal run are rejected loudly, not applied.
+    expect(() => runner.acceptPlan(runId, lanesPlusWriter())).toThrow(/already terminal|use submitPlanProposal/);
+    expect(() => runner.attemptSucceeded(runId, acc.nodeIds[2] as string, "att-writer-late", "{}"))
+      .toThrow(/terminal.*late result rejected/);
   });
 
-  it("a live synthesis turn owns the project: duplicate wake cannot start another", async () => {
-    const { root, runId } = await seedHandoffProject();
-    const first = store.claimSalvageExecution(claimInput(root, runId), "local_peer", "inst_1");
-    expect(first.kind).toBe("claimed");
+  it("a live writer run owns the project: duplicate admission returns the same run and dispatches nothing twice", () => {
+    const { runId, card } = admitScheduled(runner, store, "daily-dossier-dup");
 
-    // Duplicate wake while the synthesis turn is live (scheduled, un-released):
-    // the live owner wins — no second turn is admitted.
-    const dup = store.claimSalvageExecution(claimInput(root, runId), "local_peer", "inst_1");
-    expect(dup.kind).toBe("busy");
-    expect(markedCount(root)).toBe(1);
+    // Duplicate wake while the run is live: idempotent admission, same run.
+    const dup = runner.admitSupervised({ rootCardId: card, source: "task", sourceId: `synth-run-${runSeq}`, scheduledRunId: `synth-run-${runSeq}` });
+    expect(dup.kind).toBe("duplicate");
+    expect(dup.runId).toBe(runId);
+    expect(store.db.prepare(`SELECT COUNT(*) AS c FROM workflow_runs WHERE root_card_id = ?`).get(card) as { c: number }).toEqual({ c: 1 });
+
+    const acc = runner.acceptPlan(runId, lanesPlusWriter());
+    const dispatched: string[] = [];
+    const ports = scriptedPorts(dispatched);
+    runner.drain(10, ports);
+    const firstPass = dispatched.length;
+    expect(firstPass).toBeGreaterThanOrEqual(2);
+    // Second drain claims nothing new — no double dispatch of live work.
+    expect(runner.drain(10, ports)).toBe(0);
+    expect(dispatched).toHaveLength(firstPass);
+
+    // Exactly-once attempt application: the same attempt id cannot complete twice.
+    runner.attemptSucceeded(runId, acc.nodeIds[0] as string, "att-once", "{}");
+    expect(() => runner.attemptSucceeded(runId, acc.nodeIds[0] as string, "att-once", "{}"))
+      .toThrow(/conflicts with completion/);
   });
 
-  it("#1791 report handoff: failed primary with valid report → review receives citable report evidence → accept", async () => {
-    // Production incident 2026-09-09 (project 160): lanes passed, the primary
-    // wrote the final report, then exhausted its prompt rounds. Admission stood
-    // down correctly (no second synthesis turn), but the review case carried no
-    // report evidence and the reviewer — without filesystem tools — blocked on
-    // missing_required_output for a deliverable that existed. Root
-    // output/criterion ids deliberately differ from project 160 to catch
-    // hardcoding (final-report/orc-synthesis must never appear here).
-    const root = kanban.kanbanEnqueue("Handoff project", "task", undefined, { type: "O", goal: "g" }) as number;
-    const runId = `hrun-${root}`;
-    store.db.prepare(`UPDATE kanban_board SET source_id = ?, due_at = ?, status = 'running' WHERE id = ?`).run(runId, isoFuture(), root);
-    store.db.exec(`CREATE TABLE IF NOT EXISTS project_supervision (
-      project_card_id INTEGER PRIMARY KEY, contract_id TEXT, state TEXT NOT NULL DEFAULT 'executing',
-      generation INTEGER NOT NULL DEFAULT 1, review_round INTEGER NOT NULL DEFAULT 0, repair_round INTEGER NOT NULL DEFAULT 0,
-      active_review_case_id TEXT, accepted_decision_id TEXT, blocked_reason TEXT, updated_at TEXT NOT NULL);`);
-    store.db.prepare(`INSERT INTO project_supervision (project_card_id, contract_id, state, generation, updated_at) VALUES (?, 'hpc', 'executing', 1, ?)`)
-      .run(root, isoNow());
-    const reviewStoreMod = await import("../../components/project-acceptance/project-review-store.js");
-    new reviewStoreMod.ProjectReviewStore().insertContract({
-      schema_version: 2,
-      id: "hpc",
-      digest: `d-hpc-${root}`,
-      project_card_id: root,
-      goal: "g",
-      criteria: [
-        { id: "jlane-a", description: "first source", required: false, execution_owner: "delegated", evidence_expectation: "observed" },
-        { id: "jlane-b", description: "second source", required: false, execution_owner: "delegated", evidence_expectation: "observed" },
-        { id: "jmeld", description: "meld into dossier", required: true, execution_owner: "orc", evidence_expectation: "synthesis" },
-      ],
-      required_outputs: [{ id: "jdossier", description: "dossier file", kind: "file", required: true }],
-      constraints: [],
-      limits: { hard_deadline_at: undefined, max_tokens: undefined, max_cost: undefined, max_review_rounds: 5, max_repair_rounds: 3 },
-      provenance: { requested_by: "user", authored_by: "orc", created_at: isoNow() },
-    } as never);
+  it("#1791 report handoff: writer outcome is citable review evidence and survives later file mutation", () => {
+    const { runId } = admitScheduled(runner, store, "daily-dossier-handoff");
+    const acc = runner.acceptPlan(runId, lanesPlusWriter());
+    const ports = scriptedPorts();
+    runner.drain(10, ports);
+    runner.attemptSucceeded(runId, acc.nodeIds[0] as string, "att-ha", "{}");
+    runner.attemptSucceeded(runId, acc.nodeIds[1] as string, "att-hb", "{}");
+    runner.drain(10, ports);
 
-    const dir = join(home, "workspace", `handoff-${root}`);
-    mkdirSync(dir, { recursive: true });
-    const reportPath = join(dir, "Dossier.md");
+    // The writer's durable effects: report written with digest, turn recorded.
     const reportBody = "# Dossier\n\n## Findings\n\n- melded lane evidence\n";
-    const now = Date.now();
-    const snapshot = JSON.stringify({
-      artifactPath: reportPath, minBytes: 10,
-      requiredSections: ["# Dossier", "## Findings"], baseline: { existed: false },
-    });
-    const cols = ["run_id", "task_id", "group_id", "attempt", "trigger", "occurrence_at", "reserved_at", "deadline_at", "phase", "last_progress_at", "progress_sequence", "card_id", "session_id", "execution_id", "terminal_request_json", "report_contract_json", "owner_pid", "owner_started_at"];
-    store.db.prepare(`INSERT INTO task_runs (${cols.join(", ")}) VALUES (${cols.map(() => "?").join(", ")})`).run(
-      runId, `ht-${root}`, "g", 1, "schedule", now - 60_000, now - 60_000, now + 3_600_000, "executing", now, 0,
-      root, null, null, null, snapshot, process.pid, null);
-
-    // Two lanes with real worker contracts and passed results (supports mapping).
-    const supMod = await import("../../components/worker-supervision-store.js");
-    const supStore = new supMod.WorkerSupervisionStore();
-    const laneCrit = ["jlane-a", "jlane-b"];
-    const laneEvidence: string[] = [];
-    for (let i = 0; i < 2; i++) {
-      const child = kanban.kanbanEnqueue(`hlane ${i}`, "agent", undefined, { type: "W", parent_id: root }) as number;
-      const contractId = `hpc_${child}`;
-      const childCrit = `hl${child}c1`;
-      supStore.insertContract({
-        schema_version: 1,
-        id: contractId,
-        digest: `digest-${contractId}`,
-        goal: "lane goal",
-        criteria: [{ id: childCrit, description: "lane criterion" }],
-        expected_artifacts: [{ id: "a1", kind: "file", ref: "handoff.md", required: true, criterion_ids: [childCrit] }],
-        verification_commands: [],
-        required_capabilities: [],
-        supports_root_criteria: [laneCrit[i]!],
-        limits: {},
-        provenance: { root_card_id: root, card_id: child, authored_by: "orc", created_at: isoNow() },
-      }, child);
-      kanban.kanbanComplete(child, null, "lane summary");
-      if (!kanban.kanbanClaimDelivery(child)) throw new Error(`delivery claim failed for lane ${i}`);
-      kanban.kanbanMarkDelivered(child);
-      const attemptId = `ha_${root}_${i}`;
-      store.db.prepare(`INSERT INTO worker_attempts (id, card_id, contract_id, ordinal, executor_kind, executor_id, generation, lifecycle, status, started_at) VALUES (?, ?, ?, 1, 'spin-local', 'e1', 1, 'completed', 'done', ?)`)
-        .run(attemptId, child, contractId, isoNow());
-      supStore.insertResult(attemptId, {
-        schema_version: 1,
-        attempt: { id: attemptId, ordinal: 1, contract_id: contractId, contract_digest: `digest-${contractId}`, executor_kind: "spin-local", executor_id: "e1", started_at: isoNow(), finished_at: isoNow() },
-        outcome: "completed",
-        criteria: [{ criterion_id: childCrit, status: "passed", evidence_ids: ["v1"] }],
-        checks: [{ check_id: "v1", argv: ["true"], started_at: isoNow(), finished_at: isoNow(), timed_out: false, exit_code: 0, signal: null, stdout_excerpt: "ok", stderr_excerpt: "" }],
-        artifacts: [{ artifact_id: "a1", exists: true, kind: "file", ref: "handoff.md" }],
-        worker_report: { summary: "lane done", claims: [], unresolved_risks: [] },
-      });
-      laneEvidence.push(`attempt:${attemptId}:check:v1`);
-    }
-
-    // The primary's durable effects: report written, then the turn exhausted
-    // its rounds (released + failed with prompt_round_limit — the incident).
-    writeFileSync(reportPath, reportBody, "utf-8");
-    store.db.prepare(`INSERT INTO orc_project_runs (id, intent_key, intent_kind, intent_ref, goal, project_card_id, project_generation, ownership_generation, owner_peer, owner_instance_id, global_sequence, origin_kind, origin_peer, task_run_id, salvage_for_run_id, state, outcome, failure_code, started_at, created_at, updated_at)
-      VALUES (?, ?, 'project_execution', NULL, ?, ?, 1, 1, 'local_peer', 'inst_1', NULL, 'local', NULL, ?, NULL, 'released', 'failed', 'prompt_round_limit', ?, ?, ?)`)
-      .run(`or_${root}_1_x`, `execute:${root}:1`, `primary goal ${root}`, root, runId, isoNow(), isoNow(), isoNow());
-    store.db.prepare(`INSERT OR IGNORE INTO orc_project_ownership_counters (project_card_id, next_generation) VALUES (?, 2)`).run(root);
-
-    // Admission stands down: valid report routes to review, no second turn.
-    const claim = store.claimSalvageExecution(claimInput(root, runId), "local_peer", "inst_1");
-    expect(claim).toMatchObject({ kind: "conflict", reason: "salvage_not_needed" });
-    expect(markedCount(root)).toBe(0);
-
-    // Real case assembly + persistence.
-    const { ReviewCaseAssembler } = await import("../../components/project-acceptance/project-review-case.js");
-    const assembled = await new ReviewCaseAssembler().assembleCase(root, 1, 1);
-    expect("error" in assembled).toBe(false);
-    if ("error" in assembled) return;
-    const expectedDigest = `sha256:${createHash("sha256").update(reportBody, "utf-8").digest("hex")}`;
-    const expectedId = `report:${runId}:${expectedDigest}`;
-    expect(assembled.report_evidence).toMatchObject({
-      state: "captured",
-      evidence_id: expectedId,
-      run_id: runId,
-      path: reportPath,
-      digest: expectedDigest,
-      content: reportBody,
-    });
-    // Citable from the Orc-owned criterion only — never from delegated lanes.
-    const meld = assembled.criterion_inputs.find(c => c.criterion_id === "jmeld")!;
-    expect(meld.artifact_observation_ids).toContain(expectedId);
-    for (const laneId of laneCrit) {
-      const lane = assembled.criterion_inputs.find(c => c.criterion_id === laneId)!;
-      expect(lane.artifact_observation_ids).not.toContain(expectedId);
-    }
-
-    const reviewStore = new ReviewStore();
-    const { id: caseId } = reviewStore.insertReviewCase(root, 1, 1, assembled, `digest_handoff_${root}`);
-    reviewStore.insertReviewRequest(root, caseId, 1);
-    reviewStore.stateTransition(root, ["executing"], "review_requested");
-
-    // Actual reviewer-tool retrieval with review authority.
-    const { getOrcTools } = await import("../../components/transport/orc-tools.js");
-    const caseTool = getOrcTools().find(t => t.name === "get_project_review_case")!;
-    const raw = await caseTool.execute(
-      { project_card_id: root, review_case_id: caseId },
-      { userId: "test", orcContext: { projectCardId: root, projectGeneration: 1 } } as never,
+    const reportPath = writeArtifact(`handoff-${runId}.md`, reportBody);
+    const expectedDigest = digestOf(reportBody);
+    runner.attemptSucceeded(
+      runId, acc.nodeIds[2] as string, "att-hw",
+      JSON.stringify({ artifact: reportPath, digest: expectedDigest }),
     );
-    const brief = JSON.parse(raw) as {
-      report_evidence?: { state: string; evidence_id?: string; content?: string; digest?: string };
-      criteria: Array<{ criterion_id: string; compatible_evidence: { artifacts: string[] } }>;
-    };
-    expect(brief.report_evidence?.state).toBe("captured");
-    expect(brief.report_evidence?.evidence_id).toBe(expectedId);
-    expect(brief.report_evidence?.content).toBe(reportBody);
-    expect(brief.report_evidence?.digest).toBe(expectedDigest);
-    expect(brief.criteria.find(c => c.criterion_id === "jmeld")!.compatible_evidence.artifacts).toContain(expectedId);
+    runner.drain(10, ports);
 
-    // Immutability: replacing the file cannot change the tool response — the
-    // reviewer reads the stored capture, never the live filesystem.
+    // The reviewer brief carries the writer outcome as citable evidence.
+    const brief = runner.assembleBrief(runId, 1, acc.nodeIds[3] as string);
+    const writerNode = brief.nodes.find((n) => n.nodeId === acc.nodeIds[2]);
+    expect(writerNode?.status).toBe("succeeded");
+    const outcome = JSON.parse(writerNode?.outcome ?? "{}") as { artifact?: string; digest?: string };
+    expect(outcome.artifact).toBe(reportPath);
+    expect(outcome.digest).toBe(expectedDigest);
+    expect(readFileSync(outcome.artifact as string, "utf8")).toBe(reportBody);
+
+    expect(runner.submitVerdict(runId, acc.nodeIds[3] as string, { verdict: "accept" })).toBe("accepted");
+    const sender = { name: "synth-sender", send: (_doc: { idempotenceKey: string }) => "receipt" };
+    expect(runner.executeDelivery(runId, acc.nodeIds[3] as string, sender)).toBe("acknowledged");
+    expect(store.getRun(runId)?.state).toBe("succeeded");
+
+    // Immutability: replacing then deleting the file cannot change the judged
+    // evidence — review judged the stored outcome, never the live filesystem.
     writeFileSync(reportPath, "# Replaced\n", "utf-8");
-    const rawAfter = await caseTool.execute(
-      { project_card_id: root, review_case_id: caseId },
-      { userId: "test", orcContext: { projectCardId: root, projectGeneration: 1 } } as never,
-    );
-    const briefAfter = JSON.parse(rawAfter) as { report_evidence?: { content?: string; digest?: string } };
-    expect(briefAfter.report_evidence?.content).toBe(reportBody);
-    expect(briefAfter.report_evidence?.digest).toBe(expectedDigest);
-
-    // Acceptance submission through the real review service.
-    const { ProjectReviewService } = await import("../../components/project-acceptance/project-review-service.js");
-    const outcome = new ProjectReviewService().processDecision({
-      schema_version: 1,
-      id: `rd_handoff_${root}`,
-      project_card_id: root,
-      review_case_id: caseId,
-      project_generation: 1,
-      action: "accept",
-      criteria: [
-        { criterion_id: "jlane-a", verdict: "satisfied", evidence_ids: [laneEvidence[0]!], rationale: "lane passed with observed check" },
-        { criterion_id: "jlane-b", verdict: "satisfied", evidence_ids: [laneEvidence[1]!], rationale: "lane passed with observed check" },
-        { criterion_id: "jmeld", verdict: "satisfied", evidence_ids: [expectedId], rationale: "dossier quality reviewed against both lanes" },
-      ],
-      outputs: [{ output_id: "jdossier", disposition: "present", evidence_ids: [expectedId] }],
-      contradictions: [],
-      residual_risks: [],
-      synthesis: "Dossier accepted with captured report evidence.",
-      authored_at: isoNow(),
-    });
-    expect(outcome.kind).toBe("accepted");
-
-    // The stored case keeps the original capture even after the file is
-    // deleted outright.
-    rmSync(reportPath, { force: true });
-    const stored = reviewStore.getReviewCase(caseId)!;
-    expect(stored.status).toBe("accepted");
-    const storedSnapshot = JSON.parse(stored.case_json) as {
-      report_evidence?: { state: string; content?: string; digest?: string };
-    };
-    expect(storedSnapshot.report_evidence?.state).toBe("captured");
-    expect(storedSnapshot.report_evidence?.content).toBe(reportBody);
-    expect(storedSnapshot.report_evidence?.digest).toBe(expectedDigest);
-    expect(reviewStore.getSupervision(root)!.accepted_decision_id).toBeTruthy();
+    rmFile(reportPath, { force: true });
+    const stored = store.listNodes(runId, 1).find((n) => n["node_id"] === acc.nodeIds[2]);
+    expect(stored?.["status"]).toBe("succeeded");
+    const storedOutcome = JSON.parse(stored?.["outcome"] as string) as { artifact?: string; digest?: string };
+    expect(storedOutcome.digest).toBe(expectedDigest);
+    expect(storedOutcome.artifact).toBe(reportPath);
   });
 
-  it("#1789 KP-35 repair shape: failed originals plus delivered repairs still admit synthesis", async () => {
-    // Production shape that the shipped gate could never admit: 2 failed lanes +
-    // 4 delivered (2 originals + 2 repairs), nothing in flight, report missing.
-    const { root, runId } = await seedHandoffProject();
-    const extra: Array<[string, "failed" | "delivered"]> = [
-      ["repair-a-failed", "failed"],
-      ["repair-a-retry", "delivered"],
-      ["repair-b-failed", "failed"],
-      ["repair-b-retry", "delivered"],
-    ];
-    for (const [name, status] of extra) {
-      const child = kanban.kanbanEnqueue(name, "agent", undefined, { type: "W", parent_id: root }) as number;
-      if (status === "failed") {
-        kanban.kanbanFail(child, "lane failed");
-      } else {
-        kanban.kanbanComplete(child, null, "lane summary");
-        if (!kanban.kanbanClaimDelivery(child)) throw new Error(`delivery claim failed for ${name}`);
-        kanban.kanbanMarkDelivered(child);
-      }
-    }
-    const first = store.claimSalvageExecution(claimInput(root, runId), "local_peer", "inst_1");
-    expect(first.kind).toBe("claimed");
-    expect(markedCount(root)).toBe(1);
+  it("partial-evidence policy: optional failure proceeds, required failure settles, writer validation rejects empty acceptance", () => {
+    // Writer validation: a synthesis node with no acceptance criterion is not
+    // plannable — runner acceptance with empty outputs fails validation.
+    const badWriter: Proposal = {
+      requiredOutputs: ["report"],
+      nodes: [
+        { label: "writer", kind: "synthesis", instructions: "write", capability: "write", outputs: ["report"], acceptance: [], dependsOn: [] },
+      ],
+    };
+    expect(runner.validatePlan(badWriter).some((d) => d.field.includes("acceptance"))).toBe(true);
+
+    // Optional lane failure resolves explicitly: dependents proceed without
+    // the optional input, and the failure stays visible in the run evidence.
+    const withOptional: Proposal = {
+      requiredOutputs: ["report"],
+      nodes: [
+        { label: "core", kind: "work", instructions: "core research", capability: "research", outputs: ["notes"], acceptance: ["thorough"], dependsOn: [] },
+        { label: "extra", kind: "work", instructions: "optional scrape", capability: "research", outputs: ["scrape"], acceptance: ["fresh"], dependsOn: [], optional: true },
+        { label: "writer", kind: "synthesis", instructions: "meld into report", capability: "write", outputs: ["report"], acceptance: ["complete"], dependsOn: ["core", "extra"] },
+        { label: "judge", kind: "review", instructions: "assess", capability: "general", outputs: [], acceptance: [], dependsOn: ["writer"] },
+      ],
+    };
+    const opt = admitScheduled(runner, store, "partial-optional");
+    const optAcc = runner.acceptPlan(opt.runId, withOptional);
+    const optPorts = scriptedPorts();
+    runner.drain(10, optPorts);
+    runner.attemptFailed(opt.runId, optAcc.nodeIds[1] as string, "att-extra", "source down", false);
+    // The run is NOT failed: the optional failure released its dependents.
+    expect(["admitted", "planning", "dispatched", "executing"]).toContain(store.getRun(opt.runId)?.state);
+    runner.attemptSucceeded(opt.runId, optAcc.nodeIds[0] as string, "att-core", "{}");
+    runner.drain(10, optPorts);
+    const reportPath = writeArtifact(`partial-${opt.runId}.md`, "# Report\n\nbody\n");
+    runner.attemptSucceeded(opt.runId, optAcc.nodeIds[2] as string, "att-optw", JSON.stringify({ artifact: reportPath }));
+    runner.drain(10, optPorts);
+    expect(runner.submitVerdict(opt.runId, optAcc.nodeIds[3] as string, { verdict: "accept" })).toBe("accepted");
+    const sender = { name: "synth-sender", send: (_doc: { idempotenceKey: string }) => "receipt" };
+    expect(runner.executeDelivery(opt.runId, optAcc.nodeIds[3] as string, sender)).toBe("acknowledged");
+    expect(store.getRun(opt.runId)?.state).toBe("succeeded");
+    // The optional failure is preserved evidence, never hidden by the accept.
+    const extraNode = store.listNodes(opt.runId, 1).find((n) => n["node_id"] === optAcc.nodeIds[1]);
+    expect(extraNode?.["status"]).toBe("failed");
+
+    // Required lane failure settles explicitly: dependents never run, the run
+    // fails with its cause, and audit reports no ownerless residue.
+    const req = admitScheduled(runner, store, "partial-required");
+    const reqAcc = runner.acceptPlan(req.runId, lanesPlusWriter());
+    const reqDispatched: string[] = [];
+    runner.drain(10, scriptedPorts(reqDispatched));
+    runner.attemptFailed(req.runId, reqAcc.nodeIds[0] as string, "att-hard", "hard down", false);
+    runner.attemptFailed(req.runId, reqAcc.nodeIds[1] as string, "att-hard-b", "hard down", false);
+    expect(store.getRun(req.runId)?.state).toBe("failed");
+    expect(store.getRun(req.runId)?.failureCode).toBe("node_failed");
+    expect(reqDispatched).not.toContain(reqAcc.nodeIds[2]);
+    expect(runner.auditTick(0).ownerless).not.toContain(req.runId);
   });
 });

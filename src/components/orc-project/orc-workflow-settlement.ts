@@ -92,10 +92,22 @@ function classifyRetrySafe(
  * Commit the supervised successor obligation in the CALLER's transaction
  * (settlement joint commit). Never throws: containment + logging protect the
  * settlement result.
+ *
+ * Pi input suspension (pi_input_requested) is not a work failure: the worker
+ * stopped to ask a live question (zero-charge, resumable), Orc answers via
+ * the retry service, and the resumed generation completes the same node. The
+ * joint commit leaves the runner node running (no AttemptFailed, no retry
+ * budget consumption) so the run stays alive for the answer-retry; the W card
+ * still fails (reviewable question evidence) via the Pi lane's own
+ * projection. All other terminals commit normally.
  */
 export function commitSupervisedOutcome(db: TaskDatabase, attempt: SettledAttempt): void {
   try {
     if (attempt.rootCardId == null) return;
+    // Pi input suspension never advances the runner node (see header): the
+    // answer-retry's completion will succeed it. Failing the node here would
+    // fail the run before Orc can answer.
+    if (attempt.stableReason.startsWith("pi_input_requested")) return;
     const store = workflowStoreFor(db);
     const run = store.findRunByCard(attempt.rootCardId);
     if (!run) return; // legacy/unsupervised root: existing behavior unchanged.

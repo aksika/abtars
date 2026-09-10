@@ -231,11 +231,17 @@ describe("Peer chat journey over real WS routes (#1786)", () => {
       kanbanList: (status: string) => rawDb.prepare("SELECT * FROM kanban_board WHERE status = ?").all(status) as any[],
     };
     const nerve = { fired: [] as Array<{ event: string; cardId: number }>, fire(e: string, c: number) { nerve.fired.push({ event: e, cardId: c }); } };
-    const prs = await import("../../components/project-acceptance/project-review-store.js");
-    const reviewStore = new prs.ProjectReviewStore(taskDb as never);
+    // #1792: receiver admission runs through the workflow runner on the same
+    // database (same composition as production wiring in store.test.ts).
+    const { WorkflowRunner } = await import("../../components/orc-project/orc-workflow-runner.js");
+    const { WorkflowStore } = await import("../../components/orc-project/orc-workflow-store.js");
+    const peerRunner = new WorkflowRunner(new WorkflowStore(taskDb as never));
     const phStoreMod = await import("../../components/peer-help/store.js");
     const store = new phStoreMod.PeerHelpStore(taskDb as never, kanbanFns as never, nerve as never, {
-      ensureAwaitingContract: (id: number) => reviewStore.ensureAwaitingContract(id),
+      admitReceiverProject: (cardId: number, sourcePeer: string, sourceId: string) => {
+        const admitted = peerRunner.admitSupervised({ rootCardId: cardId, source: "peer", sourcePeer, sourceId });
+        if (admitted.kind === "conflict") throw new Error(`receiver admission failed: ${admitted.reason}`);
+      },
     });
     const phs = await import("../../components/peer-help/service.js");
     const service = new phs.PeerHelpService(store, () => []);

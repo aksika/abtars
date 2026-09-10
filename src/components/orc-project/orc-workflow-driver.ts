@@ -16,9 +16,10 @@ import { logWarn } from "../logger.js";
 import { WorkflowRunner, boundText, type DrainPorts, type ExecutionPort } from "./orc-workflow-runner.js";
 import { WorkflowStore } from "./orc-workflow-store.js";
 import {
-  WorkflowWorkerPort,
+  RoutingWorkflowWorkerPort,
   SpinPlannerBackend,
   SpinReviewerBackend,
+  workflowCapabilities,
   type ModelCall,
 } from "./orc-workflow-ports.js";
 import type { TaskDatabase } from "../tasks/kanban-board.js";
@@ -44,9 +45,13 @@ export function startWorkflowDriver(deps: {
   cursor?: number;
 }): WorkflowDriver {
   const store = new WorkflowStore(deps.db);
-  const runner = new WorkflowRunner(store);
+  // Pi-capable admission: the planner may propose Pi execution (generic
+  // pi-coding/pi names plus configured Pi workspace aliases) alongside
+  // general Spin work. Capability validation stays in the runner; routing
+  // stays capability-based and explicit (isPiCapability).
+  const runner = new WorkflowRunner(store, workflowCapabilities());
   const ports: DrainPorts = deps.ports ?? {
-    executor: new WorkflowWorkerPort({ runner, db: deps.db }),
+    executor: new RoutingWorkflowWorkerPort({ runner, db: deps.db }),
     reviewer: new SpinReviewerBackend({ runner, callModel: deps.callModel }),
     planner: new SpinPlannerBackend({ runner, callModel: deps.callModel }),
   };
