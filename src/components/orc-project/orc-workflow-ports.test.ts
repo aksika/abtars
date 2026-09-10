@@ -86,7 +86,9 @@ describe("WorkflowPorts", () => {
     expect(attempt.root_project_card_id).toBe(run.rootCardId);
     expect(attempt.lifecycle).toBe("pending");
     const sup = store.db.prepare(`SELECT state FROM project_supervision WHERE project_card_id = ?`).get(run.rootCardId) as { state: string };
-    expect(sup.state).toBe("awaiting_contract");
+    // #1792: first dispatch starts execution (the executor claim fence only
+    // claims under executing/repairing); awaiting stays until dispatch.
+    expect(sup.state).toBe("executing");
     expect(woke).toBe(1);
   });
 

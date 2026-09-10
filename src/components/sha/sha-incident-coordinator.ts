@@ -16,6 +16,7 @@ import { loadPiConfig } from "../pi-executor/config.js";
 import { ProjectReviewStore } from "../project-acceptance/project-review-store.js";
 import { WorkflowRunner } from "../orc-project/orc-workflow-runner.js";
 import { WorkflowStore } from "../orc-project/orc-workflow-store.js";
+import { workflowCapabilities } from "../orc-project/orc-workflow-ports.js";
 import { WorkerSupervisionService } from "../worker-supervision-service.js";
 import { WorkerSupervisionStore } from "../worker-supervision-store.js";
 import { ShaWorkspaceManager } from "./sha-workspace-manager.js";
@@ -793,12 +794,51 @@ private async bindNextStage(
    * `this.db` explicitly keeps the same connection the incident transition
    * just committed on. Never throws past the incident commit: the "review"
    * incident state is the redelivery record and boot recovery redrives the
-   * same idempotent `acceptShaHandoff`.
+   * same idempotent handoff.
+   *
+   * SHA roots are not runner-planned during staging (stages are worker-driven
+   * with workspace binding), so the handoff admits the root and proposes a
+   * fixed final-review plan: one verify-work node over the accepted stage
+   * evidence plus a review node judging it. Normal flow then closes the loop
+   * through existing machinery (dispatch → verdict → terminal projections →
+   * root done → incident accepted). Redelivery is idempotent: duplicate
+   * admission replays to "duplicate", and a present plan revision skips
+   * acceptPlan (which only takes the initial revision).
    */
   private deliverFinalShaHandoff(rootCardId: number, stage: string, result: string): void {
     try {
       const store = new WorkflowStore(this.db);
-      const runner = new WorkflowRunner(store);
+      const runner = new WorkflowRunner(store, workflowCapabilities());
+      const admitted = runner.admitSupervised({ rootCardId, source: "sha" });
+      if (admitted.kind === "conflict") {
+        throw new Error(`SHA admission conflict: ${admitted.reason ?? "unknown"}`);
+      }
+      const runId = admitted.runId ?? store.findLatestRunByCard(rootCardId)?.runId;
+      if (!runId) throw new Error("SHA admission produced no run");
+      const run = store.getRun(runId);
+      if (!run || run.state === "succeeded" || run.state === "failed" || run.state === "cancelled") return;
+      if (store.currentRevision(runId) === 0) {
+        const evidenceRef = `sha/${stage}-evidence`;
+        runner.acceptPlan(runId, {
+          requiredOutputs: [evidenceRef],
+          nodes: [
+            {
+              label: "sha-final-verify", kind: "work",
+              instructions: `Verify the accepted ${stage} stage evidence for incident root ${rootCardId}: ${result}`,
+              capability: "general", outputs: [evidenceRef],
+              acceptance: ["final stage evidence verified"],
+              dependsOn: [],
+            },
+            {
+              label: "sha-final-review", kind: "review",
+              instructions: "Judge the verified final stage evidence",
+              capability: "general", outputs: [],
+              acceptance: [],
+              dependsOn: ["sha-final-verify"],
+            },
+          ],
+        });
+      }
       runner.acceptShaHandoff({ rootCardId, stage, result, final: true });
     } catch (err) {
       logWarn(TAG, `SHA final handoff for root ${rootCardId} deferred to boot recovery: ${err instanceof Error ? err.message : String(err)}`);

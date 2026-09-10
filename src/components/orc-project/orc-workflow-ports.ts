@@ -131,8 +131,29 @@ function parseVerdict(text: string): ReviewVerdict {
   return raw as unknown as ReviewVerdict;
 }
 
-export class WorkflowWorkerPort implements ExecutionPort {
-  readonly name = "workflow-worker";
+/**
+ * First-dispatch execution start shared by both worker ports. The retained
+ * executor claim fence only claims under executing/repairing supervision;
+ * the runner owns this transition post-cutover. Idempotent: a second call
+ * with any non-awaiting state is a no-op (stateTransition CAS misses).
+ */
+function markExecutingForDispatch(
+  reviewStore: ProjectReviewStore,
+  run: { rootCardId: number; scheduledRunId?: string | null },
+  generation?: number,
+): void {
+  const sup = reviewStore.getSupervision(run.rootCardId);
+  if (!sup || sup.state !== "awaiting_contract") return;
+  reviewStore.stateTransition(run.rootCardId, ["awaiting_contract"], "executing", undefined, {
+    authority: {
+      projectCardId: run.rootCardId,
+      projectGeneration: generation ?? sup.generation,
+      scheduledRunId: run.scheduledRunId ?? undefined,
+    },
+  });
+}
+
+export class WorkflowWorkerPort implements ExecutionPort {  readonly name = "workflow-worker";
   private readonly runner: WorkflowRunner;
   private readonly workers: WorkerSupervisionService;
   private readonly reviewStore: ProjectReviewStore;
@@ -161,6 +182,13 @@ export class WorkflowWorkerPort implements ExecutionPort {
     if (!sup || sup.state === "accepted" || sup.state === "blocked") {
       throw new WorkflowDispatchError(cmd.nodeId, `supervision not dispatchable (state ${sup?.state ?? "missing"})`);
     }
+    // First dispatch starts execution: the retained executor claim fence
+    // (claimAttemptWithinLimits) only claims under executing/repairing
+    // supervision, and the runner owns this transition post-cutover
+    // (pre-cutover define_project_contract initialized executing). Awaiting
+    // stays until a worker actually dispatches; terminal projections accept
+    // from either state.
+    markExecutingForDispatch(this.reviewStore, run);
     // Evidence path (worker-contract #1588 gate): every criterion needs a
     // required artifact or verification command. Declared node outputs become
     // REQUIRED artifacts, each linked to all of the node's criteria (coarse
@@ -312,6 +340,7 @@ export class WorkflowPiPort implements ExecutionPort {
     if (!sup || sup.state === "accepted" || sup.state === "blocked") {
       throw new WorkflowDispatchError(cmd.nodeId, `supervision not dispatchable (state ${sup?.state ?? "missing"})`);
     }
+    markExecutingForDispatch(this.reviewStore, run, sup.generation);
     const workspaceAlias = this.workspaceAliasFor
       ? this.workspaceAliasFor(spec)
       : resolvePiWorkspaceAlias(spec.capability);

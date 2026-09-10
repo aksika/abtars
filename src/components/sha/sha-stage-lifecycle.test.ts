@@ -371,6 +371,57 @@ describe("SHA final-stage handoff through the runner (#1792 Task 5)", () => {
       disposer();
     }
   });
+
+  it("solution done with no pre-existing run admits and plans the final review", async () => {
+    // #1792: production SHA roots are not runner-planned during staging, so
+    // the handoff itself admits the root and proposes the fixed final-review
+    // plan (verify work + review). No direct supervision writes anywhere.
+    const coordinator = makeCoordinator("full");
+    const disposer = coordinator.subscribe();
+    try {
+      const outcome = coordinator.admit(agentEvent());
+      expect(outcome.kind).toBe("project_created");
+      if (outcome.kind !== "project_created") return;
+      const store = new ShaIncidentStore(db);
+      const incident = store.findById(outcome.incidentId)!;
+      const rootCardId = incident.rootCardId!;
+      expect(
+        db.prepare(`SELECT COUNT(*) AS n FROM workflow_runs WHERE root_card_id = ?`).get(rootCardId) as { n: number },
+      ).toEqual({ n: 0 });
+      const children = db.prepare("SELECT * FROM kanban_board WHERE parent_id = ? ORDER BY id").all(rootCardId) as Array<Record<string, unknown>>;
+      const [rca, design, solution] = children;
+      const rcaAttempt = supervision.getLatestAttempt(rca?.["id"] as number)!;
+      markStageDone(rca?.["id"] as number, completeStageEnvelope(rcaAttempt.id, "sha-rca-json"));
+      await vi.waitFor(() => expect(store.findById(outcome.incidentId)!.state).toBe("design"));
+      const designAttempt = supervision.getLatestAttempt(design?.["id"] as number)!;
+      markStageDone(design?.["id"] as number, completeStageEnvelope(designAttempt.id, "sha-design-md", "d2"));
+      await vi.waitFor(() => expect(store.findById(outcome.incidentId)!.state).toBe("solution"));
+      const solutionAttempt = supervision.getLatestAttempt(solution?.["id"] as number)!;
+      markStageDone(solution?.["id"] as number, completeStageEnvelope(solutionAttempt.id, "sha-solution-patch", "d3"));
+      await vi.waitFor(() => expect(store.findById(outcome.incidentId)!.state).toBe("review"));
+      // Admitted exactly once with the fixed final-review plan.
+      const wfStore = new WorkflowStore(db);
+      const run = wfStore.findRunByCard(rootCardId);
+      expect(run).toBeDefined();
+      expect(wfStore.currentRevision(run!.runId)).toBe(1);
+      const labels = wfStore.listNodes(run!.runId, 1)
+        .map((n) => `${String(n["node_id"]).endsWith("sha-final-review") ? "sha-final-review" : "sha-final-verify"}:${n["kind"]}`)
+        .sort();
+      expect(labels).toEqual(["sha-final-review:review", "sha-final-verify:work"]);
+      const runs = db.prepare(`SELECT COUNT(*) AS n FROM workflow_runs WHERE root_card_id = ?`).get(rootCardId) as { n: number };
+      expect(Number(runs.n)).toBe(1);
+      // Redelivery (boot recovery over the review incident) is idempotent:
+      // no second run, no second plan revision.
+      coordinator.runBootRecovery();
+      const runsAfter = db.prepare(`SELECT COUNT(*) AS n FROM workflow_runs WHERE root_card_id = ?`).get(rootCardId) as { n: number };
+      expect(Number(runsAfter.n)).toBe(1);
+      expect(wfStore.currentRevision(run!.runId)).toBe(1);
+      const sup = db.prepare(`SELECT state FROM project_supervision WHERE project_card_id = ?`).get(rootCardId) as { state: string };
+      expect(sup.state).toBe("executing");
+    } finally {
+      disposer();
+    }
+  });
 });
 
 describe("SHA handoff crash replay (#1792 Task 5)", () => {
