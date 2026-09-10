@@ -27,6 +27,7 @@
     "test:watchdog-acceptance": "tsx scripts/watchdog-acceptance/run.ts --suite real",
     "test:watchdog-acceptance:selftests": "vitest --run -c scripts/watchdog-acceptance/vitest.selftests.config.ts",
     "test:swarm-e2e": "vitest --run src/tests/e2e/local-swarm.e2e.test.ts",
+    "test:e2e:orc-workflow": "vitest --run src/tests/e2e/orc-workflow.e2e.test.ts",
     "test:e2e:pi": "tsx scripts/pi-production-e2e.ts",
     "test:e2e:pi:latest": "tsx scripts/pi-production-e2e.ts --pi latest",
     "test:e2e:pi:pinned": "tsx scripts/pi-production-e2e.ts --pi pinned",

@@ -768,7 +768,7 @@ export class WorkflowRunner {
       send(doc: { runId: string; nodeId: string; obligation: string; idempotenceKey: string }): string;
     },
   ): "acknowledged" | "failed" | "unknown" | "retry_queued" {
-    const run = this.requireLive(runId);
+    this.requireLive(runId);
     const pending = this.store.findPendingCommand(runId, nodeId, "deliver");
     if (!pending) throw new Error(`workflow runner: no pending deliver command for ${runId}/${nodeId}`);
     const claimed = this.store.claimCommand(
@@ -813,8 +813,22 @@ export class WorkflowRunner {
     }
     this.store.setDeliveryOutcome(runId, nodeId, "acknowledged", receipt);
     this.store.completeCommand(key, "delivery", claimed.token);
-    void run;
+    this.settleIfDeliverable(runId);
     return "acknowledged";
+  }
+
+  /**
+   * Re-evaluate terminal state after delivery settlement (Task 4): an
+   * acknowledged delivery with all nodes terminal and no other pending
+   * obligation completes the run. Never invents success — evaluateTerminal
+   * decides from recorded node outcomes and the delivery gate.
+   */
+  private settleIfDeliverable(runId: string): void {
+    const run = this.store.getRun(runId);
+    if (!run || TERMINAL_RUN_STATES.includes(run.state)) return;
+    const revision = this.store.currentRevision(runId);
+    const res = this.commitKind(run, "DeliverySettled", {}, () => this.evaluateTerminal(runId, revision));
+    if (res.disposition === "conflict") throw new Error(`workflow runner: ${res.diagnostics}`);
   }
 
   // ── ClaimExpired inspection applier (Revision D–F trichotomy) ─────────
@@ -849,6 +863,15 @@ export class WorkflowRunner {
       }
       if (cmd.inspectGen !== expectedGen - 1 || cmd.claimToken === null || cmd.owner === null) {
         return { noop: true }; // stale inspection — a newer one owns this claim.
+      }
+      // Terminal node with an open claim (recovered completion, prior verdict):
+      // finish the orphaned command, change nothing else.
+      const rev0 = this.store.currentRevision(run.runId);
+      const pre = this.store.listNodes(run.runId, rev0).find((n) => n["node_id"] === key.nodeId);
+      const preStatus = pre?.["status"] as string | undefined;
+      if (preStatus !== undefined && preStatus !== "queued" && preStatus !== "running") {
+        this.store.completeCommand(fullKey, cmd.owner, cmd.claimToken);
+        return { noop: true };
       }
       const finish = (): TransitionEffect => {
         this.store.completeCommand(fullKey, cmd.owner as string, cmd.claimToken as string);

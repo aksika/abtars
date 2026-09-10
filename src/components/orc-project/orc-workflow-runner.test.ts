@@ -636,7 +636,10 @@ describe("WorkflowRunner Task 4 — cancellation, delivery, input, inspection", 
     expect(sent[0]?.key).toBe(`${run.runId}/${rNode}/1`);
     const row = store.db.prepare(`SELECT outcome FROM workflow_deliveries WHERE run_id = ?`).get(run.runId) as { outcome: string };
     expect(row.outcome).toBe("acknowledged");
-    expect(() => runner.executeDelivery(run.runId, rNode, sender)).toThrow(/no pending deliver command/);
+    // Acknowledgment with all nodes terminal settles the run: a duplicate
+    // delivery is rejected as a late result, and nothing resends.
+    expect(store.getRun(run.runId)?.state).toBe("succeeded");
+    expect(() => runner.executeDelivery(run.runId, rNode, sender)).toThrow(/terminal.*late result rejected/);
     expect(sent.length).toBe(1);
   });
 
@@ -696,8 +699,7 @@ describe("WorkflowRunner Task 4 — cancellation, delivery, input, inspection", 
   it("capacity refusal releases the claim; other errors surface without wedging drain", () => {
     const run = admit(runner, seedCard(store));
     runner.acceptPlan(run.runId, twoLane());
-    const busyPort = { name: "full-exec", dispatch: (_cmd: unknown) => { throw new RunnerMod.CapacityBusy(); } };
-    expect(runner.drain(10, busyPort)).toBe(0);
+    const busyPort = { name: "full-exec", dispatch: (_cmd: unknown) => { throw new RunnerMod.CapacityBusy(); } };    expect(runner.drain(10, busyPort)).toBe(0);
     const pending = store.db.prepare(`SELECT COUNT(*) AS c FROM workflow_commands WHERE run_id = ? AND status = 'pending'`).get(run.runId) as { c: number };
     expect(Number(pending.c)).toBe(2);
     const { port, dispatched } = fakePort();
