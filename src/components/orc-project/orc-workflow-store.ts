@@ -1018,6 +1018,27 @@ export class WorkflowStore {
   }
 
   /**
+   * Terminal runs whose root card is not terminal: projection recovery input.
+   * Bounded; each row is an idempotent CAS (recovery converges, never duplicates).
+   */
+  findTerminalUnprojected(limit: number): Array<{ runId: string }> {
+    try {
+      return this.db
+        .prepare(
+          `SELECT r.run_id AS run_id FROM workflow_runs r
+           JOIN kanban_board k ON k.id = r.root_card_id
+           WHERE r.state IN ('succeeded','failed','cancelled')
+             AND k.status NOT IN ('done','failed','delivered')
+           LIMIT ?`,
+        )
+        .all(limit)
+        .map((r) => ({ runId: (r as Record<string, unknown>)["run_id"] as string }));
+    } catch {
+      return [];
+    }
+  }
+
+  /**
    * Open nodes whose latest attempt is terminal with no pending successor
    * command: the completion was never consumed (hook-contained failure or a
    * pre-cutover row). Recovery submits each exactly once (attempt-derived

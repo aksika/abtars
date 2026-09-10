@@ -28,7 +28,7 @@ export interface WorkflowDriver {
   drainWake(reason: string): number;
   auditOnce(cursor: number): {
     nextCursor: number; checked: number; lawful: string[]; ownerless: string[];
-    recovered: number; inspections: number;
+    recovered: number; inspections: number; projected: number;
   };
   recover(port?: ExecutionPort): { redrivenIngress: number; pendingCommands: number; recoveredCompletions: number };
   stop(): void;
@@ -72,12 +72,20 @@ export function startWorkflowDriver(deps: {
 
   function auditOnce(fromCursor?: number): {
     nextCursor: number; checked: number; lawful: string[]; ownerless: string[];
-    recovered: number; inspections: number;
+    recovered: number; inspections: number; projected: number;
   } {
     if (fromCursor !== undefined) cursor = fromCursor;
     const tick = runner.auditTick(cursor);
     cursor = tick.nextCursor;
     const recovered = runner.recoverUnconsumedCompletions(50);
+    let projected = 0;
+    for (const row of runner.store.findTerminalUnprojected(50)) {
+      try {
+        if (runner.projectTerminalProjections(row.runId)) projected++;
+      } catch (err) {
+        logWarn("workflow-driver", `projection recovery contained: ${boundText(err instanceof Error ? err.message : String(err), 200)}`);
+      }
+    }
     let inspections = 0;
     for (const item of tick.dueInspections) {
       if (inspections >= INSPECTION_CAP_PER_TICK) break;
@@ -90,7 +98,7 @@ export function startWorkflowDriver(deps: {
     }
     return {
       nextCursor: tick.nextCursor, checked: tick.checked,
-      lawful: tick.lawful, ownerless: tick.ownerless, recovered, inspections,
+      lawful: tick.lawful, ownerless: tick.ownerless, recovered, inspections, projected,
     };
   }
 
