@@ -120,7 +120,7 @@ describe("kanban-retry due source #1539", () => {
       const { ProjectReviewStore } = await import("../project-acceptance/project-review-store.js");
       const store = new ProjectReviewStore();
       store.ensureAwaitingContract(root);
-      store.setState(root, "executing");
+      store.stateTransition(root, ["awaiting_contract"], "executing");
       kanban.kanbanRetryOrFail(root, "orc terminal failure");
       kanban.kanbanRetryOrFail(child, "worker retry");
       const retryAt = new Date(kanban.kanbanGetCard(root)!.next_retry_at!).getTime();
@@ -152,7 +152,7 @@ describe("kanban-retry due source #1539", () => {
       const { ProjectReviewStore } = await import("../project-acceptance/project-review-store.js");
       const store = new ProjectReviewStore();
       store.ensureAwaitingContract(root);
-      store.setState(root, "blocked", { blocked_reason: "terminal" });
+      store.stateTransition(root, ["awaiting_contract"], "blocked", { blocked_reason: "terminal" });
       kanban.kanbanRetryOrFail(root, "late retry");
       const retryAt = new Date(kanban.kanbanGetCard(root)!.next_retry_at!).getTime();
       await scheduler.start();

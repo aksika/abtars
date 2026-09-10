@@ -11,6 +11,8 @@ import { requireTaskDatabase, kanbanTransition, kanbanGetCard, kanbanEnqueue } f
 import { WorkerSupervisionStore } from "../worker-supervision-store.js";
 import type { WorkerResultEnvelopeV1 } from "../worker-contract.js";
 import { nerve } from "../nerve.js";
+import { WorkflowRunner } from "../orc-project/orc-workflow-runner.js";
+import { WorkflowStore } from "../orc-project/orc-workflow-store.js";
 
 let TEST_HOME: string;
 let db: ReturnType<typeof requireTaskDatabase>;
@@ -53,6 +55,8 @@ beforeEach(async () => {
     "sha_incident_transitions", "sha_incident_events", "sha_incidents", "sha_fault_state",
     "worker_attempts", "worker_contracts", "worker_results", "project_contracts", "project_supervision",
     "kanban_card_transitions", "kanban_board",
+    "workflow_ingress", "workflow_deliveries", "workflow_commands", "workflow_budgets",
+    "workflow_node_deps", "workflow_nodes", "workflow_plan_revisions", "workflow_operations", "workflow_runs",
   ]) {
     try { db.prepare(`DELETE FROM ${table}`).run(); } catch { /* absent */ }
   }
@@ -296,5 +300,107 @@ describe("boot recovery (R5)", () => {
     coordinator.runBootRecovery();
     const i = store.findById(outcome.incidentId)!;
     expect(i.state).toBe("accepted");
+  });
+});
+
+/** #1792 Task 5: the final SHA stage hands review dispatch to the runner.
+ *  The review node is prepared in running-with-no-open-command state (drain
+ *  claims the admission-queued review, then the claim completes without a
+ *  verdict — the reviewer-died branch the handoff re-queues). */
+function prepareRunnerForShaHandoff(rootCardId: number, clientOperationId: string): {
+  wfStore: WorkflowStore; wfRunner: WorkflowRunner; runId: string; reviewNodeId: string;
+} {
+  const wfStore = new WorkflowStore(db);
+  const wfRunner = new WorkflowRunner(wfStore);
+  const run = wfRunner.admit({ rootKind: "interactive", rootCardId, clientOperationId }).run;
+  const acc = wfRunner.acceptPlan(run.runId, {
+    requiredOutputs: [],
+    nodes: [{ label: "r", kind: "review", instructions: "judge", capability: "general", outputs: [], acceptance: [], dependsOn: [] }],
+  });
+  const reviewNodeId = acc.nodeIds[0] as string;
+  wfRunner.drain(10, {
+    executor: { name: "test-exec", dispatch: () => {} },
+    reviewer: { name: "test-reviewer", startReview: () => {} },
+    planner: { name: "test-planner", startPlanning: () => {} },
+  });
+  const claimed = wfStore.db.prepare(
+    `SELECT generation, ordinal, owner, claim_token FROM workflow_commands WHERE run_id = ? AND node_id = ? AND action = 'review'`,
+  ).get(run.runId, reviewNodeId) as { generation: number; ordinal: number; owner: string; claim_token: string };
+  wfStore.completeCommand(
+    { runId: run.runId, generation: Number(claimed["generation"]), nodeId: reviewNodeId, action: "review", ordinal: Number(claimed["ordinal"]) },
+    claimed["owner"] as string,
+    claimed["claim_token"] as string,
+  );
+  return { wfStore, wfRunner, runId: run.runId, reviewNodeId };
+}
+
+describe("SHA final-stage handoff through the runner (#1792 Task 5)", () => {
+  it("solution done queues review via the runner without direct supervision writes", async () => {
+    const coordinator = makeCoordinator("full");
+    const disposer = coordinator.subscribe();
+    try {
+      const outcome = coordinator.admit(agentEvent());
+      expect(outcome.kind).toBe("project_created");
+      if (outcome.kind !== "project_created") return;
+      const store = new ShaIncidentStore(db);
+      const incident = store.findById(outcome.incidentId)!;
+      const rootCardId = incident.rootCardId!;
+      const { wfStore, runId, reviewNodeId } = prepareRunnerForShaHandoff(rootCardId, `sha-final-${outcome.incidentId}`);
+      expect(wfStore.countRunCommands(runId, "pending")).toBe(0);
+      const children = db.prepare("SELECT * FROM kanban_board WHERE parent_id = ? ORDER BY id").all(rootCardId) as Array<Record<string, unknown>>;
+      const [rca, design, solution] = children;
+      const rcaAttempt = supervision.getLatestAttempt(rca?.["id"] as number)!;
+      markStageDone(rca?.["id"] as number, completeStageEnvelope(rcaAttempt.id, "sha-rca-json"));
+      await vi.waitFor(() => expect(store.findById(outcome.incidentId)!.state).toBe("design"));
+      const designAttempt = supervision.getLatestAttempt(design?.["id"] as number)!;
+      markStageDone(design?.["id"] as number, completeStageEnvelope(designAttempt.id, "sha-design-md", "d2"));
+      await vi.waitFor(() => expect(store.findById(outcome.incidentId)!.state).toBe("solution"));
+      const solutionAttempt = supervision.getLatestAttempt(solution?.["id"] as number)!;
+      markStageDone(solution?.["id"] as number, completeStageEnvelope(solutionAttempt.id, "sha-solution-patch", "d3"));
+      await vi.waitFor(() => expect(store.findById(outcome.incidentId)!.state).toBe("review"));
+      // The runner owns review dispatch: exactly one fresh pending command.
+      await vi.waitFor(() => expect(wfStore.hasCommand(runId, reviewNodeId, "review", "pending")).toBe(true));
+      const pending = wfStore.db.prepare(
+        `SELECT COUNT(*) AS n FROM workflow_commands WHERE run_id = ? AND action = 'review' AND status = 'pending'`,
+      ).get(runId) as { n: number };
+      expect(Number(pending.n)).toBe(1);
+      // No direct supervision write outside the runner: still executing.
+      const sup = db.prepare(`SELECT state FROM project_supervision WHERE project_card_id = ?`).get(rootCardId) as { state: string };
+      expect(sup.state).toBe("executing");
+    } finally {
+      disposer();
+    }
+  });
+});
+
+describe("SHA handoff crash replay (#1792 Task 5)", () => {
+  it("review incident with no queued review redelivers exactly once across recoveries", () => {
+    const coordinator = makeCoordinator("investigation");
+    const outcome = coordinator.admit(agentEvent("crash-replay-1"));
+    expect(outcome.kind).toBe("project_created");
+    if (outcome.kind !== "project_created") return;
+    const store = new ShaIncidentStore(db);
+    const incident = store.findById(outcome.incidentId)!;
+    const rootCardId = incident.rootCardId!;
+    const { wfStore, runId, reviewNodeId } = prepareRunnerForShaHandoff(rootCardId, `sha-crash-${outcome.incidentId}`);
+    expect(wfStore.hasCommand(runId, reviewNodeId, "review", "pending")).toBe(false);
+    // Simulate a crash between the incident "review" commit and handoff
+    // application: durable review state, no review command yet.
+    db.prepare(`UPDATE sha_incidents SET state = 'review', version = version + 1 WHERE id = ?`).run(incident.id);
+    expect(store.findById(outcome.incidentId)!.state).toBe("review");
+    coordinator.runBootRecovery();
+    expect(wfStore.hasCommand(runId, reviewNodeId, "review", "pending")).toBe(true);
+    const once = wfStore.db.prepare(
+      `SELECT COUNT(*) AS n FROM workflow_commands WHERE run_id = ? AND action = 'review' AND status = 'pending'`,
+    ).get(runId) as { n: number };
+    expect(Number(once.n)).toBe(1);
+    // Second recovery is idempotent: nothing further queued.
+    coordinator.runBootRecovery();
+    const twice = wfStore.db.prepare(
+      `SELECT COUNT(*) AS n FROM workflow_commands WHERE run_id = ? AND action = 'review' AND status = 'pending'`,
+    ).get(runId) as { n: number };
+    expect(Number(twice.n)).toBe(1);
+    const sup = db.prepare(`SELECT state FROM project_supervision WHERE project_card_id = ?`).get(rootCardId) as { state: string };
+    expect(sup.state).toBe("executing");
   });
 });

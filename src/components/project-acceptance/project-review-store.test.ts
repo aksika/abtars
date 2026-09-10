@@ -220,15 +220,6 @@ describe("ProjectReviewStore", () => {
       expect(s.getSupervision(cid)!.state).toBe("executing");
     });
 
-    it("sets state unconditionally with setState", () => {
-      const { store: s, contract: c } = setupProject();
-      const cid = c.project_card_id;
-      s.setState(cid, "blocked", { blocked_reason: "Something went wrong" });
-      const sup = s.getSupervision(cid);
-      expect(sup!.state).toBe("blocked");
-      expect(sup!.blocked_reason).toBe("Something went wrong");
-    });
-
     it("increments generation", () => {
       const { store: s, contract: c } = setupProject();
       const cid = c.project_card_id;
@@ -240,7 +231,9 @@ describe("ProjectReviewStore", () => {
       const { store: s, contract: c } = setupProject();
       const cid = c.project_card_id;
       expect(s.isTerminal(cid)).toBe(false);
-      s.setState(cid, "accepted");
+      // setupProject() leaves supervision in executing; reach the terminal
+      // state through the retained supervised transition (no setState).
+      expect(s.stateTransition(cid, ["executing"], "accepted")).toBe(true);
       expect(s.isTerminal(cid)).toBe(true);
     });
 

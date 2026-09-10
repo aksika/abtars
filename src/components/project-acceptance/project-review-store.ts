@@ -696,21 +696,6 @@ export class ProjectReviewStore {
     });
   }
 
-  setState(projectCardId: number, state: ProjectState, extraSets?: Record<string, string | number | null>): boolean {
-    const sets = ["state = ?", "updated_at = ?"];
-    const vals: unknown[] = [state, new Date().toISOString()];
-    if (extraSets) {
-      for (const [k, v] of Object.entries(extraSets)) {
-        sets.push(`${k} = ?`);
-        vals.push(v);
-      }
-    }
-    vals.push(projectCardId);
-    const sql = `UPDATE project_supervision SET ${sets.join(", ")} WHERE project_card_id = ?`;
-    const result = this.db.prepare(sql).run(...vals);
-    return result.changes > 0;
-  }
-
   incrementGeneration(projectCardId: number): boolean {
     const sql = `UPDATE project_supervision SET generation = generation + 1, updated_at = ? WHERE project_card_id = ?`;
     const result = this.db.prepare(sql).run(new Date().toISOString(), projectCardId);

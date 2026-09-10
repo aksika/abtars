@@ -237,7 +237,6 @@ function makeReviewStoreMock() {
     claimCoverageRound: vi.fn().mockReturnValue(true),
     recordCoverageClear: vi.fn(),
     recordCoverageReviewable: vi.fn().mockReturnValue(true),
-    setState: vi.fn(),
     hasActiveProjectSupervision: vi.fn().mockReturnValue(false),
     db: { transaction: transactionImpl },
   };

@@ -50,8 +50,14 @@ function supervisionState(rootId: number): { state: string; generation: number }
 
 function setState(rootId: number, state: string, generation = 1): void {
   const review = new ProjectReviewStore();
-  if (supervisionState(rootId)) {
-    review.setState(rootId, state as never);
+  const existing = supervisionState(rootId);
+  if (existing) {
+    // #1792: ProjectReviewStore.setState is deleted. Move the existing row
+    // through the retained supervised transition from its current state.
+    if (existing.state !== state) {
+      const ok = review.stateTransition(rootId, [existing.state as never], state as never);
+      if (!ok) throw new Error(`test setup: stateTransition ${existing.state} -> ${state} failed for ${rootId}`);
+    }
     if (generation !== 1) review.incrementGeneration(rootId);
   } else {
     review.initializeSupervision(rootId, `pc_${rootId}`, state as never);

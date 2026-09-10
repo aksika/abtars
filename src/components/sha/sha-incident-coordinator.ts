@@ -14,6 +14,8 @@ import type { TaskDatabase } from "../tasks/kanban-board.js";
 import { cascadeFail, kanbanEnqueue, kanbanFail, kanbanGetCard, kanbanGetChildren, requireTaskDatabase } from "../tasks/kanban-board.js";
 import { loadPiConfig } from "../pi-executor/config.js";
 import { ProjectReviewStore } from "../project-acceptance/project-review-store.js";
+import { WorkflowRunner } from "../orc-project/orc-workflow-runner.js";
+import { WorkflowStore } from "../orc-project/orc-workflow-store.js";
 import { WorkerSupervisionService } from "../worker-supervision-service.js";
 import { WorkerSupervisionStore } from "../worker-supervision-store.js";
 import { ShaWorkspaceManager } from "./sha-workspace-manager.js";
@@ -698,7 +700,9 @@ private async bindNextStage(
 
   if (!next) {
     // Last stage accepted — move the incident to review; the Orc review owns
-    // the terminal mapping.
+    // the terminal mapping. The "review" incident state is the durable
+    // received record for the runner handoff below: a handoff throw must not
+    // roll it back — boot recovery redelivers the same idempotent handoff.
     const moved = this.store.transition({
       incidentId: incident.id,
       expectedVersion: incident.version,
@@ -707,10 +711,11 @@ private async bindNextStage(
       reason: `stage ${stage} accepted; awaiting Orc final review`,
     });
     if (moved.ok) {
-      const review = this.reviewStore;
-      review.setState(incident.rootCardId ?? 0, "review_ready");
-      const { requestReconcileForProject } = await import("../reconciler.js");
-      requestReconcileForProject(incident.rootCardId ?? 0);
+      this.deliverFinalShaHandoff(
+        incident.rootCardId ?? 0,
+        stage,
+        `${predecessor.stage}:${predecessor.artifactRef}:${predecessor.digest}`,
+      );
     }
     return;
   }
@@ -780,6 +785,45 @@ private async bindNextStage(
   }
   nerve.fire("card:queued", binding.cardId);
 }
+
+  /**
+   * #1792 Task 5: durable stage-to-runner handoff for the final SHA stage.
+   * Shares the coordinator's DB handle the way due-sources shares the task
+   * DB (`new WorkflowStore()` + `new WorkflowRunner(store)`); passing
+   * `this.db` explicitly keeps the same connection the incident transition
+   * just committed on. Never throws past the incident commit: the "review"
+   * incident state is the redelivery record and boot recovery redrives the
+   * same idempotent `acceptShaHandoff`.
+   */
+  private deliverFinalShaHandoff(rootCardId: number, stage: string, result: string): void {
+    try {
+      const store = new WorkflowStore(this.db);
+      const runner = new WorkflowRunner(store);
+      runner.acceptShaHandoff({ rootCardId, stage, result, final: true });
+    } catch (err) {
+      logWarn(TAG, `SHA final handoff for root ${rootCardId} deferred to boot recovery: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
+
+  /** Rebuild the handoff result for boot redelivery from the accepted stage
+   *  envelope when it is still readable; otherwise a stable fallback summary.
+   *  The runner treats the payload as an opaque digest — only `final: true`
+   *  drives review dispatch — so the fallback redelivers identically. */
+  private shaHandoffResultForRecovery(
+    incident: import("./sha-incident-store.js").IncidentRow,
+    stage: string,
+  ): string {
+    try {
+      const cardId = incident.currentStageCardId;
+      if (cardId !== null) {
+        const attempt = this.supervisionStore.getLatestAttempt(cardId);
+        const envelope = attempt ? this.supervisionStore.getResultByAttempt(attempt.id)?.envelope : undefined;
+        const artifact = envelope?.artifacts?.find((a) => a.digest);
+        if (artifact?.digest) return `${stage}:${artifact.ref}:${artifact.digest}`;
+      }
+    } catch { /* fall through to the stable summary */ }
+    return `incident ${incident.id} ${stage} final (recovery redelivery)`;
+  }
 
 /** Find the first unbound queued placeholder card (sequential binding). */
 private nextPlaceholderCardId(rootCardId: number): number | null {
@@ -866,7 +910,13 @@ private recoverOne(incident: import("./sha-incident-store.js").IncidentRow): voi
     return;
   }
   if (incident.state === "review") {
-    import("../reconciler.js").then(({ requestReconcileForProject }) => requestReconcileForProject(rootCardId)).catch(() => { /* best-effort */ });
+    // Crash window between the incident "review" commit and handoff
+    // application is closed by redelivering the same idempotent runner
+    // handoff (acceptShaHandoff skips nodes with a pending/claimed review
+    // command, so redelivery queues exactly once). The incident row is the
+    // durable received record.
+    const stage = incident.mode === "full" ? "solution" : "design";
+    this.deliverFinalShaHandoff(rootCardId, stage, this.shaHandoffResultForRecovery(incident, stage));
     return;
   }
   // Stage state: live attempt → owned by existing Worker recovery. Terminal

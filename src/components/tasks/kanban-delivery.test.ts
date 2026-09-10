@@ -335,7 +335,7 @@ describe("deliverCard — O-type acceptance gate (#1595)", () => {
     expect(logWarnMock).toHaveBeenCalledTimes(1);
     expect(logWarnMock.mock.calls[0]![1]).toContain("no accepted supervision");
     // Acceptance later unblocks delivery normally.
-    new ProjectReviewStore().setState(id, "accepted");
+    expect(new ProjectReviewStore().stateTransition(id, ["executing"], "accepted")).toBe(true);
     await deliverCard(board.kanbanGetCard(id)!, deps);
     expect(deps.sendDocument).toHaveBeenCalledTimes(1);
     expect(board.kanbanGetCard(id)!.status).toBe("delivered");
