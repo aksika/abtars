@@ -13,7 +13,11 @@
 import { createHash, randomUUID } from "node:crypto";
 import {
   WorkflowStore,
+  COMMAND_CLAIM_LEASE_MIN,
+  MAX_CONSECUTIVE_INCONCLUSIVE,
   type BudgetScope,
+  type CommandAction,
+  type CommandKey,
   type CommandRow,
   type CommitResult,
   type NodeKind,
@@ -111,6 +115,55 @@ export type DrainPorts =
   | { executor: ExecutionPort; reviewer: ReviewBackend; planner: PlannerBackend };
 
 export type VerdictOutcome = "accepted" | "repair_queued" | "failed" | "unassessable" | "correction_queued";
+
+export const DELIVERY_MAX_ATTEMPTS = 3;
+
+export interface DrainOpts {
+  policy?: ResourcePolicy;
+}
+
+/** Bounded, sanitized diagnostics: never log raw tool payloads (req 12). */
+export function boundText(value: unknown, max: number): string {
+  const s = typeof value === "string" ? value : JSON.stringify(value) ?? "unserializable";
+  return s.length > max ? `${s.slice(0, max)}…[truncated ${s.length - max} chars]` : s;
+}
+
+/** Thrown by ExecutionPorts at capacity: drain releases the claim and continues. */
+export class CapacityBusy extends Error {
+  constructor(message = "executor at capacity") {
+    super(message);
+    this.name = "CapacityBusy";
+  }
+}
+
+/** Parse a DB timestamp as UTC millis; SQLite 'YYYY-MM-DD HH:MM:SS' has no
+ * designator, so tag it explicitly rather than inheriting local TZ. NaN when
+ * unparseable (callers treat unparseable as stale — safe direction). */
+function dbTimeMillis(value: unknown): number {
+  if (typeof value !== "string") return NaN;
+  const iso = value.includes("T") ? value : `${value.replace(" ", "T")}Z`;
+  return Date.parse(iso);
+}
+
+/** Lease heartbeat fresh iff its next evaluation lies in the future. */
+function leaseFresh(snapshot: Record<string, unknown> | null): boolean {
+  if (!snapshot || snapshot["closed_at"] != null) return false;
+  const t = dbTimeMillis(snapshot["next_evaluation_at"]);
+  return !Number.isNaN(t) && t > Date.now();
+}
+
+/**
+ * Resource policy consulted before dispatch claims. Scoping lives here:
+ * an execution fuse refuses dispatch actions, never review work or
+ * already-completed evidence.
+ */
+export interface ResourcePolicy {
+  check(input: { runId: string; action: string; resource?: string }): "ok" | "refused";
+}
+
+export interface DrainOpts {
+  policy?: ResourcePolicy;
+}
 
 function isJobPorts(ports: DrainPorts): ports is { executor: ExecutionPort; reviewer: ReviewBackend; planner: PlannerBackend } {
   return (ports as { executor?: ExecutionPort }).executor !== undefined;
@@ -242,7 +295,7 @@ export class WorkflowRunner {
     if (problems.length > 0) {
       // Invalid proposal: no worker side effects. Each rejection consumes the
       // plan_revision allowance; exhaustion fails the run with the diagnostics.
-      const text = problems.map((p) => `${p.field}: ${p.reason}`).join("; ");
+      const text = boundText(problems.map((p) => `${p.field}: ${p.reason}`).join("; "), 2000);
       const res = this.commitKind(run, "PlanRejected", { problems }, () => {
         const ok = this.store.consumeBudget(runId, "plan_revision");
         if (!ok) {
@@ -299,8 +352,9 @@ export class WorkflowRunner {
   attemptFailed(runId: string, nodeId: string, attemptId: string, cause: string, retrySafe: boolean): void {
     const run = this.requireLive(runId);
     const revision = this.store.currentRevision(runId);
-    const res = this.applyAttemptFailed(run, revision, nodeId, attemptId, cause, retrySafe,
-      this.freshEvent(run, "AttemptFailed", { nodeId, attemptId, cause }));
+    const boundedCause = boundText(cause, 2000);
+    const res = this.applyAttemptFailed(run, revision, nodeId, attemptId, boundedCause, retrySafe,
+      this.freshEvent(run, "AttemptFailed", { nodeId, attemptId, cause: boundedCause }));
     if (res.disposition === "conflict") throw new Error(`workflow runner: ${res.diagnostics}`);
   }
 
@@ -380,7 +434,7 @@ export class WorkflowRunner {
     }
     const problems = this.validatePlan(proposal, this.cumulativeOutputs(runId, current));
     if (problems.length > 0) {
-      const text = problems.map((p) => `${p.field}: ${p.reason}`).join("; ");
+      const text = boundText(problems.map((p) => `${p.field}: ${p.reason}`).join("; "), 2000);
       const res = this.commitKind(run, "PlanRejected", { problems }, () => {
         const ok = this.store.consumeBudget(runId, "plan_revision");
         if (!ok) {
@@ -453,10 +507,18 @@ export class WorkflowRunner {
   // protocol correction for malformed verdicts; persistent malformed verdicts
   // fail the review with their own reason — never a fresh execution turn.
 
-  submitVerdict(runId: string, nodeId: string, verdict: ReviewVerdict): VerdictOutcome {
+  submitVerdict(runId: string, nodeId: string, rawVerdict: ReviewVerdict): VerdictOutcome {
     const run = this.requireLive(runId);
-    // Candidate under judgment is always the latest revision; the review node
-    // itself may live in an earlier revision (re-review after repair).
+    // Sanitize model-supplied text at the boundary (bounded diagnostics, req 12).
+    const verdict: ReviewVerdict = rawVerdict.verdict === "accept" ? { verdict: "accept" }
+      : rawVerdict.verdict === "cannot_assess" ? { verdict: "cannot_assess", reason: boundText(rawVerdict.reason, 2000) }
+      : rawVerdict.verdict === "changes_required" ? {
+          verdict: "changes_required",
+          defects: (rawVerdict.defects ?? []).map((d) => ({
+            criterion: boundText(d.criterion, 500), detail: boundText(d.detail, 2000),
+          })),
+        }
+      : rawVerdict;
     const judged = this.store.currentRevision(runId);
     const home = this.locateReviewNode(runId, nodeId);
     if (home === null) {
@@ -582,10 +644,424 @@ export class WorkflowRunner {
     return null;
   }
 
+  // ── Task 4: failure remediation, cancellation, delivery, input ────
+  //
+  // Cancellation and acceptance serialize on run state/version: a cancel
+  // committed before acceptance prevents it; late results after terminal
+  // states are rejected loudly and change nothing.
+
+  requestCancel(runId: string, cause: string): {
+    cancelled: boolean; attemptsFenced: number; commandsCancelled: number; nodesCancelled: number;
+  } {
+    const run = this.store.getRun(runId);
+    if (!run) throw new Error(`workflow runner: run ${runId} missing`);
+    if (TERMINAL_RUN_STATES.includes(run.state)) return { cancelled: false, attemptsFenced: 0, commandsCancelled: 0, nodesCancelled: 0 };
+    const reason = boundText(cause, 2000);
+    let attemptsFenced = 0;
+    let commandsCancelled = 0;
+    let nodesCancelled = 0;
+    const res = this.commitKind(run, "CancelRequested", { cause: reason }, () => {
+      // Fence live attempts by stable root lineage (execution facts stay in
+      // worker_attempts; the runner owns the transition, not the ledger).
+      const fenced = this.store.db
+        .prepare(
+          `UPDATE worker_attempts SET lifecycle = 'cancel_requested', cancel_reason = ?
+           WHERE root_project_card_id = ?
+             AND lifecycle IN ('pending','claimed','starting','running')`,
+        )
+        .run(`run-cancelled:${runId}`, run.rootCardId);
+      attemptsFenced = Number(fenced.changes);
+      // Release active retry reservations once (idempotent: only 'active' rows).
+      this.store.db
+        .prepare(
+          `UPDATE retry_budget_reservations SET status = 'released', updated_at = datetime('now')
+           WHERE status = 'active' AND source_attempt_id IN (
+             SELECT id FROM worker_attempts WHERE root_project_card_id = ?
+           )`,
+        )
+        .run(run.rootCardId);
+      const cmds = this.store.db
+        .prepare(
+          `UPDATE workflow_commands SET status = 'cancelled', done_at = datetime('now'),
+             next_inspection_at = NULL
+           WHERE run_id = ? AND status IN ('pending','claimed')`,
+        )
+        .run(runId);
+      commandsCancelled = Number(cmds.changes);
+      const nodes = this.store.db
+        .prepare(
+          `UPDATE workflow_nodes SET status = 'cancelled', updated_at = datetime('now')
+           WHERE run_id = ? AND status IN ('queued','running')`,
+        )
+        .run(runId);
+      nodesCancelled = Number(nodes.changes);
+      // In-flight sends made ambiguous by cancellation resolve as unknown —
+      // never falsely acknowledged, never blindly resent (§2.9 rule).
+      this.store.db
+        .prepare(
+          `UPDATE workflow_deliveries SET outcome = 'unknown',
+             receipt_json = '{"cancelled":true}', updated_at = datetime('now')
+           WHERE run_id = ? AND outcome = 'pending'`,
+        )
+        .run(runId);
+      return { nextState: "cancelled" as const, failureCode: "cancelled", failureReason: reason };
+    });
+    if (res.disposition === "conflict") throw new Error(`workflow runner: ${res.diagnostics}`);
+    return { cancelled: true, attemptsFenced, commandsCancelled, nodesCancelled };
+  }
+
+  /** Terminal failure outside node evaluation (breaker refusal, inspector verdict). */
+  failRun(runId: string, code: string, reason: string): void {
+    const run = this.requireLive(runId);
+    const res = this.commitKind(run, "RunFailed", { code, reason }, () => ({
+      nextState: "failed" as const, failureCode: code, failureReason: boundText(reason, 2000),
+    }));
+    if (res.disposition === "conflict") throw new Error(`workflow runner: ${res.diagnostics}`);
+  }
+
+  // ── input request/answer with durable resume ──────────────────────────
+
+  requestInput(runId: string, question: string, criteria: string[], kind = "text"): string {
+    const run = this.requireLive(runId);
+    if (run.state === "awaiting_input") throw new Error(`workflow runner: run ${runId} already awaiting input`);
+    const q = boundText(question, 2000);
+    let inputId = "";
+    const res = this.commitKind(run, "InputRequested", { question: q }, () => {
+      inputId = this.store.insertInputRequest({
+        runId, cardId: run.rootCardId, caseRef: `wf:${runId}`,
+        question: q, criteria, kind,
+      });
+      this.store.queueCommand({
+        runId, generation: run.generation, nodeId: "__input__", action: "notify", ordinal: 0,
+        payloadJson: JSON.stringify({ kind: "input_requested", inputId }),
+      });
+      return { nextState: "awaiting_input" as const };
+    });
+    if (res.disposition === "conflict") throw new Error(`workflow runner: ${res.diagnostics}`);
+    return inputId;
+  }
+
+  answerInput(inputId: string, response: string): { runId: string } {
+    const answered = this.store.answerInputRequest(inputId, boundText(response, 2000));
+    if (!answered || !answered.runId) throw new Error(`workflow runner: input ${inputId} unknown or already answered`);
+    const run = this.requireLive(answered.runId);
+    if (run.state !== "awaiting_input") {
+      throw new Error(`workflow runner: run ${answered.runId} not awaiting input (stale answer)`);
+    }
+    const res = this.commitKind(run, "InputAnswered", { inputId }, () => {
+      this.store.queueCommand({
+        runId: run.runId, generation: run.generation, nodeId: "__input__", action: "notify",
+        ordinal: this.store.nextCommandOrdinal(run.runId, run.generation, "__input__", "notify"),
+        payloadJson: JSON.stringify({ kind: "input_answered", inputId }),
+      });
+      return { nextState: "executing" as const };
+    });
+    if (res.disposition === "conflict") throw new Error(`workflow runner: ${res.diagnostics}`);
+    return { runId: run.runId };
+  }
+
+  // ── delivery execution (claim → send → mark; ambiguity → unknown) ─────
+
+  executeDelivery(
+    runId: string, nodeId: string,
+    sender: {
+      send(doc: { runId: string; nodeId: string; obligation: string; idempotenceKey: string }): string;
+    },
+  ): "acknowledged" | "failed" | "unknown" | "retry_queued" {
+    const run = this.requireLive(runId);
+    const pending = this.store.findPendingCommand(runId, nodeId, "deliver");
+    if (!pending) throw new Error(`workflow runner: no pending deliver command for ${runId}/${nodeId}`);
+    const claimed = this.store.claimCommand(
+      { runId, generation: pending.generation, nodeId, action: "deliver", ordinal: pending.ordinal }, "delivery",
+    );
+    if (!claimed) throw new Error(`workflow runner: deliver command for ${runId}/${nodeId} busy`);
+    const key = { runId, generation: pending.generation, nodeId, action: "deliver" as const, ordinal: pending.ordinal };
+    const delivery = this.store.getDelivery(runId, nodeId);
+    if (!delivery || delivery["outcome"] !== "pending") {
+      this.store.completeCommand(key, "delivery", claimed.token);
+      return "acknowledged";
+    }
+    const attempts = this.store.bumpDeliveryAttempts(runId, nodeId);
+    const idempotenceKey = `${runId}/${nodeId}/${attempts}`;
+    let receipt: string;
+    try {
+      receipt = sender.send({
+        runId, nodeId,
+        obligation: delivery["obligation_json"] as string,
+        idempotenceKey,
+      });
+    } catch (err) {
+      if ((err as { definitive?: boolean }).definitive === true) {
+        if (attempts < DELIVERY_MAX_ATTEMPTS) {
+          this.store.completeCommand(key, "delivery", claimed.token);
+          this.store.queueCommand({
+            runId, generation: pending.generation, nodeId, action: "deliver",
+            ordinal: this.store.nextCommandOrdinal(runId, pending.generation, nodeId, "deliver"),
+            payloadJson: JSON.stringify({ nodeId, retryOf: attempts }),
+          });
+          return "retry_queued";
+        }
+        this.store.setDeliveryOutcome(runId, nodeId, "failed", JSON.stringify({ error: boundText((err as Error).message, 500) }));
+        this.store.completeCommand(key, "delivery", claimed.token);
+        return "failed";
+      }
+      // Ambiguous send (timeout, lost ack, unknown transport outcome):
+      // explicitly unknown — never falsely acknowledged, never blindly resent.
+      this.store.setDeliveryOutcome(runId, nodeId, "unknown", JSON.stringify({ idempotenceKey }));
+      this.store.completeCommand(key, "delivery", claimed.token);
+      return "unknown";
+    }
+    this.store.setDeliveryOutcome(runId, nodeId, "acknowledged", receipt);
+    this.store.completeCommand(key, "delivery", claimed.token);
+    void run;
+    return "acknowledged";
+  }
+
+  // ── ClaimExpired inspection applier (Revision D–F trichotomy) ─────────
+
+  inspectClaim(runId: string, key: {
+    nodeId: string; action: CommandAction; ordinal: number; generation: number;
+  }, expectedGen: number): string {
+    const run = this.requireLive(runId);
+    const payload = JSON.stringify({ key, expectedGen });
+    const event: RunnerIngress = {
+      eventId: `inspect-${runId}-${key.nodeId}-${key.action}-${key.ordinal}-${expectedGen}-${randomUUID().replace(/-/g, "").slice(0, 8)}`,
+      runId, payloadHash: createHash("sha256").update(payload).digest("hex"),
+      payloadJson: JSON.stringify({ kind: "ClaimExpired", body: { key, expectedGen } }),
+      generation: run.generation, stateVersion: run.stateVersion,
+    };
+    const res = this.applyClaimExpired(run, key, expectedGen, event);
+    if (res.disposition === "conflict") throw new Error(`workflow runner: ${res.diagnostics}`);
+    const marker = this.store.getCommand({ runId, ...key });
+    return `${res.disposition}:${marker?.status ?? "gone"}`;
+  }
+
+  private applyClaimExpired(
+    run: WorkflowRunRow,
+    key: { nodeId: string; action: CommandAction; ordinal: number; generation: number },
+    expectedGen: number, event: RunnerIngress,
+  ): CommitResult {
+    return this.store.commitTransition(event, () => {
+      const fullKey = { runId: run.runId, ...key };
+      const cmd = this.store.getCommand(fullKey);
+      if (!cmd || cmd.status !== "claimed") {
+        return { noop: true }; // already settled — consume, change nothing.
+      }
+      if (cmd.inspectGen !== expectedGen - 1 || cmd.claimToken === null || cmd.owner === null) {
+        return { noop: true }; // stale inspection — a newer one owns this claim.
+      }
+      const finish = (): TransitionEffect => {
+        this.store.completeCommand(fullKey, cmd.owner as string, cmd.claimToken as string);
+        return {};
+      };
+      if (key.action === "deliver") {
+        const delivery = this.store.getDelivery(run.runId, key.nodeId);
+        if (!delivery || delivery["outcome"] !== "pending") {
+          finish();
+          return { noop: true };
+        }
+        if (Number(delivery["attempts"]) === 0) {
+          // Claimed but never sent: nothing went out — safe to requeue.
+          this.store.releaseClaim(fullKey, cmd.owner, cmd.claimToken);
+          return {};
+        }
+        // Send attempted without a recorded outcome: ambiguous by definition.
+        this.store.setDeliveryOutcome(run.runId, key.nodeId, "unknown",
+          JSON.stringify({ inspection: true }));
+        finish();
+        return {};
+      }
+      if (key.action === "review" || key.action === "plan") {
+        // No backend observability for model invocations: count inconclusive,
+        // fail terminally at the bound (never silently retry, never wait forever).
+        return this.applyInconclusive(run, fullKey, expectedGen, () => {
+          const rev = this.store.currentRevision(run.runId);
+          const node = this.store.listNodes(run.runId, rev).find((n) => n["node_id"] === key.nodeId);
+          const home = node ? rev : this.locateAnyRevision(run.runId, key.nodeId);
+          if (home !== null) {
+            this.store.upsertOperation({
+              opId: opIdFor(run.runId, home, key.nodeId), runId: run.runId,
+              kind: key.action === "review" ? "review" : "planning",
+              revision: home, status: "failed", resultJson: "inspection cap reached",
+            });
+            this.store.setNodeOutcome(run.runId, home, key.nodeId, "failed", "inspection cap reached without verdict");
+          }
+        });
+      }
+      // dispatch: inspect the attempt by stable identity.
+      const rev = this.store.currentRevision(run.runId);
+      const node = this.store.listNodes(run.runId, rev).find((n) => n["node_id"] === key.nodeId);
+      if (!node) {
+        finish();
+        return { noop: true }; // node gone (cancelled/superseded) — moot.
+      }
+      const cardId = node["worker_card_id"] as number | null;
+      const latest = cardId === null ? null : this.store.latestAttemptForCard(cardId);
+      if (!latest) {
+        // No attempt ever started for this command: nothing ran — safe requeue.
+        this.store.releaseClaim(fullKey, cmd.owner, cmd.claimToken);
+        return {};
+      }
+      const lifecycle = latest["lifecycle"] as string;
+      if (["completed", "failed", "cancelled", "timed_out"].includes(lifecycle)) {
+        if (lifecycle === "completed") {
+          // Lost completion found by inspection: recover result + successors.
+          const result = this.store.readResult(latest["id"] as string);
+          this.store.setNodeOutcome(run.runId, rev, key.nodeId, "succeeded",
+            result ?? `{"recovered":"${latest["id"]}"}`, latest["id"] as string);
+          for (const next of this.store.satisfyDependents(run.runId, rev, key.nodeId)) {
+            this.queueForNode(run.runId, run.generation, rev, next, this.nodeKindOf(run.runId, rev, next), {});
+          }
+          finish();
+          return this.evaluateTerminal(run.runId, rev);
+        }
+        // Did the CLAIMED round run? Compare attempt start against claim time
+        // (60s grace for clock skew). Proven older → the round never started →
+        // safe requeue. Proven newer → it ran and died → fail into policy
+        // without blind retry. Unparseable → undecidable → unobservable path
+        // below (never requeue on doubt).
+        const started = dbTimeMillis(latest["started_at"]);
+        const claimedAt = dbTimeMillis(cmd.claimedAt);
+        const decided = !Number.isNaN(started) && !Number.isNaN(claimedAt);
+        if (decided && started <= claimedAt - 60000) {
+          this.store.releaseClaim(fullKey, cmd.owner, cmd.claimToken);
+          return {};
+        }
+        if (decided) {
+          this.store.setNodeOutcome(run.runId, rev, key.nodeId, "failed",
+            `attempt ${latest["id"]} ${lifecycle} found at inspection`);
+          finish();
+          return this.evaluateTerminal(run.runId, rev, `attempt ${latest["id"]} ${lifecycle}`);
+        }
+      } else {
+        // Non-terminal attempt: liveness hinges on the lease heartbeat.
+        const lease = this.store.readLeaseSnapshot(latest["id"] as string);
+        if (leaseFresh(lease)) {
+          this.store.db.prepare(
+            `UPDATE workflow_commands SET inspect_gen = ?, consecutive_inconclusive = 0,
+               next_inspection_at = datetime('now', '+${COMMAND_CLAIM_LEASE_MIN} minutes')
+             WHERE run_id = ? AND generation = ? AND node_id = ? AND action = ? AND ordinal = ?`,
+          ).run(expectedGen, run.runId, key.generation, key.nodeId, key.action, key.ordinal);
+          return {};
+        }
+      }
+      return this.applyInconclusive(run, fullKey, expectedGen, () => {
+        this.store.setNodeOutcome(run.runId, rev, key.nodeId, "failed", "observation_unknown");
+      }, true);
+    });
+  }
+
+  /** Shared inconclusive counter: reschedule below MAX, explicit unknown at MAX. */
+  private applyInconclusive(
+    run: WorkflowRunRow, fullKey: CommandKey, expectedGen: number,
+    onMax: () => void, resolveRunUnknown = false,
+  ): TransitionEffect {
+    const cmd = this.store.getCommand(fullKey);
+    const inconclusive = Number(cmd?.consecutiveInconclusive ?? 0) + 1;
+    if (inconclusive >= MAX_CONSECUTIVE_INCONCLUSIVE) {
+      onMax();
+      if (resolveRunUnknown) {
+        return {
+          nextState: "failed", failureCode: "observation_unknown",
+          failureReason: "5 consecutive inconclusive inspections; no retry without confirmed termination",
+        };
+      }
+      const rev = this.store.currentRevision(run.runId);
+      return this.evaluateTerminal(run.runId, rev, "inspection cap reached without verdict");
+    }
+    this.store.db.prepare(
+      `UPDATE workflow_commands SET inspect_gen = ?, consecutive_inconclusive = ?,
+         next_inspection_at = datetime('now', '+${COMMAND_CLAIM_LEASE_MIN} minutes')
+       WHERE run_id = ? AND generation = ? AND node_id = ? AND action = ? AND ordinal = ?`,
+    ).run(expectedGen, inconclusive, run.runId, fullKey.generation, fullKey.nodeId, fullKey.action, fullKey.ordinal);
+    return {};
+  }
+
+  private locateAnyRevision(runId: string, nodeId: string): number | null {
+    const current = this.store.currentRevision(runId);
+    for (let rev = current; rev >= 1; rev--) {
+      if (this.store.listNodes(runId, rev).some((n) => n["node_id"] === nodeId)) return rev;
+    }
+    return null;
+  }
+
+  private nodeKindOf(runId: string, revision: number, nodeId: string): string {
+    const node = this.store.listNodes(runId, revision).find((n) => n["node_id"] === nodeId);
+    return (node?.["kind"] as string) ?? "work";
+  }
+
+  // ── SHA handoff consumption ───────────────────────────────────────────
+
+  acceptShaHandoff(payload: { rootCardId: number; stage: string; result: string; final: boolean }): string {
+    payload = { rootCardId: payload.rootCardId, stage: boundText(payload.stage, 500), result: boundText(payload.result, 2000), final: payload.final };
+    const run = this.store.findRunByCard(payload.rootCardId);
+    if (!run) return "no-run:noop";
+    if (TERMINAL_RUN_STATES.includes(run.state)) return "terminal:noop";
+    const res = this.applyShaHandoff(run, payload, this.freshEvent(run, "ShaHandoff", payload));
+    if (res.disposition === "conflict") throw new Error(`workflow runner: ${res.diagnostics}`);
+    return `${res.disposition}`;
+  }
+
+  /** Shared applier so live and redriven handoffs execute identical writes. */
+  private applyShaHandoff(
+    run: WorkflowRunRow, payload: { rootCardId: number; stage: string; result: string; final: boolean },
+    event: RunnerIngress,
+  ): CommitResult {
+    return this.store.commitTransition(event, () => {
+      if (!payload.final) return { noop: true };
+      // Final stage: ensure review dispatch for review nodes that need it:
+      // queued+unblocked nodes, plus running nodes with no open review command
+      // (reviewer died mid-review — re-queue with a fresh ordinal). Idempotent:
+      // nodes with a pending/claimed review command are skipped.
+      const rev = this.store.currentRevision(run.runId);
+      let queued = 0;
+      for (const row of this.store.listNodes(run.runId, rev)) {
+        if (row["kind"] !== "review") continue;
+        const nodeId = row["node_id"] as string;
+        const status = row["status"] as string;
+        if (status !== "queued" && status !== "running") continue;
+        if (this.store.hasUnsatisfiedDeps(run.runId, rev, nodeId)) continue;
+        if (this.store.hasCommand(run.runId, nodeId, "review", "pending")) continue;
+        if (status === "running" && this.store.hasCommand(run.runId, nodeId, "review", "claimed")) continue;
+        this.queueForNode(run.runId, run.generation, rev, nodeId, "review", {},
+          this.store.nextCommandOrdinal(run.runId, run.generation, nodeId, "review"));
+        queued++;
+      }
+      return queued > 0 ? {} : { noop: true };
+    });
+  }
+
+  // ── breaker refusal ───────────────────────────────────────────────────
+
+  submitBreakerRefused(runId: string, nodeId: string, resource: string, ordinal = 0): string {
+    const run = this.requireLive(runId);
+    resource = boundText(resource, 500);
+    const rev = this.store.currentRevision(runId);
+    const res = this.commitKind(run, "BreakerRefused", { nodeId, resource }, () => {
+      const node = this.store.listNodes(runId, rev).find((n) => n["node_id"] === nodeId);
+      if (!node || (node["status"] !== "queued" && node["status"] !== "running")) return { noop: true };
+      this.store.cancelCommand({ runId, generation: run.generation, nodeId, action: "dispatch", ordinal });
+      if (this.isOptionalNode(runId, rev, nodeId)) {
+        this.store.setNodeOutcome(runId, rev, nodeId, "skipped", `resource refused: ${resource}`);
+        this.store.satisfyDependents(runId, rev, nodeId);
+        return this.evaluateTerminal(runId, rev);
+      }
+      // Required work refused: fail fast AND cancel the run's leftover pending
+      // commands so no drain rediscovers them (the run is terminal; the audit
+      // ignores terminal runs, but dangling rows are not left behind).
+      this.store.db
+        .prepare(`UPDATE workflow_commands SET status = 'cancelled', done_at = datetime('now') WHERE run_id = ? AND status = 'pending'`)
+        .run(runId);
+      return { nextState: "failed" as const, failureCode: "resource_unavailable", failureReason: `resource refused: ${resource}` };
+    });
+    if (res.disposition === "conflict") throw new Error(`workflow runner: ${res.diagnostics}`);
+    return res.disposition;
+  }
+
   // ── drain + recovery + audit ──────────────────────────────────────────
 
-  drain(limit: number, ports: DrainPorts): number {
-    const route = (cmd: CommandRow): { owner: string; start: () => void } => {
+  drain(limit: number, ports: DrainPorts, opts?: DrainOpts): number {
+    const policy = opts?.policy;    const route = (cmd: CommandRow): { owner: string; start: () => void } => {
       if (!isJobPorts(ports) || cmd.action === "dispatch" || cmd.action === "deliver" || cmd.action === "notify") {
         const exec = isJobPorts(ports) ? ports.executor : ports;
         return { owner: exec.name, start: () => exec.dispatch(cmd) };
@@ -624,7 +1100,35 @@ export class WorkflowRunner {
       };
     };
     let dispatched = 0;
+    let firstError: unknown = null;
+    const keyOf = (cmd: CommandRow) => ({
+      runId: cmd.runId, generation: cmd.generation,
+      nodeId: cmd.nodeId, action: cmd.action, ordinal: cmd.ordinal,
+    });
     for (const cmd of this.store.drainPendingCommands(limit)) {
+      // Resource policy precedes the claim: refused work is never claimed,
+      // and refusal resolves immediately (fail or skip) — never fuse deferral.
+      if (policy && cmd.action === "dispatch") {
+        let resource: string | undefined;
+        try {
+          resource = (JSON.parse(cmd.payloadJson) as { resource?: string }).resource;
+        } catch {
+          resource = undefined;
+        }
+        if (policy.check({ runId: cmd.runId, action: cmd.action, resource }) === "refused") {
+          try {
+            this.submitBreakerRefused(cmd.runId, cmd.nodeId, resource ?? "default", cmd.ordinal);
+          } catch (err) {
+            // A run failed by an earlier refusal in this same drain pass leaves
+            // terminal leftovers behind: skip them (their commands were already
+            // cancelled by the failing commit), surface anything else.
+            const state = this.store.getRun(cmd.runId)?.state;
+            if (state === undefined || (TERMINAL_RUN_STATES as string[]).includes(state)) continue;
+            if (firstError === null) firstError = err;
+          }
+          continue;
+        }
+      }
       const target = route(cmd);
       const claimed = this.store.claimCommand(
         { runId: cmd.runId, generation: cmd.generation, nodeId: cmd.nodeId, action: cmd.action, ordinal: cmd.ordinal },
@@ -657,9 +1161,24 @@ export class WorkflowRunner {
           }
         }
       }
-      target.start();
+      try {
+        target.start();
+      } catch (err) {
+        // Capacity refusal releases the claim for redrive (the lease would
+        // cover it, but prompt release keeps the queue fluid). Any other port
+        // error leaves the claim for lease redrive and is reported at the end:
+        // one bad executor must not wedge the whole drain, and failures must
+        // surface instead of vanishing.
+        if (err instanceof CapacityBusy) {
+          this.store.releaseClaim(keyOf(cmd), target.owner, claimed.token);
+          continue;
+        }
+        if (firstError === null) firstError = err;
+        continue;
+      }
       dispatched++;
     }
+    if (dispatched === 0 && firstError !== null) throw firstError;
     return dispatched;
   }
 
@@ -700,6 +1219,15 @@ export class WorkflowRunner {
           this.applyAttemptFailed(run, this.store.currentRevision(atRunId),
             b["nodeId"] as string, b["attemptId"] as string,
             b["cause"] as string, b["retrySafe"] as boolean, event);
+        } else if (parsed.kind === "ClaimExpired") {
+          const b = parsed.body as {
+            key: { nodeId: string; action: CommandAction; ordinal: number; generation: number };
+            expectedGen: number;
+          };
+          this.applyClaimExpired(run, b.key, b.expectedGen, event);
+        } else if (parsed.kind === "ShaHandoff") {
+          const b = parsed.body as { rootCardId: number; stage: string; result: string; final: boolean };
+          this.applyShaHandoff(run, b, event);
         }
         // Other kinds belong to their owner (planning/review/input/delivery
         // jobs); recovery leaves them received for the audit to observe.
@@ -758,12 +1286,12 @@ export class WorkflowRunner {
    * work/synthesis/delivery → dispatch (executor), review → review (reviewer),
    * planning → plan (planner).
    */
-  private queueForNode(runId: string, generation: number, revision: number, nodeId: string, kind: string, payload: Record<string, unknown>): void {
+  private queueForNode(runId: string, generation: number, revision: number, nodeId: string, kind: string, payload: Record<string, unknown>, ordinal = 0): void {
     const action = kind === "review" ? "review" : kind === "planning" ? "plan" : "dispatch";
     // Planner guidance (single-open review op per revision): one review node
     // per revision; parallel review branches serialize through re-review.
     this.store.queueCommand({
-      runId, generation, nodeId, action, ordinal: 0,
+      runId, generation, nodeId, action, ordinal,
       payloadJson: JSON.stringify({
         nodeId, revision, ...payload,
         ...(kind === "planning" ? { purpose: "next_wave" } : {}),

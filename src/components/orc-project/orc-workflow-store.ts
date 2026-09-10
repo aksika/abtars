@@ -516,6 +516,24 @@ export class WorkflowStore {
     return Number(row.v) === 1;
   }
 
+  getDelivery(runId: string, nodeId: string): Record<string, unknown> | null {
+    const row = this.db
+      .prepare(`SELECT outcome, attempts, obligation_json, receipt_json FROM workflow_deliveries WHERE run_id = ? AND node_id = ?`)
+      .get(runId, nodeId) as Record<string, unknown> | undefined;
+    return row ?? null;
+  }
+
+  bumpDeliveryAttempts(runId: string, nodeId: string): number {
+    const res = this.db
+      .prepare(`UPDATE workflow_deliveries SET attempts = attempts + 1, updated_at = datetime('now') WHERE run_id = ? AND node_id = ? AND outcome = 'pending'`)
+      .run(runId, nodeId);
+    if (res.changes !== 1) throw new Error(`workflow store: delivery ${runId}/${nodeId} not pending`);
+    const row = this.db
+      .prepare(`SELECT attempts FROM workflow_deliveries WHERE run_id = ? AND node_id = ?`)
+      .get(runId, nodeId) as { attempts: number };
+    return Number(row.attempts);
+  }
+
   upsertOperation(op: {
     opId: string; runId: string; kind: "planning" | "review"; revision?: number | null;
     status: "pending" | "claimed" | "running" | "succeeded" | "failed" | "cancelled";
@@ -567,6 +585,72 @@ export class WorkflowStore {
     if (res.changes !== 1) {
       throw new Error(`workflow store: complete rejected for ${key.runId}/${key.nodeId} (stale or cross-owner)`);
     }
+  }
+
+  /**
+   * Release a claim back to pending (capacity refusal). Same fencing triple:
+   * only the claim owner with the live token can release it. The next claim
+   * mints a fresh token, so in-flight callbacks for the old claim complete
+   * zero rows. Observation schedule clears — the fresh claim reschedules.
+   */
+  releaseClaim(key: CommandKey, owner: string, token: string): boolean {
+    const res = this.db
+      .prepare(
+        `UPDATE workflow_commands SET status = 'pending', claimed_at = NULL,
+          owner = NULL, claim_token = NULL, next_inspection_at = NULL
+         WHERE run_id = ? AND generation = ? AND node_id = ? AND action = ? AND ordinal = ?
+           AND status = 'claimed' AND owner = ? AND claim_token = ?`,
+      )
+      .run(key.runId, key.generation, key.nodeId, key.action, key.ordinal, owner, token);
+    return res.changes === 1;
+  }
+
+  getCommand(key: CommandKey): CommandRow | null {
+    const row = this.db
+      .prepare(`SELECT * FROM workflow_commands WHERE run_id = ? AND generation = ? AND node_id = ? AND action = ? AND ordinal = ?`)
+      .get(key.runId, key.generation, key.nodeId, key.action, key.ordinal) as Record<string, unknown> | undefined;
+    return row ? rowToCommand(row) : null;
+  }
+
+  findPendingCommand(runId: string, nodeId: string, action: CommandAction): CommandRow | null {
+    const row = this.db
+      .prepare(
+        `SELECT * FROM workflow_commands WHERE run_id = ? AND node_id = ? AND action = ?
+           AND status = 'pending' ORDER BY ordinal LIMIT 1`,
+      )
+      .get(runId, nodeId, action) as Record<string, unknown> | undefined;
+    return row ? rowToCommand(row) : null;
+  }
+
+  hasCommand(runId: string, nodeId: string, action: CommandAction, status: CommandStatus): boolean {
+    const row = this.db
+      .prepare(`SELECT EXISTS(SELECT 1 FROM workflow_commands WHERE run_id = ? AND node_id = ? AND action = ? AND status = ?) AS v`)
+      .get(runId, nodeId, action, status) as { v: number };
+    return Number(row.v) === 1;
+  }
+
+  /** Cancel a pending command without executing it (breaker refusal, run cancel). */
+  cancelCommand(key: CommandKey): boolean {
+    const res = this.db
+      .prepare(
+        `UPDATE workflow_commands SET status = 'cancelled', done_at = datetime('now'),
+          next_inspection_at = NULL
+         WHERE run_id = ? AND generation = ? AND node_id = ? AND action = ? AND ordinal = ?
+           AND status = 'pending'`,
+      )
+      .run(key.runId, key.generation, key.nodeId, key.action, key.ordinal);
+    return res.changes === 1;
+  }
+
+  findRunByCard(rootCardId: number): WorkflowRunRow | null {
+    const row = this.db
+      .prepare(
+        `SELECT * FROM workflow_runs WHERE root_card_id = ?
+           AND state NOT IN ('succeeded','failed','cancelled')
+         ORDER BY created_at DESC LIMIT 1`,
+      )
+      .get(rootCardId) as Record<string, unknown> | undefined;
+    return row ? rowToRun(row) : null;
   }
 
   consumeBudget(runId: string, scope: BudgetScope): boolean {
@@ -684,5 +768,101 @@ export class WorkflowStore {
       .prepare(`UPDATE workflow_ingress SET disposition = 'noop', applied_at = datetime('now') WHERE event_id = ? AND disposition = 'received'`)
       .run(eventId);
     return res.changes === 1;
+  }
+
+  // ── input requests (runner-owned rows in the shared input table) ────
+  //
+  // project_input_requests is shared with the legacy review flow, but rows
+  // are namespaced by case reference (`wf:<runId>`): legacy flows never
+  // create or read wf-namespaced rows, and the runner never touches legacy
+  // rows (fenced by case reference in every statement below). Post-cutover
+  // the legacy writers are deleted and this becomes the only writer.
+
+  insertInputRequest(input: {
+    runId: string; cardId: number; caseRef: string; question: string;
+    criteria: string[]; kind?: string;
+  }): string {
+    const id = `inq-${Math.random().toString(36).slice(2, 10)}${Date.now().toString(36)}`;
+    this.db
+      .prepare(
+        `INSERT INTO project_input_requests (id, project_card_id, review_case_id,
+          question, affected_criterion_ids, expected_response_kind, context, status, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', datetime('now'))`,
+      )
+      .run(
+        id, input.cardId, input.caseRef, input.question, JSON.stringify(input.criteria),
+        input.kind ?? "text", JSON.stringify({ runId: input.runId }),
+      );
+    return id;
+  }
+
+  answerInputRequest(id: string, response: string): { runId: string; cardId: number } | null {
+    const row = this.db
+      .prepare(`SELECT project_card_id, context FROM project_input_requests WHERE id = ? AND status = 'pending'`)
+      .get(id) as { project_card_id: number; context: string | null } | undefined;
+    if (!row) return null;
+    this.db
+      .prepare(
+        `UPDATE project_input_requests SET status = 'answered', response_text = ?,
+          answered_at = datetime('now') WHERE id = ? AND status = 'pending'`,
+      )
+      .run(response, id);
+    let runId = "";
+    try {
+      runId = (JSON.parse(row.context ?? "{}") as { runId?: string }).runId ?? "";
+    } catch {
+      runId = "";
+    }
+    return { runId, cardId: Number(row.project_card_id) };
+  }
+
+  // ── execution-fact reads (fencing/verification stays in worker stores;
+  // the runner only reads by stable identity for inspection verdicts) ────
+
+  readAttempt(attemptId: string): Record<string, unknown> | null {    try {
+      const row = this.db
+        .prepare(`SELECT id, card_id, lifecycle, status, executor_kind, executor_id FROM worker_attempts WHERE id = ?`)
+        .get(attemptId) as Record<string, unknown> | undefined;
+      return row ?? null;
+    } catch {
+      return null; // table absent (minimal harness): unobservable, never alive.
+    }
+  }
+
+  readLeaseSnapshot(attemptId: string): Record<string, unknown> | null {
+    try {
+      const row = this.db
+        .prepare(`SELECT next_evaluation_at, closed_at FROM attempt_lease_snapshots WHERE attempt_id = ?`)
+        .get(attemptId) as Record<string, unknown> | undefined;
+      return row ?? null;
+    } catch {
+      return null;
+    }
+  }
+
+  /** Latest attempt for a worker card by ordinal (null when nothing ever started). */
+  latestAttemptForCard(cardId: number): Record<string, unknown> | null {
+    try {
+      const row = this.db
+        .prepare(
+          `SELECT id, lifecycle, status, started_at, executor_kind, executor_id
+           FROM worker_attempts WHERE card_id = ? ORDER BY ordinal DESC LIMIT 1`,
+        )
+        .get(cardId) as Record<string, unknown> | undefined;
+      return row ?? null;
+    } catch {
+      return null;
+    }
+  }
+
+  readResult(attemptId: string): string | null {
+    try {
+      const row = this.db
+        .prepare(`SELECT envelope_json FROM worker_results WHERE attempt_id = ?`)
+        .get(attemptId) as { envelope_json: string } | undefined;
+      return row?.envelope_json ?? null;
+    } catch {
+      return null;
+    }
   }
 }

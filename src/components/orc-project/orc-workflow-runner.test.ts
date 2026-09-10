@@ -7,6 +7,7 @@ import { vi } from "vitest";
 let TEST_HOME: string;
 let RunnerType: typeof import("./orc-workflow-runner.js").WorkflowRunner;
 let StoreType: typeof import("./orc-workflow-store.js").WorkflowStore;
+let RunnerMod: typeof import("./orc-workflow-runner.js");
 
 beforeAll(async () => {
   vi.resetModules();
@@ -17,6 +18,7 @@ beforeAll(async () => {
   const storeMod = await import("./orc-workflow-store.js");
   RunnerType = runnerMod.WorkflowRunner;
   StoreType = storeMod.WorkflowStore;
+  RunnerMod = runnerMod;
 });
 
 afterAll(() => {
@@ -29,6 +31,10 @@ type Runner = import("./orc-workflow-runner.js").WorkflowRunner;
 type Store = import("./orc-workflow-store.js").WorkflowStore;
 type Proposal = import("./orc-workflow-runner.js").PlanProposal;
 type BudgetScope = import("./orc-workflow-store.js").BudgetScope;
+type ReviewBrief = import("./orc-workflow-runner.js").ReviewBrief;
+
+let runner: Runner;
+let store: Store;
 
 let cardSeq = 5000;
 let copSeq = 0;
@@ -76,9 +82,6 @@ function fakePort() {
 }
 
 describe("WorkflowRunner Task 2", () => {
-  let runner: Runner;
-  let store: Store;
-
   beforeEach(() => {
     ({ runner, store } = makeRunner());
     // Tables owned by other stores (see orc-workflow-store.test.ts harness note).
@@ -89,14 +92,18 @@ describe("WorkflowRunner Task 2", () => {
         status TEXT NOT NULL, started_at TEXT NOT NULL,
         lifecycle TEXT NOT NULL DEFAULT 'pending',
         root_project_card_id INTEGER, root_project_generation INTEGER,
+        cancel_reason TEXT,
         UNIQUE(card_id, ordinal)
       );
       CREATE TABLE IF NOT EXISTS project_input_requests (
         id TEXT PRIMARY KEY, project_card_id INTEGER NOT NULL,
         review_case_id TEXT NOT NULL, question TEXT NOT NULL,
         affected_criterion_ids TEXT NOT NULL,
+        expected_response_kind TEXT NOT NULL DEFAULT 'text',
+        context TEXT,
         status TEXT NOT NULL DEFAULT 'pending',
-        created_at TEXT NOT NULL
+        created_at TEXT NOT NULL,
+        answered_at TEXT, response_text TEXT
       );
     `);
     for (const t of ["workflow_ingress", "workflow_deliveries", "workflow_commands", "workflow_budgets", "workflow_node_deps", "workflow_nodes", "workflow_plan_revisions", "workflow_operations", "workflow_runs"]) {
@@ -272,34 +279,6 @@ describe("WorkflowRunner Task 2", () => {
   });
 });
 
-describe("WorkflowRunner Task 3 — planning jobs and review verdicts", () => {
-  let runner: Runner;
-  let store: Store;
-
-  beforeEach(() => {
-    ({ runner, store } = makeRunner());
-    for (const t of ["workflow_ingress", "workflow_deliveries", "workflow_commands", "workflow_budgets", "workflow_node_deps", "workflow_nodes", "workflow_plan_revisions", "workflow_operations", "workflow_runs"]) {
-      store.db.exec(`DELETE FROM ${t}`);
-    }
-    store.db.exec(`
-      CREATE TABLE IF NOT EXISTS worker_attempts (
-        id TEXT PRIMARY KEY, card_id INTEGER NOT NULL, contract_id TEXT NOT NULL,
-        ordinal INTEGER NOT NULL, executor_kind TEXT NOT NULL, executor_id TEXT NOT NULL,
-        status TEXT NOT NULL, started_at TEXT NOT NULL,
-        lifecycle TEXT NOT NULL DEFAULT 'pending',
-        root_project_card_id INTEGER, root_project_generation INTEGER,
-        UNIQUE(card_id, ordinal)
-      );
-      CREATE TABLE IF NOT EXISTS project_input_requests (
-        id TEXT PRIMARY KEY, project_card_id INTEGER NOT NULL,
-        review_case_id TEXT NOT NULL, question TEXT NOT NULL,
-        affected_criterion_ids TEXT NOT NULL,
-        status TEXT NOT NULL DEFAULT 'pending',
-        created_at TEXT NOT NULL
-      );
-    `);
-  });
-
   const reviewPlan = (): Proposal => ({
     requiredOutputs: ["report"],
     nodes: [
@@ -309,19 +288,9 @@ describe("WorkflowRunner Task 3 — planning jobs and review verdicts", () => {
     ],
   });
 
-  /** Drive work+synthesis to completion so the review node dispatches. */
-  function completeToReview(runId: string, acc: { nodeIds: string[] }, ports: ReturnType<typeof jobPorts>["ports"]): string {
-    runner.drain(10, ports);
-    runner.attemptSucceeded(runId, acc.nodeIds[0] as string, "att-a", "{}");
-    runner.drain(10, ports);
-    runner.attemptSucceeded(runId, acc.nodeIds[1] as string, "att-s", "{}");
-    runner.drain(10, ports);
-    return acc.nodeIds[2] as string;
-  }
-
   function jobPorts() {
     const dispatched: Array<{ nodeId: string; action: string }> = [];
-    const reviews: Array<{ nodeId: string; brief: import("./orc-workflow-runner.js").ReviewBrief }> = [];
+    const reviews: Array<{ nodeId: string; brief: ReviewBrief }> = [];
     const plannings: Array<{ nodeId: string; purpose: string }> = [];
     const ports = {
       executor: {
@@ -332,7 +301,7 @@ describe("WorkflowRunner Task 3 — planning jobs and review verdicts", () => {
       },
       reviewer: {
         name: "fake-reviewer",
-        startReview: (cmd: { nodeId: string }, brief: import("./orc-workflow-runner.js").ReviewBrief) => {
+        startReview: (cmd: { nodeId: string }, brief: ReviewBrief) => {
           reviews.push({ nodeId: cmd.nodeId, brief });
         },
       },
@@ -345,6 +314,54 @@ describe("WorkflowRunner Task 3 — planning jobs and review verdicts", () => {
     };
     return { ports, dispatched, reviews, plannings };
   }
+
+  /** Drive work+synthesis to completion so the review node dispatches. */
+  function completeToReview(runId: string, acc: { nodeIds: string[] }, ports: ReturnType<typeof jobPorts>["ports"]): string {
+    runner.drain(10, ports);
+    runner.attemptSucceeded(runId, acc.nodeIds[0] as string, "att-a", "{}");
+    runner.drain(10, ports);
+    runner.attemptSucceeded(runId, acc.nodeIds[1] as string, "att-s", "{}");
+    runner.drain(10, ports);
+    return acc.nodeIds[2] as string;
+  }
+
+describe("WorkflowRunner Task 3 — planning jobs and review verdicts", () => {
+  beforeEach(() => {
+    ({ runner, store } = makeRunner());
+    for (const t of ["workflow_ingress", "workflow_deliveries", "workflow_commands", "workflow_budgets", "workflow_node_deps", "workflow_nodes", "workflow_plan_revisions", "workflow_operations", "workflow_runs"]) {
+      store.db.exec(`DELETE FROM ${t}`);
+    }
+    store.db.exec(`
+      CREATE TABLE IF NOT EXISTS worker_attempts (
+        id TEXT PRIMARY KEY, card_id INTEGER NOT NULL, contract_id TEXT NOT NULL,
+        ordinal INTEGER NOT NULL, executor_kind TEXT NOT NULL, executor_id TEXT NOT NULL,
+        status TEXT NOT NULL, started_at TEXT NOT NULL,
+        lifecycle TEXT NOT NULL DEFAULT 'pending',
+        root_project_card_id INTEGER, root_project_generation INTEGER,
+        cancel_reason TEXT,
+        UNIQUE(card_id, ordinal)
+      );
+      CREATE TABLE IF NOT EXISTS project_input_requests (
+        id TEXT PRIMARY KEY, project_card_id INTEGER NOT NULL,
+        review_case_id TEXT NOT NULL, question TEXT NOT NULL,
+        affected_criterion_ids TEXT NOT NULL,
+        expected_response_kind TEXT NOT NULL DEFAULT 'text',
+        context TEXT,
+        status TEXT NOT NULL DEFAULT 'pending',
+        created_at TEXT NOT NULL,
+        answered_at TEXT, response_text TEXT
+      );
+    `);
+  });
+
+  const reviewPlan = (): Proposal => ({
+    requiredOutputs: ["report"],
+    nodes: [
+      { label: "a", kind: "work", instructions: "research", capability: "research", outputs: ["notes"], acceptance: ["thorough"], dependsOn: [] },
+      { label: "s", kind: "synthesis", instructions: "draft", capability: "write", outputs: ["report"], acceptance: ["complete"], dependsOn: ["a"] },
+      { label: "r", kind: "review", instructions: "judge", capability: "general", outputs: [], acceptance: [], dependsOn: ["s"] },
+    ],
+  });
 
   it("review accept creates a durable delivery obligation without succeeding the run", () => {
     const run = admit(runner, seedCard(store));
@@ -493,5 +510,281 @@ describe("WorkflowRunner Task 3 — planning jobs and review verdicts", () => {
     runner.drain(10, port);
     // Review command also flows to the single port (pre-cutover compat).
     expect(dispatched.length).toBe(3);
+  });
+});
+
+describe("WorkflowRunner Task 4 — cancellation, delivery, input, inspection", () => {
+  beforeEach(() => {
+    ({ runner, store } = makeRunner());
+    for (const t of ["workflow_ingress", "workflow_deliveries", "workflow_commands", "workflow_budgets", "workflow_node_deps", "workflow_nodes", "workflow_plan_revisions", "workflow_operations", "workflow_runs"]) {
+      store.db.exec(`DELETE FROM ${t}`);
+    }
+    store.db.exec(`
+      CREATE TABLE IF NOT EXISTS worker_attempts (
+        id TEXT PRIMARY KEY, card_id INTEGER NOT NULL, contract_id TEXT NOT NULL,
+        ordinal INTEGER NOT NULL, executor_kind TEXT NOT NULL, executor_id TEXT NOT NULL,
+        status TEXT NOT NULL, started_at TEXT NOT NULL,
+        lifecycle TEXT NOT NULL DEFAULT 'pending',
+        root_project_card_id INTEGER, root_project_generation INTEGER,
+        cancel_reason TEXT,
+        UNIQUE(card_id, ordinal)
+      );
+      CREATE TABLE IF NOT EXISTS project_input_requests (
+        id TEXT PRIMARY KEY, project_card_id INTEGER NOT NULL,
+        review_case_id TEXT NOT NULL, question TEXT NOT NULL,
+        affected_criterion_ids TEXT NOT NULL,
+        expected_response_kind TEXT NOT NULL DEFAULT 'text',
+        context TEXT,
+        status TEXT NOT NULL DEFAULT 'pending',
+        created_at TEXT NOT NULL,
+        answered_at TEXT, response_text TEXT
+      );
+      CREATE TABLE IF NOT EXISTS retry_budget_reservations (
+        source_attempt_id TEXT PRIMARY KEY, target_attempt_id TEXT UNIQUE NOT NULL,
+        reserved_attempts INTEGER NOT NULL CHECK(reserved_attempts = 1),
+        reserved_tokens INTEGER NOT NULL, reserved_cost REAL NOT NULL,
+        reserved_switches INTEGER NOT NULL,
+        status TEXT NOT NULL CHECK(status IN ('active','claimed','released','consumed')),
+        created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+      );
+      CREATE TABLE IF NOT EXISTS attempt_lease_snapshots (
+        attempt_id TEXT PRIMARY KEY, card_id INTEGER,
+        claim_generation INTEGER NOT NULL, executor_kind TEXT NOT NULL,
+        executor_id TEXT NOT NULL, high_water_sequence INTEGER NOT NULL,
+        state_version INTEGER DEFAULT 1, next_evaluation_at TEXT,
+        closed_at TEXT, snapshot_json TEXT NOT NULL, updated_at TEXT NOT NULL
+      );
+    `);
+    store.db.exec(`DELETE FROM worker_attempts`);
+    store.db.exec(`DELETE FROM project_input_requests`);
+    store.db.exec(`DELETE FROM retry_budget_reservations`);
+    store.db.exec(`DELETE FROM attempt_lease_snapshots`);
+  });
+
+  const reviewPlan = (): Proposal => ({
+    requiredOutputs: ["report"],
+    nodes: [
+      { label: "a", kind: "work", instructions: "research", capability: "research", outputs: ["notes"], acceptance: ["thorough"], dependsOn: [] },
+      { label: "s", kind: "synthesis", instructions: "draft", capability: "write", outputs: ["report"], acceptance: ["complete"], dependsOn: ["a"] },
+      { label: "r", kind: "review", instructions: "judge", capability: "general", outputs: [], acceptance: [], dependsOn: ["s"] },
+    ],
+  });
+
+  function senderOk() {
+    const sent: Array<{ key: string }> = [];
+    return {
+      sent,
+      sender: {
+        send: (doc: { runId: string; nodeId: string; idempotenceKey: string }) => {
+          sent.push({ key: doc.idempotenceKey });
+          return `receipt-for-${doc.idempotenceKey}`;
+        },
+      },
+    };
+  }
+
+  it("cancellation fences attempts, releases reservations, and blocks late results", () => {
+    const run = admit(runner, seedCard(store));
+    runner.acceptPlan(run.runId, twoLane());
+    const { port } = fakePort();
+    runner.drain(10, port);
+    store.db.prepare(
+      `INSERT INTO worker_attempts (id, card_id, contract_id, ordinal, executor_kind, executor_id, status, started_at, lifecycle, root_project_card_id, root_project_generation)
+       VALUES ('att-live', 91001, 'ctr', 1, 'spin', 'ex', 'running', datetime('now'), 'running', ?, 1)`,
+    ).run(run.rootCardId);
+    store.db.prepare(
+      `INSERT INTO retry_budget_reservations (source_attempt_id, target_attempt_id, reserved_attempts, reserved_tokens, reserved_cost, reserved_switches, status, created_at, updated_at)
+       VALUES ('att-live', 'att-next', 1, 0, 0, 0, 'active', datetime('now'), datetime('now'))`,
+    ).run();
+    const res = runner.requestCancel(run.runId, "operator stop");
+    expect(res.cancelled).toBe(true);
+    expect(res.attemptsFenced).toBe(1);
+    expect(store.getRun(run.runId)?.state).toBe("cancelled");
+    const att = store.db.prepare(`SELECT lifecycle FROM worker_attempts WHERE id = 'att-live'`).get() as { lifecycle: string };
+    expect(att.lifecycle).toBe("cancel_requested");
+    const rsv = store.db.prepare(`SELECT status FROM retry_budget_reservations WHERE source_attempt_id = 'att-live'`).get() as { status: string };
+    expect(rsv.status).toBe("released");
+    // Idempotent second cancel; late results rejected, never resurrected.
+    expect(runner.requestCancel(run.runId, "again").cancelled).toBe(false);
+    expect(() => runner.attemptSucceeded(run.runId, "whatever", "att-late", "{}")).toThrow(/terminal.*late result rejected/);
+    expect(store.getRun(run.runId)?.state).toBe("cancelled");
+  });
+
+  it("zero-worker failure settles immediately with no clock involvement", () => {
+    const run = admit(runner, seedCard(store));
+    const acc = runner.acceptPlan(run.runId, twoLane());
+    // B succeeds first; A then fails while still queued — no worker ever
+    // touched A, yet the run settles synchronously in the same call.
+    runner.attemptSucceeded(run.runId, acc.nodeIds[1] as string, "att-b", "{}");
+    runner.attemptFailed(run.runId, acc.nodeIds[0] as string, "att-never", "admission revoked", false);
+    expect(store.getRun(run.runId)?.state).toBe("failed");
+    // Its stale dispatch command completes without dispatch on drain.
+    const { port, dispatched } = fakePort();
+    expect(runner.drain(10, port)).toBe(0);
+    expect(dispatched.length).toBe(0);
+  });
+
+  it("delivery acknowledges with receipt; duplicates cannot resend", () => {
+    const run = admit(runner, seedCard(store));
+    const acc = runner.acceptPlan(run.runId, reviewPlan());
+    const { ports } = jobPorts();
+    const rNode = completeToReview(run.runId, acc, ports);
+    runner.submitVerdict(run.runId, rNode, { verdict: "accept" });
+    const { sender, sent } = senderOk();
+    expect(runner.executeDelivery(run.runId, rNode, sender)).toBe("acknowledged");
+    expect(sent.length).toBe(1);
+    expect(sent[0]?.key).toBe(`${run.runId}/${rNode}/1`);
+    const row = store.db.prepare(`SELECT outcome FROM workflow_deliveries WHERE run_id = ?`).get(run.runId) as { outcome: string };
+    expect(row.outcome).toBe("acknowledged");
+    expect(() => runner.executeDelivery(run.runId, rNode, sender)).toThrow(/no pending deliver command/);
+    expect(sent.length).toBe(1);
+  });
+
+  it("ambiguous send resolves unknown without resend; definitive failure retries bounded", () => {
+    const run = admit(runner, seedCard(store));
+    const acc = runner.acceptPlan(run.runId, reviewPlan());
+    const { ports } = jobPorts();
+    const rNode = completeToReview(run.runId, acc, ports);
+    runner.submitVerdict(run.runId, rNode, { verdict: "accept" });
+    let calls = 0;
+    const flaky = {
+      send: (_doc: { idempotenceKey: string }) => {
+        calls++;
+        throw new Error("transport timeout: outcome unknown");
+      },
+    };
+    expect(runner.executeDelivery(run.runId, rNode, flaky)).toBe("unknown");
+    expect(calls).toBe(1);
+    const row = store.db.prepare(`SELECT outcome FROM workflow_deliveries WHERE run_id = ?`).get(run.runId) as { outcome: string };
+    expect(row.outcome).toBe("unknown");
+
+    const run2 = admit(runner, seedCard(store));
+    const acc2 = runner.acceptPlan(run2.runId, reviewPlan());
+    const { ports: ports2 } = jobPorts();
+    const r2 = completeToReview(run2.runId, acc2, ports2);
+    runner.submitVerdict(run2.runId, r2, { verdict: "accept" });
+    let n = 0;
+    const eventual = {
+      send: (doc: { idempotenceKey: string }) => {
+        n++;
+        if (n === 1) {
+          const err = new Error("refused") as Error & { definitive: boolean };
+          err.definitive = true;
+          throw err;
+        }
+        return `ok-${doc.idempotenceKey}`;
+      },
+    };
+    expect(runner.executeDelivery(run2.runId, r2, eventual)).toBe("retry_queued");
+    expect(runner.executeDelivery(run2.runId, r2, eventual)).toBe("acknowledged");
+    expect(n).toBe(2);
+  });
+
+  it("input request pauses visibly; answer resumes; double answer rejected", () => {
+    const run = admit(runner, seedCard(store));
+    runner.acceptPlan(run.runId, twoLane());
+    const q = "which region?";
+    const id = runner.requestInput(run.runId, q, ["report"], "text");
+    expect(typeof id).toBe("string");
+    expect(store.getRun(run.runId)?.state).toBe("awaiting_input");
+    expect(() => runner.requestInput(run.runId, "again?", [])).toThrow(/already awaiting/);
+    expect(runner.answerInput(id, "us-west").runId).toBe(run.runId);
+    expect(store.getRun(run.runId)?.state).toBe("executing");
+    expect(() => runner.answerInput(id, "twice")).toThrow(/unknown or already answered/);
+  });
+
+  it("capacity refusal releases the claim; other errors surface without wedging drain", () => {
+    const run = admit(runner, seedCard(store));
+    runner.acceptPlan(run.runId, twoLane());
+    const busyPort = { name: "full-exec", dispatch: (_cmd: unknown) => { throw new RunnerMod.CapacityBusy(); } };
+    expect(runner.drain(10, busyPort)).toBe(0);
+    const pending = store.db.prepare(`SELECT COUNT(*) AS c FROM workflow_commands WHERE run_id = ? AND status = 'pending'`).get(run.runId) as { c: number };
+    expect(Number(pending.c)).toBe(2);
+    const { port, dispatched } = fakePort();
+    expect(runner.drain(10, port)).toBe(2);
+    expect(dispatched.length).toBe(2);
+
+    const run2 = admit(runner, seedCard(store));
+    runner.acceptPlan(run2.runId, twoLane());
+    const boom = { name: "boom", dispatch: (_cmd: unknown) => { throw new Error("executor exploded"); } };
+    expect(() => runner.drain(10, boom)).toThrow(/executor exploded/);
+  });
+
+  it("breaker refusal fails required work immediately and spares review", () => {
+    const run = admit(runner, seedCard(store));
+    runner.acceptPlan(run.runId, twoLane());
+    const policy = {
+      check: (input: { action: string }) => (input.action === "dispatch" ? "refused" as const : "ok" as const),
+    };
+    const { port } = fakePort();
+    runner.drain(10, port, { policy });
+    expect(store.getRun(run.runId)?.state).toBe("failed");
+    expect(store.getRun(run.runId)?.failureCode).toBe("resource_unavailable");
+
+    const run2 = admit(runner, seedCard(store));
+    const proposal: Proposal = {
+      requiredOutputs: ["report"],
+      nodes: [
+        { label: "opt", kind: "work", instructions: "nice", capability: "general", outputs: ["extra"], acceptance: ["done"], dependsOn: [], optional: true },
+        { label: "main", kind: "work", instructions: "core", capability: "general", outputs: ["report"], acceptance: ["done"], dependsOn: [] },
+        { label: "r", kind: "review", instructions: "judge", capability: "general", outputs: [], acceptance: [], dependsOn: ["opt", "main"] },
+      ],
+    };
+    const acc2 = runner.acceptPlan(run2.runId, proposal);
+    runner.drain(10, port, { policy });
+    const nodes = store.listNodes(run2.runId, 1);
+    const optId = acc2.nodeIds[0] as string;
+    expect(nodes.find((n) => n["node_id"] === optId)?.["status"]).toBe("skipped");
+    // Review was never blanket-blocked by the execution fuse: it stays queued.
+    expect(nodes.find((n) => n["kind"] === "review")?.["status"]).toBe("queued");
+  });
+
+  it("inspection requeues work that never started, fenced by fresh tokens", () => {
+    const run = admit(runner, seedCard(store));
+    const acc = runner.acceptPlan(run.runId, twoLane());
+    const key = { nodeId: acc.nodeIds[0] as string, action: "dispatch" as const, ordinal: 0, generation: 1 };
+    const claimed = store.claimCommand({ runId: run.runId, ...key }, "gone");
+    expect(claimed).not.toBeNull();
+    // Age the claim past the lease with no attempt ever starting.
+    store.db.prepare(`UPDATE workflow_commands SET next_inspection_at = datetime('now','-10 minutes') WHERE run_id = ?`).run(run.runId);
+    const out = runner.inspectClaim(run.runId, key, 1);
+    expect(out).toMatch(/^applied:pending$/);
+    // Stale token from the expired claim completes nothing after re-claim.
+    const reclaimed = store.claimCommand({ runId: run.runId, ...key }, "fresh");
+    expect(reclaimed).not.toBeNull();
+    expect(() => store.completeCommand({ runId: run.runId, ...key }, "gone", claimed?.token ?? "")).toThrow(/rejected/);
+    store.completeCommand({ runId: run.runId, ...key }, "fresh", reclaimed?.token ?? "");
+  });
+
+  it("SHA final handoff queues review once; non-final and unknown cards noop", () => {
+    const run = admit(runner, seedCard(store));
+    const acc = runner.acceptPlan(run.runId, reviewPlan());
+    expect(runner.acceptShaHandoff({ rootCardId: run.rootCardId, stage: "solution", result: "ok", final: false })).toBe("noop");
+    // Review node blocked behind work: nothing queued yet, still recorded.
+    expect(runner.acceptShaHandoff({ rootCardId: run.rootCardId, stage: "solution", result: "ok", final: true })).toBe("noop");
+    // Complete the work; the reviewer claims the review command, then dies
+    // without a verdict. Complete its orphaned claim; the handoff re-queues.
+    const { ports } = jobPorts();
+    const rNode = completeToReview(run.runId, acc, ports);
+    const claim = store.db.prepare(
+      `SELECT generation, ordinal, owner, claim_token FROM workflow_commands WHERE run_id = ? AND node_id = ? AND action = 'review' AND status = 'claimed'`,
+    ).get(run.runId, rNode) as { generation: number; ordinal: number; owner: string; claim_token: string };
+    store.completeCommand(
+      { runId: run.runId, generation: Number(claim["generation"]), nodeId: rNode, action: "review", ordinal: Number(claim["ordinal"]) },
+      claim["owner"] as string, claim["claim_token"] as string,
+    );
+    expect(runner.acceptShaHandoff({ rootCardId: run.rootCardId, stage: "solution", result: "ok", final: true })).toBe("applied");
+    // A second handoff finds the replacement already pending: noop.
+    expect(runner.acceptShaHandoff({ rootCardId: run.rootCardId, stage: "solution", result: "ok", final: true })).toBe("noop");
+    expect(runner.acceptShaHandoff({ rootCardId: 987654321, stage: "x", result: "y", final: true })).toBe("no-run:noop");
+  });
+
+  it("diagnostics are bounded and never raw payloads", () => {
+    const run = admit(runner, seedCard(store));
+    const acc = runner.acceptPlan(run.runId, twoLane());
+    const big = `x`.repeat(5000);
+    runner.attemptFailed(run.runId, acc.nodeIds[0] as string, "att-1", big, false);
+    const node = store.listNodes(run.runId, 1).find((n) => n["node_id"] === acc.nodeIds[0]);
+    expect((node?.["outcome"] as string).length).toBeLessThan(2200);
   });
 });
