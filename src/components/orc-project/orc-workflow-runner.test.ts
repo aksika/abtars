@@ -148,7 +148,7 @@ describe("WorkflowRunner Task 2", () => {
       runId: run.runId, generation: 1, nodeId: acc.nodeIds[0] as string,
       action: "deliver", ordinal: 0, payloadJson: "{}",
     });
-    const sender = { send: (_doc: { idempotenceKey: string }) => "receipt-never" };
+    const sender = { name: "test-sender", send: (_doc: { runId: string; nodeId: string; obligation: string; idempotenceKey: string }) => "receipt-never" };
     expect(() => runner.executeDelivery(run.runId, acc.nodeIds[0] as string, sender))
       .toThrow(/no delivery obligation.*never accepted/);
   });
@@ -604,7 +604,8 @@ describe("WorkflowRunner Task 4 — cancellation, delivery, input, inspection", 
     return {
       sent,
       sender: {
-        send: (doc: { runId: string; nodeId: string; idempotenceKey: string }) => {
+        name: "ok-sender",
+        send: (doc: { runId: string; nodeId: string; obligation: string; idempotenceKey: string }) => {
           sent.push({ key: doc.idempotenceKey });
           return `receipt-for-${doc.idempotenceKey}`;
         },
@@ -680,7 +681,8 @@ describe("WorkflowRunner Task 4 — cancellation, delivery, input, inspection", 
     runner.submitVerdict(run.runId, rNode, { verdict: "accept" });
     let calls = 0;
     const flaky = {
-      send: (_doc: { idempotenceKey: string }) => {
+      name: "flaky-sender",
+      send: (_doc: { runId: string; nodeId: string; obligation: string; idempotenceKey: string }) => {
         calls++;
         throw new Error("transport timeout: outcome unknown");
       },
@@ -697,7 +699,8 @@ describe("WorkflowRunner Task 4 — cancellation, delivery, input, inspection", 
     runner.submitVerdict(run2.runId, r2, { verdict: "accept" });
     let n = 0;
     const eventual = {
-      send: (doc: { idempotenceKey: string }) => {
+      name: "eventual-sender",
+      send: (doc: { runId: string; nodeId: string; obligation: string; idempotenceKey: string }) => {
         n++;
         if (n === 1) {
           const err = new Error("refused") as Error & { definitive: boolean };

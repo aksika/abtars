@@ -1,6 +1,6 @@
 {
   "_comment": "Existing test-file typecheck debt, frozen by #1742. May shrink, never grow. A baseline increase is a review red flag; fix the test, do not raise the baseline.",
-  "_recorded": "2026-09-03",
+  "_recorded": "2026-09-10",
   "files": {
     "src/boot/env-secret-migration.test.ts": 12,
     "src/boot/memory-recomposition-lifecycle.test.ts": 1,
@@ -23,7 +23,7 @@
     "src/cli/install-manifest.test.ts": 1,
     "src/components/abmind-signed-wss-client.test.ts": 1,
     "src/components/agent-api-router.test.ts": 5,
-    "src/components/agent-api-server.test.ts": 11,
+    "src/components/agent-api-server.test.ts": 2,
     "src/components/agent-registry.test.ts": 6,
     "src/components/artifact-store.test.ts": 4,
     "src/components/command-handlers.test.ts": 5,
@@ -55,8 +55,8 @@
     "src/components/pipeline/busy-guard.test.ts": 1,
     "src/components/pipeline/commands.test.ts": 1,
     "src/components/pipeline/session-selection.test.ts": 1,
-    "src/components/reconciler-lifecycle.test.ts": 6,
-    "src/components/reconciler.test.ts": 16,
+    "src/components/reconciler-lifecycle.test.ts": 5,
+    "src/components/reconciler.test.ts": 6,
     "src/components/retry/retry-directive.test.ts": 5,
     "src/components/session-instruction-queue-1444.test.ts": 1,
     "src/components/session-instruction-queue.test.ts": 3,
@@ -112,7 +112,6 @@
     "src/platforms/tui/tui-socket-adapter.test.ts": 36,
     "src/supervisor/state.test.ts": 1,
     "src/test-support/test-isolation-policy.test.ts": 21,
-    "src/tests/orc-containment-smoke.test.ts": 1,
     "src/tests/smoke.test.ts": 4,
     "src/utils/crypto.test.ts": 3,
     "src/utils/sqlite-migrate.test.ts": 3

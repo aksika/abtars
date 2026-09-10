@@ -43,7 +43,7 @@ describe("AgentApiAdapter.handlePeerChat (#1786)", () => {
     });
     expect(out).toBe("hello peer");
     expect(spinMock).toHaveBeenCalledTimes(1);
-    const spec = spinMock.mock.calls[0][0];
+    const spec = spinMock.mock.calls[0]![0];
     expect(spec.type).toBe("P");
     expect(spec.goal).toBeUndefined();
     expect(spec.cardId).toBeUndefined();
@@ -118,7 +118,7 @@ describe("AgentApiAdapter.handlePeerChat (#1786)", () => {
     expect(spinMock).toHaveBeenCalledWith(expect.objectContaining({
       type: "P", source: "peer", settlementOwner: "spin",
     }));
-    const spec = spinMock.mock.calls[0][0];
+    const spec = spinMock.mock.calls[0]![0];
     expect(spec.goal).toBeUndefined();
   });
 });

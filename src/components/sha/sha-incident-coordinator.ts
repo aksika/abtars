@@ -507,6 +507,18 @@ export class ShaIncidentCoordinator {
       // #1688 review: fire the root failed event after commit so other nerve
       // listeners observe the terminal block.
       nerve.fire("card:failed", rootCardId);
+      // #1792: a live runner run (post-handoff admission) must not keep
+      // working a blocked incident — cancel it through the runner. Contained:
+      // the incident block already committed above.
+      try {
+        const store = new WorkflowStore(this.db);
+        const supervised = store.findRunByCard(rootCardId);
+        if (supervised) {
+          new WorkflowRunner(store).requestCancel(supervised.runId, `sha incident blocked: ${reason.slice(0, 200)}`);
+        }
+      } catch (err) {
+        logWarn(TAG, `SHA runner cancel on block contained for root ${rootCardId}: ${err instanceof Error ? err.message : String(err)}`);
+      }
     } catch (err) {
       logWarn(TAG, `blockIncident failed for ${incidentId}: ${err instanceof Error ? err.message : String(err)}`);
     }

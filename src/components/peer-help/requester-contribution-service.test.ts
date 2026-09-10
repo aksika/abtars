@@ -72,11 +72,13 @@ function makeEnv(): Env {
     kanbanFail: () => {},
   });
   const reviewStore = new ProjectReviewStore(wrapper as any);
-  const env: Env = {
+  // #1792: Env requires the service, but the service closes over env —
+  // construct the shell first, then attach (same pattern as before).
+  const env = {
     sends: [],
     wakes: [],
     nextResponse: { version: 1, request_id: "req_1", decision: "declined", reason_code: "policy" },
-  };
+  } as unknown as Env;
   env.service = new RequesterContributionService({
     contributionStore,
     taskDb: wrapper as any,

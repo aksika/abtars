@@ -19,6 +19,8 @@ function makeConfig(overrides: Record<string, unknown> = {}) {
     cliPath: "kiro-cli",
     workingDir: "/tmp",
     memoryRuntime: null,
+    // Required AgentApiDeps surface owned by other slices; not under test here.
+    runtime: {} as never,
   };
 }
 

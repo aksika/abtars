@@ -154,7 +154,7 @@ describe("buildPrompt session-context request (#1776)", () => {
       recordMessage,
       assembleSessionContext,
     } as never;
-    const deps = { ...baseDeps(runtime), maxContext: 128000 } as never;
+    const deps = { ...(baseDeps(runtime) as Record<string, unknown>), maxContext: 128000 } as never;
     const result = await buildPrompt(
       { userId: "master", channelId: "1", platform: "telegram", isGroup: false, messageId: "hydra-1" } as never,
       "hello",

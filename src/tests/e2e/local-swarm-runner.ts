@@ -311,7 +311,6 @@ async function admitRunnerProject(
   const { WorkflowRunner } = await import("../../components/orc-project/orc-workflow-runner.js") as typeof import("../../components/orc-project/orc-workflow-runner.js");
   const { WorkflowStore } = await import("../../components/orc-project/orc-workflow-store.js") as typeof import("../../components/orc-project/orc-workflow-store.js");
   const { RoutingWorkflowWorkerPort, workflowCapabilities } = await import("../../components/orc-project/orc-workflow-ports.js") as typeof import("../../components/orc-project/orc-workflow-ports.js");
-  const { ProjectReviewStore } = await import("../../components/project-acceptance/project-review-store.js") as typeof import("../../components/project-acceptance/project-review-store.js");
   const { nerve } = await import("../../components/nerve.js") as typeof import("../../components/nerve.js");
   type CommandKey = import("../../components/orc-project/orc-workflow-store.js").CommandKey;
 
@@ -335,13 +334,9 @@ async function admitRunnerProject(
   const runId = (admitted.runId ?? store.findLatestRunByCard(projectCardId)?.runId) as string;
   if (!runId) fail("admission", "NO_RUN", "admission produced no run");
 
-  // #1792 harness: the retained executor dispatch fence
-  // (claimAttemptWithinLimits) requires executing/repairing supervision.
-  // The runner leaves awaiting_contract until its terminal projection; the
-  // harness moves to executing so the real Spin/Pi dispatch pump can claim
-  // (mirrors pre-cutover define_project_contract which initialized
-  // executing). Terminal projections accept from executing.
-  new ProjectReviewStore(store.db).stateTransition(projectCardId, ["awaiting_contract"], "executing");
+  // #1792: no manual executing transition — the production worker ports move
+  // supervision awaiting_contract→executing on first dispatch (the retained
+  // claim fence refuses awaiting roots). The harness exercises that path.
 
   // Production routing executor: capability-based (Pi alias as capability for
   // Pi lanes, general for Spin). Exercises WorkflowPiPort + joint commit +

@@ -58,7 +58,7 @@ describe("#1520 peer identity boundary", () => {
 
   it("peer_doorbell rejects local session identities with zero transport calls", async () => {
     for (const name of LOCAL_NAMES) {
-      const out = await executeToolCall("peer_doorbell", { peer_name: name }, {});
+      const out = await executeToolCall("peer_doorbell", { peer_name: name }, {} as never);
       const parsed = JSON.parse(out) as { code?: string; error?: string };
       expect(parsed.code).toBe("local_session_not_peer");
       expect(ringDoorbell).not.toHaveBeenCalled();
@@ -67,7 +67,7 @@ describe("#1520 peer identity boundary", () => {
   });
 
   it("peer_doorbell rejects unknown external names with zero transport calls", async () => {
-    const out = await executeToolCall("peer_doorbell", { peer_name: "nobody" }, {});
+    const out = await executeToolCall("peer_doorbell", { peer_name: "nobody" }, {} as never);
     const parsed = JSON.parse(out) as { code?: string; error?: string };
     expect(parsed.code).toBe("peer_not_enrolled");
     expect(ringDoorbell).not.toHaveBeenCalled();

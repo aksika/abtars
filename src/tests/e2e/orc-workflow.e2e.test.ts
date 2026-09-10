@@ -202,7 +202,7 @@ describe("orc-workflow E2E (Task 6)", () => {
     for (const kind of ["interactive", "scheduled"] as const) {
       const { run, acc, card } = admitAndPlan(kind, reportPlan());
       expect(run.rootKind).toBe(kind === "scheduled" ? "scheduled" : "interactive");
-      const { ports } = scriptedPorts({});
+      const { ports } = scriptedPorts();
       expect(runner.drain(10, ports)).toBe(1);
       const reportPath = writeArtifact(`report-${run.runId}.md`, `# Report\n\nThorough notes.\n`);
       runner.attemptSucceeded(run.runId, acc.nodeIds[0] as string, `att-${attSeq++}`, JSON.stringify({ artifact: reportPath }));
@@ -216,7 +216,7 @@ describe("orc-workflow E2E (Task 6)", () => {
       expect(runner.submitVerdict(run.runId, acc.nodeIds[2] as string, { verdict: "accept" })).toBe("accepted");
       // Accepted content is not proof of delivery: run waits for ack.
       expect(store.getRun(run.runId)?.state).not.toBe("succeeded");
-      const sender = { send: (doc: { idempotenceKey: string }) => `receipt:${doc.idempotenceKey}` };
+      const sender = { name: "e2e-sender", send: (doc: { runId: string; nodeId: string; obligation: string; idempotenceKey: string }) => `receipt:${doc.idempotenceKey}` };
       expect(runner.executeDelivery(run.runId, acc.nodeIds[2] as string, sender)).toBe("acknowledged");
       void card;
       // Terminal run/projection agreement (pass evidence): run, card, and
@@ -261,7 +261,7 @@ describe("orc-workflow E2E (Task 6)", () => {
   // Journey 3: worker failure modes without ownerless waiting.
   it("retry succeeds; required failure settles; optional failure proceeds", () => {
     const { run, acc } = admitAndPlan("interactive", twoLane());
-    const { ports } = scriptedPorts({});
+    const { ports } = scriptedPorts();
     runner.drain(10, ports);
     const research = acc.nodeIds[0] as string;
     runner.attemptFailed(run.runId, research, "att-r1", "flaky lane", true);
@@ -282,7 +282,7 @@ describe("orc-workflow E2E (Task 6)", () => {
   it("deficient output is repaired and only the repaired revision passes", () => {
     const { run } = admitAndPlan("interactive", reportPlan());
     const nodes = store.listNodes(run.runId, 1).map((n) => n["node_id"] as string);
-    const { ports } = scriptedPorts({});
+    const { ports } = scriptedPorts();
     runner.drain(10, ports);
     runner.attemptSucceeded(run.runId, nodes[0] as string, "att-a", "{}");
     runner.drain(10, ports);
@@ -313,7 +313,7 @@ describe("orc-workflow E2E (Task 6)", () => {
   it("restart redrives unapplied ingress; duplicates and late results change nothing", () => {
     const { run } = admitAndPlan("interactive", reportPlan());
     const nodes = store.listNodes(run.runId, 1).map((n) => n["node_id"] as string);
-    const { ports } = scriptedPorts({});
+    const { ports } = scriptedPorts();
     runner.drain(10, ports);
     // Crash between worker commit and wake: plant the received completion.
     const payload = JSON.stringify({
@@ -337,7 +337,7 @@ describe("orc-workflow E2E (Task 6)", () => {
     runner.attemptSucceeded(run.runId, nodes[1] as string, "att-s", "{}");
     runner.drain(10, ports);
     runner.submitVerdict(run.runId, nodes[2] as string, { verdict: "accept" });
-    const sender = { send: (_doc: { idempotenceKey: string }) => "receipt" };
+    const sender = { name: "e2e-sender", send: (_doc: { runId: string; nodeId: string; obligation: string; idempotenceKey: string }) => "receipt" };
     runner.executeDelivery(run.runId, nodes[2] as string, sender);
     expect(store.getRun(run.runId)?.state).toBe("succeeded");
     expect(() => runner.attemptFailed(run.runId, nodes[0] as string, "att-late", "x", false))
@@ -347,14 +347,14 @@ describe("orc-workflow E2E (Task 6)", () => {
   // Journey 6: cancellation, capacity, breaker.
   it("cancellation wins races; capacity release wakes; breaker resolves explicitly", () => {
     const { run } = admitAndPlan("interactive", reportPlan());
-    const { ports } = scriptedPorts({});
+    const { ports } = scriptedPorts();
     runner.drain(10, ports);
     const res = runner.requestCancel(run.runId, "operator stop");
     expect(res.cancelled).toBe(true);
     expect(store.getRun(run.runId)?.state).toBe("cancelled");
 
     const run2 = admitAndPlan("interactive", reportPlan());
-    const { ports: ports2 } = scriptedPorts({});
+    const { ports: ports2 } = scriptedPorts();
     const busyPort = { name: "full", dispatch: (_c: unknown) => { throw new RunnerMod.CapacityBusy(); } };
     expect(runner.drain(10, busyPort)).toBe(0);
     expect(runner.drain(10, ports2)).toBe(1); // capacity release wakes queued work
@@ -371,7 +371,7 @@ describe("orc-workflow E2E (Task 6)", () => {
   it("lost delivery acknowledgment stays unknown without resend", () => {
     const { run } = admitAndPlan("interactive", reportPlan());
     const nodes = store.listNodes(run.runId, 1).map((n) => n["node_id"] as string);
-    const { ports } = scriptedPorts({});
+    const { ports } = scriptedPorts();
     runner.drain(10, ports);
     runner.attemptSucceeded(run.runId, nodes[0] as string, "att-a", "{}");
     runner.drain(10, ports);
@@ -380,7 +380,8 @@ describe("orc-workflow E2E (Task 6)", () => {
     runner.submitVerdict(run.runId, nodes[2] as string, { verdict: "accept" });
     let sends = 0;
     const lossy = {
-      send: (_doc: unknown) => {
+      name: "lossy-sender",
+      send: (_doc: { runId: string; nodeId: string; obligation: string; idempotenceKey: string }) => {
         sends++;
         throw new Error("ack lost in transit");
       },
@@ -403,7 +404,7 @@ describe("orc-workflow E2E (Task 6)", () => {
     store.db.prepare(
       `UPDATE workflow_nodes SET worker_card_id = 96001, attempt_id = 'att-L' WHERE run_id = ? AND node_id = ?`,
     ).run(g.run.runId, gn[0]);
-    const { ports: ports8 } = scriptedPorts({});
+    const { ports: ports8 } = scriptedPorts();
     runner.drain(10, ports8);
     // Age the live claim: the completion event was lost, nothing recorded it.
     store.db.prepare(`UPDATE workflow_commands SET next_inspection_at = datetime('now','-1 minute') WHERE run_id = ?`).run(g.run.runId);
@@ -428,7 +429,7 @@ describe("orc-workflow E2E (Task 6)", () => {
     store.db.prepare(
       `UPDATE workflow_nodes SET status = 'running', worker_card_id = 96002, attempt_id = 'att-h' WHERE run_id = ? AND node_id = ?`,
     ).run(h.run.runId, hn[0]);
-    const { ports: ports9 } = scriptedPorts({});
+    const { ports: ports9 } = scriptedPorts();
     runner.drain(10, ports9);
     const claimed9 = store.db.prepare(
       `SELECT owner, claim_token FROM workflow_commands WHERE run_id = ? AND node_id = ?`,
@@ -456,7 +457,7 @@ describe("orc-workflow E2E (Task 6)", () => {
     store.db.prepare(
       `UPDATE workflow_nodes SET status = 'running', worker_card_id = 96003, attempt_id = 'att-u' WHERE run_id = ? AND node_id = ?`,
     ).run(u.run.runId, un[0]);
-    const { ports: ports10 } = scriptedPorts({});
+    const { ports: ports10 } = scriptedPorts();
     runner.drain(10, ports10);
     for (let gen = 1; gen <= 5; gen++) {
       store.db.prepare(`UPDATE workflow_commands SET next_inspection_at = datetime('now','-1 minute') WHERE run_id = ? AND status = 'claimed'`).run(u.run.runId);

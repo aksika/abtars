@@ -136,9 +136,6 @@ export type OrcRunReason =
   | "fuse_open"
   | "peer_relay_blocked"
   | "busy"
-  | "salvage_not_needed"
-  | "salvage_ineligible"
-  | "salvage_exhausted"
   | "deadline_expired";
 
 export interface OrcInvocationContextV2 {
@@ -312,9 +309,6 @@ export function formatRunReason(reason: OrcRunReason): string {
     case "fuse_open": return "Circuit breaker is open for this scope — operator reset required";
     case "peer_relay_blocked": return "Peer-origin project may not relay to third peers";
     case "busy": return "Another Orc intent owns this project";
-    case "salvage_not_needed": return "Salvage not needed — newest primary succeeded or no failed primary";
-    case "salvage_ineligible": return "Salvage ineligible — lanes not ready or prerequisites not met";
-    case "salvage_exhausted": return "Salvage exhausted — one salvage per generation already exists or newest salvage failed";
     case "deadline_expired": return "Deadline expired — cannot salvage or claim";
   }
 }

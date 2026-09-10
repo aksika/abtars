@@ -2053,8 +2053,10 @@ describe("#1656 E2E — truthful worker evidence and fail-closed parent acceptan
     const caseId = await assembleAndInsertReview(rootCardId);
     const store = new reviewStoreMod.ProjectReviewStore();
     const supervision = store.getSupervision(rootCardId)!;
-    const { ProjectReviewService } = await import("../../components/project-acceptance/project-review-service.js");
-    const service = new ProjectReviewService();
+    // #1792: the decision/settle service is deleted with the supervised
+    // review-turn world — validate directly against the assembled snapshot.
+    const { ProjectReviewValidator } = await import("../../components/project-acceptance/project-review-validator.js");
+    const snapshotA = JSON.parse(store.getReviewCase(caseId)!.case_json);
 
     // The Orc submits the #1656 shape: satisfied c1 citing the failed child's
     // artifact evidence. The validator must reject it.
@@ -2077,10 +2079,8 @@ describe("#1656 E2E — truthful worker evidence and fail-closed parent acceptan
       synthesis: "all lanes delivered",
       authored_at: new Date().toISOString(),
     };
-    const outcome = service.processDecision(decision);
-    expect(outcome.kind).toBe("invalid");
-    if (outcome.kind !== "invalid") throw new Error("expected invalid decision outcome");
-    expect(outcome.errors.some(e => /no successful mapped child/.test(e))).toBe(true);
+    const issues = new ProjectReviewValidator().validateDecision(decision, snapshotA);
+    expect(issues.some(e => /no successful mapped child/.test(e.message))).toBe(true);
 
     // Fail-closed parent: not accepted, not done, not delivery-ready, no
     // delivery record, no acceptance outbox.
@@ -2114,8 +2114,10 @@ describe("#1656 E2E — truthful worker evidence and fail-closed parent acceptan
     const caseId = await assembleAndInsertReview(rootCardId);
     const store = new reviewStoreMod.ProjectReviewStore();
     const supervision = store.getSupervision(rootCardId)!;
-    const { ProjectReviewService } = await import("../../components/project-acceptance/project-review-service.js");
-    const service = new ProjectReviewService();
+    // #1792: the decision/settle service is deleted — validate directly,
+    // then settle through the store (what the service did internally).
+    const { ProjectReviewValidator } = await import("../../components/project-acceptance/project-review-validator.js");
+    const snapshotB = JSON.parse(store.getReviewCase(caseId)!.case_json);
 
     const decision: ProjectReviewDecisionV1 = {
       schema_version: 1,
@@ -2136,8 +2138,9 @@ describe("#1656 E2E — truthful worker evidence and fail-closed parent acceptan
       synthesis: "lane delivered",
       authored_at: new Date().toISOString(),
     };
-    const outcome = service.processDecision(decision);
-    expect(outcome.kind).toBe("accepted");
+    const issuesB = new ProjectReviewValidator().validateDecision(decision, snapshotB);
+    expect(issuesB).toEqual([]);
+    store.settleAcceptance(rootCardId, caseId, decision, "lane delivered");
 
     // Let the scheduled runner observe the terminal acceptance and settle the
     // run row (task_runs success) — the delivery release CAS depends on it.
@@ -2178,8 +2181,11 @@ describe("#1656 E2E — truthful worker evidence and fail-closed parent acceptan
     const caseId = await assembleAndInsertReview(rootCardId);
     const store = new reviewStoreMod.ProjectReviewStore();
     const supervision = store.getSupervision(rootCardId)!;
-    const { ProjectReviewService } = await import("../../components/project-acceptance/project-review-service.js");
-    const service = new ProjectReviewService();
+    // #1792: the decision/settle service is deleted — validate directly,
+    // render the disclosed synthesis, then settle through the store.
+    const { ProjectReviewValidator } = await import("../../components/project-acceptance/project-review-validator.js");
+    const { renderAcceptedSynthesis } = await import("../../components/project-acceptance/project-review-service.js");
+    const snapshotC = JSON.parse(store.getReviewCase(caseId)!.case_json);
 
     const decision: ProjectReviewDecisionV1 = {
       schema_version: 1,
@@ -2198,8 +2204,9 @@ describe("#1656 E2E — truthful worker evidence and fail-closed parent acceptan
       synthesis: "required lane delivered; optional lane disclosed as omitted",
       authored_at: new Date().toISOString(),
     };
-    const outcome = service.processDecision(decision);
-    expect(outcome.kind).toBe("accepted");
+    const issuesC = new ProjectReviewValidator().validateDecision(decision, snapshotC);
+    expect(issuesC).toEqual([]);
+    store.settleAcceptance(rootCardId, caseId, decision, renderAcceptedSynthesis(decision, snapshotC));
 
     const root = board.kanbanGetCard(rootCardId)!;
     expect(root.status).toBe("done");

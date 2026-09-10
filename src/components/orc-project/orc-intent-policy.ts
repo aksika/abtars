@@ -12,8 +12,9 @@
  * policy.
  *
  * `hasAllLanesTerminal` and `readOrcProjectSnapshot` are retained unchanged:
- * `orc-project-run-store.ts` still imports both (claim gate + salvage
- * eligibility), so deleting them here would break module load. Their
+ * `orc-project-run-store.ts` still imports `readOrcProjectSnapshot` (claim
+ * gate), and `readOrcProjectSnapshot` itself consumes `hasAllLanesTerminal`,
+ * so deleting either here would break module load. The salvage-claim
  * caller-side removal belongs to the run-store retirement slice.
  */
 
@@ -63,8 +64,9 @@ const TERMINAL_SUPERVISION = new Set(["accepted", "blocked"]);
  * `isActionable`/`completion` closures (`contract_authoring`,
  * `project_execution`, `project_review`, `repair_review`, `input_resume`)
  * are deleted — verified 2026-09-10 on `dev`: no production producer
- * remains (coordinator `schedule*` retired; `claimSalvageExecution`'s sole
- * caller `scheduleProjectSalvage` retired with it).
+ * remains (coordinator `schedule*` retired with the supervised brain;
+ * `scheduleProjectSalvage` and its sole callee `claimSalvageExecution`
+ * deleted with the salvage authority #1792).
  */
 const OPERATOR_POLICY: OrcIntentPolicy = {
   intentKind: "operator_turn",

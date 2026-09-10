@@ -44,6 +44,10 @@ function mockTransport(): IKiroTransport {
     destroy: vi.fn(),
     transportCommands: [],
     get isReady() { return true; },
+    contextPercent: 0,
+    answerOnly: "",
+    toolCallsSucceeded: 0,
+    intermediateDeliveredText: "",
   };
 }
 

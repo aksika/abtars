@@ -77,6 +77,6 @@ describe("isActiveCardPeerSourced (retained relay guard)", () => {
 
   it("is true for a stale or foreign peer-originated context", async () => {
     const orc = await import("./orc-tools.js");
-    expect(await orc.isActiveCardPeerSourced({ orcContext: peerContext })).toBe(true);
+    expect(await orc.isActiveCardPeerSourced({ orcContext: peerContext } as never)).toBe(true);
   });
 });
