@@ -248,7 +248,8 @@ export type TransitionActor =
   | "pi_origin_projection"  // boot/phase-pi-executor 105
   | "budget_enforcement"    // reconciler 1015
   | "stale_repair"          // doctor-fixes 166
-  | "retry_requeue";        // retry-store successor allocation (#1644)
+  | "retry_requeue"         // retry-store successor allocation (#1644)
+  | "workflow-runner";      // orc-workflow-runner terminal projections (#1792)
 
 export interface TransitionRequest {
   readonly cardId: number;

@@ -61,10 +61,10 @@ function makeRunner(): { runner: Runner; store: Store } {
   return { runner, store };
 }
 
-function seedCard(store: Store, source = "task"): number {
+function seedCard(store: Store, source = "task", sourceId: string | null = null): number {
   const id = cardSeq++;
-  store.db.prepare(`INSERT INTO kanban_board (id, title, source, type, status, goal) VALUES (?, ?, ?, 'O', 'running', ?)`)
-    .run(id, `wf-e2e-${id}`, source, `deliver report ${id}`);
+  store.db.prepare(`INSERT INTO kanban_board (id, title, source, source_id, type, status, goal) VALUES (?, ?, ?, ?, 'O', 'running', ?)`)
+    .run(id, `wf-e2e-${id}`, source, sourceId, `deliver report ${id}`);
   return id;
 }
 
@@ -170,10 +170,14 @@ describe("orc-workflow E2E (Task 6)", () => {
 
   function admitAndPlan(kind: "interactive" | "scheduled", proposal: Proposal, budgets?: Partial<Record<BudgetScope, number>>) {
     copSeq++;
-    const card = seedCard(store, kind === "scheduled" ? "task" : "agent");
     let scheduledRunId: string | null = null;
     if (kind === "scheduled") {
       scheduledRunId = `sched-${copSeq}`;
+    }
+    // Faithful scheduled identity: production kanbanEnqueue stores the
+    // occurrence run id as source_id (authority correlation depends on it).
+    const card = seedCard(store, kind === "scheduled" ? "task" : "agent", scheduledRunId);
+    if (kind === "scheduled" && scheduledRunId) {
       seedOccurrence(store, `daily-ai-e2e`, scheduledRunId);
     }
     const run = runner.admit({
@@ -215,7 +219,15 @@ describe("orc-workflow E2E (Task 6)", () => {
       const sender = { send: (doc: { idempotenceKey: string }) => `receipt:${doc.idempotenceKey}` };
       expect(runner.executeDelivery(run.runId, acc.nodeIds[2] as string, sender)).toBe("acknowledged");
       void card;
-      // Terminal run and its projection agree: no unowned nonterminal rows.
+      // Terminal run/projection agreement (pass evidence): run, card, and
+      // supervision must tell the same story with no unowned residue.
+      const terminal = store.getRun(run.runId);
+      expect(terminal?.state).toBe("succeeded");
+      const cardRow = store.db.prepare(`SELECT status, result_summary FROM kanban_board WHERE id = ?`).get(card) as { status: string; result_summary: string | null };
+      expect(cardRow.status).toBe("done");
+      expect(typeof cardRow.result_summary).toBe("string");
+      const sup = store.db.prepare(`SELECT state FROM project_supervision WHERE project_card_id = ?`).get(card) as { state: string };
+      expect(sup.state).toBe("accepted");
       const tick = runner.auditTick(0);
       expect(tick.ownerless).not.toContain(run.runId);
     }

@@ -29,6 +29,13 @@ import {
   type WorkflowRunState,
 } from "./orc-workflow-store.js";
 import type { TaskDatabase } from "../tasks/kanban-board.js";
+import {
+  kanbanGetCard,
+  kanbanSetProjectDeliveryReady,
+  kanbanTransition,
+  sqliteNow,
+} from "../tasks/kanban-board.js";
+import { ProjectReviewStore } from "../project-acceptance/project-review-store.js";
 
 // ── proposal types (native structured values; transport serializes) ────
 
@@ -841,7 +848,7 @@ export class WorkflowRunner {
     key: { nodeId: string; action: CommandAction; ordinal: number; generation: number },
     expectedGen: number, event: RunnerIngress,
   ): CommitResult {
-    return this.store.commitTransition(event, () => {
+    return this.commitWithProjections(run.runId, event, () => {
       const fullKey = { runId: run.runId, ...key };
       const cmd = this.store.getCommand(fullKey);
       if (!cmd || cmd.status !== "claimed") {
@@ -1008,7 +1015,7 @@ export class WorkflowRunner {
     run: WorkflowRunRow, payload: { rootCardId: number; stage: string; result: string; final: boolean },
     event: RunnerIngress,
   ): CommitResult {
-    return this.store.commitTransition(event, () => {
+    return this.commitWithProjections(run.runId, event, () => {
       if (!payload.final) return { noop: true };
       // Final stage: ensure review dispatch for review nodes that need it:
       // queued+unblocked nodes, plus running nodes with no open review command
@@ -1055,6 +1062,93 @@ export class WorkflowRunner {
     });
     if (res.disposition === "conflict") throw new Error(`workflow runner: ${res.diagnostics}`);
     return res.disposition;
+  }
+
+  // ── terminal projections (Task 5: card/supervision/delivery-ready) ────
+  //
+  // Project/card rows are PROJECTIONS updated by the runner's transitions, not
+  // independent decision makers. Applied synchronously after every terminal
+  // commit (same call stack — deterministic agreement in tests and production);
+  // the crash window between the two commits is closed by recovery
+  // (startupRecovery + heartbeat audit redrive projectTerminalProjections,
+  // each statement idempotent CAS). Never reads projections back as decisions.
+
+  projectTerminalProjections(runId: string): boolean {
+    const run = this.store.getRun(runId);
+    if (!run || !TERMINAL_RUN_STATES.includes(run.state)) return false;
+    const reviewStore = new ProjectReviewStore(this.store.db);
+    reviewStore.ensureAwaitingContract(run.rootCardId);
+    const sup = reviewStore.getSupervision(run.rootCardId);
+    if (!sup) throw new Error(`workflow runner: supervision missing for card ${run.rootCardId}`);
+    const target = run.state === "succeeded" ? "accepted" : "blocked";
+    if (sup.state !== target) {
+      const extra: Record<string, string | number | null> =
+        target === "blocked"
+          ? { blocked_reason: boundText(run.failureReason ?? run.failureCode ?? "failed", 2000) }
+          : {};
+      const ok = reviewStore.stateTransition(
+        run.rootCardId,
+        ["awaiting_contract", "executing", "review_ready", "review_requested", "reviewing", "repair_planned", "repairing", "needs_input"],
+        target as "accepted" | "blocked",
+        extra,
+        { authority: { projectCardId: run.rootCardId, projectGeneration: sup.generation, scheduledRunId: run.scheduledRunId ?? undefined } },
+      );
+      if (!ok) return false;
+    }
+    const card = kanbanGetCard(run.rootCardId);
+    if (card && card.status !== "done" && card.status !== "failed" && card.status !== "delivered") {
+      if (run.state === "succeeded") {
+        kanbanTransition({
+          cardId: run.rootCardId, from: ["queued", "running"], to: "done",
+          actor: "workflow-runner", reason: `run ${runId} succeeded`,
+          fields: {
+            result_summary: this.resultSummary(run),
+            ...(this.resultArtifact(run) ? { result_path: this.resultArtifact(run) as string } : {}),
+            completed_at: sqliteNow(),
+          },
+        }, this.store.db);
+      } else {
+        kanbanTransition({
+          cardId: run.rootCardId, from: ["queued", "running"], to: "failed",
+          actor: "workflow-runner",
+          reason: `run ${runId} ${run.state}`,
+          fields: {
+            error: boundText(run.failureReason ?? run.failureCode ?? run.state, 1000),
+            completed_at: sqliteNow(),
+          },
+        }, this.store.db);
+      }
+    }
+    if (run.state === "succeeded") {
+      kanbanSetProjectDeliveryReady(run.rootCardId, {
+        projectGeneration: sup.generation, scheduledRunId: run.scheduledRunId ?? undefined,
+      });
+    }
+    return true;
+  }
+
+  private resultSummary(run: WorkflowRunRow): string {
+    const revision = this.store.currentRevision(run.runId);
+    const parts = [`${run.state} revision ${revision}`];
+    if (run.failureReason) parts.push(boundText(run.failureReason, 500));
+    return parts.join(": ").slice(0, 4000);
+  }
+
+  /** Best-effort file artifact ref from succeeded node outcomes (DB-only). */
+  private resultArtifact(run: WorkflowRunRow): string | null {
+    try {
+      const revision = this.store.currentRevision(run.runId);
+      for (const n of this.store.listNodes(run.runId, revision)) {
+        if (n["status"] !== "succeeded" || typeof n["outcome"] !== "string") continue;
+        const match = (n["outcome"] as string).match(/"artifact"\s*:\s*"([^"]+)"/)
+          ?? (n["outcome"] as string).match(/"result_path"\s*:\s*"([^"]+)"/)
+          ?? (n["outcome"] as string).match(/"path"\s*:\s*"([^"]+)"/);
+        if (match?.[1]) return match[1].slice(0, 500);
+      }
+    } catch {
+      // Best effort only: no artifact pointer is not a failure.
+    }
+    return null;
   }
 
   // ── drain + recovery + audit ──────────────────────────────────────────
@@ -1271,7 +1365,7 @@ export class WorkflowRunner {
     return dispatched;
   }
 
-  startupRecovery(port?: ExecutionPort): { redrivenIngress: number; pendingCommands: number; recoveredCompletions: number } {
+  startupRecovery(port?: ExecutionPort): { redrivenIngress: number; pendingCommands: number; recoveredCompletions: number; projectedTerminals: number } {
     // Re-drive persisted-but-unapplied ingress with STORED identity (idempotent
     // by event_id): crash between commit and wake, or a handoff persisted
     // without runner contact. Terminal runs' leftovers are consumed as noop.
@@ -1333,10 +1427,19 @@ export class WorkflowRunner {
     if (port) {
       for (const root of this.store.listAuditRoots(0, 100)) port.reconcileLiveAttempts?.(root.runId);
     }
+    let projected = 0;
+    for (const row of this.store.findTerminalUnprojected(100)) {
+      try {
+        if (this.projectTerminalProjections(row.runId)) projected++;
+      } catch {
+        // Leave for the next pass; audit observes the same durable state.
+      }
+    }
     return {
       redrivenIngress: redriven,
       pendingCommands: this.store.countPendingCommands(),
       recoveredCompletions: this.recoverUnconsumedCompletions(100),
+      projectedTerminals: projected,
     };
   }
 
@@ -1403,7 +1506,30 @@ export class WorkflowRunner {
     }
   }  /** Commit one ingress with a FRESH host identity. */
   private commitKind(run: WorkflowRunRow, kind: string, body: unknown, apply: () => TransitionEffect): CommitResult {
-    return this.store.commitTransition(this.freshEvent(run, kind, body), () => apply());
+    return this.commitWithProjections(run.runId, this.freshEvent(run, kind, body), apply);
+  }
+
+  private commitWithProjections(
+    runId: string, event: RunnerIngress, apply: () => TransitionEffect,
+  ): CommitResult {
+    const res = this.store.commitTransition(event, () => apply());
+    this.projectAfterCommit(runId, res);
+    return res;
+  }
+
+  /**
+   * Post-commit terminal projection (same call stack — deterministic).
+   * A projection failure throws LOUDLY after the transition committed (never
+   * swallowed): recovery (startup/audit) repairs it, and the error surfaces
+   * instead of masquerading as a failed transition.
+   */
+  private projectAfterCommit(runId: string, res: CommitResult): void {
+    if (res.disposition !== "applied") return;
+    const run = this.store.getRun(runId);
+    if (!run || !TERMINAL_RUN_STATES.includes(run.state)) return;
+    if (!this.projectTerminalProjections(runId)) {
+      throw new Error(`workflow runner: terminal projections incomplete for run ${runId}`);
+    }
   }
 
   /** Shared applier so live and redriven paths execute identical writes. */
@@ -1411,7 +1537,7 @@ export class WorkflowRunner {
     run: WorkflowRunRow, revision: number, nodeId: string, attemptId: string,
     artifactsJson: string, event: RunnerIngress,
   ): CommitResult {
-    return this.store.commitTransition(event, () => {
+    return this.commitWithProjections(run.runId, event, () => {
       this.requireNode(run.runId, revision, nodeId, ["queued", "running"]);
       this.store.setNodeOutcome(run.runId, revision, nodeId, "succeeded", artifactsJson, attemptId);
       const unblocked = this.store.satisfyDependents(run.runId, revision, nodeId);
@@ -1429,7 +1555,7 @@ export class WorkflowRunner {
     run: WorkflowRunRow, revision: number, nodeId: string, attemptId: string,
     cause: string, retrySafe: boolean, event: RunnerIngress,
   ): CommitResult {
-    return this.store.commitTransition(event, () => {
+    return this.commitWithProjections(run.runId, event, () => {
       this.requireNode(run.runId, revision, nodeId, ["queued", "running"]);
       const optional = this.isOptionalNode(run.runId, revision, nodeId);
       if (!optional && retrySafe && this.store.consumeBudget(run.runId, "work_retry")) {
