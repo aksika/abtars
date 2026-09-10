@@ -1,4 +1,5 @@
 import { kanbanTransition, requireTaskDatabase, type TaskDatabase } from "./tasks/kanban-board.js";
+import { commitSupervisedOutcome } from "./orc-project/orc-workflow-settlement.js";
 import type { WorkerAcceptanceContractV1, WorkerResultEnvelopeV1 } from "./worker-contract.js";
 import { ExecutorLeaseStore } from "./executor-lease-store.js";
 import { addColumnIfMissing } from "../utils/sqlite-migrate.js";
@@ -1367,6 +1368,30 @@ export class WorkerSupervisionStore {
     }
 
     logSwarmTrace({ event: `attempt_${effectiveState}`, card: attempt.card_id, attempt: input.attemptId, generation: attempt.generation, to: effectiveState, reason: input.stableReason });
+
+    // #1792 Task 5: supervised successor obligation shares THIS transaction
+    // (joint commit). Resolves the workflow run/node by stable identity;
+    // unsupervised and legacy-supervised attempts return silently with zero
+    // behavior change. The hook never throws: containment + logging protect
+    // the settlement result (recovery via recoverUnconsumedCompletions).
+    if (attempt.root_project_card_id != null) {
+      const rootCard = attempt.root_project_card_id;
+      try {
+        this.db.transaction(() => {
+          commitSupervisedOutcome(this.db, {
+            attemptId: input.attemptId,
+            cardId: attempt.card_id,
+            rootCardId: rootCard,
+            lifecycle: effectiveState,
+            generation: attempt.generation || 1,
+            stableReason: input.stableReason,
+            envelopeJson: null,
+          });
+        });
+      } catch (err) {
+        logSwarmTrace({ event: "workflow_successor_contained", card: attempt.card_id, attempt: input.attemptId, generation: attempt.generation, to: effectiveState, reason: err instanceof Error ? err.message.slice(0, 200) : "unknown" });
+      }
+    }
 
     const violationResult = budgetViolation
       ? { kind: "budget_violation" as const, lifecycle: effectiveState, chargedTokens: chargeTokens, cardId: attempt.card_id }

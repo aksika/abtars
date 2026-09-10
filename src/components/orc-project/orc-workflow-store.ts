@@ -169,7 +169,6 @@ export class WorkflowStore {
     this.db = db ?? requireTaskDatabase();
     initWorkflowSchema(this.db);
   }
-
   // ── admission ──────────────────────────────────────────────────────────
 
   admitRun(input: {
@@ -254,75 +253,92 @@ export class WorkflowStore {
   }
 
   // ── commit envelope (Revision I order: dedupe first, fence second) ─────
+  //
+  // commitTransition opens the transaction; commitTransitionInTx assumes one is
+  // already open (settlement joint commit: the worker result and the successor
+  // obligation share the settlement transaction — #1792 Task 5). better-sqlite3
+  // composes nested transaction() calls via savepoints (verified).
 
   commitTransition(
     event: RunnerIngress,
     apply: (run: WorkflowRunRow) => TransitionEffect,
   ): CommitResult {
-    return this.db.transaction(() => {
+    return this.db.transaction(() => this.commitTransitionInTx(event, apply));
+  }
+
+  commitTransitionInTx(
+    event: RunnerIngress,
+    apply: (run: WorkflowRunRow) => TransitionEffect,
+  ): CommitResult {
+    return this.applyEnvelope(event, apply);
+  }
+
+  private applyEnvelope(
+    event: RunnerIngress,
+    apply: (run: WorkflowRunRow) => TransitionEffect,
+  ): CommitResult {
       // 1. Ingress dedupe — PK-targeted conflict only; malformed rows raise.
-      const ins = this.db
-        .prepare(
-          `INSERT INTO workflow_ingress (event_id, run_id, payload_hash, payload_json,
-            disposition, received_at)
-           VALUES (?, ?, ?, ?, 'received', datetime('now'))
-           ON CONFLICT(event_id) DO NOTHING`,
-        )
-        .run(event.eventId, event.runId, event.payloadHash, event.payloadJson);
-      if (ins.changes === 0) {
-        const stored = this.db
-          .prepare(`SELECT payload_hash, disposition FROM workflow_ingress WHERE event_id = ?`)
-          .get(event.eventId) as { payload_hash: string; disposition: string };
-        if (stored.payload_hash !== event.payloadHash) {
-          return { disposition: "conflict" as const, diagnostics: `event ${event.eventId}: conflicting duplicate payload` };
-        }
-        if (stored.disposition === "received") {
-          // NOT YET APPLIED (SHA pre-insert / crash recovery) — fall through.
-        } else {
-          // applied/noop are terminal and sticky: redelivery changes nothing.
-          return { disposition: stored.disposition === "noop" ? ("noop" as const) : ("duplicate" as const), diagnostics: null };
-        }
+    const ins = this.db
+      .prepare(
+        `INSERT INTO workflow_ingress (event_id, run_id, payload_hash, payload_json,
+          disposition, received_at)
+         VALUES (?, ?, ?, ?, 'received', datetime('now'))
+         ON CONFLICT(event_id) DO NOTHING`,
+      )
+      .run(event.eventId, event.runId, event.payloadHash, event.payloadJson);
+    if (ins.changes === 0) {
+      const stored = this.db
+        .prepare(`SELECT payload_hash, disposition FROM workflow_ingress WHERE event_id = ?`)
+        .get(event.eventId) as { payload_hash: string; disposition: string };
+      if (stored.payload_hash !== event.payloadHash) {
+        return { disposition: "conflict" as const, diagnostics: `event ${event.eventId}: conflicting duplicate payload` };
       }
-      // 2. Fence generation + version (reached only by new or received events).
-      const raw = this.db.prepare(`SELECT * FROM workflow_runs WHERE run_id = ?`).get(event.runId) as
-        | Record<string, unknown>
-        | undefined;
-      if (!raw) throw new Error(`workflow store: run ${event.runId} missing`);
-      const run = rowToRun(raw);
-      if (run.generation !== event.generation || run.stateVersion !== event.stateVersion) {
-        if (ins.changes === 0 && TERMINAL_RUNISH.has(run.state)) {
-          // Pre-existing received row for a run that has since terminalized:
-          // genuinely moot (no applier accepts terminal runs) — consume as noop
-          // so recovery never redrives it again. A LIVE run never takes this
-          // branch: losing an applicable event silently would violate
-          // requirement 6, so it throws loudly and stays received.
-          this.db
-            .prepare(`UPDATE workflow_ingress SET disposition='noop', applied_at=datetime('now') WHERE event_id = ? AND disposition='received'`)
-            .run(event.eventId);
-          return { disposition: "noop" as const, diagnostics: `event ${event.eventId}: run ${event.runId} terminal since receipt` };
-        }
-        throw new Error(`workflow store: run ${event.runId} fence mismatch (gen/state)`);
+      if (stored.disposition === "received") {
+        // NOT YET APPLIED (SHA pre-insert / crash recovery) — fall through.
+      } else {
+        // applied/noop are terminal and sticky: redelivery changes nothing.
+        return { disposition: stored.disposition === "noop" ? ("noop" as const) : ("duplicate" as const), diagnostics: null };
       }
-      // 3. Runner semantics.
-      const effect = apply(run);
-      // 4. Version bump + ingress consumption, one commit.
-      const nextState = effect.nextState ?? run.state;
-      const bumped = this.db
-        .prepare(
-          `UPDATE workflow_runs SET state = ?, state_version = state_version + 1,
-            failure_code = COALESCE(?, failure_code), failure_reason = COALESCE(?, failure_reason),
-            updated_at = datetime('now')
-           WHERE run_id = ? AND state_version = ?`,
-        )
-        .run(nextState, effect.failureCode ?? null, effect.failureReason ?? null, event.runId, event.stateVersion);
-      if (bumped.changes !== 1) throw new Error(`workflow store: run ${event.runId} lost version race`);
-      const finalDisposition = effect.noop === true ? "noop" : "applied";
-      const marked = this.db
-        .prepare(`UPDATE workflow_ingress SET disposition = ?, applied_at = datetime('now') WHERE event_id = ? AND disposition = 'received'`)
-        .run(finalDisposition, event.eventId);
+    }
+    // 2. Fence generation + version (reached only by new or received events).
+    const raw = this.db.prepare(`SELECT * FROM workflow_runs WHERE run_id = ?`).get(event.runId) as
+      | Record<string, unknown>
+      | undefined;
+    if (!raw) throw new Error(`workflow store: run ${event.runId} missing`);
+    const run = rowToRun(raw);
+    if (run.generation !== event.generation || run.stateVersion !== event.stateVersion) {
+      if (ins.changes === 0 && TERMINAL_RUNISH.has(run.state)) {
+        // Pre-existing received row for a run that has since terminalized:
+        // genuinely moot (no applier accepts terminal runs) — consume as noop
+        // so recovery never redrives it again. A LIVE run never takes this
+        // branch: losing an applicable event silently would violate
+        // requirement 6, so it throws loudly and stays received.
+        this.db
+          .prepare(`UPDATE workflow_ingress SET disposition='noop', applied_at=datetime('now') WHERE event_id = ? AND disposition='received'`)
+          .run(event.eventId);
+        return { disposition: "noop" as const, diagnostics: `event ${event.eventId}: run ${event.runId} terminal since receipt` };
+      }
+      throw new Error(`workflow store: run ${event.runId} fence mismatch (gen/state)`);
+    }
+    // 3. Runner semantics.
+    const effect = apply(run);
+    // 4. Version bump + ingress consumption, one commit.
+    const nextState = effect.nextState ?? run.state;
+    const bumped = this.db
+      .prepare(
+        `UPDATE workflow_runs SET state = ?, state_version = state_version + 1,
+          failure_code = COALESCE(?, failure_code), failure_reason = COALESCE(?, failure_reason),
+          updated_at = datetime('now')
+         WHERE run_id = ? AND state_version = ?`,
+      )
+      .run(nextState, effect.failureCode ?? null, effect.failureReason ?? null, event.runId, event.stateVersion);
+    if (bumped.changes !== 1) throw new Error(`workflow store: run ${event.runId} lost version race`);
+    const finalDisposition = effect.noop === true ? "noop" : "applied";
+    const marked = this.db
+      .prepare(`UPDATE workflow_ingress SET disposition = ?, applied_at = datetime('now') WHERE event_id = ? AND disposition = 'received'`)
+      .run(finalDisposition, event.eventId);
       if (marked.changes !== 1) throw new Error(`workflow store: event ${event.eventId} apply race lost`);
       return { disposition: finalDisposition === "noop" ? ("noop" as const) : ("applied" as const), diagnostics: null };
-    });
   }
 
   // ── granular writers (runner appliers call these inside commitTransition) ─
@@ -358,6 +374,37 @@ export class WorkflowStore {
     return this.db
       .prepare(`SELECT node_id, kind, status, worker_card_id, attempt_id, outcome FROM workflow_nodes WHERE run_id = ? AND revision = ? ORDER BY node_id`)
       .all(runId, revision);
+  }
+
+  /**
+   * Locate the node dispatched to a worker card, newest revision first.
+   * Settlement uses this to map a terminal attempt back to its node.
+   */
+  findNodeByCard(runId: string, cardId: number): {
+    revision: number; nodeId: string; status: string; kind: string;
+  } | null {
+    const revs = this.db
+      .prepare(`SELECT DISTINCT revision AS rev FROM workflow_nodes WHERE run_id = ? ORDER BY rev DESC`)
+      .all(runId) as Array<{ rev: number }>;
+    for (const { rev } of revs) {
+      const row = this.db
+        .prepare(`SELECT node_id, status, kind FROM workflow_nodes WHERE run_id = ? AND revision = ? AND worker_card_id = ?`)
+        .get(runId, rev, cardId) as { node_id: string; status: string; kind: string } | undefined;
+      if (row) return { revision: Number(rev), nodeId: row.node_id, status: row.status, kind: row.kind };
+    }
+    return null;
+  }
+
+  /** Bind a dispatched worker card/attempt to its node (host dispatch record). */
+  bindNodeWorker(runId: string, revision: number, nodeId: string, cardId: number, attemptId: string | null): void {
+    const res = this.db
+      .prepare(
+        `UPDATE workflow_nodes SET worker_card_id = ?, attempt_id = COALESCE(?, attempt_id),
+          updated_at = datetime('now')
+         WHERE run_id = ? AND revision = ? AND node_id = ?`,
+      )
+      .run(cardId, attemptId, runId, revision, nodeId);
+    if (res.changes !== 1) throw new Error(`workflow store: node ${runId}/${nodeId} missing for worker bind`);
   }
 
   currentRevision(runId: string): number {
@@ -961,4 +1008,53 @@ export class WorkflowStore {
       return null;
     }
   }
+
+  /**
+   * Open nodes whose latest attempt is terminal with no pending successor
+   * command: the completion was never consumed (hook-contained failure or a
+   * pre-cutover row). Recovery submits each exactly once (attempt-derived
+   * ingress identity dedupes).
+   */
+  findUnconsumedCompletions(limit: number): Array<Record<string, unknown>> {
+    try {
+      return this.db
+        .prepare(
+          `SELECT n.run_id AS run_id, n.revision AS revision, n.node_id AS node_id,
+             a.id AS attempt_id, a.lifecycle AS lifecycle, res.envelope_json AS envelope_json
+           FROM workflow_nodes n
+           JOIN workflow_runs r ON r.run_id = n.run_id
+             AND r.state NOT IN ('succeeded','failed','cancelled')
+           JOIN worker_attempts a ON a.card_id = n.worker_card_id
+             AND a.ordinal = (SELECT MAX(ordinal) FROM worker_attempts WHERE card_id = n.worker_card_id)
+           LEFT JOIN worker_results res ON res.attempt_id = a.id
+           WHERE n.status IN ('queued','running') AND n.worker_card_id IS NOT NULL
+             AND a.lifecycle IN ('completed','failed','cancelled','timed_out')
+             AND NOT EXISTS (
+               SELECT 1 FROM workflow_commands c
+               WHERE c.run_id = n.run_id AND c.node_id = n.node_id AND c.status = 'pending'
+             )
+           LIMIT ?`,
+        )
+        .all(limit);
+    } catch {
+      return [];
+    }
+  }
+}
+
+const storeCache = new WeakMap<object, WorkflowStore>();
+
+/**
+ * #1792 Task 5: one WorkflowStore per database handle. The settlement joint
+ * commit resolves the store for the settling connection so the successor
+ * obligation shares the settlement transaction; constructing per call would
+ * re-run schema DDL on every worker completion.
+ */
+export function workflowStoreFor(db: TaskDatabase): WorkflowStore {
+  let store = storeCache.get(db);
+  if (!store) {
+    store = new WorkflowStore(db);
+    storeCache.set(db, store);
+  }
+  return store;
 }

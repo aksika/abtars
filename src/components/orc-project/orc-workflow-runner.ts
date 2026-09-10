@@ -103,6 +103,8 @@ export interface PlanningInput {
   purpose: "initial" | "repair" | "next_wave";
   defects: Array<{ criterion: string; detail: string }>;
   requiredOutputs: string[];
+  nodeId: string;
+  opId?: string;
 }
 
 export interface PlannerBackend {
@@ -238,6 +240,9 @@ export class WorkflowRunner {
       }
       if (!Array.isArray(n.outputs)) problems.push({ field: `nodes[${i}].outputs`, reason: "outputs must be an array" });
       if (!Array.isArray(n.acceptance)) problems.push({ field: `nodes[${i}].acceptance`, reason: "acceptance must be an array" });
+      if ((n.kind === "work" || n.kind === "synthesis" || n.kind === "delivery") && (n.acceptance ?? []).length === 0) {
+        problems.push({ field: `nodes[${i}].acceptance`, reason: `${n.kind} nodes need at least one acceptance criterion (worker contracts require it at dispatch)` });
+      }
       if (!Array.isArray(n.dependsOn)) problems.push({ field: `nodes[${i}].dependsOn`, reason: "dependsOn must be an array" });
     });
     proposal.nodes.forEach((n, i) => {
@@ -394,7 +399,6 @@ export class WorkflowRunner {
       budgets: this.store.readBudgets(runId) as Record<string, { allowed: number; consumed: number }>,
     };
   }
-
   private requiredOutputsOf(runId: string): string[] {
     try {
       const revision = this.store.currentRevision(runId);
@@ -404,6 +408,24 @@ export class WorkflowRunner {
     } catch {
       return [];
     }
+  }
+
+  /**
+   * Find a node's proposal spec by host id (ids embed `n{rev}_{i}_{label}`).
+   * Single home for the id scheme (replaces ad-hoc reconstruction).
+   */
+  planNodeSpec(runId: string, revision: number, nodeId: string): PlanNodeProposal | null {
+    try {
+      const proposal = JSON.parse(this.store.getPlanJson(runId, revision)) as PlanProposal;
+      for (let i = 0; i < (proposal.nodes ?? []).length; i++) {
+        const n = proposal.nodes[i] as PlanNodeProposal;
+        const id = `n${revision}_${i}_${n.label.replace(/[^a-zA-Z0-9_-]/g, "_").slice(0, 24)}`;
+        if (id === nodeId) return n;
+      }
+    } catch {
+      // Unreadable revision: no spec (callers fail closed).
+    }
+    return null;
   }
 
   /** Union of node outputs declared by revisions 1..upto (for revision coverage). */
@@ -1037,6 +1059,73 @@ export class WorkflowRunner {
 
   // ── drain + recovery + audit ──────────────────────────────────────────
 
+  /**
+   * Commit a worker-settlement outcome with an EXPLICIT ingress identity
+   * (settlement joint commit and recovery redrive). The caller owns
+   * idempotency: settlement uses `attempt-<id>-<lifecycle>`, recovery reuses
+   * stored identity. Never generates a fresh identity (that would duplicate).
+   */
+  commitStoredAttemptOutcome(input: {
+    runId: string;
+    kind: "AttemptSucceeded" | "AttemptFailed";
+    body: { nodeId: string; attemptId: string; artifactsJson?: string; cause?: string; retrySafe?: boolean };
+    revision: number;
+    event: RunnerIngress;
+  }): CommitResult {
+    const run = this.store.getRun(input.runId);
+    if (!run) throw new Error(`workflow runner: run ${input.runId} missing`);
+    if (input.kind === "AttemptSucceeded") {
+      return this.applyAttemptSucceeded(
+        run, input.revision, input.body.nodeId, input.body.attemptId,
+        input.body.artifactsJson ?? "{}", input.event,
+      );
+    }
+    return this.applyAttemptFailed(
+      run, input.revision, input.body.nodeId, input.body.attemptId,
+      input.body.cause ?? "settlement", input.body.retrySafe ?? false, input.event,
+    );
+  }
+
+  /**
+   * Submit unconsumed terminal completions (hook-contained failures and
+   * pre-cutover rows). Idempotent by attempt-derived identity; returns the
+   * number of newly applied outcomes.
+   */
+  recoverUnconsumedCompletions(limit = 100): number {
+    let applied = 0;
+    for (const row of this.store.findUnconsumedCompletions(limit)) {
+      const runId = row["run_id"] as string;
+      const revision = Number(row["revision"]);
+      const nodeId = row["node_id"] as string;
+      const attemptId = row["attempt_id"] as string;
+      const lifecycle = row["lifecycle"] as string;
+      const run = this.store.getRun(runId);
+      if (!run || TERMINAL_RUN_STATES.includes(run.state)) continue;
+      const eventId = `attempt-${attemptId}-${lifecycle}`;
+      const body = lifecycle === "completed"
+        ? { nodeId, attemptId, artifactsJson: (row["envelope_json"] as string | null) ?? "{}" }
+        : { nodeId, attemptId, cause: lifecycle, retrySafe: false };
+      const payloadJson = JSON.stringify({
+        kind: lifecycle === "completed" ? "AttemptSucceeded" : "AttemptFailed", body,
+      });
+      const event: RunnerIngress = {
+        eventId, runId,
+        payloadHash: createHash("sha256").update(payloadJson).digest("hex"),
+        payloadJson, generation: run.generation, stateVersion: run.stateVersion,
+      };
+      try {
+        const res = this.commitStoredAttemptOutcome({
+          runId, kind: lifecycle === "completed" ? "AttemptSucceeded" : "AttemptFailed",
+          body, revision, event,
+        });
+        if (res.disposition === "applied") applied++;
+      } catch {
+        // Leave for the next pass; audit observes the same durable state.
+      }
+    }
+    return applied;
+  }
+
   drain(limit: number, ports: DrainPorts, opts?: DrainOpts): number {
     const policy = opts?.policy;
     const route = (cmd: CommandRow): { owner: string; start: () => void } => {
@@ -1073,6 +1162,7 @@ export class WorkflowRunner {
           planner.startPlanning(cmd, {
             runId: cmd.runId, revision: payload.revision, purpose: payload.purpose,
             defects: payload.defects ?? [], requiredOutputs: this.requiredOutputsOf(cmd.runId),
+            nodeId: cmd.nodeId, opId: payload.opId,
           });
         },
       };
@@ -1160,7 +1250,7 @@ export class WorkflowRunner {
     return dispatched;
   }
 
-  startupRecovery(port?: ExecutionPort): { redrivenIngress: number; pendingCommands: number } {
+  startupRecovery(port?: ExecutionPort): { redrivenIngress: number; pendingCommands: number; recoveredCompletions: number } {
     // Re-drive persisted-but-unapplied ingress with STORED identity (idempotent
     // by event_id): crash between commit and wake, or a handoff persisted
     // without runner contact. Terminal runs' leftovers are consumed as noop.
@@ -1222,7 +1312,11 @@ export class WorkflowRunner {
     if (port) {
       for (const root of this.store.listAuditRoots(0, 100)) port.reconcileLiveAttempts?.(root.runId);
     }
-    return { redrivenIngress: redriven, pendingCommands: this.store.countPendingCommands() };
+    return {
+      redrivenIngress: redriven,
+      pendingCommands: this.store.countPendingCommands(),
+      recoveredCompletions: this.recoverUnconsumedCompletions(100),
+    };
   }
 
   auditTick(cursor: number): {
