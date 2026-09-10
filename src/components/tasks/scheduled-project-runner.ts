@@ -103,6 +103,10 @@ export async function scheduledProjectRunner(request: ScheduledProjectRequest): 
     if (admitted.kind === "conflict") {
       throw new Error(`scheduled project admission failed: ${admitted.reason}`);
     }
+    // #1792 live-fix: wake the driver AFTER admission commits — the card
+    // enqueue fired before the planning command existed, so without this the
+    // run waits for the next audit tick to start.
+    nerve.fire("card:queued", rootCardId);
     const currentCard = kanbanGetCard(rootCardId);
     if (currentCard?.status === "queued") {
       if (currentCard.next_retry_at != null) {
@@ -141,6 +145,9 @@ export async function scheduledProjectRunner(request: ScheduledProjectRequest): 
   if (admitted.kind === "conflict") {
     throw new Error(`scheduled project admission failed: ${admitted.reason}`);
   }
+
+  // #1792 live-fix: wake the driver AFTER admission commits (see above).
+  nerve.fire("card:queued", rootCardId);
 
   // The runner owns supervised progression from here; the card runs while
   // work is outstanding regardless of dispatch gate state.

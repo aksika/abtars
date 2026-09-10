@@ -80,6 +80,12 @@ export function startWorkflowDriver(deps: {
     recovered: number; inspections: number; projected: number;
   } {
     if (fromCursor !== undefined) cursor = fromCursor;
+    // #1792 live-fix: the audit redrives persisted commands (checkpoint §6).
+    // Admission queues the initial planning command without a guaranteed
+    // nerve wake after it (enqueue fires before the command exists), so a
+    // drain here is the backstop that starts every run. Bounded like all
+    // drains; nerve stays the fast path.
+    drainWake("audit");
     const tick = runner.auditTick(cursor);
     cursor = tick.nextCursor;
     const recovered = runner.recoverUnconsumedCompletions(50);
