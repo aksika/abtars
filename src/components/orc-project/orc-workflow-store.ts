@@ -11,13 +11,17 @@
  * Timestamps use SQLite datetime('now')-compatible UTC ('YYYY-MM-DD HH:MM:SS')
  * for every column the SQL compares; ISO strings appear only inside JSON payloads.
  */
-import { randomUUID } from "node:crypto";
+import { randomUUID, createHash } from "node:crypto";
 import {
   requireTaskDatabase,
   sqliteNow,
   type TaskDatabase,
 } from "../tasks/kanban-board.js";
 import { initWorkflowSchema } from "./workflow-schema.js";
+
+function shaHex(body: string): string {
+  return createHash("sha256").update(body).digest("hex");
+}
 
 export type WorkflowRunState =
   | "admitted" | "planning" | "dispatched" | "executing" | "reviewing"
@@ -184,6 +188,21 @@ export class WorkflowStore {
     }
     const runId = input.runId ?? `wf_${randomUUID().replace(/-/g, "").slice(0, 16)}`;
     return this.db.transaction(() => {
+      // Dedupe FIRST: a retried admission returns the existing run without
+      // revalidating preconditions the world may since have moved past
+      // (e.g. the occurrence settled after the first admission committed).
+      const existing = this.db
+        .prepare(`SELECT * FROM workflow_runs WHERE client_operation_id = ?`)
+        .get(input.clientOperationId);
+      if (existing) {
+        const prev = rowToRun(existing);
+        if (prev.rootCardId !== input.rootCardId || prev.rootKind !== input.rootKind) {
+          throw new Error(
+            `workflow store: conflicting admission for operation ${input.clientOperationId}`,
+          );
+        }
+        return { row: prev, disposition: "duplicate" as const };
+      }
       const card = this.db
         .prepare(`SELECT id FROM kanban_board WHERE id = ?`)
         .get(input.rootCardId) as { id: number } | undefined;
@@ -195,10 +214,10 @@ export class WorkflowStore {
         if (!occ) throw new Error(`workflow store: scheduled run ${input.scheduledRunId} not live`);
       }
       const now = sqliteNow();
-      const existing = this.db
-        .prepare(`SELECT * FROM workflow_runs WHERE client_operation_id = ?`)
-        .get(input.clientOperationId);
-      if (existing) return { row: rowToRun(existing), disposition: "duplicate" as const };
+      const admissionBody = JSON.stringify({
+        rootKind: input.rootKind, rootCardId: input.rootCardId,
+        scheduledRunId: input.scheduledRunId ?? null, budgets: input.budgets,
+      });
       this.db
         .prepare(
           `INSERT INTO workflow_runs (run_id, root_kind, root_card_id, scheduled_run_id,
@@ -221,7 +240,7 @@ export class WorkflowStore {
             disposition, received_at, applied_at)
            VALUES (?, ?, ?, ?, 'applied', ?, ?)`,
         )
-        .run(`admit-${input.clientOperationId}`, runId, "admit", "{}", now, now);
+        .run(`admit-${input.clientOperationId}`, runId, shaHex(admissionBody), admissionBody, now, now);
       const row = this.db.prepare(`SELECT * FROM workflow_runs WHERE run_id = ?`).get(runId) as Record<string, unknown>;
       return { row: rowToRun(row), disposition: "admitted" as const };
     });
@@ -859,7 +878,7 @@ export class WorkflowStore {
     runId: string; cardId: number; caseRef: string; question: string;
     criteria: string[]; kind?: string;
   }): string {
-    const id = `inq-${Math.random().toString(36).slice(2, 10)}${Date.now().toString(36)}`;
+    const id = `inq-${randomUUID().replace(/-/g, "").slice(0, 20)}`;
     this.db
       .prepare(
         `INSERT INTO project_input_requests (id, project_card_id, review_case_id,

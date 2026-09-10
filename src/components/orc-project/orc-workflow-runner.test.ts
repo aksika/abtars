@@ -133,6 +133,25 @@ describe("WorkflowRunner Task 2", () => {
     expect(tick.ownerless).not.toContain(run.runId);
   });
 
+  it("acceptPlan is initial-only; revisions append through submitPlanProposal", () => {
+    const run = admit(runner, seedCard(store));
+    runner.acceptPlan(run.runId, twoLane());
+    expect(() => runner.acceptPlan(run.runId, twoLane())).toThrow(/use submitPlanProposal/);
+    expect(store.currentRevision(run.runId)).toBe(1);
+  });
+
+  it("delivery without an accepted obligation throws instead of acking", () => {
+    const run = admit(runner, seedCard(store));
+    const acc = runner.acceptPlan(run.runId, twoLane());
+    // Hand-plant a deliver command with no acceptance behind it.
+    store.queueCommand({
+      runId: run.runId, generation: 1, nodeId: acc.nodeIds[0] as string,
+      action: "deliver", ordinal: 0, payloadJson: "{}",
+    });
+    const sender = { send: (_doc: { idempotenceKey: string }) => "receipt-never" };
+    expect(() => runner.executeDelivery(run.runId, acc.nodeIds[0] as string, sender))
+      .toThrow(/no delivery obligation.*never accepted/);
+  });
   it("malformed plan creates no workers and reports field diagnostics", () => {
     const run = admit(runner, seedCard(store));
     const bad: Proposal = {

@@ -89,6 +89,13 @@ describe("WorkflowStore", () => {
     expect(second.row.runId).toBe(first.row.runId);
   });
 
+  it("rejects conflicting admission on the same operation id", () => {
+    const card = seedCard(store);
+    admit(store, card, "cop-conf");
+    const other = seedCard(store);
+    expect(() => admit(store, other, "cop-conf")).toThrow(/conflicting admission/);
+  });
+
   it("rejects admission for a missing root card and non-finite budgets", () => {
     expect(() => admit(store, 999999, "cop-miss")).toThrow(/root card .* missing/);
     const card = seedCard(store);

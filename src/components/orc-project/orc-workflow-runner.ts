@@ -291,6 +291,11 @@ export class WorkflowRunner {
     if (TERMINAL_RUN_STATES.includes(run.state)) {
       throw new Error(`workflow runner: run ${runId} already terminal`);
     }
+    // Initial admission only: revisions append through submitPlanProposal,
+    // which cancels superseded work and enforces acceptance monotonicity.
+    if (this.store.currentRevision(runId) !== 0) {
+      throw new Error(`workflow runner: run ${runId} already has a plan; use submitPlanProposal`);
+    }
     const problems = this.validatePlan(proposal);
     if (problems.length > 0) {
       // Invalid proposal: no worker side effects. Each rejection consumes the
@@ -733,9 +738,12 @@ export class WorkflowRunner {
     if (!claimed) throw new Error(`workflow runner: deliver command for ${runId}/${nodeId} busy`);
     const key = { runId, generation: pending.generation, nodeId, action: "deliver" as const, ordinal: pending.ordinal };
     const delivery = this.store.getDelivery(runId, nodeId);
-    if (!delivery || delivery["outcome"] !== "pending") {
+    if (!delivery) {
+      throw new Error(`workflow runner: no delivery obligation for ${runId}/${nodeId} (never accepted)`);
+    }
+    if (delivery["outcome"] !== "pending") {
       this.store.completeCommand(key, "delivery", claimed.token);
-      return "acknowledged";
+      return delivery["outcome"] as "acknowledged" | "failed" | "unknown";
     }
     const attempts = this.store.bumpDeliveryAttempts(runId, nodeId);
     const idempotenceKey = `${runId}/${nodeId}/${attempts}`;
@@ -1184,24 +1192,28 @@ export class WorkflowRunner {
           const b = parsed.body;
           this.applyAttemptSucceeded(run, this.store.currentRevision(atRunId),
             b["nodeId"] as string, b["attemptId"] as string, b["artifactsJson"] as string, event);
+          redriven++;
         } else if (parsed.kind === "AttemptFailed") {
           const b = parsed.body;
           this.applyAttemptFailed(run, this.store.currentRevision(atRunId),
             b["nodeId"] as string, b["attemptId"] as string,
             b["cause"] as string, b["retrySafe"] as boolean, event);
+          redriven++;
         } else if (parsed.kind === "ClaimExpired") {
           const b = parsed.body as {
             key: { nodeId: string; action: CommandAction; ordinal: number; generation: number };
             expectedGen: number;
           };
           this.applyClaimExpired(run, b.key, b.expectedGen, event);
+          redriven++;
         } else if (parsed.kind === "ShaHandoff") {
           const b = parsed.body as { rootCardId: number; stage: string; result: string; final: boolean };
           this.applyShaHandoff(run, b, event);
+          redriven++;
         }
         // Other kinds belong to their owner (planning/review/input/delivery
-        // jobs); recovery leaves them received for the audit to observe.
-        redriven++;
+        // jobs); recovery leaves them received for the audit to observe
+        // (deliberately NOT counted: nothing was redriven).
       } catch {
         // Recovery redrive must never throw past boot: the next audit pass
         // re-examines the same durable state.
