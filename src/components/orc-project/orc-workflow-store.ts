@@ -770,6 +770,83 @@ export class WorkflowStore {
     return res.changes === 1;
   }
 
+  /**
+   * Cancel a whole run's in-flight work (cancellation terminal path): fence
+   * live attempts by root lineage, release active retry reservations once,
+   * cancel open commands and nodes, resolve pending deliveries as unknown.
+   * Single call site: the runner's CancelRequested applier.
+   */
+  cancelRun(runId: string, rootCardId: number): {
+    attemptsFenced: number; commandsCancelled: number; nodesCancelled: number;
+  } {
+    const fenced = this.db
+      .prepare(
+        `UPDATE worker_attempts SET lifecycle = 'cancel_requested', cancel_reason = ?
+         WHERE root_project_card_id = ?
+           AND lifecycle IN ('pending','claimed','starting','running')`,
+      )
+      .run(`run-cancelled:${runId}`, rootCardId);
+    this.db
+      .prepare(
+        `UPDATE retry_budget_reservations SET status = 'released', updated_at = datetime('now')
+         WHERE status = 'active' AND source_attempt_id IN (
+           SELECT id FROM worker_attempts WHERE root_project_card_id = ?
+         )`,
+      )
+      .run(rootCardId);
+    const cmds = this.db
+      .prepare(
+        `UPDATE workflow_commands SET status = 'cancelled', done_at = datetime('now'),
+           next_inspection_at = NULL
+         WHERE run_id = ? AND status IN ('pending','claimed')`,
+      )
+      .run(runId);
+    const nodes = this.db
+      .prepare(
+        `UPDATE workflow_nodes SET status = 'cancelled', updated_at = datetime('now')
+         WHERE run_id = ? AND status IN ('queued','running')`,
+      )
+      .run(runId);
+    this.db
+      .prepare(
+        `UPDATE workflow_deliveries SET outcome = 'unknown',
+           receipt_json = '{"cancelled":true}', updated_at = datetime('now')
+         WHERE run_id = ? AND outcome = 'pending'`,
+      )
+      .run(runId);
+    return {
+      attemptsFenced: Number(fenced.changes),
+      commandsCancelled: Number(cmds.changes),
+      nodesCancelled: Number(nodes.changes),
+    };
+  }
+
+  /** Cancel leftover pending commands of a failed run (breaker refusal path). */
+  cancelPendingCommands(runId: string): number {
+    const res = this.db
+      .prepare(`UPDATE workflow_commands SET status = 'cancelled', done_at = datetime('now') WHERE run_id = ? AND status = 'pending'`)
+      .run(runId);
+    return Number(res.changes);
+  }
+
+  /** Record a confirmed-alive inspection: reset inconclusive, schedule next look. */
+  noteInspectionAlive(key: CommandKey, gen: number, intervalMin: number): void {
+    this.db.prepare(
+      `UPDATE workflow_commands SET inspect_gen = ?, consecutive_inconclusive = 0,
+         next_inspection_at = datetime('now', '+' || ? || ' minutes')
+       WHERE run_id = ? AND generation = ? AND node_id = ? AND action = ? AND ordinal = ?`,
+    ).run(gen, intervalMin, key.runId, key.generation, key.nodeId, key.action, key.ordinal);
+  }
+
+  /** Record an inconclusive inspection: bump counter, schedule next look. */
+  noteInspectionInconclusive(key: CommandKey, gen: number, inconclusive: number, intervalMin: number): void {
+    this.db.prepare(
+      `UPDATE workflow_commands SET inspect_gen = ?, consecutive_inconclusive = ?,
+         next_inspection_at = datetime('now', '+' || ? || ' minutes')
+       WHERE run_id = ? AND generation = ? AND node_id = ? AND action = ? AND ordinal = ?`,
+    ).run(gen, inconclusive, intervalMin, key.runId, key.generation, key.nodeId, key.action, key.ordinal);
+  }
+
   // ── input requests (runner-owned rows in the shared input table) ────
   //
   // project_input_requests is shared with the legacy review flow, but rows

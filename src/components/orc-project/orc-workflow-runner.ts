@@ -657,57 +657,13 @@ export class WorkflowRunner {
     if (!run) throw new Error(`workflow runner: run ${runId} missing`);
     if (TERMINAL_RUN_STATES.includes(run.state)) return { cancelled: false, attemptsFenced: 0, commandsCancelled: 0, nodesCancelled: 0 };
     const reason = boundText(cause, 2000);
-    let attemptsFenced = 0;
-    let commandsCancelled = 0;
-    let nodesCancelled = 0;
+    let counts = { attemptsFenced: 0, commandsCancelled: 0, nodesCancelled: 0 };
     const res = this.commitKind(run, "CancelRequested", { cause: reason }, () => {
-      // Fence live attempts by stable root lineage (execution facts stay in
-      // worker_attempts; the runner owns the transition, not the ledger).
-      const fenced = this.store.db
-        .prepare(
-          `UPDATE worker_attempts SET lifecycle = 'cancel_requested', cancel_reason = ?
-           WHERE root_project_card_id = ?
-             AND lifecycle IN ('pending','claimed','starting','running')`,
-        )
-        .run(`run-cancelled:${runId}`, run.rootCardId);
-      attemptsFenced = Number(fenced.changes);
-      // Release active retry reservations once (idempotent: only 'active' rows).
-      this.store.db
-        .prepare(
-          `UPDATE retry_budget_reservations SET status = 'released', updated_at = datetime('now')
-           WHERE status = 'active' AND source_attempt_id IN (
-             SELECT id FROM worker_attempts WHERE root_project_card_id = ?
-           )`,
-        )
-        .run(run.rootCardId);
-      const cmds = this.store.db
-        .prepare(
-          `UPDATE workflow_commands SET status = 'cancelled', done_at = datetime('now'),
-             next_inspection_at = NULL
-           WHERE run_id = ? AND status IN ('pending','claimed')`,
-        )
-        .run(runId);
-      commandsCancelled = Number(cmds.changes);
-      const nodes = this.store.db
-        .prepare(
-          `UPDATE workflow_nodes SET status = 'cancelled', updated_at = datetime('now')
-           WHERE run_id = ? AND status IN ('queued','running')`,
-        )
-        .run(runId);
-      nodesCancelled = Number(nodes.changes);
-      // In-flight sends made ambiguous by cancellation resolve as unknown —
-      // never falsely acknowledged, never blindly resent (§2.9 rule).
-      this.store.db
-        .prepare(
-          `UPDATE workflow_deliveries SET outcome = 'unknown',
-             receipt_json = '{"cancelled":true}', updated_at = datetime('now')
-           WHERE run_id = ? AND outcome = 'pending'`,
-        )
-        .run(runId);
+      counts = this.store.cancelRun(runId, run.rootCardId);
       return { nextState: "cancelled" as const, failureCode: "cancelled", failureReason: reason };
     });
     if (res.disposition === "conflict") throw new Error(`workflow runner: ${res.diagnostics}`);
-    return { cancelled: true, attemptsFenced, commandsCancelled, nodesCancelled };
+    return { cancelled: true, ...counts };
   }
 
   /** Terminal failure outside node evaluation (breaker refusal, inspector verdict). */
@@ -960,11 +916,7 @@ export class WorkflowRunner {
         // Non-terminal attempt: liveness hinges on the lease heartbeat.
         const lease = this.store.readLeaseSnapshot(latest["id"] as string);
         if (leaseFresh(lease)) {
-          this.store.db.prepare(
-            `UPDATE workflow_commands SET inspect_gen = ?, consecutive_inconclusive = 0,
-               next_inspection_at = datetime('now', '+${COMMAND_CLAIM_LEASE_MIN} minutes')
-             WHERE run_id = ? AND generation = ? AND node_id = ? AND action = ? AND ordinal = ?`,
-          ).run(expectedGen, run.runId, key.generation, key.nodeId, key.action, key.ordinal);
+          this.store.noteInspectionAlive(fullKey, expectedGen, COMMAND_CLAIM_LEASE_MIN);
           return {};
         }
       }
@@ -992,11 +944,7 @@ export class WorkflowRunner {
       const rev = this.store.currentRevision(run.runId);
       return this.evaluateTerminal(run.runId, rev, "inspection cap reached without verdict");
     }
-    this.store.db.prepare(
-      `UPDATE workflow_commands SET inspect_gen = ?, consecutive_inconclusive = ?,
-         next_inspection_at = datetime('now', '+${COMMAND_CLAIM_LEASE_MIN} minutes')
-       WHERE run_id = ? AND generation = ? AND node_id = ? AND action = ? AND ordinal = ?`,
-    ).run(expectedGen, inconclusive, run.runId, fullKey.generation, fullKey.nodeId, fullKey.action, fullKey.ordinal);
+    this.store.noteInspectionInconclusive(fullKey, expectedGen, inconclusive, COMMAND_CLAIM_LEASE_MIN);
     return {};
   }
 
@@ -1072,9 +1020,7 @@ export class WorkflowRunner {
       // Required work refused: fail fast AND cancel the run's leftover pending
       // commands so no drain rediscovers them (the run is terminal; the audit
       // ignores terminal runs, but dangling rows are not left behind).
-      this.store.db
-        .prepare(`UPDATE workflow_commands SET status = 'cancelled', done_at = datetime('now') WHERE run_id = ? AND status = 'pending'`)
-        .run(runId);
+      this.store.cancelPendingCommands(runId);
       return { nextState: "failed" as const, failureCode: "resource_unavailable", failureReason: `resource refused: ${resource}` };
     });
     if (res.disposition === "conflict") throw new Error(`workflow runner: ${res.diagnostics}`);
@@ -1084,7 +1030,8 @@ export class WorkflowRunner {
   // ── drain + recovery + audit ──────────────────────────────────────────
 
   drain(limit: number, ports: DrainPorts, opts?: DrainOpts): number {
-    const policy = opts?.policy;    const route = (cmd: CommandRow): { owner: string; start: () => void } => {
+    const policy = opts?.policy;
+    const route = (cmd: CommandRow): { owner: string; start: () => void } => {
       if (!isJobPorts(ports) || cmd.action === "dispatch" || cmd.action === "deliver" || cmd.action === "notify") {
         const exec = isJobPorts(ports) ? ports.executor : ports;
         return { owner: exec.name, start: () => exec.dispatch(cmd) };
