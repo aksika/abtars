@@ -30,6 +30,7 @@ import {
 } from "./orc-workflow-store.js";
 import { mkdirSync, realpathSync } from "node:fs";
 import type { TaskDatabase } from "../tasks/kanban-board.js";
+import { ensureRunnerTables } from "./orc-workflow-ensure.js";
 import {
   kanbanGetCard,
   kanbanSetProjectDeliveryReady,
@@ -692,6 +693,7 @@ export class WorkflowRunner {
     const run = this.store.getRun(runId);
     if (!run) throw new Error(`workflow runner: run ${runId} missing`);
     if (TERMINAL_RUN_STATES.includes(run.state)) return { cancelled: false, attemptsFenced: 0, commandsCancelled: 0, nodesCancelled: 0 };
+    ensureRunnerTables(this.store.db);
     const reason = boundText(cause, 2000);
     let counts = { attemptsFenced: 0, commandsCancelled: 0, nodesCancelled: 0 };
     const res = this.commitKind(run, "CancelRequested", { cause: reason }, () => {
@@ -716,6 +718,7 @@ export class WorkflowRunner {
   requestInput(runId: string, question: string, criteria: string[], kind = "text"): string {
     const run = this.requireLive(runId);
     if (run.state === "awaiting_input") throw new Error(`workflow runner: run ${runId} already awaiting input`);
+    ensureRunnerTables(this.store.db);
     const q = boundText(question, 2000);
     let inputId = "";
     const res = this.commitKind(run, "InputRequested", { question: q }, () => {
@@ -734,6 +737,7 @@ export class WorkflowRunner {
   }
 
   answerInput(inputId: string, response: string): { runId: string } {
+    ensureRunnerTables(this.store.db);
     const answered = this.store.answerInputRequest(inputId, boundText(response, 2000));
     if (!answered || !answered.runId) throw new Error(`workflow runner: input ${inputId} unknown or already answered`);
     const run = this.requireLive(answered.runId);
@@ -847,6 +851,7 @@ export class WorkflowRunner {
     nodeId: string; action: CommandAction; ordinal: number; generation: number;
   }, expectedGen: number): string {
     const run = this.requireLive(runId);
+    ensureRunnerTables(this.store.db);
     const payload = JSON.stringify({ key, expectedGen });
     const event: RunnerIngress = {
       eventId: `inspect-${runId}-${key.nodeId}-${key.action}-${key.ordinal}-${expectedGen}-${randomUUID().replace(/-/g, "").slice(0, 8)}`,
@@ -1194,7 +1199,23 @@ export class WorkflowRunner {
     });
     if (admitted.disposition === "duplicate") {
       // Re-admission heals a crash between admission commit and planning
-      // queue (below): the run exists but may have no planning yet.
+      // queue (below): the run exists but may have no planning yet. A cwd on
+      // a duplicate re-verifies the immutable workspace binding (#1656):
+      // mismatch fails closed, never rebinds.
+      if (input.cwd !== undefined) {
+        let canonical: string;
+        try {
+          mkdirSync(input.cwd, { recursive: true });
+          canonical = realpathSync(input.cwd);
+        } catch (err) {
+          throw new Error(`workflow runner: workspace ${input.cwd} is not resolvable: ${err instanceof Error ? err.message : String(err)}`);
+        }
+        const reviewStore = new ProjectReviewStore(this.store.db);
+        const current = reviewStore.getSupervision(input.rootCardId)?.workspace_cwd ?? null;
+        if (typeof current === "string" && current !== canonical) {
+          throw new Error("scheduled project admission failed: workspace mismatch — the bound project workspace is immutable and cannot be re-pointed");
+        }
+      }
       this.ensureInitialPlanning(admitted.run.runId);
       return { kind: "duplicate", runId: admitted.run.runId, rootKind };
     }

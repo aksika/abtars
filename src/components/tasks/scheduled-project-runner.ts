@@ -13,7 +13,7 @@
 
 import { nerve } from "../nerve.js";
 import { logInfo } from "../logger.js";
-import { kanbanEnqueue, kanbanRunning, kanbanGetCard, kanbanGetChildren } from "./kanban-board.js";
+import { kanbanEnqueue, kanbanRunning, kanbanGetCard, kanbanGetChildren, kanbanPromoteDueRetry } from "./kanban-board.js";
 import { readState, advanceRun } from "./task-state-store.js";
 import { WorkflowRunner } from "../orc-project/orc-workflow-runner.js";
 import { WorkflowStore } from "../orc-project/orc-workflow-store.js";
@@ -86,6 +86,13 @@ export async function scheduledProjectRunner(request: ScheduledProjectRequest): 
     }
     executionControl.setCardId(rootCardId);
     logInfo(TAG, `Reattaching scheduled project card #${rootCardId} for task "${entryId}" run ${runId}`);
+    // Terminal cards resolve from evidence without any admission side effects:
+    // no supervision insertion, no runner admission, no planning.
+    if (existing.status === "done" || existing.status === "delivered" || existing.status === "failed") {
+      logInfo(TAG, `Scheduled project #${rootCardId} already terminal on reattach — waiting for terminal evidence`);
+      bindProjectCancellation(executionControl, rootCardId, cancellationState);
+      return waitForProjectTerminal(request, rootCardId, cancellationState);
+    }
     // Idempotent runner admission: the same client operation id replays to a
     // duplicate (proceed), a terminal run resolves in the waiter below, and
     // workspace mismatch fails closed inside admission.
@@ -97,7 +104,15 @@ export async function scheduledProjectRunner(request: ScheduledProjectRequest): 
       throw new Error(`scheduled project admission failed: ${admitted.reason}`);
     }
     const currentCard = kanbanGetCard(rootCardId);
-    if (currentCard?.status === "queued") kanbanRunning(rootCardId);
+    if (currentCard?.status === "queued") {
+      if (currentCard.next_retry_at != null) {
+        // Spent retry marker: due promotion consumes it atomically; a future
+        // marker is left untouched for the retry due source.
+        kanbanPromoteDueRetry(rootCardId);
+      } else {
+        kanbanRunning(rootCardId);
+      }
+    }
     bindProjectCancellation(executionControl, rootCardId, cancellationState);
     return waitForProjectTerminal(request, rootCardId, cancellationState);
   } else {
@@ -360,12 +375,17 @@ function readWorkflowTerminal(rootCardId: number): ProjectTerminalRead | undefin
     }
     const reason = (runTerminal.failureReason ?? runTerminal.failureCode ?? "project blocked").slice(0, 500);
     const lanes = gatherLaneFacts(rootCardId);
-    const diagnostic = makeTaskFailure("supervision", "project_blocked", "executing",
-      reason, "none",
+    // Lane evidence refines the diagnostic (reporting only — progression
+    // already settled in the runner): a specific lane fault wins over the
+    // generic run reason; otherwise the run's own reason surfaces verbatim.
+    const selected = selectSupervisionCode(lanes, []);
+    const code = selected.code === "project_blocked" ? "project_blocked" : selected.code;
+    const diagnostic = makeTaskFailure("supervision", code, "executing",
+      code === "project_blocked" ? reason : selected.message, "none",
       {
         rootCardId,
         lanes,
-        remediationHint: reason,
+        remediationHint: code === "project_blocked" ? reason : undefined,
       });
     return { accepted: false, diagnostic, factAt: cardTimeMs(card.updated_at) };
   }
