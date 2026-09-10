@@ -249,6 +249,17 @@ export class WorkflowRunner {
         problems.push({ field: `nodes[${i}].capability`, reason: `unsupported capability ${n.capability}` });
       }
       if (!Array.isArray(n.outputs)) problems.push({ field: `nodes[${i}].outputs`, reason: "outputs must be an array" });
+      for (const o of n.outputs ?? []) {
+        if (typeof o !== "string" || o.length === 0) {
+          problems.push({ field: `nodes[${i}].outputs`, reason: "outputs must be non-empty strings" });
+        } else if (o.startsWith("/") || o.startsWith("~") || /(^|\/)home\//.test(o) || o.startsWith("tmp/") || o === "tmp") {
+          // #1792 live-fix: absolute outputs pass plan validation but die at
+          // dispatch (worker-contract path check), bricking the run on
+          // claimed commands. Reject here so the bounded protocol-correction
+          // path fixes the plan instead.
+          problems.push({ field: `nodes[${i}].outputs`, reason: `output ${o} must be workspace-relative (no absolute paths)` });
+        }
+      }
       if (!Array.isArray(n.acceptance)) problems.push({ field: `nodes[${i}].acceptance`, reason: "acceptance must be an array" });
       if ((n.kind === "work" || n.kind === "synthesis" || n.kind === "delivery") && (n.acceptance ?? []).length === 0) {
         problems.push({ field: `nodes[${i}].acceptance`, reason: `${n.kind} nodes need at least one acceptance criterion (worker contracts require it at dispatch)` });

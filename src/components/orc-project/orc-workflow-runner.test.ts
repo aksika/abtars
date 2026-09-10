@@ -172,6 +172,17 @@ describe("WorkflowRunner Task 2", () => {
     }
     expect(store.listNodes(run.runId, 1)).toEqual([]);
     expect(store.countPendingCommands()).toBe(0);
+    // Absolute outputs are rejected at the plan boundary (they die at
+    // dispatch contract validation and would brick the run on claimed
+    // commands — the bounded correction path fixes the plan instead).
+    const absRun = admit(runner, seedCard(store));
+    expect(() => runner.acceptPlan(absRun.runId, {
+      requiredOutputs: ["out/report.md"],
+      nodes: [{
+        label: "w", kind: "work", instructions: "do", capability: "general",
+        outputs: ["/home/u/out/report.md"], acceptance: ["done"], dependsOn: [],
+      }],
+    })).toThrow(/workspace-relative/);
     // A corrected proposal succeeds within the revision budget.
     const acc = runner.acceptPlan(run.runId, twoLane());
     expect(acc.queued).toBe(2);

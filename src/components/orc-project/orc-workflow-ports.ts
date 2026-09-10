@@ -71,6 +71,7 @@ function planPrompt(input: {
       + `${input.capabilities.join(", ")}), outputs, acceptance, and dependsOn (possibly empty).`,
     "Labels unique. Dependencies must reference declared labels. No cycles.",
     "Every requiredOutput must be declared in some node's outputs.",
+    "All outputs must be workspace-relative paths (e.g. out/report.md) — never absolute paths, never ~, never /home or /tmp prefixes. Absolute outputs are rejected.",
     "Include an explicit synthesis node when the requested output needs assembled writing.",
     `Goal: ${input.goal}`,
     `Required outputs: ${input.requiredOutputs.join(", ")}`,
