@@ -18,6 +18,7 @@ import { createHash } from "node:crypto";
 import { classify } from "../retry/failure-classifier.js";
 import type { WorkerResultEnvelopeV1 } from "../worker-contract.js";
 import { logWarn } from "../logger.js";
+import { requireTaskDatabase } from "../tasks/kanban-board.js";
 import { boundText } from "./orc-workflow-runner.js";
 import { workflowStoreFor } from "./orc-workflow-store.js";
 import type { TaskDatabase } from "../tasks/kanban-board.js";
@@ -42,6 +43,15 @@ function runnerForDb(db: TaskDatabase): WorkflowRunner {
     runners.set(db, runner);
   }
   return runner;
+}
+
+/**
+ * Whether a worker card is bound to a live workflow run's node (reconciler
+ * retry inference stands down; false on any read failure — safe direction
+ * keeps legacy handling rather than dropping retries).
+ */
+export function isRunnerManagedCard(cardId: number): boolean {
+  return workflowStoreFor(requireTaskDatabase()).isCardRunnerManaged(cardId);
 }
 
 function classifyRetrySafe(

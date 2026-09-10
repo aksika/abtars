@@ -12,7 +12,8 @@ import { getRun } from "./task-history-store.js";
 import { settleRunFromHistory, settleRunOnce } from "./task-run-settler.js";
 import { makeTaskFailure } from "./task-failure.js";
 import { kanbanDueRetryItems, kanbanGetCard, type KanbanCard } from "./kanban-board.js";
-import { abortProjectById } from "../reconciler.js";
+import { WorkflowRunner } from "../orc-project/orc-workflow-runner.js";
+import { WorkflowStore } from "../orc-project/orc-workflow-store.js";
 import { ProjectReviewStore } from "../project-acceptance/project-review-store.js";
 import { logAndSwallow } from "../log-and-swallow.js";
 import type { LifecycleDueItem, LifecycleDueSource, LifecycleDueSourceId } from "../lifecycle-wake-scheduler.js";
@@ -55,10 +56,19 @@ export function settleExpiredRun(
     detail,
     onFailure,
   });
-  // #1516: terminalize the interrupted project so its Orc/Worker state
-  // cannot orphan after the scheduled run is settled.
+  // #1792: terminalize the supervised project through the runner. Only
+  // workflow-supervised cards have runs; anything else has no supervised
+  // children by construction (quiescent cutover) and is left for the
+  // occurrence settlement above.
   if (run.cardId !== undefined) {
-    void abortProjectById(run.cardId, abortReason);
+    try {
+      const store = new WorkflowStore();
+      const runner = new WorkflowRunner(store);
+      const supervised = store.findRunByCard(run.cardId);
+      if (supervised) runner.requestCancel(supervised.runId, abortReason);
+    } catch (err) {
+      logAndSwallow("due-sources", "supervised cancel on deadline settlement", err);
+    }
   }
 }
 

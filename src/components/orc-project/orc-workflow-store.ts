@@ -376,6 +376,26 @@ export class WorkflowStore {
   }
 
   /**
+   * Whether a worker card is bound to a live workflow run's node (runner
+   * owns its retry/continuation decisions; competing inference must stand down).
+   */
+  isCardRunnerManaged(cardId: number): boolean {
+    try {
+      const row = this.db
+        .prepare(
+          `SELECT 1 AS v FROM workflow_nodes n
+           JOIN workflow_runs r ON r.run_id = n.run_id
+             AND r.state NOT IN ('succeeded','failed','cancelled')
+           WHERE n.worker_card_id = ? LIMIT 1`,
+        )
+        .get(cardId) as { v: number } | undefined;
+      return row !== undefined;
+    } catch {
+      return false;
+    }
+  }
+
+  /**
    * Locate the node dispatched to a worker card, newest revision first.
    * Settlement uses this to map a terminal attempt back to its node.
    */

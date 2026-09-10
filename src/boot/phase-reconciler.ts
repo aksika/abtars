@@ -22,32 +22,26 @@ import { PiExecutorAdapter } from "../components/pi-executor-adapter.js";
 import { ProjectReviewStore } from "../components/project-acceptance/project-review-store.js";
 import type { ToolExecutionScope } from "../components/tasks/task-package.js";
 import type { ReconcilerDeps, ReconcilerHandle } from "../components/reconciler.js";
+import type { WorkflowDriver } from "../components/orc-project/orc-workflow-driver.js";
 import type { HeartbeatSystem } from "../components/heartbeat-system.js";
 
 const TAG = "reconciler";
 
 const MAX_UNRESOLVED_WARNINGS = 20;
 
-/** #1554: register the existing Reconciler-owned heartbeat work after start. */
+/** #1792: the bounded audit replaces reconciler-resync at its existing cadence.
+ * review-request-retry is removed: its obligations live in the runner/outbox
+ * and the existing wake scheduler (separately approved heartbeat change).
+ * No timing or watchdog threshold changes. */
 export function registerReconcilerHeartbeatTasks(
   heartbeat: HeartbeatSystem,
-  scanActiveProjects: () => number,
-  retryPendingReviewRequests: () => number,
+  audit: () => { acted: boolean },
 ): void {
   heartbeat.registerTask({
     name: "reconciler-resync",
     execute: async () => {
-      scanActiveProjects();
-      const { ProjectReviewStore } = await import("../components/project-acceptance/project-review-store.js");
-      const facts = new ProjectReviewStore().abandonExpiredRequests();
-      return { state: facts.length > 0 ? "ran" : "idle" as const };
-    },
-  });
-  heartbeat.registerTask({
-    name: "review-request-retry",
-    execute: async () => {
-      const count = retryPendingReviewRequests();
-      return { state: count > 0 ? "ran" : "idle" as const };
+      const summary = audit();
+      return { state: summary.acted ? "ran" : "idle" as const };
     },
   });
 }
@@ -76,10 +70,11 @@ export async function phaseReconciler(ctx: BootCtx): Promise<PhaseResult> {
   }
 
   let handle: ReconcilerHandle | null = null;
+  let workflowDriver: WorkflowDriver | null = null;
   let getActiveOrcCoordinator: (() => OrcProjectCoordinator | null) | undefined;
   try {
     const reconciler = await import("../components/reconciler.js");
-    const { startReconciler, scanActiveProjects, retryPendingReviewRequests } = reconciler;
+    const { startReconciler } = reconciler;
     getActiveOrcCoordinator = reconciler.getActiveOrcCoordinator;
     const { spin } = await import("../components/spin.js");
 
@@ -130,6 +125,20 @@ export async function phaseReconciler(ctx: BootCtx): Promise<PhaseResult> {
     ctx.reconcilerHandle = handle;
     ctx.reconcilerRecovery = handle.recovery;
 
+    // #1792: start the workflow driver alongside the reconciler. The driver
+    // owns supervised runs (nerve wakes + bounded audit); the reconciler keeps
+    // executor dispatch, leases, quarantine, and unsupervised duties. With no
+    // workflow runs admitted the driver is a silent no-op.
+    const { startWorkflowDriver } = await import("../components/orc-project/orc-workflow-driver.js");
+    workflowDriver = startWorkflowDriver({
+      callModel: (prompt, timeoutMs) => spin.dispatchBackground({ prompt, timeoutMs }),
+    });
+    try {
+      workflowDriver.recover();
+    } catch (err) {
+      logWarn(TAG, `Workflow driver recovery contained: ${err instanceof Error ? err.message : String(err)}`);
+    }
+
     // #1688: one bounded SHA boot-recovery pass after the Reconciler
     // generation exists (review-state recovery needs requestReconcileForProject).
     if (ctx.shaCoordinator) {
@@ -163,17 +172,33 @@ export async function phaseReconciler(ctx: BootCtx): Promise<PhaseResult> {
       logWarn(TAG, `Recovery unresolved: ${unresolved.length - MAX_UNRESOLVED_WARNINGS} further attempt(s) omitted (bounded)`);
     }
 
-    // #1554 (approved heartbeat move): the Reconciler-owned safety/retry tasks
-    // register only after a successful generation start. project-acceptance-
-    // outbox stays independently registered in Tier-3.
-    registerReconcilerHeartbeatTasks(heartbeat, scanActiveProjects, retryPendingReviewRequests);
+    // #1792 (approved heartbeat change): the bounded audit replaces
+    // reconciler-resync at its existing cadence; review-request-retry is gone
+    // (obligations live in the runner/outbox + wake scheduler). The audit
+    // never dispatches model work: it redrives persisted commands, submits
+    // inspection ingress for suspect claims, and reports ownerless runs for
+    // the runner to fence. No timing or watchdog changes.
+    // Narrowed once: the audit closure below captures this const, so the
+    // nullable outer (needed for catch-path rollback) cannot leak in.
+    const driver = workflowDriver;
+    registerReconcilerHeartbeatTasks(heartbeat, () => {
+      const audit = driver.auditOnce();
+      return {
+        acted: audit.recovered + audit.inspections + audit.projected + audit.ownerless.length > 0,
+      };
+    });
 
     return "ran";
   } catch (err) {
     // The Reconciler is the owner of this generation. If any later boot step
     // fails after start, roll it back before propagating the phase failure so
-    // no listeners, lease source, static hook, or due scheduler survives a
-    // failed boot generation.
+    // no listeners, lease source, static hook, due scheduler, or workflow
+    // driver survives a failed boot generation.
+    if (workflowDriver) {
+      try { workflowDriver.stop(); } catch (stopErr) {
+        logWarn(TAG, `Workflow driver rollback failed: ${stopErr instanceof Error ? stopErr.message : String(stopErr)}`);
+      }
+    }
     if (handle) {
       try { await handle.stop(); } catch (stopErr) {
         logWarn(TAG, `Reconciler rollback failed: ${stopErr instanceof Error ? stopErr.message : String(stopErr)}`);

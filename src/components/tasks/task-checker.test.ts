@@ -18,12 +18,17 @@ vi.mock("./kanban-board.js", () => ({
   resolveRootId: vi.fn(() => undefined),
 }));
 
-vi.mock("../reconciler.js", () => ({
-  abortProjectById: vi.fn().mockResolvedValue(undefined),
+vi.mock("../orc-project/orc-workflow-store.js", () => ({
+  WorkflowStore: vi.fn(),
+}));
+
+vi.mock("../orc-project/orc-workflow-runner.js", () => ({
+  WorkflowRunner: vi.fn(),
 }));
 
 const kanbanMod = await import("./kanban-board.js");
-const reconcilerMod = await import("../reconciler.js");
+const workflowStoreMod = await import("../orc-project/orc-workflow-store.js");
+const workflowRunnerMod = await import("../orc-project/orc-workflow-runner.js");
 
 vi.mock("./task-state-store.js", () => ({
   createRunId: vi.fn(() => "generated-run"),
@@ -273,6 +278,18 @@ describe("coordinator.recover #1539 restart ownership", () => {
 
   it("aborts a still-live project when the scheduled deadline passed during downtime", () => {
     vi.mocked(kanbanMod.kanbanGetCard).mockReturnValue({ id: 78, status: "queued" } as never);
+    // #1792: the supervised project terminalizes through the runner, not the
+    // reconciler. A workflow run exists for card 78, so requestCancel fires.
+    // NOTE: `function` (not arrow) implementations — production constructs
+    // both classes with `new`, and `new` only honors an object returned from
+    // a constructible function implementation.
+    const requestCancel = vi.fn();
+    vi.mocked(workflowStoreMod.WorkflowStore).mockImplementation(function () {
+      return { findRunByCard: vi.fn().mockReturnValue({ runId: "wf-78" }) };
+    } as never);
+    vi.mocked(workflowRunnerMod.WorkflowRunner).mockImplementation(function () {
+      return { requestCancel };
+    } as never);
     runWith(78, Date.now() - 1000);
     return Promise.resolve().then(() => {
       expect(vi.mocked(historyStore.appendRunOnce)).toHaveBeenCalledWith(expect.objectContaining({
@@ -280,7 +297,7 @@ describe("coordinator.recover #1539 restart ownership", () => {
         detail: "restart_recovery: deadline passed",
         runId: "interrupted-run",
       }));
-      expect(reconcilerMod.abortProjectById).toHaveBeenCalledWith(78, "restart_recovery: scheduled deadline passed");
+      expect(requestCancel).toHaveBeenCalledWith("wf-78", "restart_recovery: scheduled deadline passed");
     });
   });
 

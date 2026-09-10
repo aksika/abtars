@@ -60,7 +60,7 @@ const MUTATORS = [
   "kanbanSetProjectDeliveryReady", "kanbanClaimProjectDelivery",
   "admitEventInTx", "admitEventWithCooldownInTx", "bindProvisioned",
   "setState", "claimSalvageExecution", "scheduleProjectSalvage", "supersede",
-  "release", "abandonExpiredRequests",
+  "release",
 ];
 
 // Raw SQL sites restricted to the private persistence modules + schema init.
@@ -150,7 +150,9 @@ for (const full of walk(SRC)) {
       }
     }
     // 4. Direct reconciler wake/phase calls outside the runner + boot wiring.
-    if (/requestReconcileForProject|abortProjectById/.test(line) && !trimmed.startsWith("import ")) {
+    // (#1792: abortProjectById deleted with the supervised brain; only the
+    // wake facade remains, still restricted to the runner boundary.)
+    if (/requestReconcileForProject/.test(line) && !trimmed.startsWith("import ")) {
       const allowed = rel === "src/components/orc-project/orc-workflow-runner.ts"
         || rel === "src/components/orc-project/orc-workflow-store.ts"
         || rel.startsWith("src/boot/");

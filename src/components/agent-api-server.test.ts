@@ -349,7 +349,7 @@ describe("AgentApiServer", () => {
       return { status: res.status, body: await res.json() };
     }
 
-    it("creates root+supervision+proxy+ledger before transport and replays with stable identities", async () => {
+    it("creates root+run+proxy+ledger before transport and replays with stable identities", async () => {
       const first = await postDelegate({ peer: "molty", goal: "reply ok", request_id: "orc_route_1" });
       expect(first.status).toBe(200);
       expect(first.body.ok).toBe(true);
@@ -375,8 +375,13 @@ describe("AgentApiServer", () => {
       expect(root.source).toBe("cli");
       expect(root.type).toBe("O");
       expect(root.status).toBe("queued");
-      const sup = d.prepare("SELECT state FROM project_supervision WHERE project_card_id = ?").get(first.body.project_card_id) as any;
-      expect(sup.state).toBe("awaiting_contract");
+      // #1792: the delegation root is supervised by a workflow run from
+      // birth — no project_supervision row. The run must exist, be owned by
+      // this root, and be nonterminal.
+      const run = d.prepare("SELECT run_id, state FROM workflow_runs WHERE root_card_id = ?").get(first.body.project_card_id) as any;
+      expect(run).toBeDefined();
+      expect(run.run_id).toBeTruthy();
+      expect(["admitted", "planning", "executing"]).toContain(run.state);
 
       const proxy = d.prepare("SELECT * FROM kanban_board WHERE id = ?").get(first.body.proxy_card_id) as any;
       expect(proxy.type).toBe("contribution");

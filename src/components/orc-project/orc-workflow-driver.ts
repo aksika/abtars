@@ -26,7 +26,7 @@ import type { TaskDatabase } from "../tasks/kanban-board.js";
 export interface WorkflowDriver {
   readonly runner: WorkflowRunner;
   drainWake(reason: string): number;
-  auditOnce(cursor: number): {
+  auditOnce(cursor?: number): {
     nextCursor: number; checked: number; lawful: string[]; ownerless: string[];
     recovered: number; inspections: number; projected: number;
   };

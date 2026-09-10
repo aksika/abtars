@@ -4,7 +4,24 @@
  * Real SQLite stores in a tmpdir; only external boundaries are scripted.
  * Covers: two-generation recovery/listener/source accounting, drain semantics,
  * lease-source registration identity, recovery truth, startup rollback, and
- * heartbeat decoupling (outbox independent, Reconciler tasks post-success).
+ * heartbeat decoupling (outbox independent, Reconciler task post-success).
+ *
+ * #1792 cutover: supervised (O-type) roots are runner-owned. Reconciler
+ * `deriveAction` returns early for O-roots and `requestReconcile` on an O-root
+ * is a reconciler no-op (the workflow driver advances supervised roots via
+ * nerve + bounded audit). Deleted exports: `scanActiveProjects`,
+ * `retryPendingReviewRequests`, `abortProjectById`. Review-turn liveness
+ * removed here is covered by `src/tests/e2e/orc-workflow.e2e.test.ts`
+ * journey 3 (bounded failure policy: "retry succeeds; required failure
+ * settles; optional failure proceeds"), journey 9 (alive retention under
+ * repeated inspection) and journey 10 (unobservable worker → explicit
+ * unknown) — see the combined journeys 8–10 test ("lost completion recovers
+ * exactly once; alive work survives; unknown stays explicit"). Do NOT write
+ * new runner tests here.
+ * Heartbeat (separately approved task change, implemented in
+ * `src/boot/phase-reconciler.ts` `registerReconcilerHeartbeatTasks`): only
+ * `reconciler-resync` (the driver's bounded audit) is registered;
+ * `review-request-retry` is gone.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { mkdirSync, rmSync, writeFileSync, mkdtempSync } from "node:fs";
@@ -12,27 +29,10 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import type { ProjectAcceptanceContractV1 } from "./project-acceptance/project-contract.js";
 
-/** #1554 drain test: gate for ReviewCaseAssembler.assembleCase. */
-let assemblyGate: Promise<unknown> | null = null;
-let releaseAssembly: ((snapshot: unknown) => void) | null = null;
-
 const dispatchMock = vi.fn();
 vi.mock("../spin.js", () => ({
   spin: { dispatch: dispatchMock, spawnChild: vi.fn() },
 }));
-
-vi.mock("./project-acceptance/project-review-case.js", async (importOriginal) => {
-  const actual = await importOriginal<typeof import("./project-acceptance/project-review-case.js")>();
-  return {
-    ...actual,
-    ReviewCaseAssembler: class extends actual.ReviewCaseAssembler {
-      override async assembleCase(...args: unknown[]): Promise<unknown> {
-        if (assemblyGate) return assemblyGate;
-        return super.assembleCase(...(args as [number, number, number]));
-      }
-    },
-  };
-});
 
 let TEST_HOME: string;
 let kanban: typeof import("./kanban-board.js");
@@ -50,8 +50,6 @@ let scheduler: import("./lifecycle-wake-scheduler.js").LifecycleWakeScheduler | 
 
 beforeEach(async () => {
   vi.clearAllMocks();
-  assemblyGate = null;
-  releaseAssembly = null;
   vi.resetModules();
   TEST_HOME = mkdtempSync(join(tmpdir(), "reconciler-lifecycle-"));
   mkdirSync(join(TEST_HOME, "tasks"), { recursive: true });
@@ -210,16 +208,16 @@ describe("two-generation lifecycle", () => {
     expect(nerveListenerCount("card:done")).toBe(baselineDone + 1);
     expect(nerveListenerCount("card:failed")).toBe(baselineFailed + 1);
 
-    // generation two accepts reconciliation work: a running root is woken
-    // and the driver processes it (authoring supervision is created)
+    // generation two accepts reconciliation work. #1792 cutover contract: a
+    // reconciler wake of a runner-owned O-root is a no-op — it must not throw
+    // and must not author supervision (the workflow driver owns O-roots via
+    // nerve + bounded audit).
     const rootId = kanban.kanbanEnqueue("gen2 project", "agent", undefined, { type: "O", goal: "g" });
     kanban.kanbanRunning(rootId);
-    reconciler.requestReconcile(rootId);
+    expect(() => reconciler.requestReconcile(rootId)).not.toThrow();
     await flush();
     await flush();
-    const supervision = new reviewStoreMod.ProjectReviewStore().getSupervision(rootId);
-    expect(supervision).toBeDefined();
-    expect(supervision!.state).toBe("awaiting_contract");
+    expect(new reviewStoreMod.ProjectReviewStore().getSupervision(rootId)).toBeUndefined();
   });
 
   it("a generation-one callback cannot mutate generation two, and out-of-order stop leaves the new hook intact", async () => {
@@ -247,11 +245,13 @@ describe("two-generation lifecycle", () => {
     await h1.stop(); // gen1 already stopped — idempotent
     expect(ExecutorLeaseStore.onLeaseChanged).toBe(hookAfterGen2);
 
-    // generation two still accepts work
-    reconciler.requestReconcile(rootId);
+    // generation two still accepts work. #1792 cutover contract: the wake of
+    // a runner-owned O-root is a reconciler no-op — no supervision row is
+    // authored and no throw occurs.
+    expect(() => reconciler.requestReconcile(rootId)).not.toThrow();
     await flush();
     await flush();
-    expect(new reviewStoreMod.ProjectReviewStore().getSupervision(rootId)).toBeDefined();
+    expect(new reviewStoreMod.ProjectReviewStore().getSupervision(rootId)).toBeUndefined();
   });
 });
 
@@ -280,12 +280,14 @@ describe("symmetric stop and drain", () => {
     };
   }
 
-  it("stop waits for an active card pass and an active dispatch pass, then no queued continuation runs", async () => {
+  it("stop waits for an active dispatch pass, then no queued continuation runs", async () => {
     const hold = makeHoldAdapter();
     const h = await startGeneration({ workerAdapter: hold.adapter as never });
 
     // dispatch-pass hold: a queued W child with a pending attempt under a
-    // supervised live root (the claim path authorizes against it)
+    // running O-root parent (the claim path authorizes against the running
+    // parent; no supervised review progression is involved — the O-root here
+    // is only the dispatch parent).
     const projectId = kanban.kanbanEnqueue("drain project", "agent", undefined, { type: "O", goal: "g" });
     kanban.kanbanRunning(projectId);
     const rootStore = new reviewStoreMod.ProjectReviewStore();
@@ -338,83 +340,30 @@ describe("symmetric stop and drain", () => {
     await flush();
     expect(hold.starts.length).toBe(1); // the dispatch pass is inside adapter.start
 
-    // card-pass hold: a second supervised executing root with all-terminal
-    // children reaches createReviewCase, whose assembly is gated
-    const gateCard = kanban.kanbanEnqueue("drain review project", "agent", undefined, { type: "O", goal: "g" });
-    kanban.kanbanRunning(gateCard);
-    const gateRootStore = new reviewStoreMod.ProjectReviewStore();
-    gateRootStore.ensureAwaitingContract(gateCard);
-    gateRootStore.insertContract({
-      schema_version: 1,
-      id: `ct_gate_root`,
-      digest: "d",
-      project_card_id: gateCard,
-      goal: "g",
-      criteria: [{ id: "c1", description: "c", required: true, evidence_expectation: "synthesis" }],
-      required_outputs: [],
-      constraints: [],
-      limits: { max_tokens: 100000, max_review_rounds: 5, max_repair_rounds: 3 },
-      provenance: { requested_by: "scheduler", authored_by: "orc", created_at: new Date().toISOString() },
-    } as never);
-    gateRootStore.stateTransition(gateCard, ["awaiting_contract"], "executing");
-    const gateChild = kanban.kanbanEnqueue("drain review child", "agent", undefined, {
-      type: "W", parent_id: gateCard, priority: "MEDIUM",
-    });
-    const gateSupStore = new workerStoreMod.WorkerSupervisionStore();
-    gateSupStore.insertContract({
-      schema_version: 1,
-      id: "ct_gate_child",
-      digest: "d",
-      goal: "g",
-      criteria: [{ id: "c1", description: "c", required: true, evidence_expectation: "synthesis" }],
-      expected_artifacts: [],
-      verification_commands: [],
-      required_capabilities: [],
-      supports_root_criteria: ["c1"],
-      limits: {},
-      provenance: { root_card_id: gateCard, card_id: gateChild, authored_by: "orc", created_at: new Date().toISOString() },
-    } as never, gateChild);
-    gateSupStore.insertAttempt({
-      id: "a_gate_child",
-      card_id: gateChild,
-      contract_id: "ct_gate_child",
-      ordinal: 1,
-      executor_kind: "agent",
-      executor_id: "spin-local",
-      status: "completed",
-      started_at: new Date().toISOString(),
-      root_project_card_id: gateCard,
-      root_project_generation: 1,
-      scheduled_run_id: null,
-    } as never);
-    kanban.kanbanComplete(gateChild, null, "gate child done");
-
-    let releaseGate!: (snapshot: unknown) => void;
-    assemblyGate = new Promise<unknown>(resolve => { releaseGate = resolve; });
-    releaseAssembly = releaseGate;
-    reconciler.requestReconcile(gateCard);
-    await flush();
-    await flush();
-
+    // #1792 cutover: the old second hold — a supervised O-root card pass
+    // blocked inside createReviewCase assembly — is gone with the supervised
+    // brain (`deriveAction` returns early for O-roots, so no card pass can be
+    // held that way). No unsupervised card path blocks either: Pi cards fire
+    // and forget `startWithClaim`, and W-card lease/retry evaluation is
+    // synchronous. The dispatch pump is therefore the only holdable pass, and
+    // stop must wait for it.
     const stopPromise = h.stop();
     let stopped = false;
     void stopPromise.then(() => { stopped = true; });
     await flush();
     await flush();
-    // stop is waiting on the in-flight passes
+    // stop is waiting on the in-flight dispatch pass
     expect(stopped).toBe(false);
 
-    // release the dispatch pass
+    // release the dispatch pass; stop now completes
     hold.release({ kind: "started", attemptId: "a_drain", generation: 1, executorId: "spin-local" });
-    await flush();
-    expect(stopped).toBe(false); // the card pass is still held
-
-    releaseGate({ schema_version: 1, project_card_id: gateCard, generation: 1, round: 1, created_at: new Date().toISOString(), root_contract: { id: "c", digest: "d", goal: "g", criteria: [], required_outputs: [], limits: {} }, criterion_inputs: [], contradiction_candidates: [], uncovered_criteria: [], child_summaries: [], peer_contributions: [], budgets: { total_cost: 0, total_tokens: 0, wall_clock_ms: 1, review_round: 1, repair_round: 0 }, evidence_ref_count: 0, contradiction_count: 0 });
     await stopPromise;
     expect(stopped).toBe(true);
 
-    // no queued continuation executes after stop
+    // no queued continuation executes after stop: an explicit post-stop wake
+    // must not start new work
     const startsAfter = hold.starts.length;
+    reconciler.requestWorkerDispatch();
     await flush();
     await flush();
     expect(hold.starts.length).toBe(startsAfter);
@@ -621,7 +570,15 @@ describe("#1778 boot recovery drains the peer-callback outbox", () => {
   });
 });
 
-// ── #1678 review-turn liveness ──────────────────────────────────────────────
+// ── #1678 review-turn liveness (#1792 cutover) ───────────────────────────────
+// The coordinator scheduleReview/abandon path is gone: O-roots are
+// runner-owned and review liveness lives in the runner/outbox + wake
+// scheduler. The four retry/abandon-budget tests below were deleted; their
+// replacement evidence is orc-workflow.e2e journeys 3 (bounded failure
+// policy), 9 (alive retention under repeated inspection) and 10
+// (unobservable worker → explicit unknown). The two tests that remain pin
+// store-level settlement/inertness facts without touching the deleted
+// coordinator path, so `seedReviewRequest` stays.
 
 describe("#1678 single owner of Orc review-turn liveness", () => {
   /** Seed a supervised root at generation 1 with an open review case + request. */
@@ -650,161 +607,6 @@ describe("#1678 single owner of Orc review-turn liveness", () => {
     store.db.prepare("UPDATE project_review_requests SET attempts = ? WHERE id = ?").run(attempts, requestId);
     return { projectId, caseId, requestId };
   }
-
-  it("a live review turn is never abandoned by elapsed retry ticks", async () => {
-    const { OrcProjectRunStore } = await import("./orc-project/orc-project-run-store.js");
-    const store = new reviewStoreMod.ProjectReviewStore();
-    const { projectId, caseId, requestId } = seedReviewRequest(4);
-
-    // Claim + bind a live project_review run at generation 1 through the real
-    // run store — the turn is genuinely in flight.
-    const runStore = new OrcProjectRunStore();
-    const claim = runStore.claimIntent(
-      { projectCardId: projectId, intentKind: "project_review", intentRef: caseId, goal: "review-live", originKind: "local", sourcePeer: null, cardSource: "agent", expectedProjectGeneration: 1 },
-      "kp", "inst-live",
-    );
-    expect(claim.kind).toBe("claimed");
-    if (claim.kind !== "claimed") return;
-    runStore.promoteRun(claim.context.runId);
-    const bound = runStore.bindExecution(claim.context, "sess-live", "exec-live");
-    expect(bound.ok).toBe(true);
-
-    // Start a generation whose coordinator claims through the same run store,
-    // so a re-schedule of the live intent is observed as idempotent.
-    const coordinator = {
-      getStore: () => runStore,
-      bootRecovery: () => [] as number[],
-      onOwnershipReleased: () => () => {},
-      scheduleContractAuthoring: () => ({ kind: "busy" as const, activeRunId: "or_busy" }),
-      scheduleProjectExecution: () => ({ kind: "busy" as const, activeRunId: "or_busy" }),
-      scheduleReview: (pid: number, gen: number, rc: string) => runStore.claimIntent(
-        { projectCardId: pid, intentKind: "project_review", intentRef: rc, goal: "review-wake", originKind: "local", sourcePeer: null, cardSource: "agent", expectedProjectGeneration: gen },
-        "kp", "inst-live",
-      ),
-    } as never;
-    const h = await startGeneration({ coordinator });
-
-    // Drive retry + abandon cycles well past maxAttempts (5). The 30s cooldown
-    // is bypassed by resetting updated_at so every cycle re-selects the request.
-    for (let i = 0; i < 4; i++) {
-      reconciler.retryPendingReviewRequests();
-      store.db.prepare("UPDATE project_review_requests SET updated_at = ? WHERE id = ?").run(new Date(Date.now() - 60_000).toISOString(), requestId);
-      new reviewStoreMod.ProjectReviewStore().abandonExpiredRequests();
-    }
-
-    // Wake the project so any abandonment would visibly settle blocked.
-    reconciler.requestReconcile(projectId);
-    await flush();
-    await flush();
-
-    const req = store.db.prepare("SELECT status, attempts FROM project_review_requests WHERE id = ?").get(requestId) as { status: string; attempts: number } | undefined;
-    expect(req).toBeDefined();
-    expect(req!.status).toBe("pending");
-    expect(req!.attempts).toBe(4); // observation ticks never advance the counter
-    const supervision = store.getSupervision(projectId);
-    expect(supervision).toBeDefined();
-    expect(supervision!.state).toBe("review_requested");
-    await h.stop();
-  });
-
-  it("genuine dispatch exhaustion still abandons and settles blocked", async () => {
-    const store = new reviewStoreMod.ProjectReviewStore();
-    const { projectId, requestId } = seedReviewRequest(0);
-
-    // Every scheduleReview is rejected with a typed reason; no live run exists.
-    const coordinator = {
-      getStore: () => ({ db: store.db }) as never,
-      bootRecovery: () => [] as number[],
-      onOwnershipReleased: () => () => {},
-      scheduleContractAuthoring: () => ({ kind: "busy" as const, activeRunId: "or_busy" }),
-      scheduleProjectExecution: () => ({ kind: "busy" as const, activeRunId: "or_busy" }),
-      scheduleReview: () => ({ kind: "conflict" as const, reason: "project_generation_mismatch" as const }),
-    } as never;
-    const h = await startGeneration({ coordinator });
-
-    // Each retry records one REAL rejected dispatch. After maxAttempts the
-    // safety valve fires: abandoned with the typed reason preserved.
-    for (let i = 0; i < 8; i++) {
-      reconciler.retryPendingReviewRequests();
-      store.db.prepare("UPDATE project_review_requests SET updated_at = ? WHERE id = ?").run(new Date(Date.now() - 60_000).toISOString(), requestId);
-      new reviewStoreMod.ProjectReviewStore().abandonExpiredRequests();
-    }
-
-    const req = store.db.prepare("SELECT status, attempts, last_error FROM project_review_requests WHERE id = ?").get(requestId) as { status: string; attempts: number; last_error: string } | undefined;
-    expect(req!.status).toBe("abandoned");
-    expect(req!.attempts).toBe(5);
-    expect(req!.last_error).toContain("project_generation_mismatch");
-
-    // A reconcile observes the abandoned request and settles blocked.
-    reconciler.requestReconcile(projectId);
-    await flush();
-    await flush();
-    const supervision = store.getSupervision(projectId);
-    expect(supervision!.state).toBe("blocked");
-    expect(supervision!.blocked_reason).toBe("review_request_abandoned");
-    await h.stop();
-  });
-
-  it("an unavailable scheduled occurrence does not consume the review retry budget", async () => {
-    const store = new reviewStoreMod.ProjectReviewStore();
-    const { requestId } = seedReviewRequest(4);
-    store.db.prepare("UPDATE project_review_requests SET updated_at = ? WHERE id = ?").run(new Date(Date.now() - 60_000).toISOString(), requestId);
-
-    const coordinator = {
-      getStore: () => ({ db: store.db }) as never,
-      bootRecovery: () => [] as number[],
-      onOwnershipReleased: () => () => {},
-      scheduleContractAuthoring: () => ({ kind: "busy" as const, activeRunId: "or_busy" }),
-      scheduleProjectExecution: () => ({ kind: "busy" as const, activeRunId: "or_busy" }),
-      scheduleReview: () => ({ kind: "conflict" as const, reason: "occurrence_unavailable" as const }),
-    } as never;
-    const h = await startGeneration({ coordinator });
-
-    expect(reconciler.retryPendingReviewRequests()).toBe(0);
-    const req = store.db.prepare("SELECT status, attempts FROM project_review_requests WHERE id = ?").get(requestId) as { status: string; attempts: number } | undefined;
-    expect(req).toEqual({ status: "pending", attempts: 4 });
-    await h.stop();
-  });
-
-  it("observation ticks never advance the counter while the turn is live", async () => {
-    const { OrcProjectRunStore } = await import("./orc-project/orc-project-run-store.js");
-    const store = new reviewStoreMod.ProjectReviewStore();
-    const { projectId, caseId, requestId } = seedReviewRequest(4);
-
-    const runStore = new OrcProjectRunStore();
-    const claim = runStore.claimIntent(
-      { projectCardId: projectId, intentKind: "project_review", intentRef: caseId, goal: "review-live", originKind: "local", sourcePeer: null, cardSource: "agent", expectedProjectGeneration: 1 },
-      "kp", "inst-live",
-    );
-    expect(claim.kind).toBe("claimed");
-    if (claim.kind !== "claimed") return;
-    runStore.promoteRun(claim.context.runId);
-    const bound = runStore.bindExecution(claim.context, "sess-live", "exec-live");
-    expect(bound.ok).toBe(true);
-
-    const coordinator = {
-      getStore: () => runStore,
-      bootRecovery: () => [] as number[],
-      onOwnershipReleased: () => () => {},
-      scheduleContractAuthoring: () => ({ kind: "busy" as const, activeRunId: "or_busy" }),
-      scheduleProjectExecution: () => ({ kind: "busy" as const, activeRunId: "or_busy" }),
-      scheduleReview: (pid: number, gen: number, rc: string) => runStore.claimIntent(
-        { projectCardId: pid, intentKind: "project_review", intentRef: rc, goal: "review-wake", originKind: "local", sourcePeer: null, cardSource: "agent", expectedProjectGeneration: gen },
-        "kp", "inst-live",
-      ),
-    } as never;
-    const h = await startGeneration({ coordinator });
-
-    for (let i = 0; i < 5; i++) {
-      reconciler.retryPendingReviewRequests();
-      store.db.prepare("UPDATE project_review_requests SET updated_at = ? WHERE id = ?").run(new Date(Date.now() - 60_000).toISOString(), requestId);
-    }
-
-    const req = store.db.prepare("SELECT status, attempts FROM project_review_requests WHERE id = ?").get(requestId) as { status: string; attempts: number } | undefined;
-    expect(req!.status).toBe("pending");
-    expect(req!.attempts).toBe(4);
-    await h.stop();
-  });
 
   it("a live turn's own settlement still terminates the request exactly once", async () => {
     const { OrcProjectRunStore } = await import("./orc-project/orc-project-run-store.js");
@@ -921,12 +723,14 @@ describe("heartbeat decoupling (#1554 approved move)", () => {
     expect(names).not.toContain("reconciler-resync");
     expect(names).not.toContain("review-request-retry");
 
-    // phaseReconciler with a healthy environment registers the two tasks
+    // phaseReconciler with a healthy environment registers the single
+    // reconciler task (#1792 approved heartbeat change: reconciler-resync is
+    // the driver's bounded audit; review-request-retry is gone).
     const phaseReconciler = await import("../boot/phase-reconciler.js");
     await phaseReconciler.phaseReconciler(ctx as never);
     const after = tasks.map(t => t.name);
     expect(after).toContain("reconciler-resync");
-    expect(after).toContain("review-request-retry");
+    expect(after).not.toContain("review-request-retry");
     // outbox still registered exactly once
     expect(after.filter(n => n === "project-acceptance-outbox")).toHaveLength(1);
 
