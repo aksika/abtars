@@ -10,8 +10,9 @@ import { canonicalContributionHash } from "./contract.js";
 import { ContributionStore, type ContributionState } from "./contribution-store.js";
 import { getPeerTransport } from "../peer-transport/index.js";
 import { requireTaskDatabase, kanbanGetCard, kanbanUpdate, kanbanFail } from "../tasks/kanban-board.js";
-import { ProjectReviewStore } from "../project-acceptance/project-review-store.js";
-import { requestReconcileForProject } from "../reconciler.js";
+import { WorkflowRunner } from "../orc-project/orc-workflow-runner.js";
+import { WorkflowStore } from "../orc-project/orc-workflow-store.js";
+import { nerve } from "../nerve.js";
 import { logInfo, logWarn } from "../logger.js";
 import { logAndSwallow } from "../log-and-swallow.js";
 
@@ -65,7 +66,6 @@ interface TaskDb {
 export interface RequesterContributionDeps {
   contributionStore?: ContributionStore;
   taskDb?: TaskDb;
-  reviewStore?: { ensureAwaitingContract(projectCardId: number): boolean };
   askHelp?: AskHelpPort;
   wakeProject?: WakePort;
   kanbanUpdate?: (cardId: number, updates: Record<string, unknown>) => void;
@@ -79,7 +79,6 @@ function cliRootGoal(requestId: string): string {
 export class RequesterContributionService {
   private readonly contributionStore: ContributionStore;
   private readonly taskDb: TaskDb;
-  private readonly reviewStore: { ensureAwaitingContract(projectCardId: number): boolean };
   private readonly askHelp: AskHelpPort;
   private readonly wakeProject: WakePort;
   private readonly kanbanUpdate: (cardId: number, updates: Record<string, unknown>) => void;
@@ -97,9 +96,10 @@ export class RequesterContributionService {
         kanbanFail: () => {}, // proxy failures are projected via the injected kanbanFail port below
       },
     );
-    this.reviewStore = deps.reviewStore ?? new ProjectReviewStore(db as never);
     this.askHelp = deps.askHelp ?? (async (peer, request) => getPeerTransport().askHelp(peer, request));
-    this.wakeProject = deps.wakeProject ?? requestReconcileForProject;
+    // #1792: wakes are nerve events (driver drain + dispatch pump listen);
+    // the reconciler wake facade is deleted with the supervised brain.
+    this.wakeProject = deps.wakeProject ?? ((projectCardId: number) => { nerve.fire("card:queued", projectCardId); });
     this.kanbanUpdate = deps.kanbanUpdate ?? kanbanUpdate;
     this.kanbanFail = deps.kanbanFail ?? kanbanFail;
   }
@@ -309,7 +309,19 @@ export class RequesterContributionService {
       const rootId = Number(root.lastInsertRowid);
       if (!rootId) throw new Error("Failed to create delegation project root");
 
-      this.reviewStore.ensureAwaitingContract(rootId);
+      // #1792: supervised admission runs through the runner on THIS connection
+      // (atomicity with the root insert via savepoint). The local TaskDb shape
+      // satisfies TaskDatabase structurally; the cast bridges the nominal types.
+      // Remote peer lanes keep their ledger + proxy cards; worker-attempt
+      // bridging for delegate lanes is follow-up work.
+      const admitted = new WorkflowRunner(
+        new WorkflowStore(this.taskDb as unknown as import("../tasks/kanban-board.js").TaskDatabase),
+      ).admitSupervised({
+        rootCardId: rootId, source: "cli",
+      });
+      if (admitted.kind === "conflict") {
+        throw new Error(`Failed to admit delegation project root: ${admitted.reason}`);
+      }
 
       const proxy = this.taskDb.prepare(
         `INSERT INTO kanban_board (title, source, source_id, priority, status, type, goal, notes, parent_id, delivery_mode, source_peer)

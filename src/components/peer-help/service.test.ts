@@ -12,9 +12,14 @@ const mockRecordContributionEvent = vi.hoisted(() => vi.fn());
 const mockKanbanList = vi.hoisted(() => vi.fn(() => []));
 const mockPiLedgerReserve = vi.hoisted(() => vi.fn());
 const mockRequestReconcile = vi.hoisted(() => vi.fn());
+const mockNerveFire = vi.hoisted(() => vi.fn());
 
 vi.mock("../reconciler.js", () => ({
   requestReconcile: mockRequestReconcile,
+}));
+
+vi.mock("../nerve.js", () => ({
+  nerve: { fire: mockNerveFire },
 }));
 
 vi.mock("../peer-config.js", () => ({
@@ -281,6 +286,7 @@ describe("PeerHelpService — terminal reduction wakes (#1618)", () => {
     svc = new PeerHelpService({} as any, () => []);
     svc.setContributionStore(contributionStore);
     mockRequestReconcile.mockClear();
+    mockNerveFire.mockClear();
   });
 
   afterEach(() => {
@@ -319,8 +325,10 @@ describe("PeerHelpService — terminal reduction wakes (#1618)", () => {
 
     const result = await svc.handleContributionEvent("kp", terminalEvent(row!.contribution_ref));
     expect(result.ok).toBe(true);
-    expect(mockRequestReconcile).toHaveBeenCalledTimes(1);
-    expect(mockRequestReconcile).toHaveBeenCalledWith(77);
+    // #1792: terminal contribution events wake via nerve (no terminal semantics
+    // on the wake itself); the reconciler facade is deleted.
+    expect(mockNerveFire).toHaveBeenCalledTimes(1);
+    expect(mockNerveFire).toHaveBeenCalledWith("card:queued", 77);
     expect(contributionStore.getContribution("kp", "r1")!.state).toBe("completed");
   });
 
@@ -335,7 +343,7 @@ describe("PeerHelpService — terminal reduction wakes (#1618)", () => {
 
     expect((await svc.handleContributionEvent("kp", evt)).ok).toBe(true);
     expect((await svc.handleContributionEvent("kp", evt)).ok).toBe(true);
-    expect(mockRequestReconcile).toHaveBeenCalledTimes(1);
+    expect(mockNerveFire).toHaveBeenCalledTimes(1);
   });
 
   it("rejects a conflicting second terminal event without mutation or wake", async () => {
@@ -349,7 +357,7 @@ describe("PeerHelpService — terminal reduction wakes (#1618)", () => {
     expect((await svc.handleContributionEvent("kp", terminalEvent(row!.contribution_ref))).ok).toBe(true);
     const conflicting = terminalEvent(row!.contribution_ref, { event_id: "evt_term_2", sequence: 2 });
     expect((await svc.handleContributionEvent("kp", conflicting)).ok).toBe(false);
-    expect(mockRequestReconcile).toHaveBeenCalledTimes(1);
+    expect(mockNerveFire).toHaveBeenCalledTimes(1);
     const events = db.prepare("SELECT COUNT(*) as cnt FROM peer_contribution_events").get() as any;
     expect(events.cnt).toBe(1);
   });
@@ -369,7 +377,7 @@ describe("PeerHelpService — terminal reduction wakes (#1618)", () => {
       },
     });
     expect((await svc.handleContributionEvent("kp", foreign)).ok).toBe(false);
-    expect(mockRequestReconcile).not.toHaveBeenCalled();
+    expect(mockNerveFire).not.toHaveBeenCalled();
     expect(contributionStore.getContribution("kp", "r1")!.state).toBe("accepted");
   });
 });

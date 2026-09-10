@@ -306,10 +306,15 @@ export class PeerHelpService {
       try {
         const row = cs.getContribution(originPeer, event.request_id);
         if (row?.project_card_id) {
-          const { requestReconcile } = await import("../reconciler.js");
-          requestReconcile(row.project_card_id);
+          // #1792: wakes are nerve events (driver drain + dispatch pump listen);
+          // the reconciler wake facade is deleted with the supervised brain.
+          // card:queued carries no terminal semantics (the card did not
+          // transition). Remote delegate-lane worker-attempt bridging is
+          // follow-up work: contribution payloads stay in the ledger until then.
+          const { nerve } = await import("../nerve.js");
+          nerve.fire("card:queued", row.project_card_id);
         }
-      } catch (err) { logAndSwallow(TAG, `wake reconcile for project after contribution event`, err); }
+      } catch (err) { logAndSwallow(TAG, `wake for project after contribution event`, err); }
     }
 
     return { ok: result === "applied" || result === "duplicate" };

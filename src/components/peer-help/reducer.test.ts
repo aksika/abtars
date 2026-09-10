@@ -4,9 +4,10 @@ import { PeerHelpService } from "./service.js";
 import { PeerHelpStore } from "./store.js";
 import type { PeerContributionEventV1 } from "./contract.js";
 
-const reconcileCalls: number[] = [];
-vi.mock("../reconciler.js", () => ({
-  requestReconcile: (id: number) => { reconcileCalls.push(id); },
+const nerveFires: Array<{ event: string; cardId: number }> = [];
+vi.mock("../reconciler.js", () => ({}));
+vi.mock("../nerve.js", () => ({
+  nerve: { fire: (event: string, cardId: number) => { nerveFires.push({ event, cardId }); } },
 }));
 
 let _Database: any = null;
@@ -79,7 +80,7 @@ describe("PeerHelpService contribution reduction (#1493)", () => {
   let service: PeerHelpService;
 
   beforeEach(async () => {
-    reconcileCalls.length = 0;
+    nerveFires.length = 0;
     harness = await makeDb();
     helpStore = new PeerHelpStore(harness.raw, noopKanban, noopNerve);
     contribStore = new ContributionStore(harness.db, noopKanban);
@@ -120,10 +121,10 @@ describe("PeerHelpService contribution reduction (#1493)", () => {
     expect(result.ok).toBe(true);
     expect(contribStore.getContribution("peer1", "r1")!.state).toBe("running");
     await new Promise(r => setTimeout(r, 0));
-    expect(reconcileCalls.length).toBe(0);
+    expect(nerveFires.length).toBe(0);
   });
 
-  it("wakes Reconciler on completed terminal event", async () => {
+  it("wakes via nerve on completed terminal event", async () => {
     contribStore.reserve("peer1", "r1", "h1", 42, 200, null);
     contribStore.transitionToAccepted("peer1", "r1");
     const cr = contribStore.getContribution("peer1", "r1")!.contribution_ref;
@@ -135,10 +136,10 @@ describe("PeerHelpService contribution reduction (#1493)", () => {
     expect(result.ok).toBe(true);
     expect(contribStore.getContribution("peer1", "r1")!.state).toBe("completed");
     await new Promise(r => setTimeout(r, 0));
-    expect(reconcileCalls).toContain(42);
+    expect(nerveFires).toContainEqual({ event: "card:queued", cardId: 42 });
   });
 
-  it("wakes Reconciler on failed terminal event", async () => {
+  it("wakes via nerve on failed terminal event", async () => {
     contribStore.reserve("peer1", "r1", "h1", 42, 200, null);
     contribStore.transitionToAccepted("peer1", "r1");
     const cr = contribStore.getContribution("peer1", "r1")!.contribution_ref;
@@ -147,7 +148,7 @@ describe("PeerHelpService contribution reduction (#1493)", () => {
     expect(result.ok).toBe(true);
     expect(contribStore.getContribution("peer1", "r1")!.state).toBe("failed");
     await new Promise(r => setTimeout(r, 0));
-    expect(reconcileCalls).toContain(42);
+    expect(nerveFires).toContainEqual({ event: "card:queued", cardId: 42 });
   });
 
   it("duplicate event is accepted but does not add extra reconcile", async () => {
@@ -157,10 +158,10 @@ describe("PeerHelpService contribution reduction (#1493)", () => {
     const evt = makeEvent({ request_id: "r1", event_id: "evt_fixed", contribution_ref: cr, sequence: 1, kind: "completed", summary: "done" });
     expect((await service.handleContributionEvent("peer1", evt as any)).ok).toBe(true);
     await new Promise(r => setTimeout(r, 0));
-    const countAfterFirst = reconcileCalls.length;
+    const countAfterFirst = nerveFires.length;
     expect((await service.handleContributionEvent("peer1", evt as any)).ok).toBe(true);
     await new Promise(r => setTimeout(r, 0));
-    expect(reconcileCalls.length).toBe(countAfterFirst);
+    expect(nerveFires.length).toBe(countAfterFirst);
   });
 
   it("conflicting terminal event after first-terminal-wins is handled gracefully", async () => {
@@ -171,10 +172,10 @@ describe("PeerHelpService contribution reduction (#1493)", () => {
     const evt2 = makeEvent({ request_id: "r1", event_id: "e2", contribution_ref: cr, sequence: 2, kind: "completed", summary: "different" });
     expect((await service.handleContributionEvent("peer1", evt1 as any)).ok).toBe(true);
     await new Promise(r => setTimeout(r, 0));
-    expect(reconcileCalls.filter(c => c === 42).length).toBe(1);
+    expect(nerveFires.filter(c => c.cardId === 42).length).toBe(1);
     expect((await service.handleContributionEvent("peer1", evt2 as any)).ok).toBe(false);
     await new Promise(r => setTimeout(r, 0));
-    expect(reconcileCalls.filter(c => c === 42).length).toBe(1);
+    expect(nerveFires.filter(c => c.cardId === 42).length).toBe(1);
   });
 
   it("rejects event with invalid projection provenance", async () => {

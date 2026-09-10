@@ -28,6 +28,7 @@ import {
   type WorkflowRunRow,
   type WorkflowRunState,
 } from "./orc-workflow-store.js";
+import { mkdirSync, realpathSync } from "node:fs";
 import type { TaskDatabase } from "../tasks/kanban-board.js";
 import {
   kanbanGetCard,
@@ -121,7 +122,7 @@ export interface PlannerBackend {
 
 export type DrainPorts =
   | ExecutionPort
-  | { executor: ExecutionPort; reviewer: ReviewBackend; planner: PlannerBackend };
+  | { executor: ExecutionPort; reviewer: ReviewBackend; planner: PlannerBackend; delivery?: DeliverySender };
 
 export type VerdictOutcome = "accepted" | "repair_queued" | "failed" | "unassessable" | "correction_queued";
 
@@ -129,6 +130,11 @@ export const DELIVERY_MAX_ATTEMPTS = 3;
 
 export interface DrainOpts {
   policy?: ResourcePolicy;
+}
+
+export interface DeliverySender {
+  name: string;
+  send(doc: { runId: string; nodeId: string; obligation: string; idempotenceKey: string }): string;
 }
 
 /** Bounded, sanitized diagnostics: never log raw tool payloads (req 12). */
@@ -168,10 +174,6 @@ function leaseFresh(snapshot: Record<string, unknown> | null): boolean {
  */
 export interface ResourcePolicy {
   check(input: { runId: string; action: string; resource?: string }): "ok" | "refused";
-}
-
-export interface DrainOpts {
-  policy?: ResourcePolicy;
 }
 
 function isJobPorts(ports: DrainPorts): ports is { executor: ExecutionPort; reviewer: ReviewBackend; planner: PlannerBackend } {
@@ -754,9 +756,7 @@ export class WorkflowRunner {
 
   executeDelivery(
     runId: string, nodeId: string,
-    sender: {
-      send(doc: { runId: string; nodeId: string; obligation: string; idempotenceKey: string }): string;
-    },
+    sender: DeliverySender,
   ): "acknowledged" | "failed" | "unknown" | "retry_queued" {
     this.requireLive(runId);
     const pending = this.store.findPendingCommand(runId, nodeId, "deliver");
@@ -765,13 +765,30 @@ export class WorkflowRunner {
       { runId, generation: pending.generation, nodeId, action: "deliver", ordinal: pending.ordinal }, "delivery",
     );
     if (!claimed) throw new Error(`workflow runner: deliver command for ${runId}/${nodeId} busy`);
-    const key = { runId, generation: pending.generation, nodeId, action: "deliver" as const, ordinal: pending.ordinal };
+    return this.runDeliverySend(
+      runId, nodeId,
+      { runId, generation: pending.generation, nodeId, action: "deliver" as const, ordinal: pending.ordinal },
+      "delivery", claimed.token, sender,
+    );
+  }
+
+  /**
+   * Send + mark + complete for an ALREADY-CLAIMED deliver command (drain path
+   * uses the drain claim; the standalone path claims first). Owner/token must
+   * match the live claim: stale senders complete zero rows, loudly.
+   */
+  private runDeliverySend(
+    runId: string, nodeId: string,
+    key: { runId: string; generation: number; nodeId: string; action: "deliver"; ordinal: number },
+    owner: string, token: string,
+    sender: DeliverySender,
+  ): "acknowledged" | "failed" | "unknown" | "retry_queued" {
     const delivery = this.store.getDelivery(runId, nodeId);
     if (!delivery) {
       throw new Error(`workflow runner: no delivery obligation for ${runId}/${nodeId} (never accepted)`);
     }
     if (delivery["outcome"] !== "pending") {
-      this.store.completeCommand(key, "delivery", claimed.token);
+      this.store.completeCommand(key, owner, token);
       return delivery["outcome"] as "acknowledged" | "failed" | "unknown";
     }
     const attempts = this.store.bumpDeliveryAttempts(runId, nodeId);
@@ -786,26 +803,26 @@ export class WorkflowRunner {
     } catch (err) {
       if ((err as { definitive?: boolean }).definitive === true) {
         if (attempts < DELIVERY_MAX_ATTEMPTS) {
-          this.store.completeCommand(key, "delivery", claimed.token);
+          this.store.completeCommand(key, owner, token);
           this.store.queueCommand({
-            runId, generation: pending.generation, nodeId, action: "deliver",
-            ordinal: this.store.nextCommandOrdinal(runId, pending.generation, nodeId, "deliver"),
+            runId, generation: key.generation, nodeId, action: "deliver",
+            ordinal: this.store.nextCommandOrdinal(runId, key.generation, nodeId, "deliver"),
             payloadJson: JSON.stringify({ nodeId, retryOf: attempts }),
           });
           return "retry_queued";
         }
         this.store.setDeliveryOutcome(runId, nodeId, "failed", JSON.stringify({ error: boundText((err as Error).message, 500) }));
-        this.store.completeCommand(key, "delivery", claimed.token);
+        this.store.completeCommand(key, owner, token);
         return "failed";
       }
       // Ambiguous send (timeout, lost ack, unknown transport outcome):
       // explicitly unknown — never falsely acknowledged, never blindly resent.
       this.store.setDeliveryOutcome(runId, nodeId, "unknown", JSON.stringify({ idempotenceKey }));
-      this.store.completeCommand(key, "delivery", claimed.token);
+      this.store.completeCommand(key, owner, token);
       return "unknown";
     }
     this.store.setDeliveryOutcome(runId, nodeId, "acknowledged", receipt);
-    this.store.completeCommand(key, "delivery", claimed.token);
+    this.store.completeCommand(key, owner, token);
     this.settleIfDeliverable(runId);
     return "acknowledged";
   }
@@ -1151,6 +1168,88 @@ export class WorkflowRunner {
     return null;
   }
 
+  // ── supervised admission (Task 5: single entry for all origins) ────
+  //
+  // All supervised entry points (scheduled, interactive, peer-origin) funnel
+  // through here. Task-specific inputs are data (goal lives on the card);
+  // there is no per-task supervisor. Peer roots require authenticated source
+  // identity and fail closed (never fall back to local).
+
+  admitSupervised(input: {
+    rootCardId: number;
+    source: string;
+    sourcePeer?: string | null;
+    sourceId?: string | null;
+    scheduledRunId?: string | null;
+    cwd?: string;
+  }): { kind: "admitted" | "duplicate" | "conflict"; reason?: string; runId?: string; rootKind?: RootKind } {
+    if (input.source === "peer" && (!input.sourcePeer || input.sourcePeer.trim().length === 0)) {
+      return { kind: "conflict", reason: "origin_invalid" };
+    }
+    const rootKind: RootKind = input.source === "task" ? "scheduled" : input.source === "peer" ? "peer" : "interactive";
+    const scheduledRunId = input.scheduledRunId ?? (input.source === "task" ? input.sourceId ?? undefined : undefined);
+    const admitted = this.admit({
+      rootKind, rootCardId: input.rootCardId, scheduledRunId,
+      clientOperationId: `admit-${input.rootCardId}-${input.source}`,
+    });
+    if (admitted.disposition === "duplicate") {
+      // Re-admission heals a crash between admission commit and planning
+      // queue (below): the run exists but may have no planning yet.
+      this.ensureInitialPlanning(admitted.run.runId);
+      return { kind: "duplicate", runId: admitted.run.runId, rootKind };
+    }
+    const runId = admitted.run.runId;
+    if (input.cwd !== undefined) {
+      let canonical: string;
+      try {
+        mkdirSync(input.cwd, { recursive: true });
+        canonical = realpathSync(input.cwd);
+      } catch (err) {
+        throw new Error(`workflow runner: workspace ${input.cwd} is not resolvable: ${err instanceof Error ? err.message : String(err)}`);
+      }
+      const reviewStore = new ProjectReviewStore(this.store.db);
+      reviewStore.ensureAwaitingContract(input.rootCardId);
+      const bound = reviewStore.bindWorkspace(input.rootCardId, canonical);
+      if (!bound.ok) {
+        throw new Error(`workflow runner: workspace bind failed (${bound.reason}): the bound workspace is immutable`);
+      }
+    }
+    // Initial planning job (bounded model invocation via the planner backend),
+    // queued atomically with its op record: a crash between admission commit
+    // and this point heals via the duplicate path above, never strands.
+    const opId = `op-${runId}-initial-plan`;
+    this.store.db.transaction(() => {
+      this.store.upsertOperation({ opId, runId, kind: "planning", status: "pending", resultJson: JSON.stringify({ purpose: "initial" }) });
+      this.store.queueCommand({
+        runId, generation: admitted.run.generation, nodeId: "__plan__", action: "plan", ordinal: 0,
+        payloadJson: JSON.stringify({ nodeId: "__plan__", revision: null, purpose: "initial", defects: [], opId }),
+      });
+    });
+    return { kind: "admitted", runId, rootKind };
+  }
+
+  /**
+   * Heal a planless admitted run (crash between admission and planning queue,
+   * or planning command lost before any revision): queue the initial planning
+   * job exactly once. No-op when a revision exists or planning is already open.
+   */
+  private ensureInitialPlanning(runId: string): void {
+    if (this.store.currentRevision(runId) !== 0) return;
+    const run = this.store.getRun(runId);
+    if (!run || run.state !== "admitted") return;
+    const opId = `op-${runId}-initial-plan`;
+    this.store.db.transaction(() => {
+      this.store.upsertOperation({ opId, runId, kind: "planning", status: "pending", resultJson: JSON.stringify({ purpose: "initial" }) });
+      if (!this.store.hasCommand(runId, "__plan__", "plan", "pending")
+        && !this.store.hasCommand(runId, "__plan__", "plan", "claimed")) {
+        this.store.queueCommand({
+          runId, generation: run.generation, nodeId: "__plan__", action: "plan", ordinal: 0,
+          payloadJson: JSON.stringify({ nodeId: "__plan__", revision: null, purpose: "initial", defects: [], opId }),
+        });
+      }
+    });
+  }
+
   // ── drain + recovery + audit ──────────────────────────────────────────
 
   /**
@@ -1345,7 +1444,21 @@ export class WorkflowRunner {
         }
       }
       try {
-        target.start();
+        // Deliver commands with a configured sender execute inline (claim →
+        // send → mark); without one they ride the executor port like any
+        // other command (pre-cutover compat — a real send needs Task-5 wiring).
+        const sender = isJobPorts(ports) ? ports.delivery : undefined;
+        if (cmd.action === "deliver" && sender) {
+          this.runDeliverySend(
+            cmd.runId, cmd.nodeId, keyOf(cmd) as {
+              runId: string; generation: number; nodeId: string;
+              action: "deliver"; ordinal: number;
+            },
+            target.owner, claimed.token, sender,
+          );
+        } else {
+          target.start();
+        }
       } catch (err) {
         // Capacity refusal releases the claim for redrive (the lease would
         // cover it, but prompt release keeps the queue fluid). Any other port

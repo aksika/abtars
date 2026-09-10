@@ -126,7 +126,7 @@ afterEach(() => {
 });
 
 describe("RequesterContributionService", () => {
-  it("create_cli_project: root, supervision, and proxy exist before the transport is invoked", async () => {
+  it("create_cli_project: root, supervised run, and proxy exist before the transport is invoked", async () => {
     const env = makeEnv();
     env.nextResponse = { version: 1, request_id: "req_1", decision: "accepted", contribution_ref: "help_abc" };
     const result = await env.service.delegate({
@@ -144,8 +144,12 @@ describe("RequesterContributionService", () => {
     expect(root.status).toBe("queued");
     expect(root.goal).toContain("req_1");
 
-    const sup = db.prepare("SELECT state FROM project_supervision WHERE project_card_id = ?").get(root.id) as any;
-    expect(sup.state).toBe("awaiting_contract");
+    const run = db.prepare("SELECT run_id, root_kind, state FROM workflow_runs WHERE root_card_id = ?").get(root.id) as any;
+    expect(run).toBeDefined();
+    expect(run.root_kind).toBe("interactive");
+    expect(run.state).toBe("admitted");
+    const planCmd = db.prepare("SELECT COUNT(*) as cnt FROM workflow_commands WHERE run_id = ? AND action = 'plan'").get(run.run_id) as any;
+    expect(planCmd.cnt).toBe(1);
 
     const proxy = db.prepare("SELECT * FROM kanban_board WHERE type = 'contribution'").get() as any;
     expect(proxy).toBeDefined();

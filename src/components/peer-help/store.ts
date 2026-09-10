@@ -114,9 +114,10 @@ interface NerveEmitter {
   fire(event: "card:queued" | "card:running" | "card:done" | "card:failed" | "card:delivered", cardId: number): void;
 }
 
-/** #1618: database-only receiver project admission. No Nerve/Spin/network/timer side effects. */
+/** #1792: receiver project admission runs through the workflow runner (same
+ * transaction as the card insert). No Nerve/Spin/network/timer side effects. */
 interface ReceiverProjectAdmission {
-  ensureAwaitingContract(projectCardId: number): boolean;
+  admitReceiverProject(cardId: number, sourcePeer: string, sourceId: string): void;
 }
 
 interface Db {
@@ -237,14 +238,12 @@ export class PeerHelpStore {
       const cardId = Number(insert.lastInsertRowid);
       if (!cardId) throw new Error("Failed to insert help card");
 
-      // #1618: admit the receiver-owned project in the same transaction so the
+      // #1792: admit the receiver-owned project in the same transaction so the
       // peer root is supervised from birth — no window where the card exists
-      // without its awaiting_contract supervision row. Generic admission must
-      // fail closed if production wiring omitted the supervision port.
+      // without its runner admission. Generic admission must fail closed if
+      // production wiring omitted the runner port.
       if (!this.admission) throw new Error("receiver project admission unavailable");
-      if (!this.admission.ensureAwaitingContract(cardId)) {
-        throw new Error(`failed to admit receiver project ${cardId}`);
-      }
+      this.admission.admitReceiverProject(cardId, reservation.originPeer, reservation.requestId);
 
       this.db.prepare(
         `UPDATE peer_help_requests

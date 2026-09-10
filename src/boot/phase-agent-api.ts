@@ -83,18 +83,26 @@ export async function phaseAgentApi(ctx: BootCtx): Promise<PhaseResult> {
         const { PeerHelpStore } = await import("../components/peer-help/store.js");
         const { ContributionStore } = await import("../components/peer-help/contribution-store.js");
         const { RequesterContributionService } = await import("../components/peer-help/requester-contribution-service.js");
-        const { ProjectReviewStore } = await import("../components/project-acceptance/project-review-store.js");
         const { requireTaskDatabase } = await import("../components/tasks/kanban-board.js");
         const { nerve } = await import("../components/nerve.js");
         const { kanbanEnqueue, kanbanGetCard, kanbanUpdate, kanbanList, kanbanComplete, kanbanFail } = await import("../components/tasks/kanban-board.js");
         const { getLocalCapabilities } = await import("../components/peer-transport/peer-health.js");
         const db = requireTaskDatabase();
-        const reviewStore = new ProjectReviewStore(db);
+        const { WorkflowRunner } = await import("../components/orc-project/orc-workflow-runner.js");
+        const { WorkflowStore } = await import("../components/orc-project/orc-workflow-store.js");
+        const peerRunner = new WorkflowRunner(new WorkflowStore(db));
         const store = new PeerHelpStore(
           db as any,
           { kanbanEnqueue, kanbanGetCard, kanbanUpdate, kanbanList, kanbanComplete, kanbanFail },
           nerve,
-          { ensureAwaitingContract: (projectCardId) => reviewStore.ensureAwaitingContract(projectCardId) },
+          {
+            admitReceiverProject: (cardId, sourcePeer, sourceId) => {
+              const admitted = peerRunner.admitSupervised({ rootCardId: cardId, source: "peer", sourcePeer, sourceId });
+              if (admitted.kind === "conflict") {
+                throw new Error(`receiver project admission failed: ${admitted.reason}`);
+              }
+            },
+          },
         );
         const contributionStore = new ContributionStore(db, {
           kanbanGetCard,
@@ -108,7 +116,6 @@ export async function phaseAgentApi(ctx: BootCtx): Promise<PhaseResult> {
         agentApiServer.setRequesterContributionService(new RequesterContributionService({
           taskDb: db,
           contributionStore,
-          reviewStore,
           kanbanUpdate,
           kanbanFail,
         }));

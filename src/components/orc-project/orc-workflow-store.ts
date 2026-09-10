@@ -168,8 +168,7 @@ export class WorkflowStore {
   constructor(db?: TaskDatabase) {
     this.db = db ?? requireTaskDatabase();
     initWorkflowSchema(this.db);
-  }
-  // ── admission ──────────────────────────────────────────────────────────
+  }  // ── admission ──────────────────────────────────────────────────────────
 
   admitRun(input: {
     runId?: string;
@@ -723,6 +722,14 @@ export class WorkflowStore {
            AND state NOT IN ('succeeded','failed','cancelled')
          ORDER BY created_at DESC LIMIT 1`,
       )
+      .get(rootCardId) as Record<string, unknown> | undefined;
+    return row ? rowToRun(row) : null;
+  }
+
+  /** Latest run for a card in any state (terminal evidence reads). */
+  findLatestRunByCard(rootCardId: number): WorkflowRunRow | null {
+    const row = this.db
+      .prepare(`SELECT * FROM workflow_runs WHERE root_card_id = ? ORDER BY created_at DESC, rowid DESC LIMIT 1`)
       .get(rootCardId) as Record<string, unknown> | undefined;
     return row ? rowToRun(row) : null;
   }
