@@ -90,7 +90,7 @@ function claim(store: import("./orc-project-run-store.js").OrcProjectRunStore, c
   // the per-occurrence terminal-attempt rule.
   return store.claimIntent({
     projectCardId: cardId,
-    intentKind: "project_execution",
+    intentKind: "operator_turn",
     goal: "execute",
     originKind: "local",
     cardSource: "task",
@@ -140,7 +140,7 @@ describe("#1707 same-card circuit breaker", () => {
     // "Restart": brand-new store instance over the same durable database.
     const restarted = new runStoreMod.OrcProjectRunStore();
     expect(restarted.claimIntent({
-      projectCardId: rootId, intentKind: "project_execution", goal: "execute",
+      projectCardId: rootId, intentKind: "operator_turn", goal: "execute",
       originKind: "local", cardSource: "task", sourcePeer: null,
     }, "p", "inst2")).toMatchObject({ kind: "not_actionable", reason: "fuse_open" });
   });
@@ -174,7 +174,7 @@ describe("#1707 same-card circuit breaker", () => {
 
     // Trip via execution hard rule.
     const r = store.claimIntent({
-      projectCardId: rootId, intentKind: "project_execution", goal: "work",
+      projectCardId: rootId, intentKind: "operator_turn", goal: "work",
       originKind: "local", cardSource: "task", sourcePeer: null, taskRunId: runId,
     }, "p", "inst");
     if (r.kind !== "claimed") throw new Error("claim failed");
@@ -193,7 +193,7 @@ describe("#1707 same-card circuit breaker", () => {
 
     // The reset admits exactly one NEW attempt (new generation), not a reuse.
     const retry = store.claimIntent({
-      projectCardId: rootId, intentKind: "project_execution", goal: "work",
+      projectCardId: rootId, intentKind: "operator_turn", goal: "work",
       originKind: "local", cardSource: "task", sourcePeer: null, taskRunId: runId,
     }, "p", "inst");
     expect(["claimed", "idempotent"]).toContain(retry.kind);
@@ -233,7 +233,7 @@ describe("#1708 policy-controlled guardrails", () => {
     // the existing window counts already meet it.
     limit = 2;
     const afterReload = store.claimIntent({
-      projectCardId: rootId, intentKind: "project_execution", goal: "execute",
+      projectCardId: rootId, intentKind: "operator_turn", goal: "execute",
       originKind: "local", cardSource: "task", sourcePeer: null,
     }, "p", "inst");
     expect(afterReload).toMatchObject({ kind: "not_actionable", reason: "fuse_open" });

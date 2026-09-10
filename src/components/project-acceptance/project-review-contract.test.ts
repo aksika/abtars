@@ -18,9 +18,9 @@ import type { PiCoreToolContext } from "../transport/pi-core-tools.js";
 import type { ModelCandidate } from "../transport/model-candidates.js";
 
 function reviewToolParams(): Record<string, unknown> {
-  const def = getToolDefinitions().find(t => t.name === "review_project");
-  expect(def).toBeDefined();
-  return def!.parameters as Record<string, unknown>;
+  // #1792: the review_project tool is deleted — the contract constants below
+  // still own the schema, but the registry no longer presents it.
+  return REVIEW_PROJECT_PARAMETERS as unknown as Record<string, unknown>;
 }
 
 function makePiContext(): PiCoreToolContext {
@@ -39,7 +39,11 @@ function makePiContext(): PiCoreToolContext {
 const criteriaSchema = (params: Record<string, unknown>) =>
   (params as { properties: Record<string, unknown> }).properties["criteria"] as Record<string, unknown>;
 
-describe("review_project nested schema preservation (#1620)", () => {
+describe("review_project nested schema preservation (#1620; #1792: tool deleted from presentation)", () => {
+  it("#1792: the registry no longer presents the deleted review_project tool", () => {
+    expect(getToolDefinitions().find(t => t.name === "review_project")).toBeUndefined();
+  });
+
   it("registry schema carries nested enums, items, and required fields", () => {
     const params = reviewToolParams();
     const properties = (params as { properties: Record<string, unknown> }).properties as Record<string, unknown>;
@@ -78,14 +82,9 @@ describe("review_project nested schema preservation (#1620)", () => {
     expect(properties["input_request"]).toBeDefined();
   });
 
-  it("getToolSchemas (OpenAI-compatible) preserves the nested contract", () => {
+  it("#1792: getToolSchemas (OpenAI-compatible) no longer lists review_project", () => {
     const schemas = getToolSchemas();
-    const fn = schemas.find(s => s.function.name === "review_project");
-    expect(fn).toBeDefined();
-    const params = fn!.function.parameters as Record<string, unknown>;
-    const criteria = criteriaSchema(params);
-    const verdict = ((criteria.items as { properties: Record<string, unknown> }).properties["verdict"]) as { enum?: unknown[] };
-    expect(verdict.enum).toEqual([...CRITERION_VERDICTS]);
+    expect(schemas.find(s => s.function.name === "review_project")).toBeUndefined();
   });
 
   it("Anthropic adapter preserves input_schema nested enums", () => {
@@ -101,16 +100,9 @@ describe("review_project nested schema preservation (#1620)", () => {
     expect(verdict.enum).toEqual([...CRITERION_VERDICTS]);
   });
 
-  it("Pi adapter preserves nested enums and validates the full schema", () => {
+  it("#1792: Pi adapter no longer presents the deleted review_project tool", () => {
     const tools = createPiAgentTools(makePiContext());
-    const review = tools.find(t => t.name === "review_project");
-    expect(review).toBeDefined();
-    // Pi wraps the registry schema without dropping nested keywords; the
-    // parameters object is the adapted registry schema.
-    const params = review!.parameters as unknown as Record<string, unknown>;
-    const criteria = criteriaSchema(params);
-    const verdict = ((criteria.items as { properties: Record<string, unknown> }).properties["verdict"]) as { enum?: unknown[] };
-    expect(verdict.enum).toEqual([...CRITERION_VERDICTS]);
+    expect(tools.find(t => t.name === "review_project")).toBeUndefined();
   });
 
   it("Pi schema validation rejects malformed nested array items at registration", () => {

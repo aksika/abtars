@@ -99,9 +99,8 @@ async function startGeneration(overrides: GenerationOverrides = {}): Promise<imp
       getStore: () => new OrcProjectRunStore(),
       bootRecovery: () => [] as number[],
       onOwnershipReleased: () => () => {},
-      scheduleContractAuthoring: () => ({ kind: "busy" as const, activeRunId: "or_busy" }),
-      scheduleProjectExecution: () => ({ kind: "busy" as const, activeRunId: "or_busy" }),
-      scheduleReview: () => ({ kind: "busy" as const, activeRunId: "or_busy" }),
+      // #1792: the coordinator schedule path is retired — the reconciler
+      // never calls schedule* (only bootRecovery).
     }) as never,
     wakeScheduler: scheduler,
     workerAdapter: (overrides.workerAdapter ?? new adapterMod.SpinWorkerAdapter()) as never,
@@ -614,8 +613,10 @@ describe("#1678 single owner of Orc review-turn liveness", () => {
     const { projectId, caseId, requestId } = seedReviewRequest(0);
 
     const runStore = new OrcProjectRunStore();
+    // #1792: `operator_turn` is the only surviving intent-policy row; the
+    // settlement-once assertions below are intent-agnostic.
     const claim = runStore.claimIntent(
-      { projectCardId: projectId, intentKind: "project_review", intentRef: caseId, goal: "review-live", originKind: "local", sourcePeer: null, cardSource: "agent", expectedProjectGeneration: 1 },
+      { projectCardId: projectId, intentKind: "operator_turn", intentRef: caseId, goal: "review-live", originKind: "local", sourcePeer: null, cardSource: "agent", expectedProjectGeneration: 1 },
       "kp", "inst-live",
     );
     expect(claim.kind).toBe("claimed");

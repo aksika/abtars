@@ -7,8 +7,16 @@
  * `project_execution` continuation.
  *
  * Real: Spin, Orc coordinator, run store, task database, tool registry,
- * contract tool, and Reconciler composition. Only the provider responses are
+ * contract store, and Reconciler composition. Only the provider responses are
  * faked (the session transport's sendPrompt).
+ *
+ * #1792: the coordinator schedule/startPort dispatch path is retired — the
+ * runner dispatches all work now. The journeys that pinned
+ * `scheduleProjectExecution`/`scheduleContractAuthoring` (no-owner execution
+ * claim, yield_turn handoff, injected overlap via coordinator dispatch) are
+ * deleted with it; turn-control/late-call protection is preserved through the
+ * retained store-direct journey below plus runner/store tests (see
+ * orc-project-coordinator.test.ts header).
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { mkdirSync, rmSync, mkdtempSync, writeFileSync } from "node:fs";
@@ -81,6 +89,26 @@ async function flush(times = 4): Promise<void> {
   for (let i = 0; i < times; i++) await new Promise(r => setTimeout(r, 25));
 }
 
+/**
+ * #1792: local one-shot turn-control stand-in for the deleted
+ * `createOrcTurnControl` factory (retired with the coordinator schedule
+ * path). The retained journey below passes `() => true` verification, so the
+ * first `complete()` wins — identical to the old factory under that
+ * verification. Production turn dispatch lives in the runner now.
+ */
+function makeTestTurnControl(runId: string): import("./orc-project-contracts.js").OrcTurnControl {
+  let completed: import("./orc-project-contracts.js").OrcTurnTerminal | null = null;
+  return {
+    runId,
+    get completed(): import("./orc-project-contracts.js").OrcTurnTerminal | null { return completed; },
+    complete(terminal: import("./orc-project-contracts.js").OrcTurnTerminal): boolean {
+      if (completed !== null) return false;
+      completed = terminal;
+      return true;
+    },
+  };
+}
+
 async function seedPeerProjectWithContribution(withLedger = false): Promise<number> {
   const rootId = kanban.kanbanEnqueue("Peer Project", "peer", undefined, {
     type: "O",
@@ -135,15 +163,7 @@ async function seedPeerProjectWithContribution(withLedger = false): Promise<numb
   return rootId;
 }
 
-const CONTRACT_ARGS = (projectCardId: number): Record<string, string> => ({
-  project_card_id: String(projectCardId),
-  goal: "supervised peer work",
-  criteria: JSON.stringify([{ id: "c1", description: "Task goal met", required: true, execution_owner: "delegated", evidence_expectation: "synthesis" }]),
-  required_outputs: JSON.stringify([]),
-  constraints: JSON.stringify([]),
-});
-
-function mockTransport(scripted: (ctx: import("../transport/kiro-transport.js").PromptRequestContext | undefined) => Promise<string>) {
+async function mockTransport(scripted: (ctx: import("../transport/kiro-transport.js").PromptRequestContext | undefined) => Promise<string>) {
   const transport = {
     initialize: vi.fn().mockResolvedValue(undefined),
     sendPrompt: vi.fn(async (_k: string, _m: string, _i: unknown, ctx?: import("../transport/kiro-transport.js").PromptRequestContext) => scripted(ctx)),
@@ -188,7 +208,10 @@ describe("#1680 escaped turn boundary (real Spin/coordinator/stores/tools)", () 
     const runStore = new runStoreMod.OrcProjectRunStore();
     const claim = runStore.claimIntent({
       projectCardId: rootId,
-      intentKind: "contract_authoring",
+      // #1792: `operator_turn` is the only surviving intent-policy row; the
+      // turn-control one-shot, release, and late-call rejection under test
+      // are intent-agnostic.
+      intentKind: "operator_turn",
       goal: "authoring claim",
       originKind: "peer",
       originPeer: "p1",
@@ -199,18 +222,42 @@ describe("#1680 escaped turn boundary (real Spin/coordinator/stores/tools)", () 
     if (claim.kind !== "claimed") return;
 
     const context = claim.context;
-    const control = coordinatorMod.createOrcTurnControl(context.runId, () => true);
+    const control = makeTestTurnControl(context.runId);
     runStore.promoteRun(context.runId);
     const bound = { ...context, sessionId: "sess_1", executionId: "exec_1" };
     const bind = runStore.bindExecution(bound, "sess_1", "exec_1");
     expect(bind.ok).toBe(true);
 
-    // A live claim is an existing owner; commit the contract through the REAL
-    // tool so the policy postcondition re-read wins the control.
-    const contractResult = await toolRegistry.executeToolCall("define_project_contract", CONTRACT_ARGS(rootId), {
-      userId: "test-user", orcContext: bound, orcTurnControl: control, authorizationMode: "interactive",
+    // #1792: the define_project_contract tool is deleted — commit the same
+    // durable contract + supervision transition store-direct (the exact
+    // writes the tool performed), then win the host-owned control.
+    const { normalizeContract, createContractId } = await import("../project-acceptance/project-contract.js");
+    const { authorizeActiveProjectWork } = await import("../project-acceptance/project-review-store.js");
+    const rawContract: Record<string, unknown> = {
+      schema_version: 2,
+      id: createContractId(),
+      digest: "",
+      project_card_id: rootId,
+      goal: "supervised peer work",
+      criteria: [{ id: "c1", description: "Task goal met", required: true, execution_owner: "delegated", evidence_expectation: "synthesis" }],
+      required_outputs: [],
+      constraints: [],
+      limits: { max_review_rounds: 10, max_repair_rounds: 5 },
+      provenance: { requested_by: "peer", authored_by: "orc", created_at: new Date().toISOString() },
+    };
+    const normalized = normalizeContract(rawContract);
+    expect(normalized.ok).toBe(true);
+    if (!normalized.ok) return;
+    const reviewStore = new reviewStoreMod.ProjectReviewStore();
+    const authority = { projectCardId: bound.projectCardId, projectGeneration: bound.projectGeneration };
+    reviewStore.db.transaction(() => {
+      const rejection = authorizeActiveProjectWork(reviewStore.db, authority);
+      if (rejection) throw new Error(`project mutation rejected: ${rejection}`);
+      reviewStore.insertContract(normalized.contract);
+      reviewStore.initializeSupervision(rootId, normalized.contract.id, "executing");
     });
-    expect(contractResult).toContain("Root contract defined");
+    expect(reviewStore.getSupervision(rootId)?.state).toBe("executing");
+    expect(control.complete({ kind: "intent_satisfied", code: "contract_defined" })).toBe(true);
     expect(control.completed).toMatchObject({ kind: "intent_satisfied" });
 
     // The host-owned control cannot be replayed or displaced: a second request
@@ -229,7 +276,9 @@ describe("#1680 escaped turn boundary (real Spin/coordinator/stores/tools)", () 
     // A transport-bypassed late tool call must be rejected at the shared
     // execution gate after the exact run has released; it must not reach the
     // shell/tool implementation merely because its intent surface was valid.
-    const late = JSON.parse(await toolRegistry.executeToolCall("define_project_contract", {}, {
+    // #1792: the contract tool is deleted — execute_bash (live) pins the same
+    // gate: the denial precedes tool lookup.
+    const late = JSON.parse(await toolRegistry.executeToolCall("execute_bash", { command: "echo late" }, {
       userId: "test-user", orcContext: bound, authorizationMode: "interactive",
     })) as { reason?: string };
     expect(late.reason).toBe("orc_context_invalid");
@@ -239,255 +288,4 @@ describe("#1680 escaped turn boundary (real Spin/coordinator/stores/tools)", () 
     expect(policyMod.readOrcProjectSnapshot(runStore.db, rootId).contributionActive).toBe(true);
   });
 
-  it("a normal local no-owner project claims exactly one project_execution run, never another contract_authoring run (#1680)", async () => {
-    // Local executing root with a contract and no Worker/contribution/review
-    // owner: the reconciler's no-owner path must claim the truthful
-    // project_execution intent — never a second contract_authoring claim.
-    const rootId = kanban.kanbanEnqueue("Local Project", "agent", undefined, {
-      type: "O",
-      goal: "local supervised work",
-    });
-    kanban.kanbanRunning(rootId);
-    const store = new reviewStoreMod.ProjectReviewStore();
-    const contractId = `ct_exec_${rootId}`;
-    store.insertContract({
-      schema_version: 2,
-      id: contractId,
-      digest: `d_${contractId}`,
-      project_card_id: rootId,
-      goal: "local supervised work",
-      criteria: [{ id: "c1", description: "goal met", required: true, execution_owner: "orc", evidence_expectation: "synthesis" }],
-      required_outputs: [],
-      constraints: [],
-      limits: { max_review_rounds: 10, max_repair_rounds: 5 },
-      provenance: { requested_by: "agent", authored_by: "fixture", created_at: new Date().toISOString() },
-    } as never);
-    store.initializeSupervision(rootId, contractId, "executing");
-
-    const runStore = new runStoreMod.OrcProjectRunStore();
-    // The no-owner wake path (claimOrcContinuation) routes to
-    // scheduleProjectExecution — the same decision the reconciler makes.
-    const claim = new coordinatorMod.OrcProjectCoordinator({
-      ownerPeer: "kp",
-      ownerInstanceId: "inst-test",
-      startPort: async () => {},
-    }).scheduleProjectExecution(rootId, "resume from durable state");
-
-    expect(claim.kind).toBe("claimed");
-    if (claim.kind !== "claimed") return;
-    expect(claim.context.intentKind).toBe("project_execution");
-    expect(claim.context.intentKey).toBe(`execute:${rootId}:1`);
-    const row = runStore.getRun(claim.context.runId);
-    expect(row?.intent_kind).toBe("project_execution");
-
-    // A second no-owner wake is idempotent against the same run — no second
-    // claim, and never a contract_authoring claim (that intent is only
-    // actionable before a contract exists).
-    const again = new coordinatorMod.OrcProjectCoordinator({
-      ownerPeer: "kp",
-      ownerInstanceId: "inst-test",
-      startPort: async () => {},
-    }).scheduleProjectExecution(rootId, "resume from durable state");
-    expect(again.kind).toBe("idempotent");
-    if (again.kind !== "idempotent" && again.kind !== "claimed") throw new Error("expected a claim result with context");
-    expect(again.context.runId).toBe(claim.context.runId);
-    expect(runStore.getRunsForProject(rootId).filter(r => r.intent_kind === "contract_authoring")).toHaveLength(0);
-    expect(runStore.getRunsForProject(rootId).filter(r => r.intent_kind === "project_execution")).toHaveLength(1);
-  });
-
-  it("yield_turn hands the execute turn off once a durable Worker exists (#1728)", async () => {
-    const rootId = kanban.kanbanEnqueue("Yield Project", "agent", undefined, {
-      type: "O",
-      goal: "local supervised work",
-    });
-    kanban.kanbanRunning(rootId);
-    const store = new reviewStoreMod.ProjectReviewStore();
-    const contractId = `ct_yield_${rootId}`;
-    store.insertContract({
-      schema_version: 2,
-      id: contractId,
-      digest: `d_${contractId}`,
-      project_card_id: rootId,
-      goal: "local supervised work",
-      criteria: [{ id: "c1", description: "goal met", required: true, execution_owner: "delegated", evidence_expectation: "synthesis" }],
-      required_outputs: [],
-      constraints: [],
-      limits: { max_review_rounds: 10, max_repair_rounds: 5 },
-      provenance: { requested_by: "agent", authored_by: "fixture", created_at: new Date().toISOString() },
-    } as never);
-    store.initializeSupervision(rootId, contractId, "executing");
-
-    const specs: Array<import("./orc-project-contracts.js").OrcTurnSpec> = [];
-    const coordinator = new coordinatorMod.OrcProjectCoordinator({
-      ownerPeer: "kp",
-      ownerInstanceId: "inst-yield",
-      startPort: async (spec) => { specs.push(spec); },
-    });
-    const claim = coordinator.scheduleProjectExecution(rootId, "execute");
-    expect(claim.kind).toBe("claimed");
-    await flush();
-    expect(specs).toHaveLength(1);
-    const spec = specs[0]!;
-
-    // spawn_child stub creating a REAL durable child card + worker contract —
-    // exactly the durable state the execution postcondition reads.
-    const { setOrcToolsDeps } = await import("../transport/orc-tools.js");
-    const { WorkerSupervisionStore } = await import("../worker-supervision-store.js");
-    setOrcToolsDeps({
-      spawnChild: () => {
-        const childId = kanban.kanbanEnqueue("Worker lane", "agent", undefined, {
-          type: "W",
-          goal: "lane work",
-          parent_id: rootId,
-        });
-        new WorkerSupervisionStore().insertContract({
-          schema_version: 1,
-          id: `wc_${childId}`,
-          digest: `wd_${childId}`,
-          goal: "lane work",
-          criteria: [{ id: "c1", description: "lane done", required: true }],
-          expected_artifacts: [],
-          verification_commands: [],
-          required_capabilities: [],
-          limits: {},
-          provenance: { root_card_id: rootId, card_id: childId, authored_by: "orc", created_at: new Date().toISOString() },
-        } as never, childId);
-        return childId;
-      },
-    } as never);
-
-    const execCtx: import("../transport/tool-registry.js").ToolExecutionContext = {
-      userId: "kp",
-      orcContext: spec.context,
-      orcTurnControl: spec.turnControl,
-      authorizationMode: "interactive",
-    };
-
-    // Pre-handoff: no durable owner — bounded error, turn stays alive.
-    const before = await toolRegistry.executeToolCall("yield_turn", {}, execCtx);
-    expect(before).toContain("[err]");
-    expect(spec.turnControl.completed).toBeNull();
-
-    // Spawn the real durable Worker through the authorized execution surface.
-    const spawned = await toolRegistry.executeToolCall("spawn_worker", {
-      goal: "lane work",
-      project_card_id: String(rootId),
-      title: "Lane worker",
-      criteria: JSON.stringify([{ id: "c1", description: "lane done", required: true }]),
-      supports_root_criteria: JSON.stringify(["c1"]),
-    }, execCtx);
-    expect(spawned).toContain("+ Worker card #");
-    expect(spawned).toContain("call yield_turn");
-
-    // Post-handoff: the latch wins through the shared turn control.
-    const after = await toolRegistry.executeToolCall("yield_turn", {}, execCtx);
-    expect(after).toContain("✓");
-    expect(spec.turnControl.completed).toMatchObject({ kind: "intent_satisfied", code: "project_execution_handed_off" });
-
-    // A repeat is a bounded error and never mutates the winning terminal.
-    const repeat = await toolRegistry.executeToolCall("yield_turn", {}, execCtx);
-    expect(repeat).toContain("[err] turn already completed");
-
-    // The run releases completed under the existing ownership path while the
-    // Worker stays durably owned for later lifecycle processing.
-    const runStore = new runStoreMod.OrcProjectRunStore();
-    expect(coordinator.releaseOwnedRun(spec.context, "completed")).toBe(true);
-    const row = runStore.getRun((claim as { kind: "claimed"; context: { runId: string } }).context.runId);
-    expect(row?.outcome).toBe("completed");
-    const childCount = runStore.db.prepare(`SELECT COUNT(*) AS cnt FROM kanban_board WHERE parent_id = ? AND status IN ('queued','running')`).get(rootId) as { cnt: number };
-    expect(childCount.cnt).toBe(1);
-  });
-
-  it("#1691 injected overlap: a second O start on the same session is rejected before it can overwrite the first execution, and the first owner releases its own run", async () => {
-    let releaseFirst!: () => void;
-    const firstHeld = new Promise<void>(r => { releaseFirst = r; });
-    const sendCalls: Array<{ runId: string | undefined }> = [];
-    const transport = mockTransport(async (ctx) => {
-      sendCalls.push({ runId: ctx?.orcContext?.runId });
-      await firstHeld;
-      return "first turn prose — no tool call";
-    });
-
-    const spin = new spinMod.Spin();
-    spin.setRuntime({ session: vi.fn(async () => ({ transport, destroy: vi.fn() })), openExecution: vi.fn(), lastUsage: null } as never);
-
-    const coordinator = new coordinatorMod.OrcProjectCoordinator({
-      ownerPeer: "kp",
-      ownerInstanceId: "inst-test",
-      startPort: async (spec) => {
-        spin.spin({
-          type: "O",
-          goal: spec.goal,
-          sessionId: spec.context.sessionId,
-          cardId: spec.context.projectCardId,
-          settlementOwner: "spin",
-          source: "agent",
-          orcContext: spec.context,
-          orcTurnControl: spec.turnControl,
-          orcMaxPromptRounds: spec.maxPromptRounds,
-          await: false,
-        }).catch(() => { /* injected overlap and later turns assert their own outcomes */ });
-      },
-    });
-
-    const rootId = await seedPeerProjectWithContribution();
-    const claim = coordinator.scheduleContractAuthoring(rootId);
-    expect(claim.kind).toBe("claimed");
-    if (claim.kind !== "claimed") return;
-
-    // The first authoring execution reaches a held sendPrompt on the reusable
-    // O session.
-    await vi.waitFor(() => expect(sendCalls).toHaveLength(1));
-    const oSession = spin.listAllSessions().find(s => s.id.includes("_O_"))!;
-    expect(oSession.orcContext?.runId).toBe(claim.context.runId);
-
-    // Injected overlap: a second O start against the SAME session with a
-    // distinct durable context is rejected with the bounded admission error
-    // BEFORE bind, prompt, or any session-field mutation.
-    await expect(spin.spin({
-      type: "O",
-      sessionId: oSession.id,
-      goal: "overlapping authoring",
-      cardId: rootId,
-      settlementOwner: "spin",
-      source: "agent",
-      orcContext: { ...claim.context, runId: "or_overlap_injected" },
-      orcTurnControl: coordinatorMod.createOrcTurnControl("or_overlap_injected", () => true),
-      orcMaxPromptRounds: 3,
-      await: true,
-    })).rejects.toMatchObject({ name: "SpinDispatchAdmissionError", code: "type_busy" });
-    expect(sendCalls).toHaveLength(1);
-    expect(oSession.orcContext?.runId).toBe(claim.context.runId);
-    expect(oSession.activeExecutionId).toBeDefined();
-
-    // Release the first turn: it settles with its own bound context and
-    // releases the exact claimed run.
-    releaseFirst();
-    await vi.waitFor(() => expect(sendCalls).toHaveLength(1)); // no second prompt ever
-    const runStore = new runStoreMod.OrcProjectRunStore();
-    await vi.waitFor(() => {
-      const row = runStore.getRun(claim.context.runId);
-      expect(row?.state).toBe("released");
-    });
-    const row = runStore.getRun(claim.context.runId);
-    expect(row?.outcome).toBe("failed");
-    expect(row?.failure_code).toBe("intent_postcondition_unsatisfied");
-    expect(oSession.activeExecutionId).toBeUndefined();
-
-    // The session marker is free again — a later start is admitted past the
-    // single-flight gate (its own durable bind is a separate authority).
-    await expect(spin.spin({
-      type: "O",
-      sessionId: oSession.id,
-      goal: "post-settlement turn",
-      cardId: rootId,
-      settlementOwner: "spin",
-      source: "agent",
-      orcContext: { ...claim.context, runId: "or_after_settlement" },
-      orcTurnControl: coordinatorMod.createOrcTurnControl("or_after_settlement", () => true),
-      orcMaxPromptRounds: 3,
-      await: true,
-    })).rejects.toThrow(/Orc bindExecution rejected: run_unknown/);
-    expect(sendCalls).toHaveLength(1);
-  });
 });

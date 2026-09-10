@@ -231,30 +231,14 @@ async function startTestReconciler(
   const { startReconciler } = await import("../../components/reconciler.js");
   const { LifecycleWakeScheduler } = await import("../../components/lifecycle-wake-scheduler.js");
   const { OrcProjectCoordinator } = await import("../../components/orc-project/orc-project-coordinator.js");
-  const { loadPeerConfig } = await import("../../components/peer-config.js");
   const { SpinWorkerAdapter } = await import("../../components/spin-worker-adapter.js");
   const { ReconcileQuarantineStore } = await import("../../components/reconcile-quarantine-store.js");
   const { WorkerSupervisionStore } = await import("../../components/worker-supervision-store.js");
   const { PiExecutorAdapter } = await import("../../components/pi-executor-adapter.js");
-  const { spin } = await import("../../components/spin.js");
 
-  const peerName = loadPeerConfig().self.name;
-  const coordinator = deps.coordinator ?? new OrcProjectCoordinator({
-    ownerPeer: peerName,
-    startPort: async (spec) => {
-      await spin.spin({
-        type: "O",
-        goal: spec.goal,
-        sessionId: spec.context.sessionId,
-        cardId: spec.context.projectCardId,
-        settlementOwner: "spin",
-        source: "agent",
-        orcContext: spec.context,
-        orcTurnControl: spec.turnControl,
-        orcMaxPromptRounds: spec.maxPromptRounds,
-      });
-    },
-  });
+  // #1792: the coordinator retains only the release/supersede boundary — the
+  // runner dispatches all work now, so no start port is injected.
+  const coordinator = deps.coordinator ?? new OrcProjectCoordinator({});
   const scheduler = deps.wakeScheduler ?? new LifecycleWakeScheduler();
   await startReconciler({
     generationId: `local-swarm-${++_reconcilerGenerationCounter}`,

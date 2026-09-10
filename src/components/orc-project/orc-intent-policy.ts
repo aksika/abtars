@@ -2,14 +2,19 @@
  * orc-intent-policy.ts — #1680: the single provider-neutral Orc intent policy
  * registry.
  *
- * One intent row owns: the prompt-round bound, the allowed tool surface,
- * durable actionability, and the durable completion postcondition. Both the
- * shared tool-presentation boundary (createPiAgentTools) and the execution-time
- * authorization gate (executeToolCall) consume the same tool-surface decision;
- * Spin consumes the prompt bound and the completion postcondition. Model
+ * #1792: the supervised scheduling surface is deleted — the workflow runner
+ * dispatches all work now. Only the `operator_turn` policy row remains. The
+ * shared tool-presentation boundary (createPiAgentTools) and the
+ * execution-time authorization gate (executeToolCall) consume the same
+ * tool-surface decision via `orcToolAllowedOnIntent`; the trusted intent kind
+ * comes only from the persisted run row via OrcInvocationContextV2. Model
  * arguments, prompts, and provider candidates can never select or change a
- * policy — the trusted intent kind comes only from the persisted run row via
- * OrcInvocationContextV2.
+ * policy.
+ *
+ * `hasAllLanesTerminal` and `readOrcProjectSnapshot` are retained unchanged:
+ * `orc-project-run-store.ts` still imports both (claim gate + salvage
+ * eligibility), so deleting them here would break module load. Their
+ * caller-side removal belongs to the run-store retirement slice.
  */
 
 import type { TaskDatabase } from "../tasks/kanban-board.js";
@@ -51,176 +56,86 @@ export interface OrcIntentPolicy {
 
 const TERMINAL_SUPERVISION = new Set(["accepted", "blocked"]);
 
-const AUTHORING_TOOLS: ReadonlySet<string> = new Set(["define_project_contract"]);
-
-const EXECUTION_TOOLS: ReadonlySet<string> = new Set([
-  "execute_bash",
-  "artifact_attach",
-  "artifact_pull",
-  "artifact_push",
-  "channel_post",
-  "channel_read",
-  "kanban_manage",
-  "memory_recall",
-  "peer_ask_help",
-  "peer_help_status",
-  "peer_withdraw_help",
-  "spawn_worker",
-  "check_workers",
-  "cancel_worker",
-  "review_worker_failure",
-  // #1728: explicit durable-handoff yield — ends the execute turn once a
-  // durable owner (Worker/contribution/review case) exists.
-  "yield_turn",
-]);
-
-const REVIEW_TOOLS: ReadonlySet<string> = new Set([
-  "get_project_review_case",
-  "review_project",
-  "artifact_pull",
-  "channel_read",
-]);
-
-const REPAIR_TOOLS: ReadonlySet<string> = new Set([
-  "check_workers",
-  "cancel_worker",
-  "review_worker_failure",
-  "artifact_pull",
-  "channel_read",
-]);
-
-const INPUT_RESUME_TOOLS: ReadonlySet<string> = new Set([
-  "get_project_review_case",
-  "review_project",
-  "artifact_pull",
-  "channel_read",
-]);
-
-const POLICIES: Record<OrcIntentKind, OrcIntentPolicy> = {
-  contract_authoring: {
-    intentKind: "contract_authoring",
-    maxPromptRounds: 3,
-    allowedTools: AUTHORING_TOOLS,
-    isActionable: (s) => !s.contractExists && s.supervisionState === "awaiting_contract",
-    // A committed contract that advanced supervision to `executing` satisfies
-    // the authoring intent durably.
-    completion: (s) => s.contractExists && s.supervisionState === "executing"
-      ? { satisfied: true, code: "contract_defined" }
-      : { satisfied: false, code: "intent_postcondition_unsatisfied" },
-  },
-  project_execution: {
-    intentKind: "project_execution",
-    maxPromptRounds: 25,
-    allowedTools: EXECUTION_TOOLS,
-    isActionable: (s) => s.supervisionState === "executing"
-      && s.contractExists
-      && !s.projectTerminal
-      && !s.workerOwnedChild
-      && !s.contributionActive
-      && !s.openReviewCase
-      && !s.inputRequestsOutstanding,
-    // A durable owner (Worker/contribution/review) or a terminal project means
-    // the execution intent has handed off; synthesis without any durable owner
-    // is unsatisfied. #1789: finished lane sets (≥1 lane, all terminal) also
-    // satisfy the salvage turn — but a project that never spawned any lane has
-    // not finished a work phase, so zero lanes must stay unsatisfied here.
-    completion: (s) => s.projectTerminal || s.workerOwnedChild || s.contributionActive || s.openReviewCase || s.allLanesTerminal
-      ? { satisfied: true, code: "project_execution_handed_off" }
-      : { satisfied: false, code: "intent_postcondition_unsatisfied" },
-  },
-  project_review: {
-    intentKind: "project_review",
-    // #1725: 6, not 3. A successful review turn uses two provider requests
-    // (read case, then review_project, which satisfies the intent and stops
-    // safety mid-round), so 3 left only one spare request — consumed by a
-    // single artifact_pull/channel_read or one invalid proposal. Six leaves
-    // four spare requests while keeping the bound finite.
-    maxPromptRounds: 6,
-    allowedTools: REVIEW_TOOLS,
-    isActionable: (s) => s.openReviewCase && !s.projectTerminal,
-    // The referenced case is consumed once no open case remains for the
-    // project, or the project reached terminal state.
-    completion: (s) => s.projectTerminal || !s.openReviewCase
-      ? { satisfied: true, code: "review_case_consumed" }
-      : { satisfied: false, code: "intent_postcondition_unsatisfied" },
-  },
-  repair_review: {
-    intentKind: "repair_review",
-    maxPromptRounds: 5,
-    allowedTools: REPAIR_TOOLS,
-    isActionable: (s) => s.supervisionState === "repair_planned" || s.supervisionState === "repairing",
-    // A repair decision that advanced durable ownership leaves the repair
-    // states; a terminal project also satisfies.
-    completion: (s) => s.projectTerminal
-      || (s.supervisionState !== "repair_planned" && s.supervisionState !== "repairing")
-      ? { satisfied: true, code: "repair_decision_advanced" }
-      : { satisfied: false, code: "intent_postcondition_unsatisfied" },
-  },
-  input_resume: {
-    intentKind: "input_resume",
-    // #1725: same review tool surface and the same read-then-submit turn shape
-    // as project_review — same bound.
-    maxPromptRounds: 6,
-    allowedTools: INPUT_RESUME_TOOLS,
-    isActionable: (s) => s.inputRequestsOutstanding && !s.projectTerminal,
-    // The input/review request is consumed once no outstanding request row
-    // remains for the project.
-    completion: (s) => s.projectTerminal || !s.inputRequestsOutstanding
-      ? { satisfied: true, code: "input_request_consumed" }
-      : { satisfied: false, code: "intent_postcondition_unsatisfied" },
-  },
-  operator_turn: {
-    intentKind: "operator_turn",
-    maxPromptRounds: 25,
-    allowedTools: "operator_surface",
-    isActionable: () => true,
-    // An operator turn reaches normal terminal output when the model ends it.
-    completion: () => ({ satisfied: true, code: "operator_turn_complete" }),
-  },
+/**
+ * #1792: the only surviving policy row. Supervised tool surfaces
+ * (`AUTHORING_TOOLS`, `EXECUTION_TOOLS` + `yield_turn`, `REVIEW_TOOLS`,
+ * `REPAIR_TOOLS`, `INPUT_RESUME_TOOLS`) and the supervised
+ * `isActionable`/`completion` closures (`contract_authoring`,
+ * `project_execution`, `project_review`, `repair_review`, `input_resume`)
+ * are deleted — verified 2026-09-10 on `dev`: no production producer
+ * remains (coordinator `schedule*` retired; `claimSalvageExecution`'s sole
+ * caller `scheduleProjectSalvage` retired with it).
+ */
+const OPERATOR_POLICY: OrcIntentPolicy = {
+  intentKind: "operator_turn",
+  maxPromptRounds: 25,
+  allowedTools: "operator_surface",
+  isActionable: () => true,
+  // An operator turn reaches normal terminal output when the model ends it.
+  completion: () => ({ satisfied: true, code: "operator_turn_complete" }),
 };
 
-/** #1680: the exact policy row for a persisted intent kind. */
+const POLICIES: Partial<Record<OrcIntentKind, OrcIntentPolicy>> = {
+  operator_turn: OPERATOR_POLICY,
+};
+
+/** #1792: fail-closed for the deleted supervised kinds — they have no
+ *  production producer, so reaching here is a programmer error, never a
+ *  schedulable state. */
+function deadIntentError(intentKind: OrcIntentKind): Error {
+  return new Error(`orc-intent-policy: dead supervised intent kind (deleted #1792): ${intentKind}`);
+}
+
+/** #1680: the exact policy row for a persisted intent kind. Throws for the
+ *  deleted supervised kinds. */
 export function intentPolicyFor(intentKind: OrcIntentKind): OrcIntentPolicy {
-  return POLICIES[intentKind];
+  const policy = POLICIES[intentKind];
+  if (!policy) throw deadIntentError(intentKind);
+  return policy;
 }
 
 /**
- * #1728: attempt-aware effective prompt bound. Fixed for every intent except
- * `project_review`, whose durable review-dispatch stream escalates from the
- * #1725 base of 6 by two requests per additional dispatch attempt, capped at
- * 10 (`6, 8, 10, 10, 10` across the five permitted attempts). The ordinal is
- * one-based trusted scheduler input: non-finite, non-integer, zero, or negative
- * values fail closed to the base bound; large ordinals cap at 10.
+ * #1728: attempt-aware effective prompt bound.
+ *
+ * #1792: only `operator_turn` remains, so the bound is fixed at 25 and the
+ * `project_review` dispatch-ordinal escalation is deleted with its policy.
+ * The `dispatchOrdinal` parameter is retained (ignored) so the
+ * coordinator-era call shape keeps compiling for any in-flight caller.
  */
-export function effectiveMaxPromptRounds(intentKind: OrcIntentKind, dispatchOrdinal?: number): number {
-  const base = POLICIES[intentKind].maxPromptRounds;
-  if (intentKind !== "project_review") return base;
-  const ordinal = dispatchOrdinal !== undefined
-    && Number.isInteger(dispatchOrdinal)
-    && dispatchOrdinal >= 1
-    ? dispatchOrdinal
-    : 1;
-  return Math.min(base + (ordinal - 1) * 2, 10);
+export function effectiveMaxPromptRounds(intentKind: OrcIntentKind, _dispatchOrdinal?: number): number {
+  const policy = POLICIES[intentKind];
+  if (!policy) throw deadIntentError(intentKind);
+  return policy.maxPromptRounds;
 }
 
 /** #1680: the allowed tool surface for schema presentation and execution
- *  authorization. `operator_surface` means the full current operator surface. */
+ *  authorization. `operator_surface` means the full current operator surface.
+ *  Throws for the deleted supervised kinds — use `orcToolAllowedOnIntent`
+ *  for a non-throwing authorization check. */
 export function orcAllowedToolsFor(intentKind: OrcIntentKind): ReadonlySet<string> | "operator_surface" {
-  return POLICIES[intentKind].allowedTools;
+  const policy = POLICIES[intentKind];
+  if (!policy) throw deadIntentError(intentKind);
+  return policy.allowedTools;
 }
 
-/** #1680: true when an Orc tool name is legal for the given intent surface. */
+/**
+ * #1680: true when an Orc tool name is legal for the given intent surface.
+ * Fail-closed total function: deleted supervised kinds deny every tool
+ * (never throw), so the transport gate degrades to denial rather than a
+ * crash on historical contexts.
+ */
 export function orcToolAllowedOnIntent(toolName: string, intentKind: OrcIntentKind): boolean {
-  const surface = orcAllowedToolsFor(intentKind);
+  const policy = POLICIES[intentKind];
+  if (!policy) return false;
+  const surface = policy.allowedTools;
   if (surface === "operator_surface") return true;
   return surface.has(toolName);
 }
 
 /**
  * #1789: true when the project has at least one W lane and every W lane is
- * terminal (`done`/`delivered`/`failed`). Deliberately mirrors
- * `TERMINAL_CARD_STATUSES` in project-lifecycle-decision.ts so the decision
- * layer and the claim transaction cannot disagree.
+ * terminal (`done`/`delivered`/`failed`). Uses the canonical terminal lane
+ * set inline so lane-terminal reads and the claim transaction cannot disagree.
  *
  * Zero lanes → false: a project that never spawned has not finished a work
  * phase, and `project_execution.completion` must not read that as a handoff.

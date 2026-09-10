@@ -324,9 +324,9 @@ function makeTestCoordinator(overrides: Record<string, unknown> = {}) {
     getStore: makeFakeRunStore,
     bootRecovery: () => [] as number[],
     onOwnershipReleased: () => () => {},
-    scheduleContractAuthoring: () => ({ kind: "busy" as const, activeRunId: "or_unused" }),
-    scheduleProjectExecution: () => ({ kind: "busy" as const, activeRunId: "or_unused" }),
-    scheduleReview: () => ({ kind: "busy" as const, activeRunId: "or_review" }),
+    // #1792: the coordinator schedule path is retired — the reconciler never
+    // calls schedule* (only bootRecovery). No schedule fakes: any attempt
+    // would throw on the missing method.
     ...overrides,
   };
 }
@@ -853,22 +853,15 @@ describe("Reconciler — #1546 scheduled-root driver", () => {
     }
   }
 
-  async function fakeCoordinator(claims: Array<{ projectCardId: number; goal: string }>) {
+  // #1792: the coordinator schedule path is retired — the reconciler owns no
+  // Orc continuation claims, so the fake carries no schedule methods. The
+  // `claims` array each test threads through stays empty by construction;
+  // the behavioral asserts below (dispatch/kanban mocks) are what pin the
+  // no-continuation cutover contract.
+  async function fakeCoordinator(_claims: Array<{ projectCardId: number; goal: string }>) {
     await swapTestGeneration({
       coordinator: {
         getStore: makeFakeRunStore,
-        scheduleContractAuthoring: (projectCardId: number) => {
-          claims.push({ projectCardId, goal: "contract_authoring" });
-          getLiveRunForProjectMock.mockReturnValue({ project_generation: 1, id: `or_${projectCardId}` });
-          return { kind: "claimed" as const, context: { runId: `or_${projectCardId}`, projectCardId } };
-        },
-        scheduleProjectExecution: (projectCardId: number, goal: string) => {
-          claims.push({ projectCardId, goal });
-          // a real claim creates the durable live Orc row the next pass observes
-          getLiveRunForProjectMock.mockReturnValue({ project_generation: 1, id: `or_${projectCardId}` });
-          return { kind: "claimed" as const, context: { runId: `or_${projectCardId}`, projectCardId } };
-        },
-        scheduleReview: () => ({ kind: "busy" as const, activeRunId: "or_review" }),
       } as never,
     });
   }
@@ -1089,7 +1082,6 @@ describe("Reconciler — #1546 scheduled-root driver", () => {
     await swapTestGeneration({
       coordinator: {
         getStore: makeFakeRunStore,
-        scheduleProjectExecution: () => ({ kind: "not_actionable" as const, reason: "intent_not_actionable" as const }),
       } as never,
     });
     // Incident shape: the Worker card is still queued between its failed
@@ -1125,7 +1117,6 @@ describe("Reconciler — #1546 scheduled-root driver", () => {
     await swapTestGeneration({
       coordinator: {
         getStore: makeFakeRunStore,
-        scheduleProjectExecution: () => ({ kind: "not_actionable" as const, reason: "intent_not_actionable" as const }),
       } as never,
     });
     setupExecutingProject({

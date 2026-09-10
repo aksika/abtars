@@ -2,9 +2,11 @@
  * orc-intent-policy.test.ts — #1680 intent-policy registry, tool-authorization
  * matrix, and the preserving orc_project_runs migration.
  *
- * The tool matrix is exercised at BOTH real boundaries: schema presentation
- * (createPiAgentTools) and execution-time authorization (executeToolCall).
- * Removing either consumer must make the matrix fail.
+ * #1792: only `operator_turn` survives — supervised entries, tool surfaces,
+ * and completion-as-authority are deleted. The tool matrix is exercised at
+ * BOTH real boundaries: schema presentation (createPiAgentTools) and
+ * execution-time authorization (executeToolCall). Removing either consumer
+ * must make the matrix fail.
  */
 import { describe, it, expect, beforeAll, afterAll, beforeEach } from "vitest";
 import { mkdirSync, rmSync, existsSync, mkdtempSync } from "node:fs";
@@ -49,7 +51,7 @@ function makeOrcContext(overrides: Partial<import("./orc-project-contracts.js").
     version: 2,
     runId: "or_test_1",
     intentKey: "contract:1:1",
-    intentKind: "contract_authoring",
+    intentKind: "operator_turn",
     projectCardId: 1,
     projectGeneration: 1,
     ownershipGeneration: 1,
@@ -64,34 +66,37 @@ function makeSafety() {
   return piCoreSafetyMod.createPiExecutionSafetyController(new fallbackPolicyMod.FallbackPolicy([] as never, new healthRegistryMod.ModelHealthRegistry()), undefined);
 }
 
-describe("#1680 intent policy rows", () => {
-  it("carries the exact intent prompt bounds and tool surfaces (#1725: review/input bound is 6)", () => {
-    const cases: Array<[import("./orc-project-contracts.js").OrcIntentKind, number, string]> = [
-      ["contract_authoring", 3, "define_project_contract"],
-      ["project_execution", 25, "execute_bash"],
-      ["project_review", 6, "get_project_review_case"],
-      ["repair_review", 5, "check_workers"],
-      ["input_resume", 6, "get_project_review_case"],
-      ["operator_turn", 25, "operator_surface"],
-    ];
-    for (const [kind, rounds, firstTool] of cases) {
-      const policy = policyMod.intentPolicyFor(kind);
-      expect(policy.maxPromptRounds).toBe(rounds);
-      if (firstTool === "operator_surface") {
-        expect(policy.allowedTools).toBe("operator_surface");
-      } else {
-        expect(policy.allowedTools).toContain(firstTool);
-      }
-    }
+describe("#1680 intent policy rows (#1792: operator_turn only)", () => {
+  it("carries the operator prompt bound and the full operator surface", () => {
+    const policy = policyMod.intentPolicyFor("operator_turn");
+    expect(policy.maxPromptRounds).toBe(25);
+    expect(policy.allowedTools).toBe("operator_surface");
   });
 
-  it("authoring is actionable only before a contract; execution only after one", () => {
-    const authoring = policyMod.intentPolicyFor("contract_authoring");
-    expect(authoring.isActionable({ ...emptySnapshot(), supervisionState: "awaiting_contract", contractExists: false })).toBe(true);
-    expect(authoring.isActionable({ ...emptySnapshot(), supervisionState: "executing", contractExists: true })).toBe(false);
-    const execution = policyMod.intentPolicyFor("project_execution");
-    expect(execution.isActionable({ ...emptySnapshot(), supervisionState: "executing", contractExists: true })).toBe(true);
-    expect(execution.isActionable({ ...emptySnapshot(), supervisionState: "awaiting_contract", contractExists: false })).toBe(false);
+  it("operator turns are always actionable and always complete", () => {
+    const operator = policyMod.intentPolicyFor("operator_turn");
+    expect(operator.isActionable(emptySnapshot())).toBe(true);
+    expect(operator.isActionable({ ...emptySnapshot(), projectTerminal: true })).toBe(true);
+    expect(operator.completion(emptySnapshot())).toEqual({ satisfied: true, code: "operator_turn_complete" });
+  });
+
+  it("deleted supervised kinds fail closed (#1792)", () => {
+    const dead: Array<import("./orc-project-contracts.js").OrcIntentKind> = [
+      "contract_authoring",
+      "project_execution",
+      "project_review",
+      "repair_review",
+      "input_resume",
+    ];
+    for (const kind of dead) {
+      expect(() => policyMod.intentPolicyFor(kind)).toThrow();
+      expect(() => policyMod.effectiveMaxPromptRounds(kind)).toThrow();
+      expect(() => policyMod.orcAllowedToolsFor(kind)).toThrow();
+      // The transport authorization gate denies without throwing so a
+      // historical context degrades to denial, never a crash.
+      expect(policyMod.orcToolAllowedOnIntent("execute_bash", kind)).toBe(false);
+      expect(policyMod.orcToolAllowedOnIntent("define_project_contract", kind)).toBe(false);
+    }
   });
 
   it("#1751 marks an owner read failure as incomplete evidence", () => {
@@ -109,16 +114,10 @@ describe("#1680 intent policy rows", () => {
     expect(snapshot.ownerReadsComplete).toBe(false);
   });
 
-  it("completion postconditions re-read durable state", () => {
-    const authoring = policyMod.intentPolicyFor("contract_authoring");
-    expect(authoring.completion({ ...emptySnapshot(), contractExists: true, supervisionState: "executing" }).satisfied).toBe(true);
-    expect(authoring.completion(emptySnapshot()).satisfied).toBe(false);
-    const execution = policyMod.intentPolicyFor("project_execution");
-    expect(execution.completion({ ...emptySnapshot(), workerOwnedChild: true }).satisfied).toBe(true);
-    expect(execution.completion({ ...emptySnapshot(), projectTerminal: true }).satisfied).toBe(true);
-    expect(execution.completion({ ...emptySnapshot(), allLanesTerminal: true }).satisfied).toBe(true);
-    expect(execution.completion({ ...emptySnapshot(), allLanesTerminal: true }).code).toBe("project_execution_handed_off");
-    expect(execution.completion(emptySnapshot()).satisfied).toBe(false);
+  it("operator completion is terminal output, independent of durable state", () => {
+    const operator = policyMod.intentPolicyFor("operator_turn");
+    expect(operator.completion(emptySnapshot()).satisfied).toBe(true);
+    expect(operator.completion({ ...emptySnapshot(), projectTerminal: true }).satisfied).toBe(true);
   });
 });
 
@@ -181,17 +180,13 @@ describe("#1789 hasAllLanesTerminal", () => {
     expect(check(await ensureStores(), await seedProject(["failed", "failed", "delivered", "delivered"]))).toBe(true);
   });
 
-  it("zero children → false, so project_execution.completion cannot misread a handoff", async () => {
+  it("zero children → false (#1789: no handoff misread on an unspawned project)", async () => {
     // Guard against the rejected hasNoWorkingLanes shape (COUNT(queued|running) == 0
-    // is true for zero children): an Orc turn that spawned nothing must report
-    // intent_postcondition_unsatisfied, never project_execution_handed_off.
+    // is true for zero children): a turn that spawned nothing must report
+    // false here, never a terminal lane set.
     const kanban = await import("../tasks/kanban-board.js");
     const root = kanban.kanbanEnqueue("1789 childless root", "task", undefined, { type: "O", goal: "g" }) as number;
     expect(check(await ensureStores(), root)).toBe(false);
-    const execution = policyMod.intentPolicyFor("project_execution");
-    expect(execution.completion({ ...emptySnapshot(), allLanesTerminal: false }).satisfied).toBe(false);
-    expect(execution.completion({ ...emptySnapshot(), allLanesTerminal: false }).code)
-      .toBe("intent_postcondition_unsatisfied");
   });
 });
 
@@ -210,62 +205,22 @@ function emptySnapshot(): import("./orc-intent-policy.js").OrcProjectSnapshot {
   };
 }
 
-describe("#1728 review dispatch escalation", () => {
-  it("escalates project_review across dispatch ordinals: 6, 8, 10, then caps at 10", () => {
-    expect(policyMod.effectiveMaxPromptRounds("project_review", 1)).toBe(6);
-    expect(policyMod.effectiveMaxPromptRounds("project_review", 2)).toBe(8);
-    expect(policyMod.effectiveMaxPromptRounds("project_review", 3)).toBe(10);
-    expect(policyMod.effectiveMaxPromptRounds("project_review", 4)).toBe(10);
-    expect(policyMod.effectiveMaxPromptRounds("project_review", 5)).toBe(10);
-    expect(policyMod.effectiveMaxPromptRounds("project_review", 99)).toBe(10);
-  });
-
-  it("fails closed to the base bound on invalid ordinals and keeps every other intent fixed", () => {
-    expect(policyMod.effectiveMaxPromptRounds("project_review")).toBe(6);
-    expect(policyMod.effectiveMaxPromptRounds("project_review", 0)).toBe(6);
-    expect(policyMod.effectiveMaxPromptRounds("project_review", -3)).toBe(6);
-    expect(policyMod.effectiveMaxPromptRounds("project_review", 2.5)).toBe(6);
-    expect(policyMod.effectiveMaxPromptRounds("project_review", Number.NaN)).toBe(6);
-    expect(policyMod.effectiveMaxPromptRounds("contract_authoring", 9)).toBe(3);
-    expect(policyMod.effectiveMaxPromptRounds("project_execution", 9)).toBe(25);
-    expect(policyMod.effectiveMaxPromptRounds("repair_review", 4)).toBe(5);
-    expect(policyMod.effectiveMaxPromptRounds("input_resume", 7)).toBe(6);
+describe("#1792 operator prompt bound (fixed; review escalation deleted)", () => {
+  it("operator_turn is always 25 and ignores the dispatch ordinal", () => {
+    expect(policyMod.effectiveMaxPromptRounds("operator_turn")).toBe(25);
+    expect(policyMod.effectiveMaxPromptRounds("operator_turn", 1)).toBe(25);
     expect(policyMod.effectiveMaxPromptRounds("operator_turn", 3)).toBe(25);
+    expect(policyMod.effectiveMaxPromptRounds("operator_turn", 99)).toBe(25);
   });
 });
 
-describe("#1680 tool authorization matrix (schema + execution boundaries)", () => {
+describe("#1680 tool authorization matrix (schema + execution boundaries; #1792: operator surface only)", () => {
+  // #1792: the supervised Orc tools (define_project_contract, spawn_worker,
+  // review_project, yield_turn) are deleted from the registry — only a live
+  // tool can pin the matrix at both boundaries now.
   const MATRIX: Array<[import("./orc-project-contracts.js").OrcIntentKind, string, boolean]> = [
-    // authoring sees only the contract-definition capability
-    ["contract_authoring", "define_project_contract", true],
-    ["contract_authoring", "execute_bash", false],
-    ["contract_authoring", "spawn_worker", false],
-    ["contract_authoring", "review_project", false],
-    ["contract_authoring", "memory_recall", false],
-    // project execution cannot author or review
-    ["project_execution", "execute_bash", true],
-    ["project_execution", "spawn_worker", true],
-    ["project_execution", "define_project_contract", false],
-    ["project_execution", "review_project", false],
-    ["project_execution", "peer_ask_help", true],
-    // #1728: the durable-handoff yield is execution-only
-    ["contract_authoring", "yield_turn", false],
-    ["project_execution", "yield_turn", true],
-    ["project_review", "yield_turn", false],
-    ["repair_review", "yield_turn", false],
-    ["input_resume", "yield_turn", false],
-    // review intents cannot execute or author
-    ["project_review", "get_project_review_case", true],
-    ["project_review", "review_project", true],
-    ["project_review", "execute_bash", false],
-    ["project_review", "define_project_contract", false],
-    ["repair_review", "check_workers", true],
-    ["repair_review", "execute_bash", false],
-    ["input_resume", "review_project", true],
-    ["input_resume", "spawn_worker", false],
     // operator turns retain the full surface
     ["operator_turn", "execute_bash", true],
-    ["operator_turn", "define_project_contract", true],
   ];
 
   it("schema presentation filters by the exact policy surface", () => {

@@ -113,23 +113,18 @@ describe("blocked settlement → requester round trip (#1630)", () => {
     const { cardId } = setup(requestId, contributionRef);
     seedAcceptedContribution(cardId, requestId, contributionRef);
 
-    const { getOrcTools } = await import("../transport/orc-tools.js");
-    const defineTool = getOrcTools().find(t => t.name === "define_project_contract");
-    expect(defineTool).toBeDefined();
-    const args = {
-      goal: "Build the feature",
-      project_card_id: String(cardId),
-      criteria: JSON.stringify([{ id: "c1" }]), // structurally invalid — fails normalization
-      required_outputs: JSON.stringify([{ id: "o1", description: "Output", kind: "logical", required: true }]),
-    };
-    // #1644: contract authoring requires the bound Orc invocation context.
-    const context = { userId: "test", orcContext: { version: 1, runId: `or_${cardId}_1`, intentKey: `contract:${cardId}:1`, projectCardId: cardId, projectGeneration: 1, ownershipGeneration: 1, ownerPeer: "local", ownerInstanceId: "test", origin: { kind: "local" } } } as never;
-    const first = await defineTool!.execute(args as never, context);
-    expect(first).toContain("[err] Invalid contract");
-    const second = await defineTool!.execute(args as never, context);
-    expect(second).toContain("[err] Invalid contract");
-    const third = await defineTool!.execute(args as never, context);
-    expect(third).toContain("blocked");
+    // #1792: the define_project_contract tool is deleted — drive the same
+    // invalid-proposal exhaustion store-direct. Three structurally invalid
+    // proposals count 1, 2, then terminalize the admission as blocked.
+    const store = new ProjectReviewStore();
+    const authority = { projectCardId: cardId, projectGeneration: 1 };
+    const decision = { action: "blocked", reason: "Invalid contract proposals exhausted" };
+    const first = store.recordInvalidContractProposal(cardId, 1, 3, decision, INVALID_CONTRACT_PROPOSALS_EXHAUSTED, `rd_block_${cardId}_1`, authority);
+    expect(first.kind).toBe("counted");
+    const second = store.recordInvalidContractProposal(cardId, 1, 3, decision, INVALID_CONTRACT_PROPOSALS_EXHAUSTED, `rd_block_${cardId}_2`, authority);
+    expect(second.kind).toBe("counted");
+    const third = store.recordInvalidContractProposal(cardId, 1, 3, decision, INVALID_CONTRACT_PROPOSALS_EXHAUSTED, `rd_block_${cardId}_3`, authority);
+    expect(third.kind).toBe("blocked");
 
     const supervision = new ProjectReviewStore().getSupervision(cardId);
     expect(supervision?.state).toBe("blocked");

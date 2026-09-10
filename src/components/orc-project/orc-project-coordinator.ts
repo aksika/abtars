@@ -1,73 +1,38 @@
 import { OrcProjectRunStore } from "./orc-project-run-store.js";
 import type {
   OrcInvocationContextV2,
-  OrcOriginKind,
-  OrcRunClaimResult,
-  OrcClaimInput,
   OrcOwnershipReleasedV1,
-  OrcTurnSpec,
-  OrcTurnControl,
-  OrcTurnTerminal,
   OrcRunFailureCode,
+  OrcRunOutcome,
+  OrcRunReason,
+  OrcRunState,
 } from "./orc-project-contracts.js";
 import { readBridgeLockField } from "../transport/bridge-lock-transport.js";
-import { logInfo, logWarn } from "../logger.js";
+import { logInfo } from "../logger.js";
 import { logAndSwallow } from "../log-and-swallow.js";
-import { effectiveMaxPromptRounds, intentPolicyFor, readOrcProjectSnapshot } from "./orc-intent-policy.js";
-import { kanbanGetCard, requireTaskDatabase } from "../tasks/kanban-board.js";
-import { scheduledOccurrenceState } from "../tasks/scheduled-occurrence-gate.js";
-import type { ScheduledOccurrenceState } from "../tasks/scheduled-occurrence-gate.js";
 
 const TAG = "orc-coordinator";
 
-/** #1680: the start port receives one typed turn specification — immutable
- *  intent, policy-derived prompt bound, and the host-owned one-shot turn
- *  control. Callers cannot pass an independently selected intent or bound. */
-export interface OrcStartPort {
-  (spec: OrcTurnSpec): Promise<void>;
-}
-
-/** #1618: durable root identity — card source plus the authenticated source peer. */
-export interface OrcRootIdentity {
-  source: string;
-  sourcePeer: string | null;
-  /** #1707 Task 2: the scheduled occurrence runId when the root is task-sourced. */
-  sourceId?: string | null;
-}
-
+/**
+ * #1792: the supervised scheduling path is retired — the workflow runner
+ * dispatches all work now. The coordinator retains only the release/
+ * supersede ownership boundary (spin.ts release path + reconciler boot
+ * recovery) and the ownership-released event.
+ */
 export interface OrcCoordinatorDeps {
   store?: OrcProjectRunStore;
-  /** Injected exact Spin O-start port — not legacy dispatch(). */
-  startPort: OrcStartPort;
-  /** Stable logical peer name (from loadPeerConfig().self.name). */
-  ownerPeer: string;
   /** Override instance ID; defaults to bridge.lock instanceId. */
   ownerInstanceId?: string;
-  /** Override root identity read; defaults to reading kanban source + source_peer. */
-  getRootIdentity?: (projectCardId: number) => OrcRootIdentity;
-  /**
-   * #1707: override the scheduled-occurrence admission read. Defaults to the
-   * shared fail-closed gate. Tests may inject a stub to avoid a task catalog.
-   */
-  scheduledOccurrenceState?: (projectCardId: number) => ScheduledOccurrenceState;
 }
 
 export class OrcProjectCoordinator {
   private readonly store: OrcProjectRunStore;
-  private readonly startPort: OrcStartPort;
-  private readonly ownerPeer: string;
   private readonly ownerInstanceId: string;
-  private readonly getRootIdentity: (projectCardId: number) => OrcRootIdentity;
-  private readonly scheduledOccurrenceState: (projectCardId: number) => ScheduledOccurrenceState;
   private readonly ownershipListeners = new Set<(event: OrcOwnershipReleasedV1) => void>();
 
   constructor(deps: OrcCoordinatorDeps) {
     this.store = deps.store ?? new OrcProjectRunStore();
-    this.startPort = deps.startPort;
-    this.ownerPeer = deps.ownerPeer;
     this.ownerInstanceId = deps.ownerInstanceId ?? readBridgeLockField<string>("instanceId") ?? "unknown";
-    this.getRootIdentity = deps.getRootIdentity ?? defaultRootIdentity;
-    this.scheduledOccurrenceState = deps.scheduledOccurrenceState ?? defaultScheduledOccurrenceState;
   }
 
   /**
@@ -98,7 +63,7 @@ export class OrcProjectCoordinator {
   private relinquish(
     runId: string,
     how: "release" | "supersede",
-    outcome: import("./orc-project-contracts.js").OrcRunOutcome,
+    outcome: OrcRunOutcome,
     context?: OrcInvocationContextV2,
     failureCode?: OrcRunFailureCode,
   ): boolean {
@@ -119,207 +84,13 @@ export class OrcProjectCoordinator {
   }
 
   /** #1628: public release entry point — publishes the ownership-released event. */
-  releaseOwnedRun(context: OrcInvocationContextV2, outcome: import("./orc-project-contracts.js").OrcRunOutcome, failureCode?: OrcRunFailureCode): boolean {
+  releaseOwnedRun(context: OrcInvocationContextV2, outcome: OrcRunOutcome, failureCode?: OrcRunFailureCode): boolean {
     return this.relinquish(context.runId, "release", outcome, context, failureCode);
   }
 
   /**
-   * #1618: centralized claim-origin derivation. A peer-sourced root requires
-   * the authenticated source peer; missing/blank identity fails closed and must
-   * never fall back to local. Task/CLI/agent roots are local.
-   */
-  private deriveOrigin(projectCardId: number): { originKind: OrcOriginKind; originPeer: string | null } | null {
-    const root = this.getRootIdentity(projectCardId);
-    if (root.source === "peer") {
-      const peer = root.sourcePeer;
-      if (!peer || peer.trim().length === 0) return null;
-      return { originKind: "peer", originPeer: peer };
-    }
-    return { originKind: "local", originPeer: null };
-  }
-
-  scheduleContractAuthoring(projectCardId: number, goal?: string): OrcRunClaimResult {
-    const origin = this.deriveOrigin(projectCardId);
-    if (!origin) return { kind: "conflict" as const, reason: "origin_invalid" as const };
-    return this.scheduleInternal({
-      projectCardId,
-      intentKind: "contract_authoring",
-      originKind: origin.originKind,
-      cardSource: this.getRootIdentity(projectCardId).source,
-      sourcePeer: origin.originPeer,
-    }, goal ?? defaultAuthoringGoal(projectCardId));
-  }
-
-  /**
-   * #1680: Post-contract Orc planning/synthesis for supervised projects.
-   * Persists the truthful `project_execution` intent (distinct from
-   * `contract_authoring`) and its derived `execute:<project>:<generation>`
-   * key. Valid only after a contract exists; the Reconciler's owner
-   * precedence decides whether this claim is reached at all. The first
-   * claimant's goal wins the start port.
-   */
-  scheduleProjectExecution(projectCardId: number, goal: string): OrcRunClaimResult {
-    const origin = this.deriveOrigin(projectCardId);
-    if (!origin) return { kind: "conflict" as const, reason: "origin_invalid" as const };
-    return this.scheduleInternal({
-      projectCardId,
-      intentKind: "project_execution",
-      originKind: origin.originKind,
-      cardSource: this.getRootIdentity(projectCardId).source,
-      sourcePeer: origin.originPeer,
-    }, goal);
-  }
-
-  scheduleProjectSalvage(projectCardId: number): OrcRunClaimResult {
-    const origin = this.deriveOrigin(projectCardId);
-    if (!origin) return { kind: "conflict" as const, reason: "origin_invalid" as const };
-    const rootIdentity = this.getRootIdentity(projectCardId);
-    if (rootIdentity.source !== "task" || !rootIdentity.sourceId) {
-      return { kind: "conflict" as const, reason: "salvage_ineligible" as const };
-    }
-    const result = this.store.claimSalvageExecution({
-      projectCardId,
-      taskRunId: rootIdentity.sourceId ?? undefined,
-      cardSource: rootIdentity.source,
-      originKind: origin.originKind,
-      sourcePeer: origin.originPeer,
-      originPeer: origin.originPeer ?? undefined,
-    }, this.ownerPeer, this.ownerInstanceId);
-    if (result.kind === "claimed" || result.kind === "idempotent") {
-      const runId = result.context.runId;
-      if (this.store.promoteRun(runId)) {
-        const promoted = this.store.getRun(runId);
-        if (promoted && promoted.state === "dispatching") {
-          this.startPort(buildTurnSpec(this.store, promoted)).catch((err) => {
-            logWarn(TAG, `Orc start port failed for salvage run ${runId}: ${err instanceof Error ? err.message : String(err)}`);
-            this.releaseOwnedRun(buildContextForRun(promoted), "failed", "provider_failure");
-          });
-        }
-      }
-    }
-    return result;
-  }
-
-  scheduleReview(projectCardId: number, _projectGeneration: number, reviewCaseId: string, dispatchAttempts = 0): OrcRunClaimResult {
-    const origin = this.deriveOrigin(projectCardId);
-    if (!origin) return { kind: "conflict" as const, reason: "origin_invalid" as const };
-    return this.scheduleInternal({
-      projectCardId,
-      intentKind: "project_review",
-      intentRef: reviewCaseId,
-      originKind: origin.originKind,
-      cardSource: this.getRootIdentity(projectCardId).source,
-      sourcePeer: origin.originPeer,
-      expectedProjectGeneration: _projectGeneration,
-    }, `Review project #${projectCardId}: first read the immutable case with get_project_review_case (project_card_id=${projectCardId}, project_generation=${_projectGeneration}, review_case_id=${reviewCaseId}), then submit exactly one review_project decision using its legal_values and compatible evidence ids.`, dispatchAttempts);
-  }
-
-  scheduleRepairReview(projectCardId: number, _projectGeneration: number): OrcRunClaimResult {
-    const origin = this.deriveOrigin(projectCardId);
-    if (!origin) return { kind: "conflict" as const, reason: "origin_invalid" as const };
-    return this.scheduleInternal({
-      projectCardId,
-      intentKind: "repair_review",
-      intentRef: undefined,
-      originKind: origin.originKind,
-      cardSource: this.getRootIdentity(projectCardId).source,
-      sourcePeer: origin.originPeer,
-      expectedProjectGeneration: _projectGeneration,
-    }, `Repair review for project #${projectCardId}`);
-  }
-
-  scheduleInputResume(projectCardId: number, _projectGeneration: number, round: number): OrcRunClaimResult {
-    const origin = this.deriveOrigin(projectCardId);
-    if (!origin) return { kind: "conflict" as const, reason: "origin_invalid" as const };
-    return this.scheduleInternal({
-      projectCardId,
-      intentKind: "input_resume",
-      intentRef: String(round),
-      originKind: origin.originKind,
-      cardSource: this.getRootIdentity(projectCardId).source,
-      sourcePeer: origin.originPeer,
-      expectedProjectGeneration: _projectGeneration,
-    }, `Resume review for project #${projectCardId} after input (round ${round})`);
-  }
-
-  scheduleOperatorTurn(projectCardId: number, requestId: string): OrcRunClaimResult {
-    const origin = this.deriveOrigin(projectCardId);
-    if (!origin) return { kind: "conflict" as const, reason: "origin_invalid" as const };
-    return this.scheduleInternal({
-      projectCardId,
-      intentKind: "operator_turn",
-      intentRef: requestId,
-      originKind: origin.originKind,
-      cardSource: this.getRootIdentity(projectCardId).source,
-      sourcePeer: origin.originPeer,
-    }, `Operator turn for project #${projectCardId}`);
-  }
-
-  private scheduleInternal(input: Omit<OrcClaimInput, "goal">, goal: string, reviewDispatchAttempts?: number): OrcRunClaimResult {
-    // #1707: the durable occurrence gate is an absolute ownership boundary and
-    // runs BEFORE any run-row insertion or provider start. A scheduled root
-    // whose task occurrence is terminal/missing is never claimed here; the
-    // reconciler's last-resort settlement owns that project instead.
-    const occurrence = this.scheduledOccurrenceState(input.projectCardId);
-    if (occurrence === "terminal") {
-      logWarn(TAG, `Project ${input.projectCardId}: refusing ${input.intentKind} claim — owning scheduled occurrence is terminal`);
-      return { kind: "conflict" as const, reason: "occurrence_terminal" as const };
-    }
-    if (occurrence === "unavailable") {
-      logWarn(TAG, `Project ${input.projectCardId}: deferring ${input.intentKind} claim — owning scheduled occurrence is unavailable`);
-      return { kind: "conflict" as const, reason: "occurrence_unavailable" as const };
-    }
-
-    // #1707 Task 2: bind the owning scheduled occurrence to the attempt so
-    // outcomes stay attributable per task run.
-    const taskRunId = input.taskRunId
-      ?? (input.cardSource === "task" ? this.getRootIdentity(input.projectCardId).sourceId ?? undefined : undefined);
-
-    const result = this.store.claimIntent({ ...input, taskRunId, goal }, this.ownerPeer, this.ownerInstanceId);
-
-    // #1675: promote exactly the run this claim owns (or the existing run an
-    // idempotent re-claim matches) and start it with the RUN ROW's persisted
-    // goal. An `idempotent` result proves identity (same intent key, same
-    // owner instance) — never that the caller's goal equals the run's first-
-    // claimant goal, so the caller's goal is never used here. Queued runs of
-    // other projects are reached by their own project's wake, which rebuilds
-    // that project's goal and re-enters this same scoped promotion.
-    if (result.kind === "claimed" || result.kind === "idempotent") {
-      const runId = result.context.runId;
-      if (this.store.promoteRun(runId)) {
-        const promoted = this.store.getRun(runId);
-        if (promoted && promoted.state === "dispatching") {
-          // #1680: the turn spec is composed only from the persisted run row
-          // and its central intent policy — never from the caller's goal or an
-          // independently selected intent/bound.
-          // #1728: a claimed run starts the next dispatch attempt
-          // (`attempts + 1`); an idempotent promotion of an already-counted
-          // queued run retains its counted ordinal instead of silently
-          // receiving the next attempt's budget.
-          const ordinal = input.intentKind === "project_review"
-            ? (result.kind === "claimed"
-              ? (reviewDispatchAttempts ?? 0) + 1
-              : Math.max(1, reviewDispatchAttempts ?? 0))
-            : undefined;
-          this.startPort(buildTurnSpec(this.store, promoted, ordinal)).catch((err) => {
-            logWarn(TAG, `Orc start port failed for run ${runId}: ${err instanceof Error ? err.message : String(err)}`);
-            // #1628/#1680: through the funnel so the ownership-released event
-            // wakes the project and the failed run persists the stable
-            // `start_port_rejected` code — the release is the recovery signal,
-            // not the scheduler's next opportunistic scan. With pump() gone
-            // there is no second promotion attempt here.
-            this.releaseOwnedRun(buildContextForRun(promoted), "failed", "start_port_rejected");
-          });
-        }
-      }
-    }
-
-    return result;
-  }
-
-  /**
-   * Boot recovery: scan live runs, supersede stale ones, reschedule actionable
-   * intents. #1628: returns the deduped, ordered project card IDs whose runs
+   * Boot recovery: scan live runs and supersede stale ones.
+   * #1628: returns the deduped, ordered project card IDs whose runs
    * were superseded so the caller can wake them AFTER its listeners are
    * registered — the event path alone cannot cover boot-time supersession.
    */
@@ -365,9 +136,8 @@ export class OrcProjectCoordinator {
 
     // #1675: boot recovery never promotes. A promoted-but-unstarted run would
     // hold the global slot with no session and no starter; the returned
-    // affected project ids are the caller's wake input, which re-enters each
-    // project's scheduleX and promotes through the scoped path with the row's
-    // own goal.
+    // affected project ids are the caller's wake input for the runner-owned
+    // redrive path.
 
     return [...affected].sort((a, b) => a - b);
   }
@@ -388,8 +158,8 @@ export type OrcReleaseFailure =
   | { kind: "already_terminal"; state: "released" | "superseded" }
   | {
       kind: "rejected_live";
-      state: import("./orc-project-contracts.js").OrcRunState;
-      reason: import("./orc-project-contracts.js").OrcRunReason | "release_rejected";
+      state: OrcRunState;
+      reason: OrcRunReason | "release_rejected";
     };
 
 export function classifyFailedRelease(
@@ -408,147 +178,5 @@ export function classifyFailedRelease(
     kind: "rejected_live" as const,
     state: row.state,
     reason: validation.ok ? ("release_rejected" as const) : validation.reason,
-  };
-}
-
-/**
- * #1786: omitted-goal default carries the stored card goal so the authoring
- * model sees the actual objective. Database failures propagate (never
- * mistaken for a missing card); missing/blank goals use the generic text.
- */
-function defaultAuthoringGoal(projectCardId: number): string {
-  const fallback = `Define acceptance contract for project #${projectCardId}; call define_project_contract with project_card_id=${projectCardId}`;
-  // Establish the database capability first: an outage must throw, never be
-  // mistaken for a missing card with a generic fallback.
-  requireTaskDatabase();
-  const goal = kanbanGetCard(projectCardId)?.goal;
-  if (!goal || goal.trim().length === 0) return fallback;
-  return `${goal.trim()}; call define_project_contract with project_card_id=${projectCardId}`;
-}
-
-function defaultRootIdentity(projectCardId: number): OrcRootIdentity {
-  try {
-    const card = kanbanGetCard(projectCardId);
-    return { source: card?.source ?? "agent", sourcePeer: card?.source_peer ?? null, sourceId: card?.source_id ?? null };
-  } catch {
-    return { source: "agent", sourcePeer: null };
-  }
-}
-
-/** #1707: shared fail-closed occurrence gate — the coordinator-side default. */
-function defaultScheduledOccurrenceState(projectCardId: number): ScheduledOccurrenceState {
-  try {
-    // kanbanGetCard() intentionally returns undefined when the board is
-    // unavailable, which is indistinguishable from a missing card. Establish
-    // the database capability first so an outage cannot be admitted as a
-    // non-scheduled project.
-    requireTaskDatabase();
-    const card = kanbanGetCard(projectCardId);
-    if (!card) return "not_scheduled";
-    return scheduledOccurrenceState(card);
-  } catch {
-    // Unreadable board defers rather than terminalizes.
-    return "unavailable";
-  }
-}
-
-function buildContextForRun(run: import("./orc-project-contracts.js").OrcProjectRunRow): OrcInvocationContextV2 {
-  return {
-    version: 2,
-    runId: run.id,
-    intentKey: run.intent_key,
-    intentKind: run.intent_kind,
-    intentRef: run.intent_ref ?? undefined,
-    projectCardId: run.project_card_id,
-    projectGeneration: run.project_generation,
-    ownershipGeneration: run.ownership_generation,
-    ownerPeer: run.owner_peer,
-    ownerInstanceId: run.owner_instance_id,
-    origin: {
-      kind: run.origin_kind,
-      peer: run.origin_peer ?? undefined,
-    },
-    sessionId: run.session_id ?? undefined,
-    executionId: run.execution_id ?? undefined,
-  };
-}
-
-/**
- * #1680: compose the one typed turn specification from the persisted promoted
- * run row and its central intent policy. `maxPromptRounds` and the allowed
- * tool surface come from the policy; the turn control re-verifies the durable
- * intent postcondition before it can win.
- * #1728: `reviewDispatchOrdinal` carries the trusted one-based dispatch ordinal
- * for `project_review` runs so the effective bound escalates across the
- * durable review-request retry stream.
- */
-function buildTurnSpec(
-  store: OrcProjectRunStore,
-  run: import("./orc-project-contracts.js").OrcProjectRunRow,
-  reviewDispatchOrdinal?: number,
-): OrcTurnSpec {
-  const policy = intentPolicyFor(run.intent_kind);
-  const context = buildContextForRun(run);
-  return {
-    context,
-    goal: run.goal,
-    maxPromptRounds: effectiveMaxPromptRounds(run.intent_kind, reviewDispatchOrdinal),
-    turnControl: createOrcTurnControl(run.id, (terminal) => {
-      // #1680: `intent_satisfied` is accepted only after re-reading the durable
-      // postcondition under the exact bound run — a tool result string is never
-      // proof. Read failures fail closed to unsatisfied.
-      if (terminal.kind !== "intent_satisfied") return true;
-      try {
-        const current = store.getRun(run.id);
-        if (!current || !isExactLiveRun(current, run)) return false;
-        const completion = policy.completion(readOrcProjectSnapshot(store.db, run.project_card_id));
-        return completion.satisfied;
-      } catch {
-        return false;
-      }
-    }),
-  };
-}
-
-/** #1680: durable identity fence for a turn-control completion callback. */
-function isExactLiveRun(
-  current: import("./orc-project-contracts.js").OrcProjectRunRow,
-  expected: import("./orc-project-contracts.js").OrcProjectRunRow,
-): boolean {
-  if (current.state !== "dispatching" && current.state !== "running") return false;
-  return current.id === expected.id
-    && current.intent_key === expected.intent_key
-    && current.intent_kind === expected.intent_kind
-    && current.intent_ref === expected.intent_ref
-    && current.project_card_id === expected.project_card_id
-    && current.project_generation === expected.project_generation
-    && current.ownership_generation === expected.ownership_generation
-    && current.owner_peer === expected.owner_peer
-    && current.owner_instance_id === expected.owner_instance_id
-    && current.origin_kind === expected.origin_kind
-    && current.origin_peer === expected.origin_peer;
-}
-
-/**
- * #1680: host-owned one-shot turn control. The first `complete()` call wins;
- * an `intent_satisfied` terminal is accepted only when the supplied durable
- * verification succeeds. Completion is a host fact distinct from cancellation:
- * late tool/model events after completion are rejected by the run CAS and the
- * Spin execution generation.
- */
-export function createOrcTurnControl(
-  runId: string,
-  verify: (terminal: OrcTurnTerminal) => boolean,
-): OrcTurnControl {
-  let completed: OrcTurnTerminal | null = null;
-  return {
-    runId,
-    get completed(): OrcTurnTerminal | null { return completed; },
-    complete(terminal: OrcTurnTerminal): boolean {
-      if (completed !== null) return false;
-      if (!verify(terminal)) return false;
-      completed = terminal;
-      return true;
-    },
   };
 }

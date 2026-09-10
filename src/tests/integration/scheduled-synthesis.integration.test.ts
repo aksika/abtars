@@ -7,18 +7,16 @@ import { tmpdir } from "node:os";
 /**
  * #1729 v2 journey acceptance (the Astrabro gate): the 2026-09-08 ordering defect
  * was Rule 13 → admission → review with no synthesis turn in between. This file
- * reproduces the actual journey through the real gather → decision → claim chain
+ * reproduces the actual journey through the real salvage-claim chain
  * with the internal production composition real; only the Orc turn itself is
  * simulated (write the report file + release the row — the durable effects of a
- * synthesis turn, which is all the decision/admission layers can observe).
+ * synthesis turn, which is all the admission layer can observe).
  */
 describe("#1729 v2 synthesis journey", () => {
   let home: string;
   let store: import("../../components/orc-project/orc-project-run-store.js").OrcProjectRunStore;
   let ReviewStore: typeof import("../../components/project-acceptance/project-review-store.js").ProjectReviewStore;
   let kanban: typeof import("../../components/tasks/kanban-board.js");
-  let gatherMod: typeof import("../../components/project-acceptance/project-lifecycle-facts.js");
-  let decideMod: typeof import("../../components/project-acceptance/project-lifecycle-decision.js");
 
   beforeEach(async () => {
     vi.resetModules();
@@ -33,8 +31,6 @@ describe("#1729 v2 synthesis journey", () => {
     void new worker.WorkerSupervisionStore();
     const runStore = await import("../../components/orc-project/orc-project-run-store.js");
     store = new runStore.OrcProjectRunStore();
-    gatherMod = await import("../../components/project-acceptance/project-lifecycle-facts.js");
-    decideMod = await import("../../components/project-acceptance/project-lifecycle-decision.js");
   });
 
   afterEach(() => {
@@ -103,12 +99,6 @@ describe("#1729 v2 synthesis journey", () => {
     return { root, runId, reportPath };
   }
 
-  function decide(root: number) {
-    const gathered = gatherMod.gatherProjectLifecycleFacts(store.db, root);
-    if (!("facts" in gathered)) throw new Error(`gather failed: ${JSON.stringify(gathered)}`);
-    return decideMod.deriveProjectLifecycleDecision(gathered.facts);
-  }
-
   const claimInput = (root: number, runId: string) => ({
     projectCardId: root, taskRunId: runId, cardSource: "task", originKind: "local" as const, sourcePeer: null,
   });
@@ -119,8 +109,7 @@ describe("#1729 v2 synthesis journey", () => {
   it("lanes done → one synthesis turn writes the report → review path, never a second turn", async () => {
     const { root, runId, reportPath } = await seedHandoffProject();
 
-    // Round 1: lanes terminal, no report — the decision must route to synthesis.
-    expect(decide(root)).toMatchObject({ kind: "attempt_salvage" });
+    // Round 1: lanes terminal, no report — salvage admission must claim the synthesis turn.
     const first = store.claimSalvageExecution(claimInput(root, runId), "local_peer", "inst_1");
     expect(first.kind).toBe("claimed");
     if (first.kind !== "claimed") return;
@@ -131,7 +120,6 @@ describe("#1729 v2 synthesis journey", () => {
     expect(store.release(first.context, "completed")).toBe(true);
 
     // Round 2: same lanes, report now valid — admission must step aside for review.
-    expect(decide(root)).toMatchObject({ kind: "attempt_salvage" });
     const second = store.claimSalvageExecution(claimInput(root, runId), "local_peer", "inst_1");
     expect(second.kind).toBe("conflict");
     if (second.kind !== "conflict") return;
@@ -141,7 +129,6 @@ describe("#1729 v2 synthesis journey", () => {
 
   it("a live synthesis turn owns the project: duplicate wake cannot start another", async () => {
     const { root, runId } = await seedHandoffProject();
-    expect(decide(root)).toMatchObject({ kind: "attempt_salvage" });
     const first = store.claimSalvageExecution(claimInput(root, runId), "local_peer", "inst_1");
     expect(first.kind).toBe("claimed");
 
@@ -366,7 +353,6 @@ describe("#1729 v2 synthesis journey", () => {
         kanban.kanbanMarkDelivered(child);
       }
     }
-    expect(decide(root)).toMatchObject({ kind: "attempt_salvage" });
     const first = store.claimSalvageExecution(claimInput(root, runId), "local_peer", "inst_1");
     expect(first.kind).toBe("claimed");
     expect(markedCount(root)).toBe(1);

@@ -12,15 +12,11 @@
 
 import { logWarn, logInfo } from "../components/logger.js";
 import type { BootCtx, PhaseResult } from "./context.js";
-import { kanbanGetCard } from "../components/tasks/kanban-board.js";
-import { loadPeerConfig } from "../components/peer-config.js";
 import { OrcProjectCoordinator } from "../components/orc-project/orc-project-coordinator.js";
 import { SpinWorkerAdapter } from "../components/spin-worker-adapter.js";
 import { ReconcileQuarantineStore } from "../components/reconcile-quarantine-store.js";
 import { WorkerSupervisionStore } from "../components/worker-supervision-store.js";
 import { PiExecutorAdapter } from "../components/pi-executor-adapter.js";
-import { ProjectReviewStore } from "../components/project-acceptance/project-review-store.js";
-import type { ToolExecutionScope } from "../components/tasks/task-package.js";
 import type { ReconcilerDeps, ReconcilerHandle } from "../components/reconciler.js";
 import type { WorkflowDriver } from "../components/orc-project/orc-workflow-driver.js";
 import type { HeartbeatSystem } from "../components/heartbeat-system.js";
@@ -46,21 +42,6 @@ export function registerReconcilerHeartbeatTasks(
   });
 }
 
-/** #1656: reconstruct the bound execution scope for a scheduled Orc turn. */
-function executionScopeFor(context: { projectCardId: number }): ToolExecutionScope | undefined {
-  const project = kanbanGetCard(context.projectCardId);
-  const isScheduledRoot = project?.source === "task" && project.source_id != null && project.source_id.length > 0;
-  if (isScheduledRoot) {
-    const scope = new ProjectReviewStore().getWorkspaceScope(context.projectCardId);
-    if (!scope) {
-      throw new Error(`scheduled project #${context.projectCardId} has no bound workspace — refusing to start Orc turn`);
-    }
-    return scope;
-  }
-  // Non-scheduled roots keep their explicitly supplied/session scope.
-  return new ProjectReviewStore().getWorkspaceScope(context.projectCardId) ?? undefined;
-}
-
 export async function phaseReconciler(ctx: BootCtx): Promise<PhaseResult> {
   const scheduler = ctx.lifecycleWakeScheduler;
   const inputs = ctx.reconcilerInputs;
@@ -76,33 +57,12 @@ export async function phaseReconciler(ctx: BootCtx): Promise<PhaseResult> {
     const reconciler = await import("../components/reconciler.js");
     const { startReconciler } = reconciler;
     getActiveOrcCoordinator = reconciler.getActiveOrcCoordinator;
-    const { spin } = await import("../components/spin.js");
 
-    // Load the local peer identity for coordinator ownership.
-    const peerName = loadPeerConfig().self.name;
-
-    // The Orc coordinator is constructed exactly once per bridge generation —
-    // never in agent-api, request paths, or the scheduled-project runner.
-    const coordinator = new OrcProjectCoordinator({
-      ownerPeer: peerName,
-      // #1680: the start port receives the typed turn specification — the
-      // immutable intent context, the policy-derived prompt bound, and the
-      // host-owned one-shot turn control travel together into Spin.
-      startPort: async (spec) => {
-        await spin.spin({
-          type: "O",
-          goal: spec.goal,
-          sessionId: spec.context.sessionId,
-          cardId: spec.context.projectCardId,
-          settlementOwner: "spin",
-          source: "agent",
-          orcContext: spec.context,
-          orcTurnControl: spec.turnControl,
-          orcMaxPromptRounds: spec.maxPromptRounds,
-          executionScope: executionScopeFor(spec.context),
-        });
-      },
-    });
+    // #1792: the coordinator retains only the release/supersede ownership
+    // boundary — the workflow runner dispatches all work now, so no start
+    // port is injected. The Orc coordinator is constructed exactly once per
+    // bridge generation.
+    const coordinator = new OrcProjectCoordinator({});
 
     // Generation-owned memoized quarantine-store accessor. Construction stays
     // inside the #1664 safe wrappers so DDL failure degrades fail-open.
@@ -130,6 +90,7 @@ export async function phaseReconciler(ctx: BootCtx): Promise<PhaseResult> {
     // executor dispatch, leases, quarantine, and unsupervised duties. With no
     // workflow runs admitted the driver is a silent no-op.
     const { startWorkflowDriver } = await import("../components/orc-project/orc-workflow-driver.js");
+    const { spin } = await import("../components/spin.js");
     workflowDriver = startWorkflowDriver({
       callModel: (prompt, timeoutMs) => spin.dispatchBackground({ prompt, timeoutMs }),
     });

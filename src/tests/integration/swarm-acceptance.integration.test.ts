@@ -206,9 +206,10 @@ async function startTestGeneration(coordinator?: unknown): Promise<void> {
       getStore: () => ({ countStartedAuthoringTurns: () => 0, countConsecutiveUnstartableAuthoringTurns: () => 0, lastAuthoringClaimAt: () => null, lastAuthoringFailureCode: () => null }),
       bootRecovery: () => [] as number[],
       onOwnershipReleased: () => () => {},
-      scheduleContractAuthoring: () => ({ kind: "busy" as const, activeRunId: "or_unused" }),
-      scheduleProjectExecution: () => ({ kind: "busy" as const, activeRunId: "or_unused" }),
-      scheduleReview: () => ({ kind: "busy" as const, activeRunId: "or_review" }),
+      // #1792: the coordinator schedule path is retired — the reconciler
+      // never calls schedule* (only bootRecovery). Journey drivers below
+      // still install schedule fakes; those journeys need the e2e-fixture
+      // port workstream (slice 2) and are not ported here.
       ...(coordinator as Record<string, unknown> | undefined),
     }) as never,
     wakeScheduler: testWakeScheduler,

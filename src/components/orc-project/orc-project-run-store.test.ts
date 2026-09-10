@@ -28,7 +28,7 @@ afterAll(() => {
 
 const makeInput = (overrides?: Partial<import("./orc-project-contracts.js").OrcClaimInput>): import("./orc-project-contracts.js").OrcClaimInput => ({
   projectCardId: 1,
-  intentKind: "contract_authoring",
+  intentKind: "operator_turn",
   goal: "Define acceptance contract for project #1",
   originKind: "local",
   sourcePeer: null,
@@ -84,20 +84,26 @@ describe("OrcProjectRunStore", () => {
 
   it("returns idempotent for same intent on same instance", () => {
     seedProject(store, 1);
+    // #1792: operator intent keys embed wall time (each operator turn is a
+    // distinct intent), so pin the clock to exercise the same-key path.
+    const nowSpy = vi.spyOn(Date, "now").mockReturnValue(1789044000000);
     store.claimIntent(makeInput({ projectCardId: 1 }), "local_peer", "inst_1");
     const result = store.claimIntent(makeInput({ projectCardId: 1 }), "local_peer", "inst_1");
+    nowSpy.mockRestore();
     expect(result.kind).toBe("idempotent");
   });
 
   it("returns busy for a different intent on same project", () => {
     seedProject(store, 2);
-    store.claimIntent(makeInput({ projectCardId: 2, intentKind: "contract_authoring" }), "local_peer", "inst_1");
-    const result = store.claimIntent(makeInput({ projectCardId: 2, intentKind: "project_review" }), "local_peer", "inst_1");
+    store.claimIntent(makeInput({ projectCardId: 2, intentKind: "operator_turn", intentRef: "busy-a" }), "local_peer", "inst_1");
+    const result = store.claimIntent(makeInput({ projectCardId: 2, intentKind: "operator_turn", intentRef: "busy-b" }), "local_peer", "inst_1");
     expect(result.kind).toBe("busy");
   });
 
   it("persists the first claimant's goal and never overwrites it (#1675)", () => {
     seedProject(store, 41);
+    // #1792: see above — pin the clock so both operator claims share one key.
+    const nowSpy = vi.spyOn(Date, "now").mockReturnValue(1789044000000);
     const claim = store.claimIntent(makeInput({ projectCardId: 41, goal: "G1-OWNER" }), "local_peer", "inst_1");
     expect(claim.kind).toBe("claimed");
     if (claim.kind !== "claimed") return;
@@ -110,6 +116,7 @@ describe("OrcProjectRunStore", () => {
 
     // an idempotent re-claim with a different goal leaves the stored goal unchanged
     const again = store.claimIntent(makeInput({ projectCardId: 41, goal: "G2-LATE" }), "local_peer", "inst_1");
+    nowSpy.mockRestore();
     expect(again.kind).toBe("idempotent");
     expect(store.getRun(claim.context.runId)?.goal).toBe("G1-OWNER");
   });
@@ -205,7 +212,7 @@ describe("OrcProjectRunStore", () => {
 
     const forgedIntent = store.validateCurrentContext({
       ...claim.context,
-      intentKind: "operator_turn",
+      intentKind: "project_execution",
     });
     expect(forgedIntent).toEqual({ ok: false, reason: "intent_mismatch" });
 
@@ -215,7 +222,7 @@ describe("OrcProjectRunStore", () => {
     });
     expect(forgedOrigin).toEqual({ ok: false, reason: "origin_invalid" });
 
-    expect(store.release({ ...claim.context, intentKind: "operator_turn" }, "completed")).toBe(false);
+    expect(store.release({ ...claim.context, intentKind: "project_execution" }, "completed")).toBe(false);
     expect(store.getRun(claim.context.runId)?.state).toBe("scheduled");
   });
 

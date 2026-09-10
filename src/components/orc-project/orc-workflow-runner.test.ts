@@ -296,6 +296,16 @@ describe("WorkflowRunner Task 2", () => {
     const tick2 = runner.auditTick(0);
     expect(tick2.ownerless).toContain(bare.runId);
   });
+
+  it("audit read failure throws instead of fabricating ownerless runs", () => {
+    // #1792 inference-removal replacement for the retired gather_failed pin:
+    // a technical read failure must surface loudly — the audit never reports
+    // a run as ownerless (or lawful) from a partial/failed read.
+    const run = admit(runner, seedCard(store));
+    runner.acceptPlan(run.runId, twoLane());
+    store.db.exec(`DROP TABLE workflow_commands`);
+    expect(() => runner.auditTick(0)).toThrow(/no such table/);
+  });
 });
 
   const reviewPlan = (): Proposal => ({

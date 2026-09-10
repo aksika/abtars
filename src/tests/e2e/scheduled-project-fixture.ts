@@ -279,9 +279,11 @@ export function makeScheduledProjectFixture(
     },
   };
 
-  const orc = new OrcCtor({
-    ownerPeer: "test-fixture",
-    startPort: async (spec: import("../../components/orc-project/orc-project-contracts.js").OrcTurnSpec): Promise<void> => {
+  // #1792: the coordinator schedule/startPort dispatch path is retired — the
+  // runner dispatches all work now. The scripted turn below is preserved
+  // verbatim for the e2e-fixture port workstream (slice 2); nothing invokes
+  // it until that port rewires these journeys to runner admission.
+  const scriptedOrcTurn = async (spec: import("../../components/orc-project/orc-project-contracts.js").OrcTurnSpec): Promise<void> => {
       const context = spec.context;
       const goal = spec.goal;
       const projectId = context.projectCardId;
@@ -339,7 +341,9 @@ export function makeScheduledProjectFixture(
         finish("completed");
         return;
       }
-      // Review turn (goal from scheduleReview / dispatchPendingReviewRequests):
+      // Review turn (formerly driven by scheduleReview /
+      // dispatchPendingReviewRequests — preserved for the runner-admission
+      // port): decide accept, needs_input, or die according to the script.
       // decide accept, needs_input, or die according to the script.
       if (state.failOrcMode || state.reviewMode === "die") {
         state.lastTurn = "failed";
@@ -450,8 +454,10 @@ export function makeScheduledProjectFixture(
       try { nerve.fire("card:done", projectId); } catch { /* best effort */ }
       state.lastTurn = "reviewed";
       finish("completed");
-    },
-  });
+    };
+  void scriptedOrcTurn;
+
+  const orc = new OrcCtor({});
 
   return { fixture: script, orc };
 }

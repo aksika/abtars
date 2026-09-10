@@ -2,6 +2,13 @@
  * orc-attempt-release.test.ts — #1707 Task 2: durable attempt outcomes tied to
  * the owning task occurrence, wake-only ownership-release semantics, and the
  * attempt-outcome classification vocabulary. Real stores in a tmpdir.
+ *
+ * #1792: the coordinator schedule/startPort dispatch path is retired — the
+ * runner dispatches all work now. The provider-start-failure auto-release
+ * test that pinned `scheduleProjectExecution` + throwing startPort is deleted
+ * with it (start_port_rejected fallback to direct store release lives in
+ * spin.ts and is covered there). Claim setups use `store.claimIntent`
+ * directly; release-path tests use the retained `releaseOwnedRun`.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { mkdirSync, rmSync, writeFileSync, mkdtempSync } from "node:fs";
@@ -85,10 +92,6 @@ function seedScheduledProject(): { rootId: number; runId: string } {
   return { rootId, runId: run.runId };
 }
 
-async function flush(): Promise<void> {
-  await new Promise(r => setTimeout(r, 20));
-}
-
 describe("#1707 attempt outcome classification", () => {
   it("classifies in-flight, progress, failure, no-progress, and superseded rows", () => {
     const store = new runStoreMod.OrcProjectRunStore();
@@ -110,7 +113,7 @@ describe("#1707 attempt identity and release semantics", () => {
     const store = new runStoreMod.OrcProjectRunStore();
     const claimed = store.claimIntent({
       projectCardId: rootId,
-      intentKind: "project_execution",
+      intentKind: "operator_turn",
       goal: "attempt work",
       originKind: "local",
       cardSource: "task",
@@ -124,10 +127,10 @@ describe("#1707 attempt identity and release semantics", () => {
 
   it("never reuses a terminal attempt — old context is rejected after release", async () => {
     const { rootId, runId } = seedScheduledProject();
-    const coordinator = new coordinatorMod.OrcProjectCoordinator({ ownerPeer: "p", startPort: async () => {} });
+    const coordinator = new coordinatorMod.OrcProjectCoordinator({});
     const claimed = coordinator.getStore().claimIntent({
       projectCardId: rootId,
-      intentKind: "project_execution",
+      intentKind: "operator_turn",
       goal: "attempt work",
       originKind: "local",
       cardSource: "task",
@@ -142,40 +145,17 @@ describe("#1707 attempt identity and release semantics", () => {
     expect(coordinator.getStore().release(claimed.context, "failed", "provider_failure")).toBe(false);
   });
 
-  it("a released failed attempt cannot synchronously re-claim — the card fuse demands an operator reset", async () => {
-    const { rootId, runId } = seedScheduledProject();
-    const coordinator = new coordinatorMod.OrcProjectCoordinator({ ownerPeer: "p", startPort: async () => {} });
-    const store = coordinator.getStore();
-    const first = store.claimIntent({
-      projectCardId: rootId, intentKind: "project_execution", goal: "attempt work",
-      originKind: "local", cardSource: "task", sourcePeer: null, taskRunId: runId,
-    }, "p", "inst");
-    if (first.kind !== "claimed") throw new Error("first claim failed");
-    expect(store.release(first.context, "failed", "provider_failure")).toBe(true);
-
-    // A terminal execution attempt is final for automatic retries:
-    expect(store.claimIntent({
-      projectCardId: rootId, intentKind: "project_execution", goal: "attempt work",
-      originKind: "local", cardSource: "task", sourcePeer: null, taskRunId: runId,
-    }, "p", "inst")).toMatchObject({ kind: "not_actionable", reason: "fuse_open" });
-
-    // Operator reset clears the fuse; the retry gets a NEW attempt identity.
-    store.resetProjectFuse(rootId);
-    const second = store.claimIntent({
-      projectCardId: rootId, intentKind: "project_execution", goal: "attempt work",
-      originKind: "local", cardSource: "task", sourcePeer: null, taskRunId: runId,
-    }, "p", "inst");
-    if (second.kind !== "claimed") throw new Error(`post-reset claim: ${second.kind}`);
-    expect(second.context.ownershipGeneration).toBe(first.context.ownershipGeneration + 1);
-    expect(second.context.runId).not.toBe(first.context.runId);
-  });
+  // #1792: the card-fuse trip test below is deleted — it pinned `fuse_open`
+  // after a supervised-intent failure, and supervised claims no longer reach
+  // the fuse (the intent policy fails them closed first). Fuse trip/reset
+  // coverage lives in `orc-card-fuse.test.ts`.
 
   it("release events fire only after the CAS lands and never authorize a same-attempt retry", async () => {
     const { rootId, runId } = seedScheduledProject();
-    const coordinator = new coordinatorMod.OrcProjectCoordinator({ ownerPeer: "p", startPort: async () => {} });
+    const coordinator = new coordinatorMod.OrcProjectCoordinator({});
     const store = coordinator.getStore();
     const claimed = store.claimIntent({
-      projectCardId: rootId, intentKind: "project_execution", goal: "attempt work",
+      projectCardId: rootId, intentKind: "operator_turn", goal: "attempt work",
       originKind: "local", cardSource: "task", sourcePeer: null, taskRunId: runId,
     }, "p", "inst");
     if (claimed.kind !== "claimed") throw new Error("claim failed");
@@ -195,10 +175,10 @@ describe("#1707 attempt identity and release semantics", () => {
 
   it("stale release events after restart are harmless — unknown/terminal rows publish nothing", async () => {
     const { rootId, runId } = seedScheduledProject();
-    const coordinator = new coordinatorMod.OrcProjectCoordinator({ ownerPeer: "p", startPort: async () => {} });
+    const coordinator = new coordinatorMod.OrcProjectCoordinator({});
     const store = coordinator.getStore();
     const claimed = store.claimIntent({
-      projectCardId: rootId, intentKind: "project_execution", goal: "attempt work",
+      projectCardId: rootId, intentKind: "operator_turn", goal: "attempt work",
       originKind: "local", cardSource: "task", sourcePeer: null, taskRunId: runId,
     }, "p", "inst");
     if (claimed.kind !== "claimed") throw new Error("claim failed");
@@ -213,33 +193,11 @@ describe("#1707 attempt identity and release semantics", () => {
     expect(events).toHaveLength(0);
   });
 
-  it("a provider start failure auto-releases wake-only with the stable failure code", async () => {
-    const { rootId } = seedScheduledProject();
-    const coordinator = new coordinatorMod.OrcProjectCoordinator({
-      ownerPeer: "p",
-      startPort: async () => { throw new Error("provider down"); },
-    });
-    const store = coordinator.getStore();
-
-    const events: string[] = [];
-    coordinator.onOwnershipReleased((e) => events.push(e.runId));
-    const result = coordinator.scheduleProjectExecution(rootId, "goal");
-    expect(result.kind === "claimed" || result.kind === "idempotent").toBe(true);
-    await flush();
-
-    if (result.kind !== "claimed" && result.kind !== "idempotent") return;
-    const row = store.getRun(result.context.runId)!;
-    expect(row.state).toBe("released");
-    expect(row.failure_code).toBe("start_port_rejected");
-    expect(row.started_at).toBeNull();
-    expect(events).toEqual([row.id]);
-  });
-
   it("durable progress clears the card's failure streak marker", async () => {
     const { rootId, runId } = seedScheduledProject();
     const store = new runStoreMod.OrcProjectRunStore();
     const claimed = store.claimIntent({
-      projectCardId: rootId, intentKind: "project_execution", goal: "attempt work",
+      projectCardId: rootId, intentKind: "operator_turn", goal: "attempt work",
       originKind: "local", cardSource: "task", sourcePeer: null, taskRunId: runId,
     }, "p", "inst");
     if (claimed.kind !== "claimed") throw new Error("claim failed");

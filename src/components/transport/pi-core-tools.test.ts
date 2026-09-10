@@ -14,17 +14,16 @@ import { createClientRuntime } from "../memory-runtime.js";
 import type { MemoryToolDependenciesHolder } from "../memory-store-quota.js";
 import type { SessionType } from "../spin-types.js";
 
-// #1677: the review-tool rejection envelope carries a `reason` code. Only the
-// registry's execution boundary is overridden here (a canned Orc rejection);
-// every other tool still routes through the real registry execution path.
+// #1677: a typed tool rejection envelope carries a `reason` code. Only the
+// registry's execution boundary is overridden here (a canned typed
+// rejection); every other tool still routes through the real registry
+// execution path. #1792: the review_project Orc tool is deleted, so the
+// canned rejection rides on secret_get via mockResolvedValueOnce per test.
 vi.mock("./tool-registry.js", async (importOriginal) => {
   const actual = await importOriginal<typeof import("./tool-registry.js")>();
   return {
     ...actual,
     executeToolCall: vi.fn(async (name: string, params: Record<string, unknown>, context: unknown) => {
-      if (name === "review_project") {
-        return JSON.stringify({ error: "Project generation mismatch: expected 1, got 2", reason: "project_generation_mismatch" });
-      }
       return (actual.executeToolCall as (name: string, params: Record<string, unknown>, context: unknown) => Promise<string>)(name, params, context);
     }),
   };
@@ -140,20 +139,25 @@ describe("createPiAgentTools", () => {
     }
   });
 
-  it("#1677 delivers the typed Orc rejection reason to onToolFailure, never unknown", async () => {
+  it("#1677 delivers a typed tool rejection reason to onToolFailure, never unknown", async () => {
     const onToolFailure = vi.fn();
     const ctx = makeContext({
-      sandboxPolicy: buildPolicy("owner"),
+      sandboxPolicy: buildPolicy("owner", { allowedTools: ["secret_get"] }),
       onToolFailure,
     });
+    // #1792: the review_project Orc tool is deleted — pin the same
+    // typed-reason plumbing through a live tool with a canned rejection.
+    vi.mocked(executeToolCall).mockResolvedValueOnce(
+      JSON.stringify({ error: "Project generation mismatch: expected 1, got 2", reason: "project_generation_mismatch" }),
+    );
     const tools = createPiAgentTools(ctx);
-    const tool = tools.find((t) => t.name === "review_project");
+    const tool = tools.find((t) => t.name === "secret_get");
     expect(tool).toBeDefined();
     if (tool) {
-      await tool.execute("call_1", {});
+      await tool.execute("call_1", { name: "x" });
       expect(onToolFailure).toHaveBeenCalledTimes(1);
       expect(onToolFailure).toHaveBeenCalledWith(
-        expect.objectContaining({ reason: "project_generation_mismatch", tool: "review_project" }),
+        expect.objectContaining({ reason: "project_generation_mismatch", tool: "secret_get" }),
       );
       const diag = onToolFailure.mock.calls[0]![0] as ToolFailureDiagnosticV1;
       expect(diag.stderr_excerpt).toContain("Project generation mismatch: expected 1, got 2");
@@ -328,14 +332,15 @@ describe("createPiAgentTools", () => {
       expect(tools.find(t => t.name === "send_document")).toBeUndefined();
     });
 
-    it("hides send_document from an unattended scheduled Orc but keeps review_project", () => {
+    it("hides send_document from an unattended scheduled Orc", () => {
       const tools = createPiAgentTools(makeContext({
         sandboxPolicy: ownerWithSend(),
         sessionType: "O",
         authorizationMode: "unattended-task",
       }));
       expect(tools.find(t => t.name === "send_document")).toBeUndefined();
-      expect(tools.find(t => t.name === "review_project")).toBeDefined();
+      // #1792: review_project deleted with the supervised surface.
+      expect(tools.find(t => t.name === "review_project")).toBeUndefined();
     });
 
     it("hides send_document from an unattended scheduled Worker W execution", () => {
