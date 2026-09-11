@@ -49,6 +49,44 @@ describe("evaluateWorkerEvidence (#1656)", () => {
     expect(evaluation.criteria.map(c => [c.criterion_id, c.status])).toEqual([["c1", "passed"], ["c2", "passed"]]);
   });
 
+  it("resolves daily-ai lane refs from the task workspace without a duplicate prefix", () => {
+    const laneRefs = [
+      "lane1-x-handoff.md",
+      "lane2-rss-handoff.md",
+      "lane3-newsletter-handoff.md",
+      "lane4-web-handoff.md",
+    ];
+    const criteria = laneRefs.map((ref, index) => ({ id: `lane${index + 1}`, description: `${ref} exists` }));
+    const contract = makeContract({
+      criteria,
+      expected_artifacts: laneRefs.map((ref, index) => ({
+        id: `a${index + 1}`,
+        kind: "file" as const,
+        ref,
+        required: true,
+        criterion_ids: [`lane${index + 1}`],
+      })),
+      verification_commands: [],
+      supports_root_criteria: criteria.map(c => c.id),
+    });
+    for (const ref of laneRefs) writeFileSync(join(WS, ref), "Generated: 2026-09-11\nsource gap: test fixture\n");
+
+    const valid = evaluateWorkerEvidence(contract, WS);
+    expect(valid.artifacts.every(a => a.exists)).toBe(true);
+    expect(valid.criteria.every(c => c.status === "passed")).toBe(true);
+
+    const duplicatedPrefix = makeContract({
+      ...contract,
+      expected_artifacts: contract.expected_artifacts.map(artifact => ({
+        ...artifact,
+        ref: `daily-ai/${artifact.ref}`,
+      })),
+    });
+    const invalid = evaluateWorkerEvidence(duplicatedPrefix, WS);
+    expect(invalid.artifacts.map(a => a.error)).toEqual(laneRefs.map(() => "not found"));
+    expect(invalid.criteria.every(c => c.status === "failed")).toBe(true);
+  });
+
   it("reports a safe missing artifact as not found and fails its criterion", () => {
     const evaluation = evaluateWorkerEvidence(makeContract(), WS);
     expect(evaluation.artifacts[0]).toMatchObject({ artifact_id: "a1", exists: false, error: "not found" });
