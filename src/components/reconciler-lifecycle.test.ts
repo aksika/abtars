@@ -753,3 +753,28 @@ describe("heartbeat decoupling (#1554 approved move)", () => {
     expect(tasks.some(t => t.name === "reconciler-resync" || t.name === "review-request-retry")).toBe(false);
   });
 });
+
+describe("#1794 dispatch pump redrive on worker terminal", () => {
+  it("a card terminal event re-arms the pump for a queued pending attempt", async () => {
+    await startGeneration();
+    seedRootProject();
+    // Queued W child with Pi contract + pending Pi attempt. No live Pi
+    // service in this harness, so a pump pass settles it failed through the
+    // eligibility path — a deterministic signal that a pass ran.
+    const child = kanban.kanbanEnqueue("pi lane", "agent", undefined, { type: "W", parent_id: 1, goal: "lane" });
+    seedActivePiAttempt(child);
+    const attemptId = `a_pi_${child}`;
+    // The seed defaults to a running lifecycle; the starvation shape is a
+    // never-started pending attempt (pump queue, Sept 10–12 lane 4). Both
+    // columns: the store migration backfills lifecycle from status.
+    const wdb = new workerStoreMod.WorkerSupervisionStore().db;
+    wdb.prepare(`UPDATE worker_attempts SET lifecycle = 'pending', status = 'pending' WHERE id = ?`).run(attemptId);
+    expect(JSON.parse(attemptRowJson(attemptId)).lifecycle).toBe("pending");
+    // An unrelated terminal event (a lane completing elsewhere). Before the
+    // redrive, only the woken card's own reconcile ran — a skipped sibling
+    // like this one waited forever (Sept 10–12 lane-4 shape).
+    nerveBus.fire("card:done", 1);
+    for (let i = 0; i < 15; i++) await flush();
+    expect(JSON.parse(attemptRowJson(attemptId)).lifecycle).toBe("failed");
+  });
+});

@@ -325,6 +325,7 @@ describe("WorkflowRunner Task 2", () => {
   });
 
   it("rejected proposal with budget requeues the planning round (rejection retry)", () => {
+
     const run = admit(runner, seedCard(store));
     const bad: Proposal = {
       requiredOutputs: ["ghost"],
@@ -349,6 +350,33 @@ describe("WorkflowRunner Task 2", () => {
     // The retry round admits a valid proposal normally.
     const acc = runner.submitPlanProposal(run.runId, twoLane());
     expect(acc.revision).toBe(1);
+  });
+
+  it("never-started pending attempt inspects as alive, never inconclusive (#1794)", () => {
+    const run = admit(runner, seedCard(store));
+    const acc = runner.acceptPlan(run.runId, twoLane());
+    const { port } = fakePort();
+    expect(runner.drain(10, port)).toBe(2);
+    // Bind the first node to a pending attempt no executor ever picked up
+    // (pump queue behind the machine cap — the Sept 10–12 lane-4 shape).
+    const a = acc.nodeIds[0] as string;
+    store.db.prepare(
+      `INSERT INTO worker_attempts (id, card_id, contract_id, ordinal, executor_kind, executor_id, status, started_at, lifecycle, root_project_card_id, root_project_generation)
+       VALUES ('att-wait', 96010, 'ctr', 1, 'agent', 'spin-local', 'pending', datetime('now'), 'pending', 1, 1)`,
+    ).run();
+    store.db.prepare(
+      `UPDATE workflow_nodes SET worker_card_id = 96010, attempt_id = 'att-wait' WHERE run_id = ? AND node_id = ?`,
+    ).run(run.runId, a);
+    store.db.prepare(`UPDATE workflow_commands SET next_inspection_at = datetime('now','-10 minutes') WHERE run_id = ?`).run(run.runId);
+    expect(runner.inspectClaim(run.runId,
+      { nodeId: a, action: "dispatch", ordinal: 0, generation: 1 }, 1)).toBe("applied:claimed");
+    const cmd = store.db.prepare(
+      `SELECT consecutive_inconclusive AS c FROM workflow_commands WHERE run_id = ? AND node_id = ?`,
+    ).get(run.runId, a) as { c: number };
+    expect(Number(cmd.c)).toBe(0);
+    // Node untouched, run alive — queueing behind the cap is lawful waiting.
+    expect(store.listNodes(run.runId, 1).find((n) => n["node_id"] === a)?.["status"]).toBe("running");
+    expect(store.getRun(run.runId)?.state).toBe("dispatched");
   });
 
   it("duplicate and stale completions cannot duplicate work or resurrect runs", () => {

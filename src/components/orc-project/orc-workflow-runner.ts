@@ -1044,6 +1044,16 @@ export class WorkflowRunner {
           return this.evaluateTerminal(run.runId, rev, `attempt ${latest["id"]} ${lifecycle}`);
         }
       } else {
+        // #1794: a `pending` attempt was never picked up by any executor —
+        // no lease row can exist, and its silence is pump queue, not
+        // abandonment. Inspect as alive (extend, never count): the fuse
+        // below exists to detect dead executors holding claims, not to
+        // time-box lawful queueing behind the machine cap. Anything the
+        // executor actually started keeps the lease-based path.
+        if (lifecycle === "pending") {
+          this.store.noteInspectionAlive(fullKey, expectedGen, COMMAND_CLAIM_LEASE_MIN);
+          return {};
+        }
         // Non-terminal attempt: liveness hinges on the lease heartbeat.
         const lease = this.store.readLeaseSnapshot(latest["id"] as string);
         if (leaseFresh(lease)) {

@@ -972,6 +972,12 @@ export async function startReconciler(deps: ReconcilerDeps): Promise<ReconcilerH
     const onQueued = (cardId: number) => requestReconcileForProject(cardId);
     const onDone = (cardId: number) => {
       requestReconcileForProject(cardId);
+      // #1794: a terminalized worker frees an executor slot — re-arm the
+      // dispatch pump so a cap-skipped pending attempt is picked up on the
+      // next pass. Without this, a skip is permanent: completions reconcile
+      // only their own cards and nothing else re-sweeps the queue.
+      // Coalesced by the pump dirty flag; a no-op pass is a bounded scan.
+      requestWorkerDispatch();
       // #1778: event-driven redrive of peer delivery left pending by a
       // failed same-tick send (any card's, not just this one's). Bounded
       // (one indexed scan, ≤100 sends), emits no nerve events itself, so it
@@ -980,6 +986,8 @@ export async function startReconciler(deps: ReconcilerDeps): Promise<ReconcilerH
     };
     const onFailed = (cardId: number) => {
       requestReconcileForProject(cardId);
+      // #1794: same redrive as onDone — a failed terminal also frees its slot.
+      requestWorkerDispatch();
       // #1778: same redrive as onDone — a failed terminal may carry the
       // queued peer obligation.
       drainPeerCallbackOutbox().catch(err => logAndSwallow(TAG, "peer callback redrive", err));
