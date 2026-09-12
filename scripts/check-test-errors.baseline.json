@@ -1,6 +1,6 @@
 {
   "_comment": "Existing test-file typecheck debt, frozen by #1742. May shrink, never grow. A baseline increase is a review red flag; fix the test, do not raise the baseline.",
-  "_recorded": "2026-09-10",
+  "_recorded": "2026-09-12",
   "files": {
     "src/boot/env-secret-migration.test.ts": 12,
     "src/boot/memory-recomposition-lifecycle.test.ts": 1,
@@ -81,7 +81,6 @@
     "src/components/transport/artifact-tools.test.ts": 2,
     "src/components/transport/delegation-tools.test.ts": 2,
     "src/components/transport/fallback-policy.test.ts": 4,
-    "src/components/transport/peer-boundary.test.ts": 6,
     "src/components/transport/peer-help-tools.test.ts": 3,
     "src/components/transport/pi-ai-adapter.test.ts": 2,
     "src/components/transport/pi-boundary.test.ts": 1,

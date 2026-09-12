@@ -74,7 +74,7 @@ describe("#1520 peer identity boundary", () => {
   });
 
   it("peer_doorbell rings only the exact enrolled key", async () => {
-    const out = await executeToolCall("peer_doorbell", { peer_name: "molty" }, {});
+    const out = await executeToolCall("peer_doorbell", { peer_name: "molty" }, {} as never);
     const parsed = JSON.parse(out) as { ok?: boolean };
     expect(parsed.ok).toBe(true);
     expect(ringDoorbell).toHaveBeenCalledWith("molty");
@@ -82,7 +82,7 @@ describe("#1520 peer identity boundary", () => {
 
   it("peer_session rejects local session identities with zero peer-client calls", async () => {
     for (const name of LOCAL_NAMES) {
-      const out = await executeToolCall("peer_session", { peer_name: name, message: "hi" }, {});
+      const out = await executeToolCall("peer_session", { peer_name: name, message: "hi" }, {} as never);
       const parsed = JSON.parse(out) as { code?: string };
       expect(parsed.code).toBe("local_session_not_peer");
       expect(callPeer).not.toHaveBeenCalled();
@@ -90,7 +90,7 @@ describe("#1520 peer identity boundary", () => {
   });
 
   it("peer_session routes only an exact enrolled key", async () => {
-    const out = await executeToolCall("peer_session", { peer_name: "molty", message: "hello" }, {});
+    const out = await executeToolCall("peer_session", { peer_name: "molty", message: "hello" }, {} as never);
     const parsed = JSON.parse(out) as { response?: string; error?: string };
     expect(parsed.error).toBeUndefined();
     expect(parsed.response).toBe("peer response");
@@ -104,7 +104,7 @@ describe("#1520 peer identity boundary", () => {
     vi.mocked(getOrCreateSession).mockReturnValueOnce({
       ok: false, code: "session_expired", message: "Unknown or expired peer session: stale",
     });
-    const out = await executeToolCall("peer_session", { peer_name: "molty", message: "hi", session_id: "stale" }, {});
+    const out = await executeToolCall("peer_session", { peer_name: "molty", message: "hi", session_id: "stale" }, {} as never);
     const parsed = JSON.parse(out) as { code?: string };
     expect(parsed.code).toBe("session_expired");
     expect(callPeer).not.toHaveBeenCalled();
@@ -112,13 +112,13 @@ describe("#1520 peer identity boundary", () => {
 
   it("peer_session rejects a second in-flight turn as session_busy", async () => {
     vi.mocked(tryBeginTurn).mockReturnValueOnce(false);
-    const out = await executeToolCall("peer_session", { peer_name: "molty", message: "hi" }, {});
+    const out = await executeToolCall("peer_session", { peer_name: "molty", message: "hi" }, {} as never);
     const parsed = JSON.parse(out) as { code?: string };
     expect(parsed.code).toBe("session_busy");
     expect(callPeer).not.toHaveBeenCalled();
   });
   it("peer help egress rejects local identities before transport lookup", async () => {
-    const out = await executeToolCall("peer_ask_help", { peer: "O", goal: "help" }, {});
+    const out = await executeToolCall("peer_ask_help", { peer: "O", goal: "help" }, {} as never);
     const parsed = JSON.parse(out) as { code?: string };
     expect(parsed.code).toBe("local_session_not_peer");
     expect(vi.mocked(getPeerTransport)).not.toHaveBeenCalled();
