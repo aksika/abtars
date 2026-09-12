@@ -1017,17 +1017,17 @@ export class WorkflowRunner {
         if (lifecycle === "completed") {
           // Lost completion found by inspection: the SAME durable acceptance
           // decision as joint settlement and recovery, applied atomically
-          // with the claimed dispatch command inside this transaction.
-          // Unbound nodes keep the legacy stored-result recovery; bound nodes
-          // succeed only on passing stored evidence (missing/malformed
-          // evidence fails closed, never `{}` success).
+          // with the claimed dispatch command inside this transaction. A
+          // completed latest attempt implies a bound card (unbound nodes
+          // take the no-attempt requeue above), so bound nodes succeed only
+          // on passing stored evidence — missing/malformed evidence fails
+          // closed, never `{}` success.
           const selectedId = latest["id"] as string;
-          const boundCard = cardId === null ? null
-            : this.requireCurrentAttempt(run.runId, rev, key.nodeId, selectedId);
-          const effect = boundCard === null
-            ? this.succeedNodeEffect(run.runId, run.generation, rev, key.nodeId, selectedId,
-              this.store.readResult(selectedId) ?? `{"recovered":"${selectedId}"}`)
-            : this.applyStoredAcceptanceEffect(run.runId, run.generation, rev, key.nodeId, boundCard, selectedId);
+          const boundCard = this.requireCurrentAttempt(run.runId, rev, key.nodeId, selectedId);
+          if (boundCard === null) {
+            throw new Error(`workflow runner: inspection found completed attempt ${selectedId} with no bound card`);
+          }
+          const effect = this.applyStoredAcceptanceEffect(run.runId, run.generation, rev, key.nodeId, boundCard, selectedId);
           finish();
           return effect;
         }
