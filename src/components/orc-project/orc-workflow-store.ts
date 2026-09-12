@@ -17,6 +17,14 @@ import {
   sqliteNow,
   type TaskDatabase,
 } from "../tasks/kanban-board.js";
+import { logWarn } from "../logger.js";
+import {
+  acceptancePassed,
+  validateContract,
+  validateEnvelope,
+  type WorkerAcceptanceContractV1,
+  type WorkerResultEnvelopeV1,
+} from "../worker-contract.js";
 import { initWorkflowSchema } from "./workflow-schema.js";
 
 function shaHex(body: string): string {
@@ -109,6 +117,30 @@ export interface TransitionEffect {
 export interface CommitResult {
   disposition: IngressDisposition;
   diagnostics: string | null;
+}
+
+/**
+ * Durable worker-acceptance verdict for one stored completion (#1794).
+ * Success carries the STORED envelope verbatim; failure carries a bounded
+ * `completed: acceptance_*` cause suitable for node outcome text.
+ */
+export type WorkerAcceptance =
+  | { accepted: true; envelopeJson: string }
+  | { accepted: false; cause: string };
+
+/** Local cause bound (same 2000-char limit as runner causes; no import cycle).
+ * The suffix counts toward the limit, so the whole cause never exceeds max. */
+function boundCause(value: string, max = 2000): string {
+  if (value.length <= max) return value;
+  let keep = max;
+  let suffix = "";
+  for (let i = 0; i < 3; i++) {
+    suffix = `…[truncated ${value.length - keep} chars]`;
+    const next = max - suffix.length;
+    if (next >= keep) break;
+    keep = Math.max(0, next);
+  }
+  return `${value.slice(0, keep)}${suffix}`;
 }
 
 function parseBudgets(json: string): ResolvedBudgets {
@@ -1063,6 +1095,133 @@ export class WorkflowStore {
   }
 
   /**
+   * #1794: the single durable acceptance decision for a stored worker
+   * completion. Reads the attempt row (by exact id/card identity), the card's
+   * latest contract revision (matching the W-card lookup), and the stored
+   * result — all on this store's connection, so callers inside a commit
+   * envelope observe the same transaction. Never verifies artifacts on disk
+   * and never calls a model: acceptance consumes already-collected evidence.
+   *
+   * Fail-closed: any missing/malformed record or validation failure yields
+   * `completed: acceptance_unreadable: <attempt|contract|envelope>`; validly
+   * structured but non-passing evidence yields
+   * `completed: acceptance_unmet: <detail>`. Read exceptions log a bounded
+   * warning and fail the same way — never manufactured success.
+   */
+  readWorkerAcceptance(cardId: number, attemptId: string): WorkerAcceptance {
+    try {
+      return this.evaluateWorkerAcceptance(cardId, attemptId);
+    } catch (err) {
+      logWarn("workflow-store",
+        `worker acceptance unreadable for attempt ${attemptId}: ${boundCause(err instanceof Error ? err.message : String(err), 300)}`);
+      return { accepted: false, cause: "completed: acceptance_unreadable: attempt" };
+    }
+  }
+
+  private evaluateWorkerAcceptance(cardId: number, attemptId: string): WorkerAcceptance {
+    const attempt = this.db
+      .prepare(`SELECT id, card_id, contract_id, lifecycle FROM worker_attempts WHERE id = ? AND card_id = ?`)
+      .get(attemptId, cardId) as
+      | { id: string; card_id: number; contract_id: string; lifecycle: string }
+      | undefined;
+    if (!attempt || attempt.lifecycle !== "completed") {
+      return { accepted: false, cause: "completed: acceptance_unreadable: attempt" };
+    }
+    const contractRow = this.db
+      .prepare(`SELECT contract_json FROM worker_contracts WHERE card_id = ? ORDER BY revision DESC LIMIT 1`)
+      .get(cardId) as { contract_json: string } | undefined;
+    if (!contractRow) return { accepted: false, cause: "completed: acceptance_unreadable: contract" };
+    let contractJson: unknown;
+    try {
+      contractJson = JSON.parse(contractRow.contract_json) as unknown;
+    } catch {
+      return { accepted: false, cause: "completed: acceptance_unreadable: contract" };
+    }
+    const contractRes = validateContract(contractJson);
+    if (!contractRes.ok) return { accepted: false, cause: "completed: acceptance_unreadable: contract" };
+    const contract: WorkerAcceptanceContractV1 = contractRes.contract;
+    const resultRow = this.db
+      .prepare(`SELECT envelope_json FROM worker_results WHERE attempt_id = ?`)
+      .get(attemptId) as { envelope_json: string } | undefined;
+    if (!resultRow) return { accepted: false, cause: "completed: acceptance_unreadable: envelope" };
+    let envelopeJson: unknown;
+    try {
+      envelopeJson = JSON.parse(resultRow.envelope_json) as unknown;
+    } catch {
+      return { accepted: false, cause: "completed: acceptance_unreadable: envelope" };
+    }
+    const envelopeRes = validateEnvelope(envelopeJson);
+    if (!envelopeRes.ok) return { accepted: false, cause: "completed: acceptance_unreadable: envelope" };
+    const envelope = envelopeRes.contract as unknown as WorkerResultEnvelopeV1;
+    // Identity: the evidence must name this exact attempt, the attempt's own
+    // contract, and the CURRENT contract revision (an old-contract result
+    // after card contract replacement never passes).
+    const unmet = (detail: string): WorkerAcceptance => ({
+      accepted: false, cause: boundCause(`completed: acceptance_unmet: ${detail}`),
+    });
+    if (envelope.attempt.id !== attemptId) {
+      return unmet(`attempt identity ${envelope.attempt.id} !== ${attemptId}`);
+    }
+    if (envelope.attempt.contract_id !== attempt.contract_id) {
+      return unmet(`contract identity ${envelope.attempt.contract_id} !== attempt contract ${attempt.contract_id}`);
+    }
+    if (envelope.attempt.contract_id !== contract.id || envelope.attempt.contract_digest !== contract.digest) {
+      return unmet(`contract identity ${envelope.attempt.contract_id} is not the current contract ${contract.id}`);
+    }
+    if (envelope.outcome !== "completed") {
+      return unmet(`envelope outcome ${envelope.outcome} is not completed`);
+    }
+    if (acceptancePassed(contract, envelope)) {
+      return { accepted: true, envelopeJson: resultRow.envelope_json };
+    }
+    return unmet(this.acceptanceCriteriaDetail(contract, envelope));
+  }
+
+  /** Sorted criterion-set diagnosis for structurally valid rejected evidence. */
+  private acceptanceCriteriaDetail(
+    contract: WorkerAcceptanceContractV1, envelope: WorkerResultEnvelopeV1,
+  ): string {
+    const contractIds = new Set(contract.criteria.map((c) => c.id));
+    const seen = new Set<string>();
+    const unknown: string[] = [];
+    const duplicate: string[] = [];
+    const notPassed: string[] = [];
+    for (const c of envelope.criteria) {
+      if (!contractIds.has(c.criterion_id)) {
+        unknown.push(c.criterion_id);
+        continue;
+      }
+      if (seen.has(c.criterion_id)) duplicate.push(c.criterion_id);
+      seen.add(c.criterion_id);
+      if (c.status !== "passed") notPassed.push(c.criterion_id);
+    }
+    const missing = contract.criteria.map((c) => c.id).filter((id) => !seen.has(id));
+    const parts: string[] = [];
+    if (unknown.length > 0) parts.push(`unknown [${[...new Set(unknown)].sort().join(",")}]`);
+    if (missing.length > 0) parts.push(`missing [${[...missing].sort().join(",")}]`);
+    if (duplicate.length > 0) parts.push(`duplicate [${[...new Set(duplicate)].sort().join(",")}]`);
+    if (notPassed.length > 0) parts.push(`not-passed [${[...new Set(notPassed)].sort().join(",")}]`);
+    if (parts.length === 0) parts.push("criteria not all passed");
+    return `criterion-set mismatch: ${parts.join("; ")}`;
+  }
+
+  /**
+   * #1794: whether an attempt is still the current work for its card — the
+   * latest attempt by ordinal. A completion for an older (superseded) attempt
+   * is stale and must neither fail nor succeed replacement work. False on any
+   * read failure (fail-closed: callers reject, never assume currency).
+   */
+  isCurrentAttemptForCard(cardId: number, attemptId: string): boolean {
+    try {
+      const latest = this.latestAttemptForCard(cardId);
+      if (!latest) return false;
+      return (latest["id"] as string) === attemptId;
+    } catch {
+      return false;
+    }
+  }
+
+  /**
    * Terminal runs whose root card is not terminal: projection recovery input.
    * Bounded; each row is an idempotent CAS (recovery converges, never duplicates).
    */
@@ -1094,7 +1253,8 @@ export class WorkflowStore {
       return this.db
         .prepare(
           `SELECT n.run_id AS run_id, n.revision AS revision, n.node_id AS node_id,
-             a.id AS attempt_id, a.lifecycle AS lifecycle, res.envelope_json AS envelope_json
+              n.worker_card_id AS worker_card_id,
+              a.id AS attempt_id, a.lifecycle AS lifecycle, res.envelope_json AS envelope_json
            FROM workflow_nodes n
            JOIN workflow_runs r ON r.run_id = n.run_id
              AND r.state NOT IN ('succeeded','failed','cancelled')

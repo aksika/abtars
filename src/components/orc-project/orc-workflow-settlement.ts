@@ -117,14 +117,24 @@ export function commitSupervisedOutcome(db: TaskDatabase, attempt: SettledAttemp
     const runner = runnerForDb(db);
     const eventId = `attempt-${attempt.attemptId}-${attempt.lifecycle}`;
     if (attempt.lifecycle === "completed") {
-      const payloadJson = JSON.stringify({
-        kind: "AttemptSucceeded",
-        body: { nodeId: node.nodeId, attemptId: attempt.attemptId, artifactsJson: attempt.envelopeJson ?? "{}" },
-      });
+      // #1794: executor `completed` means execution finished — the node
+      // succeeds only when the STORED result passes acceptance against the
+      // current card contract. The caller envelope is never trusted here
+      // (the joint hook is invoked with envelopeJson:null; the stored result
+      // persisted earlier in this transaction is the authority). Rejection
+      // fails through the existing node-failure policy with retrySafe=false.
+      // Event identity keeps the `completed` suffix (quality rejection still
+      // has lifecycle completed); kind/body/hash derive from the decision so
+      // recovery redrives type identically and dedupes by event id.
+      const verdict = store.readWorkerAcceptance(attempt.cardId, attempt.attemptId);
+      const kind = verdict.accepted ? "AttemptSucceeded" : "AttemptFailed";
+      const body = verdict.accepted
+        ? { nodeId: node.nodeId, attemptId: attempt.attemptId, artifactsJson: verdict.envelopeJson }
+        : { nodeId: node.nodeId, attemptId: attempt.attemptId, cause: verdict.cause, retrySafe: false };
+      const payloadJson = JSON.stringify({ kind, body });
       runner.commitStoredAttemptOutcome({
-        runId: run.runId, kind: "AttemptSucceeded",
-        body: { nodeId: node.nodeId, attemptId: attempt.attemptId, artifactsJson: attempt.envelopeJson ?? "{}" },
-        revision: node.revision,
+        runId: run.runId, kind,
+        body, revision: node.revision,
         event: {
           eventId, runId: run.runId,
           payloadHash: createHash("sha256").update(payloadJson).digest("hex"),

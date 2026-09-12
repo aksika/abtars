@@ -176,6 +176,36 @@ describe("Local Swarm E2E", () => {
     });
   }, CHILD_TIMEOUT_MS + 10_000);
 
+  it("runner_saturation (#1794): four lanes against capacity three start the fourth on real completion events, then synthesis, review, and one delivery", async () => {
+    await runScenario("runner_saturation", (result) => {
+      expect(result.ok).toBe(true);
+      expect(result.childCardIds).toHaveLength(4);
+      expect(result.peakActiveWorkers).toBeLessThanOrEqual(3);
+      const ss = result.scenarioSpecific as Record<string, unknown>;
+      expect(ss).toBeDefined();
+      // Capacity three admitted exactly three of four ready lanes...
+      expect(ss.saturationActive).toBe(3);
+      expect(Number(ss.maxDurableActive)).toBeLessThanOrEqual(3);
+      // ...a real terminal event started the fourth with no manual pump call.
+      expect(ss.fourthStartedWithoutManualPump).toBe(true);
+      // Consistent worker/node/root outcomes end to end.
+      expect(ss.laneLifecycles).toEqual(["completed", "completed", "completed", "completed"]);
+      expect(ss.laneNodeStatuses).toEqual(["succeeded", "succeeded", "succeeded", "succeeded"]);
+      expect(ss.synthesisLifecycle).toBe("completed");
+      expect(ss.liveReservations).toBe(0);
+      expect(result.counts).toEqual({
+        workerContracts: 5,
+        workerAttempts: 5,
+        workerResults: 5,
+        reviewCases: 0,
+        reviewDecisions: 0,
+        outboundDeliveries: 1,
+      });
+      expect(result.terminal).toEqual({ projectState: "accepted", cardStatus: "delivered", deliveryResult: "sent" });
+      expect(result.duplicateWakeStable).toBe(true);
+    });
+  }, CHILD_TIMEOUT_MS + 10_000);
+
   it("token_budget: capped project enforces reservations and exhaustion", async () => {
     await runScenario("token_budget", (result) => {
       expect(result.ok).toBe(true);

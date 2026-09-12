@@ -306,6 +306,8 @@ async function admitRunnerProject(
     maxAgents?: number;
     /** Scripted review behavior; "die" leaves the verdict pending. */
     reviewMode?: "accept" | "die";
+    /** #1794: an assembled-writing node over all lanes (review then judges it). */
+    synthesis?: { label: string; output: string; acceptance: string };
   },
 ): Promise<RunnerProject> {
   const { WorkflowRunner } = await import("../../components/orc-project/orc-workflow-runner.js") as typeof import("../../components/orc-project/orc-workflow-runner.js");
@@ -382,13 +384,25 @@ async function admitRunnerProject(
           ...(l.optional ? { optional: true } : {}),
         }));
         const proposal = {
-          requiredOutputs: lanes.map((_, i) => `out/${opts.lanes[i]!.label}-${i}.md`),
+          requiredOutputs: [...lanes.map((_, i) => `out/${opts.lanes[i]!.label}-${i}.md`),
+            ...(opts.synthesis ? [opts.synthesis.output] : [])],
           nodes: [
             ...lanes,
+            // #1794 saturation shape: one synthesis node assembles the lanes;
+            // the mandatory review judges the assembly, never the raw lanes.
+            ...(opts.synthesis ? [{
+              label: opts.synthesis.label,
+              kind: "synthesis" as const,
+              instructions: opts.synthesis.label,
+              capability: "general",
+              outputs: [opts.synthesis.output],
+              acceptance: [opts.synthesis.acceptance],
+              dependsOn: lanes.map(l => l.label),
+            }] : []),
             {
               label: "review", kind: "review" as const, instructions: "judge the candidate revision",
               capability: "general", outputs: [] as string[], acceptance: [] as string[],
-              dependsOn: lanes.map(l => l.label),
+              dependsOn: opts.synthesis ? [opts.synthesis.label] : lanes.map(l => l.label),
             },
           ],
         };
@@ -446,7 +460,12 @@ async function admitRunnerProject(
     for (const row of store.listNodes(runId, rev)) {
       if (row["kind"] !== "work" && row["kind"] !== "synthesis") continue;
       const cardId = row["worker_card_id"] as number | null;
-      if (cardId == null) fail("admission", "NO_WORKER", `node ${row["node_id"]} has no worker`);
+      // A synthesis node is legitimately undispatched until its deps finish;
+      // work nodes must all be bound once dispatch converges.
+      if (cardId == null) {
+        if (row["kind"] === "synthesis") continue;
+        fail("admission", "NO_WORKER", `node ${row["node_id"]} has no worker`);
+      }
       cards.push(cardId);
     }
     return cards;
@@ -1136,6 +1155,212 @@ function requestWorkerDispatchFrom(_requestReconcileFn: (id: number) => void): v
 }
 
 /**
+ * #1794 saturation: four independent lanes against adapter capacity three,
+ * through the REAL dispatch pump, worker settlement, synthesis, review, and
+ * delivery composition. Only the executor/model (gated mock runtime) and the
+ * destination (counting sender) are scripted.
+ *
+ * The first three executions are held until the fourth lane is observably
+ * pending; releasing exactly one must start the fourth with NO manual pump
+ * call, audit pass, or capacity change (the onDone/onFailed redrive owns
+ * it). All lanes then finish, the synthesis artifact is reviewed, and one
+ * delivery is acknowledged.
+ */
+async function runRunnerSaturation(): Promise<LocalSwarmResult> {
+  const { spin, requestReconcile, startReconciler, kanbanEnqueue, kanbanGetCard, kanbanGetChildren, kanbanRunning, WorkerSupervisionStore, ProjectReviewStore } = await setupEnvironment();
+  const { deliverCard } = await import("../../components/tasks/kanban-delivery.js");
+
+  // Gate the mock executor: entries block until released (first three held,
+  // then one released, then the rest). Both Spin entry points share the gate.
+  const gates: Array<() => void> = [];
+  let autoRelease = false;
+  const passGate = (): Promise<void> => new Promise<void>(r => {
+    if (autoRelease) r();
+    else gates.push(r);
+  });
+  const enterExecution = async (): Promise<string> => {
+    _workerEntryCount++;
+    _activeWorkerCount++;
+    _peakActiveWorkers = Math.max(_peakActiveWorkers, _activeWorkerCount);
+    await passGate();
+    // Release the occupancy as the execution flows: the capacity slot frees
+    // when settlement starts (well before the fourth lane can be claimed),
+    // so the recorded peak is exact rather than sleep-race dependent.
+    _activeWorkerCount--;
+    const resp = nextWorkerResponse();
+    await new Promise(rr => setTimeout(rr, 30));
+    return resp;
+  };
+  spin.setRuntime({
+    lastUsage: null,
+    session: async () => ({
+      sendPrompt: async () => {
+        const resp = nextWorkerResponse();
+        await new Promise(rr => setTimeout(rr, 30));
+        return resp;
+      },
+      destroy: async () => {},
+      isReady: true,
+      transport: { sendPrompt: async () => "", isReady: true, destroy: () => {} } as any,
+    }),
+    complete: async () => enterExecution(),
+    openExecution: async () => ({
+      send: async () => enterExecution(),
+      close: async () => {},
+      transport: {} as any,
+      sessionKey: "mock",
+      ephemeral: true,
+      lastUsage: () => ({ input: 500, output: 200 }),
+    }),
+    shutdown: async () => {},
+  } as any);
+
+  const lanes = [1, 2, 3, 4].map(i => ({ label: `sat-lane-${i}`, instructions: `Saturation lane ${i}` }));
+  const proj = await admitRunnerProject(
+    { kanbanEnqueue, kanbanGetCard, kanbanGetChildren, kanbanRunning },
+    {
+      title: "Runner saturation E2E",
+      goal: "Four lanes against capacity three",
+      lanes,
+      synthesis: { label: "sat-synthesis", output: "out/sat-synthesis-report.md", acceptance: "synthesis delivers" },
+    },
+  );
+  const projectCardId = proj.rootCardId;
+  await startReconciler();
+  emitCheckpoint("project_admitted");
+
+  const childCardIds = proj.laneCards();
+  if (childCardIds.length !== 4) fail("admission", "NOT_ENOUGH_CHILDREN", `Expected 4 lanes, got ${childCardIds.length}`);
+  for (const id of childCardIds) activeChildCardIds.push(id);
+
+  precreateLaneOutputs(projectCardId, lanes);
+  writeFileSync(
+    join(validatedAbtarsHome, "workspace", `swarm-${projectCardId}`, "out", "sat-synthesis-report.md"),
+    `# Saturation synthesis\n\nAssembled from four lanes.\n`,
+  );
+
+  emitCheckpoint("workers_spawned");
+  // The single manual dispatch of this scenario: everything after this point
+  // moves on real completion/card events (never a second pump call here).
+  requestWorkerDispatchFrom(requestReconcile);
+
+  const store = new WorkerSupervisionStore();
+  const durableActive = (): number => store.getActiveAttemptCountForExecutor("agent", "spin-local");
+  let maxDurableActive = 0;
+
+  // Hold three executions until the fourth lane is observably pending behind
+  // the cap (never-started: no lease, queue waiting only).
+  await eventually("three-active-fourth-pending", () => {
+    maxDurableActive = Math.max(maxDurableActive, durableActive());
+    const fourth = store.getLatestAttempt(childCardIds[3]!);
+    return durableActive() === 3 && fourth?.lifecycle === "pending" ? true : null;
+  }, 30000);
+  const saturationActive = durableActive();
+  if (saturationActive !== 3) fail("saturation", "WRONG_ACTIVE", `active=${saturationActive} expected=3`);
+  emitCheckpoint("saturation_held", { saturationActive });
+
+  // Release exactly one execution through real settlement. The fourth lane
+  // must start with no further manual pump call: the only legal driver is
+  // the terminal-card redrive (onDone/onFailed rearm the coalesced pump).
+  gates.shift()?.();
+  const fourthStarted = await eventually("fourth-started-without-manual-pump", () => {
+    maxDurableActive = Math.max(maxDurableActive, durableActive());
+    const fourth = store.getLatestAttempt(childCardIds[3]!);
+    return fourth && fourth.lifecycle !== "pending" ? fourth : null;
+  }, 30000);
+  emitCheckpoint("fourth_started", { lifecycle: (fourthStarted as { lifecycle: string }).lifecycle });
+
+  // Release the rest and finish every lane through real settlement.
+  autoRelease = true;
+  let gate: (() => void) | undefined;
+  while ((gate = gates.shift())) gate();
+  await eventually("all-lanes-terminal", () => {
+    maxDurableActive = Math.max(maxDurableActive, durableActive());
+    const all = childCardIds.every(id => {
+      const attempt = store.getLatestAttempt(id);
+      return attempt && store.isAttemptTerminal(attempt.lifecycle);
+    });
+    return all || null;
+  }, 30000);
+  emitCheckpoint("lanes_terminal");
+  const laneLifecycles = childCardIds.map(id => store.getLatestAttempt(id)?.lifecycle);
+
+  // The synthesis node dispatches on real lane completion (nerve/pump moves
+  // it — the scenario only observes); its execution flows via auto-release.
+  const synthCard = await eventually("synthesis-dispatched", () => {
+    maxDurableActive = Math.max(maxDurableActive, durableActive());
+    const rev = proj.store.currentRevision(proj.runId);
+    const node = proj.store.listNodes(proj.runId, rev)
+      .find((n: { kind: string }) => n["kind"] === "synthesis");
+    const cardId = node?.["worker_card_id"] as number | null;
+    return cardId ?? null;
+  }, 30000);
+  activeChildCardIds.push(synthCard as number);
+  await eventually("synthesis-terminal", () => {
+    const attempt = store.getLatestAttempt(synthCard as number);
+    return attempt && store.isAttemptTerminal(attempt.lifecycle) ? attempt : null;
+  }, 30000);
+  const synthesisLifecycle = store.getLatestAttempt(synthCard as number)?.lifecycle;
+  assertWorkerInvariants(new WorkerSupervisionStore(), [...childCardIds, synthCard as number]);
+
+  // Prepared review judges the synthesis; one delivery is acknowledged.
+  proj.acceptReview();
+  const reviewStore = new ProjectReviewStore();
+  await eventually("project-accepted", () => {
+    try { proj.pump(); } catch {}
+    const sup = reviewStore.getSupervision(projectCardId);
+    return sup?.state === "accepted" ? sup : null;
+  }, 30000);
+  emitCheckpoint("project_accepted");
+  await deliverCard(kanbanGetCard(projectCardId)!, testDeliverDeps);
+
+  const beforeDuplicate = readCounts();
+  for (const childId of [...childCardIds, synthCard as number]) { requestReconcile(childId); }
+  requestReconcile(projectCardId);
+  await new Promise(r => setTimeout(r, 500));
+  await deliverCard(kanbanGetCard(projectCardId)!, testDeliverDeps);
+  const afterDuplicate = readCounts();
+
+  // Worker/node/root consistency from the durable rows (not the mocks).
+  const rev = proj.store.currentRevision(proj.runId);
+  const laneNodeStatuses = childCardIds.map(id => {
+    const node = proj.store.listNodes(proj.runId, rev)
+      .find((n: { worker_card_id: number | null }) => (n["worker_card_id"] as number | null) === id);
+    return node?.["status"] as string;
+  });
+  let liveReservations = 0;
+  try {
+    liveReservations = Number((store.db.prepare(
+      `SELECT COUNT(*) AS c FROM retry_budget_reservations WHERE status IN ('active','claimed')`,
+    ).get() as { c: number }).c);
+  } catch {
+    liveReservations = -1;
+  }
+
+  const finalCard = kanbanGetCard(projectCardId)!;
+  return {
+    schemaVersion: 2, ok: true, scenario, scenarioId, projectCardId, childCardIds,
+    peakActiveWorkers: _peakActiveWorkers,
+    counts: afterDuplicate,
+    terminal: {
+      projectState: reviewStore.getSupervision(projectCardId)?.state ?? "unknown",
+      cardStatus: finalCard?.status ?? "unknown",
+      deliveryResult: finalCard?.delivery_result ?? "unknown",
+    },
+    duplicateWakeStable: JSON.stringify(beforeDuplicate) === JSON.stringify(afterDuplicate),
+    scenarioSpecific: {
+      saturationActive,
+      maxDurableActive,
+      fourthStartedWithoutManualPump: true,
+      laneLifecycles,
+      laneNodeStatuses,
+      synthesisLifecycle,
+      liveReservations,
+    },
+  };
+}
+
+/**
  * #1516: scheduled project with a durable agent cap (maxAgents=4) through the
  * real spawnChild admission boundary. Exactly three Workers are admitted; a
  * fourth is refused with no card created; a terminal Worker releases capacity.
@@ -1664,6 +1889,10 @@ async function runPiSpinRouting(): Promise<LocalSwarmResult> {
 
   const orcContext = makeOrcContext(projectCardId);
   const childCardId = laneCardByIndex(proj, 0);
+  // #1794: the bound lane succeeds only on passing stored evidence — stage
+  // the declared output so settlement observes it (mock text alone never
+  // succeeds a runner node).
+  precreateLaneOutputs(projectCardId, [{ label: "spin-lane" }]);
   // #1792: runner drain + executor pump; O-root reconciler wakes are no-ops.
   proj.pump();
   h.requestWorkerDispatch();
@@ -2054,6 +2283,9 @@ async function runPiInputAnswer(): Promise<LocalSwarmResult> {
   // then the coding worker that stops to ask.
   const siblingCardId = laneCardByIndex(proj, 0);
   const childCardId = laneCardByIndex(proj, 1);
+  // #1794: the bound sibling lane succeeds only on passing stored evidence —
+  // stage the declared outputs (mock text alone never succeeds a runner node).
+  precreateLaneOutputs(projectCardId, [{ label: "sibling-researcher" }, { label: "pi-coder" }]);
   // #1792: runner drain + executor pump; O-root reconciler wakes are no-ops.
   proj.pump();
   h.requestWorkerDispatch();
@@ -2193,6 +2425,9 @@ async function runPiAskOrc(): Promise<LocalSwarmResult> {
   const orcContext = makeOrcContext(projectCardId);
   const siblingCardId = laneCardByIndex(proj, 0);
   const childCardId = laneCardByIndex(proj, 1);
+  // #1794: the bound sibling lane succeeds only on passing stored evidence —
+  // stage the declared outputs (mock text alone never succeeds a runner node).
+  precreateLaneOutputs(projectCardId, [{ label: "sibling-researcher" }, { label: "pi-coder" }]);
   // #1792: runner drain + executor pump; O-root reconciler wakes are no-ops.
   proj.pump();
   h.requestWorkerDispatch();
@@ -2458,6 +2693,9 @@ async function main(): Promise<void> {
         break;
       case "scheduled_cap":
         result = await runScheduledCap();
+        break;
+      case "runner_saturation":
+        result = await runRunnerSaturation();
         break;
       case "pi_coding":
         result = await runPiCoding();

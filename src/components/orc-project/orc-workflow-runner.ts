@@ -1015,15 +1015,21 @@ export class WorkflowRunner {
       const lifecycle = latest["lifecycle"] as string;
       if (["completed", "failed", "cancelled", "timed_out"].includes(lifecycle)) {
         if (lifecycle === "completed") {
-          // Lost completion found by inspection: recover result + successors.
-          const result = this.store.readResult(latest["id"] as string);
-          this.store.setNodeOutcome(run.runId, rev, key.nodeId, "succeeded",
-            result ?? `{"recovered":"${latest["id"]}"}`, latest["id"] as string);
-          for (const next of this.store.satisfyDependents(run.runId, rev, key.nodeId)) {
-            this.queueForNode(run.runId, run.generation, rev, next, this.nodeKindOf(run.runId, rev, next), {});
-          }
+          // Lost completion found by inspection: the SAME durable acceptance
+          // decision as joint settlement and recovery, applied atomically
+          // with the claimed dispatch command inside this transaction.
+          // Unbound nodes keep the legacy stored-result recovery; bound nodes
+          // succeed only on passing stored evidence (missing/malformed
+          // evidence fails closed, never `{}` success).
+          const selectedId = latest["id"] as string;
+          const boundCard = cardId === null ? null
+            : this.requireCurrentAttempt(run.runId, rev, key.nodeId, selectedId);
+          const effect = boundCard === null
+            ? this.succeedNodeEffect(run.runId, run.generation, rev, key.nodeId, selectedId,
+              this.store.readResult(selectedId) ?? `{"recovered":"${selectedId}"}`)
+            : this.applyStoredAcceptanceEffect(run.runId, run.generation, rev, key.nodeId, boundCard, selectedId);
           finish();
-          return this.settleWithReReview(run.runId, run.generation, rev);
+          return effect;
         }
         // Did the CLAIMED round run? Compare attempt start against claim time
         // (60s grace for clock skew). Proven older → the round never started →
@@ -1411,6 +1417,13 @@ export class WorkflowRunner {
    * Submit unconsumed terminal completions (hook-contained failures and
    * pre-cutover rows). Idempotent by attempt-derived identity; returns the
    * number of newly applied outcomes.
+   *
+   * #1794: completed rows go through the SAME stored-evidence decision as
+   * joint settlement — the event kind/body/hash are built from the durable
+   * verdict (stored envelope on acceptance, failure cause with
+   * retrySafe=false on rejection), never from the nullable row envelope.
+   * Both readers observe the same stored result, so a joint event and its
+   * recovery redrive type identically and dedupe by event id.
    */
   recoverUnconsumedCompletions(limit = 100): number {
     let applied = 0;
@@ -1423,12 +1436,23 @@ export class WorkflowRunner {
       const run = this.store.getRun(runId);
       if (!run || TERMINAL_RUN_STATES.includes(run.state)) continue;
       const eventId = `attempt-${attemptId}-${lifecycle}`;
-      const body = lifecycle === "completed"
-        ? { nodeId, attemptId, artifactsJson: (row["envelope_json"] as string | null) ?? "{}" }
-        : { nodeId, attemptId, cause: lifecycle, retrySafe: false };
-      const payloadJson = JSON.stringify({
-        kind: lifecycle === "completed" ? "AttemptSucceeded" : "AttemptFailed", body,
-      });
+      let kind: "AttemptSucceeded" | "AttemptFailed";
+      let body: Record<string, unknown>;
+      if (lifecycle === "completed") {
+        const cardId = Number(row["worker_card_id"]);
+        const verdict = this.store.readWorkerAcceptance(cardId, attemptId);
+        if (verdict.accepted) {
+          kind = "AttemptSucceeded";
+          body = { nodeId, attemptId, artifactsJson: verdict.envelopeJson };
+        } else {
+          kind = "AttemptFailed";
+          body = { nodeId, attemptId, cause: verdict.cause, retrySafe: false };
+        }
+      } else {
+        kind = "AttemptFailed";
+        body = { nodeId, attemptId, cause: lifecycle, retrySafe: false };
+      }
+      const payloadJson = JSON.stringify({ kind, body });
       const event: RunnerIngress = {
         eventId, runId,
         payloadHash: createHash("sha256").update(payloadJson).digest("hex"),
@@ -1436,8 +1460,12 @@ export class WorkflowRunner {
       };
       try {
         const res = this.commitStoredAttemptOutcome({
-          runId, kind: lifecycle === "completed" ? "AttemptSucceeded" : "AttemptFailed",
-          body, revision, event,
+          runId, kind,
+          body: body as {
+            nodeId: string; attemptId: string;
+            artifactsJson?: string; cause?: string; retrySafe?: boolean;
+          },
+          revision, event,
         });
         if (res.disposition === "applied") applied++;
       } catch {
@@ -1773,15 +1801,17 @@ export class WorkflowRunner {
   ): CommitResult {
     return this.commitWithProjections(run.runId, event, () => {
       this.requireNode(run.runId, revision, nodeId, ["queued", "running"]);
-      this.store.setNodeOutcome(run.runId, revision, nodeId, "succeeded", artifactsJson, attemptId);
-      const unblocked = this.store.satisfyDependents(run.runId, revision, nodeId);
-      const kinds = new Map(
-        this.store.listNodes(run.runId, revision).map((n) => [n["node_id"] as string, n["kind"] as string]),
-      );
-      for (const next of unblocked) {
-        this.queueForNode(run.runId, run.generation, revision, next, kinds.get(next) ?? "work", {});
+      // #1794: a runner-managed worker node succeeds only when its DURABLE
+      // result passes acceptance against the current card contract. The
+      // caller-supplied payload is ignored for bound nodes (it may be a
+      // stale replay, a null joint envelope, or a fabricated direct ingress);
+      // the stored envelope is the authority. Unbound nodes keep the existing
+      // abstract executor behavior.
+      const cardId = this.requireCurrentAttempt(run.runId, revision, nodeId, attemptId);
+      if (cardId === null) {
+        return this.succeedNodeEffect(run.runId, run.generation, revision, nodeId, attemptId, artifactsJson);
       }
-      return this.settleWithReReview(run.runId, run.generation, revision);
+      return this.applyStoredAcceptanceEffect(run.runId, run.generation, revision, nodeId, cardId, attemptId);
     });
   }
 
@@ -1826,30 +1856,103 @@ export class WorkflowRunner {
   ): CommitResult {
     return this.commitWithProjections(run.runId, event, () => {
       this.requireNode(run.runId, revision, nodeId, ["queued", "running"]);
-      const optional = this.isOptionalNode(run.runId, revision, nodeId);
-      if (!optional && retrySafe && this.store.consumeBudget(run.runId, "work_retry")) {
-        const ordinal = this.store.nextCommandOrdinal(run.runId, run.generation, nodeId, "dispatch");
-        this.store.setNodeOutcome(run.runId, revision, nodeId, "running", cause, attemptId);
-        this.store.queueCommand({
-          runId: run.runId, generation: run.generation, nodeId, action: "dispatch", ordinal,
-          payloadJson: JSON.stringify({ nodeId, revision, retryOf: attemptId, cause }),
-        });
-        return {};
-      }
-      this.store.setNodeOutcome(run.runId, revision, nodeId, "failed", cause, attemptId);
-      if (optional) {
-        // Explicit optional-input policy: release dependents to proceed
-        // without the optional input (never silently skip required work).
-        // AstraMaster-5: the unblocked nodes need commands, not just
-        // satisfied deps — the success path queues them, so does this one.
-        for (const next of this.store.satisfyDependents(run.runId, revision, nodeId)) {
-          this.queueForNode(run.runId, run.generation, revision, next, this.nodeKindOf(run.runId, revision, next), {});
-        }
-      } else {
-        this.store.skipDependents(run.runId, revision, nodeId);
-      }
-      return this.settleWithReReview(run.runId, run.generation, revision, `node ${nodeId} failed: ${cause}`);
+      return this.failNodeEffect(run.runId, run.generation, revision, nodeId, attemptId, cause, retrySafe);
     });
+  }
+
+  /**
+   * #1794: attempt ownership for a bound worker node. Returns the bound card
+   * id when the incoming attempt is still that card's latest attempt, null
+   * for unbound (abstract executor) nodes. Throws on a completion for an
+   * older/superseded attempt so it can neither fail nor succeed replacement
+   * work. Callers run this inside their commit envelope (after requireNode),
+   * so the throw fences the whole transition.
+   */
+  private requireCurrentAttempt(
+    runId: string, revision: number, nodeId: string, attemptId: string,
+  ): number | null {
+    const node = this.store.listNodes(runId, revision).find((n) => n["node_id"] === nodeId);
+    const cardId = node?.["worker_card_id"] as number | null | undefined;
+    if (cardId === null || cardId === undefined) return null;
+    if (!this.store.isCurrentAttemptForCard(cardId, attemptId)) {
+      throw new Error(`workflow runner: stale attempt ${attemptId} for node ${nodeId} (superseded work)`);
+    }
+    return cardId;
+  }
+
+  /**
+   * #1794: the single stored-evidence decision for a bound worker node.
+   * Acceptance succeeds with the stored envelope verbatim; rejection fails
+   * through the shared failure effect with retrySafe=false (quality failure
+   * never consumes work_retry allowance, optional/required policy preserved).
+   */
+  private applyStoredAcceptanceEffect(
+    runId: string, generation: number, revision: number, nodeId: string,
+    cardId: number, attemptId: string,
+  ): TransitionEffect {
+    const verdict = this.store.readWorkerAcceptance(cardId, attemptId);
+    if (!verdict.accepted) {
+      return this.failNodeEffect(runId, generation, revision, nodeId, attemptId, verdict.cause, false);
+    }
+    return this.succeedNodeEffect(runId, generation, revision, nodeId, attemptId, verdict.envelopeJson);
+  }
+
+  /**
+   * #1794: transaction-local success effect shared by direct ingress, joint
+   * settlement, unconsumed recovery, startup replay, and claim inspection.
+   * Owns the outcome write, dependent release, and re-review settlement;
+   * commit envelopes (ingress identity, fencing, projection) stay with the
+   * calling applier. Must run inside an open commit callback — never commits.
+   */
+  private succeedNodeEffect(
+    runId: string, generation: number, revision: number, nodeId: string,
+    attemptId: string, artifactsJson: string,
+  ): TransitionEffect {
+    this.store.setNodeOutcome(runId, revision, nodeId, "succeeded", artifactsJson, attemptId);
+    const unblocked = this.store.satisfyDependents(runId, revision, nodeId);
+    const kinds = new Map(
+      this.store.listNodes(runId, revision).map((n) => [n["node_id"] as string, n["kind"] as string]),
+    );
+    for (const next of unblocked) {
+      this.queueForNode(runId, generation, revision, next, kinds.get(next) ?? "work", {});
+    }
+    return this.settleWithReReview(runId, generation, revision);
+  }
+
+  /**
+   * #1794: transaction-local failure effect (existing node-failure policy:
+   * retry-safe budget, optional-dependent release, required-dependent skip).
+   * Acceptance rejection routes here with retrySafe=false: quality failure
+   * never consumes work_retry allowance. Same envelope discipline as the
+   * success effect — runs inside the caller's commit callback, never commits.
+   */
+  private failNodeEffect(
+    runId: string, generation: number, revision: number, nodeId: string,
+    attemptId: string, cause: string, retrySafe: boolean,
+  ): TransitionEffect {
+    const optional = this.isOptionalNode(runId, revision, nodeId);
+    if (!optional && retrySafe && this.store.consumeBudget(runId, "work_retry")) {
+      const ordinal = this.store.nextCommandOrdinal(runId, generation, nodeId, "dispatch");
+      this.store.setNodeOutcome(runId, revision, nodeId, "running", cause, attemptId);
+      this.store.queueCommand({
+        runId, generation, nodeId, action: "dispatch", ordinal,
+        payloadJson: JSON.stringify({ nodeId, revision, retryOf: attemptId, cause }),
+      });
+      return {};
+    }
+    this.store.setNodeOutcome(runId, revision, nodeId, "failed", cause, attemptId);
+    if (optional) {
+      // Explicit optional-input policy: release dependents to proceed
+      // without the optional input (never silently skip required work).
+      // AstraMaster-5: the unblocked nodes need commands, not just
+      // satisfied deps — the success path queues them, so does this one.
+      for (const next of this.store.satisfyDependents(runId, revision, nodeId)) {
+        this.queueForNode(runId, generation, revision, next, this.nodeKindOf(runId, revision, next), {});
+      }
+    } else {
+      this.store.skipDependents(runId, revision, nodeId);
+    }
+    return this.settleWithReReview(runId, generation, revision, `node ${nodeId} failed: ${cause}`);
   }
 
   private freshEvent(run: WorkflowRunRow, kind: string, body: unknown): RunnerIngress {

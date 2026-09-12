@@ -18,6 +18,7 @@ import { mkdirSync, rmSync, existsSync, writeFileSync, readFileSync } from "node
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { vi } from "vitest";
+import { computeDigest, computeEnvelopeDigest } from "../../components/worker-contract.js";
 
 let TEST_HOME: string;
 let ARTIFACTS: string;
@@ -138,6 +139,16 @@ describe("orc-workflow E2E (Task 6)", () => {
         cancel_reason TEXT,
         UNIQUE(card_id, ordinal)
       );
+      CREATE TABLE IF NOT EXISTS worker_contracts (
+        id TEXT PRIMARY KEY, card_id INTEGER NOT NULL, revision INTEGER NOT NULL DEFAULT 1,
+        root_contract_id TEXT NOT NULL, parent_contract_id TEXT, source_attempt_id TEXT,
+        schema_version INTEGER NOT NULL, contract_json TEXT NOT NULL, contract_digest TEXT NOT NULL,
+        created_at TEXT NOT NULL
+      );
+      CREATE TABLE IF NOT EXISTS worker_results (
+        attempt_id TEXT PRIMARY KEY, envelope_json TEXT NOT NULL, envelope_digest TEXT NOT NULL,
+        created_at TEXT NOT NULL
+      );
       CREATE TABLE IF NOT EXISTS project_input_requests (
         id TEXT PRIMARY KEY, project_card_id INTEGER NOT NULL,
         review_case_id TEXT NOT NULL, question TEXT NOT NULL,
@@ -164,10 +175,59 @@ describe("orc-workflow E2E (Task 6)", () => {
         closed_at TEXT, snapshot_json TEXT NOT NULL, updated_at TEXT NOT NULL
       );
     `);
-    for (const t of ["worker_attempts", "project_input_requests", "retry_budget_reservations", "attempt_lease_snapshots"]) {
+    for (const t of ["worker_attempts", "worker_contracts", "worker_results", "project_input_requests", "retry_budget_reservations", "attempt_lease_snapshots"]) {
       try { store.db.exec(`DELETE FROM ${t}`); } catch {}
     }
   });
+
+  /**
+   * #1794: seed a real contract + stored result so a bound completion
+   * decides through durable acceptance (synthetic success rows without
+   * evidence fail closed and must not be used for bound fixtures).
+   */
+  function seedStoredEvidence(cardId: number, attemptId: string, contractId: string, status: "passed" | "failed"): string {
+    const base = {
+      schema_version: 1, id: contractId,
+      goal: "e2e lane work",
+      criteria: [{ id: "done", description: "lane done" }],
+      expected_artifacts: [{
+        id: "o1", kind: "file", ref: "out/lane.md", required: true, criterion_ids: ["done"],
+      }],
+      verification_commands: [{
+        id: "v1", argv: ["test", "-f", "out/lane.md"], timeout_ms: 10_000, criterion_ids: ["done"],
+      }],
+      required_capabilities: [],
+      limits: {},
+      provenance: { root_card_id: cardId, card_id: cardId, authored_by: "e2e", created_at: "2026-09-12T00:00:00.000Z" },
+    };
+    const digest = computeDigest(base);
+    store.db.prepare(
+      `INSERT INTO worker_contracts (id, card_id, revision, root_contract_id, schema_version, contract_json, contract_digest, created_at)
+       VALUES (?, ?, 1, ?, 1, ?, ?, datetime('now'))`,
+    ).run(contractId, cardId, contractId, JSON.stringify({ ...base, digest }), digest);
+    const envelope = JSON.stringify({
+      schema_version: 1,
+      attempt: {
+        id: attemptId, ordinal: 1, contract_id: contractId, contract_digest: digest,
+        executor_kind: "agent", executor_id: "ex",
+        started_at: "2026-09-12T00:00:00.000Z", finished_at: "2026-09-12T00:01:00.000Z",
+      },
+      outcome: "completed",
+      criteria: [{ criterion_id: "done", status, evidence_ids: ["v1"] }],
+      checks: [{
+        check_id: "v1", argv: ["test", "-f", "out/lane.md"],
+        started_at: "2026-09-12T00:00:00.000Z", finished_at: "2026-09-12T00:00:01.000Z",
+        timed_out: false, exit_code: 0, signal: null, stdout_excerpt: "", stderr_excerpt: "",
+      }],
+      artifacts: [{ artifact_id: "o1", exists: true, kind: "file", ref: "out/lane.md" }],
+      worker_report: { summary: "done", claims: [], unresolved_risks: [] },
+    });
+    store.db.prepare(
+      `INSERT INTO worker_results (attempt_id, envelope_json, envelope_digest, created_at)
+       VALUES (?, ?, ?, datetime('now'))`,
+    ).run(attemptId, envelope, computeEnvelopeDigest(JSON.parse(envelope)));
+    return envelope;
+  }
 
   function admitAndPlan(kind: "interactive" | "scheduled", proposal: Proposal, budgets?: Partial<Record<BudgetScope, number>>) {
     copSeq++;
@@ -402,6 +462,9 @@ describe("orc-workflow E2E (Task 6)", () => {
       `INSERT INTO worker_attempts (id, card_id, contract_id, ordinal, executor_kind, executor_id, status, started_at, lifecycle, root_project_card_id, root_project_generation)
        VALUES ('att-L', 96001, 'ctr', 1, 'spin', 'ex', 'completed', datetime('now','-9 minutes'), 'completed', ?, 1)`,
     ).run(g.card);
+    // #1794: the lost completion recovers through durable acceptance, so the
+    // fixture carries a real contract + passing stored result.
+    seedStoredEvidence(96001, "att-L", "ctr", "passed");
     store.db.prepare(
       `UPDATE workflow_nodes SET worker_card_id = 96001, attempt_id = 'att-L' WHERE run_id = ? AND node_id = ?`,
     ).run(g.run.runId, gn[0]);
@@ -469,6 +532,48 @@ describe("orc-workflow E2E (Task 6)", () => {
     expect(store.getRun(u.run.runId)?.failureCode).toBe("observation_unknown");
     const attCount = store.db.prepare(`SELECT COUNT(*) AS c FROM worker_attempts WHERE card_id = 96003`).get() as { c: number };
     expect(Number(attCount.c)).toBe(1);
+  });
+
+  // Journey 8b (#1794): rejected required evidence recovered from worker
+  // rows fails the lane, skips the synthesis dependent, and never reaches a
+  // successful dependent dispatch or an acknowledged delivery.
+  it("rejected required evidence never dispatches dependents or delivers", () => {
+    const g = admitAndPlan("interactive", reportPlan());
+    const gn = store.listNodes(g.run.runId, 1).map((n) => n["node_id"] as string);
+    const research = gn[0] as string;
+    const write = gn[1] as string;
+    store.db.prepare(
+      `INSERT INTO worker_attempts (id, card_id, contract_id, ordinal, executor_kind, executor_id, status, started_at, lifecycle, root_project_card_id, root_project_generation)
+       VALUES ('att-R', 96011, 'ctr-r', 1, 'spin', 'ex', 'completed', datetime('now','-9 minutes'), 'completed', ?, 1)`,
+    ).run(g.card);
+    seedStoredEvidence(96011, "att-R", "ctr-r", "failed");
+    store.db.prepare(
+      `UPDATE workflow_nodes SET worker_card_id = 96011, attempt_id = 'att-R' WHERE run_id = ? AND node_id = ?`,
+    ).run(g.run.runId, research);
+    // Production shape: the dispatch command was claimed while the completion
+    // event was lost, so recovery (not the hook) settles it.
+    const { ports } = scriptedPorts();
+    runner.drain(10, ports);
+    store.db.prepare(`UPDATE workflow_commands SET next_inspection_at = datetime('now','-1 minute') WHERE run_id = ?`).run(g.run.runId);
+    expect(runner.recoverUnconsumedCompletions(10)).toBe(1);
+    const nodes = store.listNodes(g.run.runId, 1);
+    expect(nodes.find((n) => n["node_id"] === research)?.["status"]).toBe("failed");
+    expect(nodes.find((n) => n["node_id"] === research)?.["outcome"]).toMatch(/acceptance_unmet/);
+    expect(nodes.find((n) => n["node_id"] === write)?.["status"]).toBe("skipped");
+    // The skipped synthesis never received a dispatch command...
+    const writeCmds = store.db.prepare(`SELECT COUNT(*) AS c FROM workflow_commands WHERE run_id = ? AND node_id = ?`)
+      .get(g.run.runId, write) as { c: number };
+    expect(Number(writeCmds.c)).toBe(0);
+    // ...the run failed without partial allowance, and no delivery was ever
+    // acknowledged for it.
+    expect(store.getRun(g.run.runId)?.state).toBe("failed");
+    expect(store.getRun(g.run.runId)?.failureCode).toBe("node_failed");
+    const acked = store.db.prepare(
+      `SELECT COUNT(*) AS c FROM workflow_deliveries WHERE run_id = ? AND outcome = 'acknowledged'`,
+    ).get(g.run.runId) as { c: number };
+    expect(Number(acked.c)).toBe(0);
+    const tick = runner.auditTick(0);
+    expect(tick.ownerless).not.toContain(g.run.runId);
   });
 
   // Audit: dropped wake redriven; ownerless fenced; rotating past 100 roots.

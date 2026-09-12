@@ -3,6 +3,7 @@ import { mkdirSync, rmSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { vi } from "vitest";
+import { computeDigest, computeEnvelopeDigest } from "../worker-contract.js";
 
 let TEST_HOME: string;
 let RunnerType: typeof import("./orc-workflow-runner.js").WorkflowRunner;
@@ -966,5 +967,306 @@ describe("WorkflowRunner Task 4 — cancellation, delivery, input, inspection", 
     runner.attemptFailed(run.runId, acc.nodeIds[0] as string, "att-1", big, false);
     const node = store.listNodes(run.runId, 1).find((n) => n["node_id"] === acc.nodeIds[0]);
     expect((node?.["outcome"] as string).length).toBeLessThan(2200);
+  });
+});
+
+describe("WorkflowRunner durable acceptance (#1794)", () => {
+  let cardSeqAcc = 91000;
+  let attSeqAcc = 0;
+
+  function nextWorkerCard(): number {
+    return cardSeqAcc++;
+  }
+
+  function evidenceShapes(cardId: number, attemptId: string, contractId: string) {
+    const base = {
+      schema_version: 1, id: contractId,
+      goal: "acceptance fixture",
+      criteria: [{ id: "done", description: "lane done" }],
+      expected_artifacts: [{
+        id: "o1", kind: "file", ref: "out/lane.md", required: true, criterion_ids: ["done"],
+      }],
+      verification_commands: [{
+        id: "v1", argv: ["test", "-f", "out/lane.md"], timeout_ms: 10_000, criterion_ids: ["done"],
+      }],
+      required_capabilities: [],
+      limits: {},
+      provenance: { root_card_id: cardId, card_id: cardId, authored_by: "test", created_at: "2026-09-12T00:00:00.000Z" },
+    };
+    const digest = computeDigest(base);
+    const contractJson = JSON.stringify({ ...base, digest });
+    const envelope = (status: string): string => JSON.stringify({
+      schema_version: 1,
+      attempt: {
+        id: attemptId, ordinal: 1, contract_id: contractId, contract_digest: digest,
+        executor_kind: "agent", executor_id: "spin-local",
+        started_at: "2026-09-12T00:00:00.000Z", finished_at: "2026-09-12T00:01:00.000Z",
+      },
+      outcome: "completed",
+      criteria: [{ criterion_id: "done", status, evidence_ids: ["v1"] }],
+      checks: [{
+        check_id: "v1", argv: ["test", "-f", "out/lane.md"],
+        started_at: "2026-09-12T00:00:00.000Z", finished_at: "2026-09-12T00:00:01.000Z",
+        timed_out: false, exit_code: 0, signal: null, stdout_excerpt: "", stderr_excerpt: "",
+      }],
+      artifacts: [{ artifact_id: "o1", exists: true, kind: "file", ref: "out/lane.md" }],
+      worker_report: { summary: "done", claims: [], unresolved_risks: [] },
+    });
+    return { contractJson, digest, envelope };
+  }
+
+  /** Insert a contract + completed attempt + stored result (no node binding). */
+  function insertEvidence(
+    cardId: number, attemptId: string, status: "passed" | "failed" = "passed",
+  ): { contractId: string; envelope: string } {
+    const contractId = `ctr-${attemptId}`;
+    const { contractJson, digest, envelope } = evidenceShapes(cardId, attemptId, contractId);
+    store.db.prepare(
+      `INSERT INTO worker_contracts (id, card_id, revision, root_contract_id, schema_version, contract_json, contract_digest, created_at)
+       VALUES (?, ?, 1, ?, 1, ?, ?, datetime('now'))`,
+    ).run(contractId, cardId, contractId, contractJson, digest);
+    store.db.prepare(
+      `INSERT INTO worker_attempts (id, card_id, contract_id, ordinal, executor_kind, executor_id, status, started_at, lifecycle)
+       VALUES (?, ?, ?, 1, 'agent', 'spin-local', 'settled', datetime('now'), 'completed')`,
+    ).run(attemptId, cardId, contractId);
+    const body = envelope(status);
+    store.db.prepare(
+      `INSERT INTO worker_results (attempt_id, envelope_json, envelope_digest, created_at)
+       VALUES (?, ?, ?, datetime('now'))`,
+    ).run(attemptId, body, computeEnvelopeDigest(JSON.parse(body)));
+    return { contractId, envelope: body };
+  }
+
+  /** Bind a node to a worker card with a completed attempt + stored result. */
+  function seedBoundCompletion(
+    runId: string, nodeId: string, status: "passed" | "failed" = "passed",
+  ): { cardId: number; attemptId: string; envelope: string } {
+    const cardId = nextWorkerCard();
+    const attemptId = `att-acc-${attSeqAcc++}`;
+    const { envelope } = insertEvidence(cardId, attemptId, status);
+    store.bindNodeWorker(runId, 1, nodeId, cardId, attemptId);
+    return { cardId, attemptId, envelope };
+  }
+
+  function ageClaims(runId: string): void {
+    store.db.prepare(`UPDATE workflow_commands SET next_inspection_at = datetime('now','-10 minutes') WHERE run_id = ?`)
+      .run(runId);
+  }
+
+  function dispatchKey(runId: string, nodeId: string) {
+    return { nodeId, action: "dispatch" as const, ordinal: 0, generation: 1 };
+  }
+
+  beforeEach(() => {
+    ({ runner, store } = makeRunner());
+    // Fresh worker-evidence tables: this suite owns the durable acceptance
+    // fixtures (earlier suites create partial worker_attempts shapes).
+    store.db.exec(`DROP TABLE IF EXISTS worker_results`);
+    store.db.exec(`DROP TABLE IF EXISTS worker_contracts`);
+    store.db.exec(`DROP TABLE IF EXISTS worker_attempts`);
+    store.db.exec(`
+      CREATE TABLE worker_attempts (
+        id TEXT PRIMARY KEY, card_id INTEGER NOT NULL, contract_id TEXT NOT NULL,
+        ordinal INTEGER NOT NULL, executor_kind TEXT NOT NULL, executor_id TEXT NOT NULL,
+        status TEXT NOT NULL, started_at TEXT NOT NULL,
+        lifecycle TEXT NOT NULL DEFAULT 'pending',
+        generation INTEGER DEFAULT 1,
+        root_project_card_id INTEGER, root_project_generation INTEGER,
+        cancel_reason TEXT,
+        UNIQUE(card_id, ordinal)
+      );
+      CREATE TABLE worker_contracts (
+        id TEXT PRIMARY KEY, card_id INTEGER NOT NULL, revision INTEGER NOT NULL DEFAULT 1,
+        root_contract_id TEXT NOT NULL, parent_contract_id TEXT, source_attempt_id TEXT,
+        schema_version INTEGER NOT NULL, contract_json TEXT NOT NULL, contract_digest TEXT NOT NULL,
+        created_at TEXT NOT NULL
+      );
+      CREATE TABLE worker_results (
+        attempt_id TEXT PRIMARY KEY, envelope_json TEXT NOT NULL, envelope_digest TEXT NOT NULL,
+        created_at TEXT NOT NULL
+      );
+      CREATE TABLE IF NOT EXISTS project_input_requests (
+        id TEXT PRIMARY KEY, project_card_id INTEGER NOT NULL,
+        review_case_id TEXT NOT NULL, question TEXT NOT NULL,
+        affected_criterion_ids TEXT NOT NULL,
+        expected_response_kind TEXT NOT NULL DEFAULT 'text',
+        context TEXT,
+        status TEXT NOT NULL DEFAULT 'pending',
+        created_at TEXT NOT NULL,
+        answered_at TEXT, response_text TEXT
+      );
+    `);
+    for (const t of ["workflow_ingress", "workflow_deliveries", "workflow_commands", "workflow_budgets", "workflow_node_deps", "workflow_nodes", "workflow_plan_revisions", "workflow_operations", "workflow_runs"]) {
+      store.db.exec(`DELETE FROM ${t}`);
+    }
+  });
+
+  it("inspection of a completed claim succeeds only on passing stored evidence", () => {
+    const run = admit(runner, seedCard(store));
+    const acc = runner.acceptPlan(run.runId, twoLane());
+    const { port } = fakePort();
+    expect(runner.drain(10, port)).toBe(2);
+    const a = acc.nodeIds[0] as string;
+    const b = acc.nodeIds[1] as string;
+    const { envelope } = seedBoundCompletion(run.runId, a, "passed");
+    ageClaims(run.runId);
+    expect(runner.inspectClaim(run.runId, dispatchKey(run.runId, a), 1)).toBe("applied:done");
+    const node = store.listNodes(run.runId, 1).find((n) => n["node_id"] === a);
+    expect(node?.["status"]).toBe("succeeded");
+    expect(node?.["outcome"]).toBe(envelope);
+    // S still waits on B: no duplicate or early successor.
+    expect(runner.drain(10, port)).toBe(0);
+    runner.attemptSucceeded(run.runId, b, "att-b", "{}");
+    expect(runner.drain(10, port)).toBe(1);
+  });
+
+  it("inspection rejects failed evidence on a required node and skips dependents", () => {
+    const run = admit(runner, seedCard(store));
+    const acc = runner.acceptPlan(run.runId, twoLane());
+    const { port } = fakePort();
+    runner.drain(10, port);
+    const a = acc.nodeIds[0] as string;
+    seedBoundCompletion(run.runId, a, "failed");
+    ageClaims(run.runId);
+    expect(runner.inspectClaim(run.runId, dispatchKey(run.runId, a), 1)).toBe("applied:done");
+    const nodes = store.listNodes(run.runId, 1);
+    expect(nodes.find((n) => n["node_id"] === a)?.["status"]).toBe("failed");
+    expect(nodes.find((n) => n["node_id"] === a)?.["outcome"]).toMatch(/acceptance_unmet/);
+    expect(nodes.find((n) => n["node_id"] === acc.nodeIds[2])?.["status"]).toBe("skipped");
+    expect(store.readBudgets(run.runId)["work_retry"]?.consumed).toBe(0);
+  });
+
+  it("inspection rejects failed evidence on an optional node but releases dependents", () => {
+    const run = admit(runner, seedCard(store));
+    const proposal: Proposal = {
+      requiredOutputs: ["report"],
+      nodes: [
+        { label: "opt", kind: "work", instructions: "nice", capability: "general", outputs: ["extra"], acceptance: ["done"], dependsOn: [], optional: true },
+        { label: "s", kind: "synthesis", instructions: "write", capability: "write", outputs: ["report"], acceptance: ["done"], dependsOn: ["opt"] },
+      ],
+    };
+    const acc = runner.acceptPlan(run.runId, proposal);
+    const { port, dispatched } = fakePort();
+    expect(runner.drain(10, port)).toBe(1);
+    const opt = acc.nodeIds[0] as string;
+    seedBoundCompletion(run.runId, opt, "failed");
+    ageClaims(run.runId);
+    expect(runner.inspectClaim(run.runId, dispatchKey(run.runId, opt), 1)).toBe("applied:done");
+    expect(store.listNodes(run.runId, 1).find((n) => n["node_id"] === opt)?.["status"]).toBe("failed");
+    // The allowed dependent is released with a real command, not just a
+    // satisfied dep row.
+    expect(runner.drain(10, port)).toBe(1);
+    expect(dispatched[dispatched.length - 1]?.nodeId).toBe(acc.nodeIds[1]);
+  });
+
+  it("inspection fails closed when the completed attempt has no stored result", () => {
+    const run = admit(runner, seedCard(store));
+    const acc = runner.acceptPlan(run.runId, twoLane());
+    const { port } = fakePort();
+    runner.drain(10, port);
+    const a = acc.nodeIds[0] as string;
+    const { attemptId } = seedBoundCompletion(run.runId, a, "passed");
+    store.db.prepare(`DELETE FROM worker_results WHERE attempt_id = ?`).run(attemptId);
+    ageClaims(run.runId);
+    expect(runner.inspectClaim(run.runId, dispatchKey(run.runId, a), 1)).toBe("applied:done");
+    const node = store.listNodes(run.runId, 1).find((n) => n["node_id"] === a);
+    expect(node?.["status"]).toBe("failed");
+    expect(node?.["outcome"]).toMatch(/acceptance_unreadable: envelope/);
+  });
+
+  it("direct completion for a superseded attempt throws stale and changes nothing", () => {
+    const run = admit(runner, seedCard(store));
+    const acc = runner.acceptPlan(run.runId, twoLane());
+    const { port } = fakePort();
+    runner.drain(10, port);
+    const a = acc.nodeIds[0] as string;
+    const { attemptId: oldId, cardId } = seedBoundCompletion(run.runId, a, "passed");
+    // A retry successor is already the current attempt for the card.
+    store.db.prepare(
+      `INSERT INTO worker_attempts (id, card_id, contract_id, ordinal, executor_kind, executor_id, status, started_at, lifecycle)
+       VALUES ('att-acc-new', ?, ?, 2, 'agent', 'spin-local', 'running', datetime('now'), 'running')`,
+    ).run(cardId, `ctr-${oldId}`);
+    expect(() => runner.attemptSucceeded(run.runId, a, oldId, "{}")).toThrow(/stale attempt/);
+    expect(store.listNodes(run.runId, 1).find((n) => n["node_id"] === a)?.["status"]).toBe("running");
+    expect(store.readBudgets(run.runId)["work_retry"]?.consumed).toBe(0);
+    // The current attempt still succeeds normally through stored evidence
+    // under the same (unreplaced) contract.
+    store.db.prepare(`UPDATE worker_attempts SET lifecycle = 'completed', status = 'settled' WHERE id = 'att-acc-new'`).run();
+    const shapes = evidenceShapes(cardId, "att-acc-new", `ctr-${oldId}`);
+    const body = shapes.envelope("passed");
+    store.db.prepare(
+      `INSERT INTO worker_results (attempt_id, envelope_json, envelope_digest, created_at)
+       VALUES ('att-acc-new', ?, ?, datetime('now'))`,
+    ).run(body, computeEnvelopeDigest(JSON.parse(body)));
+    runner.attemptSucceeded(run.runId, a, "att-acc-new", "{}");
+    const done = store.listNodes(run.runId, 1).find((n) => n["node_id"] === a);
+    expect(done?.["status"]).toBe("succeeded");
+    expect(done?.["outcome"]).toBe(body);
+  });
+
+  it("recovery then inspection then recovery applies exactly once", () => {
+    const run = admit(runner, seedCard(store));
+    const acc = runner.acceptPlan(run.runId, twoLane());
+    const { port } = fakePort();
+    runner.drain(10, port);
+    const a = acc.nodeIds[0] as string;
+    const { envelope } = seedBoundCompletion(run.runId, a, "passed");
+    // Recovery applies the unconsumed completion (claimed command, node open).
+    expect(runner.recoverUnconsumedCompletions(10)).toBe(1);
+    expect(store.listNodes(run.runId, 1).find((n) => n["node_id"] === a)?.["status"]).toBe("succeeded");
+    expect(store.listNodes(run.runId, 1).find((n) => n["node_id"] === a)?.["outcome"]).toBe(envelope);
+    // Reordered inspection finds the terminal node and only finishes the
+    // orphaned claim; a second recovery finds nothing to apply.
+    expect(runner.inspectClaim(run.runId, dispatchKey(run.runId, a), 1)).toBe("noop:done");
+    expect(runner.recoverUnconsumedCompletions(10)).toBe(0);
+    const succ = store.db.prepare(`SELECT COUNT(*) AS c FROM workflow_commands WHERE run_id = ? AND node_id = ?`)
+      .get(run.runId, acc.nodeIds[2]) as { c: number };
+    expect(Number(succ.c)).toBe(0); // S still waits on B: exactly-once held.
+  });
+
+  it("quality rejection leaves the retry allowance for genuine flakes", () => {
+    const run = admit(runner, seedCard(store));
+    const acc = runner.acceptPlan(run.runId, twoLane());
+    const { port } = fakePort();
+    runner.drain(10, port);
+    const a = acc.nodeIds[0] as string;
+    const b = acc.nodeIds[1] as string;
+    seedBoundCompletion(run.runId, a, "failed");
+    ageClaims(run.runId);
+    expect(runner.inspectClaim(run.runId, dispatchKey(run.runId, a), 1)).toBe("applied:done");
+    expect(store.listNodes(run.runId, 1).find((n) => n["node_id"] === a)?.["status"]).toBe("failed");
+    // A genuinely retry-safe failure on the sibling still spends the
+    // untouched allowance and requeues.
+    runner.attemptFailed(run.runId, b, "att-b1", "flaky transport", true);
+    const cmds = store.db.prepare(
+      `SELECT ordinal FROM workflow_commands WHERE run_id = ? AND node_id = ? ORDER BY ordinal`,
+    ).all(run.runId, b) as Array<{ ordinal: number }>;
+    expect(cmds.map((c) => Number(c.ordinal))).toEqual([0, 1]);
+    expect(store.readBudgets(run.runId)["work_retry"]?.consumed).toBe(1);
+  });
+
+  it("rejected unapplied ingress replays as a consumed failure, never a success", () => {
+    const run = admit(runner, seedCard(store));
+    const acc = runner.acceptPlan(run.runId, twoLane());
+    const a = acc.nodeIds[0] as string;
+    const { attemptId } = seedBoundCompletion(run.runId, a, "failed");
+    // Plant the legacy abstract success request for node A with its real
+    // attempt identity; the guarded applier must consume it as a failure.
+    const realPayload = JSON.stringify({
+      kind: "AttemptSucceeded",
+      body: { nodeId: a, attemptId, artifactsJson: "{}" },
+    });
+    store.db.prepare(
+      `INSERT INTO workflow_ingress (event_id, run_id, payload_hash, payload_json, disposition, received_at)
+       VALUES ('replay-rej-1', ?, 'h', ?, 'received', datetime('now'))`,
+    ).run(run.runId, realPayload);
+    expect(runner.startupRecovery().redrivenIngress).toBe(1);
+    const nodes = store.listNodes(run.runId, 1);
+    expect(nodes.find((n) => n["node_id"] === a)?.["status"]).toBe("failed");
+    expect(nodes.find((n) => n["node_id"] === a)?.["outcome"]).toMatch(/acceptance_unmet/);
+    const ing = store.db.prepare(`SELECT disposition, payload_json FROM workflow_ingress WHERE event_id = 'replay-rej-1'`)
+      .get() as { disposition: string; payload_json: string };
+    expect(ing.disposition).toBe("applied");
+    expect(ing.payload_json).toBe(realPayload);
   });
 });
