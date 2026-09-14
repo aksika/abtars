@@ -34,6 +34,7 @@ import {
   boundText,
   type DeliverySender,
   type ExecutionPort,
+  type PlanDiagnostic,
   type PlanProposal,
   type PlannerBackend,
   type PlanningInput,
@@ -64,6 +65,7 @@ const REVIEWER_TIMEOUT_MS = 300_000;
 function planPrompt(input: {
   goal: string; requiredOutputs: string[]; capabilities: string[];
   priorResults: string; attempt: number; problem?: string;
+  workspace: string | null;
 }): string {
   return [
     "You are a work planner. Decompose the goal into a parallelizable work graph.",
@@ -75,6 +77,11 @@ function planPrompt(input: {
     "Every requiredOutput must be declared in some node's outputs.",
     "All outputs must be workspace-relative paths (e.g. out/report.md) — never absolute paths, never ~, never /home or /tmp prefixes. Absolute outputs are rejected.",
     "Include an explicit synthesis node when the requested output needs assembled writing.",
+    ...(input.workspace !== null ? [
+      `Workspace root: ${input.workspace}`,
+      "Node outputs and requiredOutputs resolve against exactly that root — do not prepend any additional directory prefix. An absolute path named in the goal identifies the destination, not an extra relative prefix.",
+      "Preserve the lane identity, source scope, optionality, exact artifact names, and report requirements stated in the goal verbatim.",
+    ] : []),
     `Goal: ${input.goal}`,
     `Required outputs: ${input.requiredOutputs.join(", ")}`,
     input.priorResults.length > 0 ? `Prior results under revision (build on them): ${input.priorResults}` : "",
@@ -443,28 +450,38 @@ export class SpinPlannerBackend implements PlannerBackend {
 
   private async run(cmd: CommandRow, input: PlanningInput): Promise<void> {
     const store = this.runner.store;
+    // #1795: the complete saved goal — never a silently shortened task.
+    // Provider/context failures stay explicit errors downstream.
     const goal = this.goalOf(cmd.runId);
+    // #1795: the immutable bound workspace, when one is bound. Unbound runs
+    // keep the generic workspace-relative rule above (no concrete root to
+    // state); a bound root is always stated explicitly, never assumed.
+    const workspace = this.runner.boundWorkspaceOf(cmd.runId);
     const caps = [...this.runner.capabilities];
     let problems = "";
+    let lastDiagnostics: PlanDiagnostic[] = [];
     for (let attempt = 0; attempt < 2; attempt++) {
       const text = await this.callModel(planPrompt({
         goal, requiredOutputs: input.requiredOutputs, capabilities: caps,
         priorResults: input.defects.length > 0 ? JSON.stringify(input.defects) : "",
         attempt, problem: attempt === 0 ? undefined : problems,
+        workspace,
       }), PLANNER_TIMEOUT_MS);
       let proposal: PlanProposal;
       try {
         proposal = parseProposal(text);
       } catch (err) {
         problems = err instanceof Error ? err.message : String(err);
+        lastDiagnostics = [{ field: "proposal", reason: problems }];
         if (attempt === 0) continue;
-        throw err;
+        break;
       }
-      const found = this.runner.validatePlan(proposal);
-      if (found.length > 0) {
-        problems = found.map((p) => `${p.field}: ${p.reason}`).join("; ");
+      const diagnostics = this.runner.validatePlanForRun(cmd.runId, proposal);
+      if (diagnostics.length > 0) {
+        problems = diagnostics.map((p) => `${p.field}: ${p.reason}`).join("; ");
+        lastDiagnostics = diagnostics;
         if (attempt === 0) continue;
-        throw new Error(`proposal invalid: ${problems}`);
+        break;
       }
       const base = store.currentRevision(cmd.runId);
       this.runner.submitPlanProposal(cmd.runId, proposal, {
@@ -490,6 +507,17 @@ export class SpinPlannerBackend implements PlannerBackend {
       this.onSettled();
       return;
     }
+    // #1795: both local attempts failed — hand the rejection to the runner
+    // instead of throwing past drain. rejectPlanRound records PlanRejected,
+    // consumes one plan_revision, and requeues this round (or fails the run
+    // on exhaustion). This backend still throws: the claim must not complete
+    // as success, and on exhaustion there is nothing to wake for.
+    const { outcome, reason } = this.runner.rejectPlanRound(cmd.runId, lastDiagnostics, {
+      opId: input.opId,
+      planRound: { nodeId: cmd.nodeId, ordinal: cmd.ordinal, payloadJson: cmd.payloadJson },
+    });
+    if (outcome === "requeued") this.onSettled();
+    throw new Error(`planner corrections exhausted: ${reason}`);
   }
 
   private goalOf(runId: string): string {
@@ -498,7 +526,9 @@ export class SpinPlannerBackend implements PlannerBackend {
     const card = this.runner.store.db
       .prepare(`SELECT title, goal FROM kanban_board WHERE id = ?`)
       .get(run.rootCardId) as { title: string; goal: string | null } | undefined;
-    return (card?.goal ?? card?.title ?? runId).slice(0, 2000);
+    // #1795: complete saved goal — no silent truncation. All planning rounds
+    // receive the full task, including rules captured beyond any cutoff.
+    return card?.goal ?? card?.title ?? runId;
   }
 }
 

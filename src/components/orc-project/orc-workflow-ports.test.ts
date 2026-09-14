@@ -3,6 +3,7 @@ import { mkdirSync, rmSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { vi } from "vitest";
+import { ProjectReviewStore } from "../project-acceptance/project-review-store.js";
 
 let TEST_HOME: string;
 let RunnerType: typeof import("./orc-workflow-runner.js").WorkflowRunner;
@@ -135,7 +136,7 @@ describe("WorkflowPorts", () => {
     expect(done.status).toBe("done");
   });
 
-  it("planner backend corrects once, then surfaces persistent failure", async () => {
+  it("planner backend hands exhausted corrections to the runner budget (#1795 §2a)", async () => {
     const run = admit(runner, seedCard(store));
     let calls = 0;
     const backend = new Ports.SpinPlannerBackend({
@@ -159,9 +160,43 @@ describe("WorkflowPorts", () => {
     });
     await new Promise((r) => setTimeout(r, 50));
     expect(calls).toBe(2);
-    // Claim left for lease expiry + inspection (bounded, terminating explicitly).
-    const left = store.db.prepare(`SELECT status FROM workflow_commands WHERE run_id = ? AND node_id = '__plan__'`).get(run.runId) as { status: string };
-    expect(left.status).toBe("claimed");
+    // Durable rejection, not a swallowed throw: exactly one plan_revision
+    // consumed, the failed round superseded, a fresh round requeued, and the
+    // run still planning with no revision admitted.
+    const budgets = store.readBudgets(run.runId);
+    expect(budgets["plan_revision"].consumed).toBe(1);
+    const cmds = store.db.prepare(`SELECT ordinal, status FROM workflow_commands WHERE run_id = ? AND node_id = '__plan__' ORDER BY ordinal`).all(run.runId) as Array<{ ordinal: number; status: string }>;
+    expect(cmds).toEqual([{ ordinal: 0, status: "cancelled" }, { ordinal: 1, status: "pending" }]);
+    expect(store.getRun(run.runId)?.state).toBe("planning");
+    expect(store.currentRevision(run.runId)).toBe(0);
+  });
+
+  it("planner exhaustion with zero budget fails the run with the rejection diagnostics", async () => {
+    copSeq++;
+    const card = seedCard(store);
+    const run = runner.admit({ rootKind: "interactive", rootCardId: card, clientOperationId: `port-zero-${copSeq}`, budgets: { plan_revision: 0 } }).run;
+    const backend = new Ports.SpinPlannerBackend({
+      runner,
+      callModel: async () => "not json at all",
+    });
+    store.queueCommand({ runId: run.runId, generation: 1, nodeId: "__plan__", action: "plan", ordinal: 0, payloadJson: "{}" });
+    store.claimCommand({ runId: run.runId, generation: 1, nodeId: "__plan__", action: "plan", ordinal: 0 }, "spin-planner");
+    backend.startPlanning({
+      runId: run.runId, generation: 1, nodeId: "__plan__", action: "plan" as const, ordinal: 0,
+      status: "claimed" as const, payloadJson: "{}",
+      createdAt: "", claimedAt: "", doneAt: null, owner: "spin-planner", claimToken: "t",
+      inspectGen: 0, consecutiveInconclusive: 0, nextInspectionAt: null,
+    }, {
+      runId: run.runId, revision: null, purpose: "initial", defects: [],
+      requiredOutputs: ["o"], nodeId: "__plan__",
+    });
+    await new Promise((r) => setTimeout(r, 50));
+    // No requeue, no stranded claim, no inspection no_workers: the run fails
+    // with the rejection diagnostics.
+    const done = store.getRun(run.runId);
+    expect(done?.state).toBe("failed");
+    expect(done?.failureCode).toBe("plan_rejected");
+    expect(done?.failureReason).toMatch(/proposal/);
   });
 
   it("reviewer backend forwards the verdict for host application", async () => {
@@ -263,8 +298,9 @@ describe("WorkflowPorts", () => {
     expect(store.currentRevision(run.runId)).toBe(1);
     expect(wakes).toBe(1);
 
-    // Persistent model failure: nothing new queued, no wake (lease expiry +
-    // inspection own recovery — no phantom drain).
+    // Persistent model failure: the rejection is durable and budgeted, the
+    // round is requeued, and the drain is woken for it (#1795 §2a — the old
+    // swallow-and-inspect behavior is gone).
     const run2 = admit(runner, seedCard(store));
     let wakes2 = 0;
     const failing = new Ports.SpinPlannerBackend({
@@ -272,13 +308,78 @@ describe("WorkflowPorts", () => {
       callModel: async () => "not json at all",
       onSettled: () => { wakes2++; },
     });
+    const cmd2 = {
+      runId: run2.runId, generation: 1, nodeId: "__plan__", action: "plan" as const, ordinal: 0,
+      status: "claimed" as const, payloadJson: "{}",
+      createdAt: "", claimedAt: "", doneAt: null, owner: "spin-planner", claimToken: "t",
+      inspectGen: 0, consecutiveInconclusive: 0, nextInspectionAt: null,
+    };
     store.queueCommand({ runId: run2.runId, generation: 1, nodeId: "__plan__", action: "plan", ordinal: 0, payloadJson: "{}" });
     store.claimCommand({ runId: run2.runId, generation: 1, nodeId: "__plan__", action: "plan", ordinal: 0 }, "spin-planner");
-    failing.startPlanning(cmd, {
+    failing.startPlanning(cmd2, {
       runId: run2.runId, revision: null, purpose: "initial", defects: [],
       requiredOutputs: ["o"], nodeId: "__plan__",
     });
     await new Promise((r) => setTimeout(r, 50));
-    expect(wakes2).toBe(0);
+    expect(wakes2).toBe(1);
+    expect(store.readBudgets(run2.runId)["plan_revision"].consumed).toBe(1);
+  });
+
+  it("planner prompt carries the full goal and bound workspace on initial and correction rounds (#1795)", async () => {
+    const card = seedCard(store);
+    // Lane-4 instructions, optionality, handoff names, and report rules sit
+    // beyond the old 2000-unit cutoff: slicing them away must fail this test.
+    const tailMarker = `LANE4-TAIL-MARKER-${card}`;
+    const longGoal = `lane1-x research the topic\nlane2-rss gather feeds\n`
+      + `filler constraint line for padding purposes\n`.repeat(60)
+      + `${tailMarker}\nlane4-web is optional; write handoff lane4-web-handoff.md; final report Daily-Briefing-2026-09-14.md\n`;
+    expect(longGoal.length).toBeGreaterThan(2000);
+    expect(longGoal.indexOf(tailMarker)).toBeGreaterThan(2000);
+    store.db.prepare(`UPDATE kanban_board SET goal = ? WHERE id = ?`).run(longGoal, card);
+    const run = admit(runner, card);
+    const ws = join(TEST_HOME, `ws-1795-${card}`);
+    mkdirSync(ws, { recursive: true });
+    const reviewStore = new ProjectReviewStore(store.db);
+    reviewStore.ensureAwaitingContract(card);
+    expect(reviewStore.bindWorkspace(card, ws)).toEqual({ ok: true });
+
+    const prompts: string[] = [];
+    let calls = 0;
+    const backend = new Ports.SpinPlannerBackend({
+      runner,
+      callModel: async (prompt: string) => {
+        prompts.push(prompt);
+        calls++;
+        if (calls === 1) return JSON.stringify({ nodes: [], requiredOutputs: [] });
+        return JSON.stringify({
+          nodes: [
+            { label: "a", kind: "work", instructions: "do", capability: "general", outputs: ["o"], acceptance: ["done"], dependsOn: [] },
+          ],
+          requiredOutputs: ["o"],
+        });
+      },
+    });
+    store.queueCommand({ runId: run.runId, generation: 1, nodeId: "__plan__", action: "plan", ordinal: 0, payloadJson: "{}" });
+    store.claimCommand({ runId: run.runId, generation: 1, nodeId: "__plan__", action: "plan", ordinal: 0 }, "spin-planner");
+    backend.startPlanning({
+      runId: run.runId, generation: 1, nodeId: "__plan__", action: "plan" as const, ordinal: 0,
+      status: "claimed" as const, payloadJson: "{}",
+      createdAt: "", claimedAt: "", doneAt: null, owner: "spin-planner", claimToken: "t",
+      inspectGen: 0, consecutiveInconclusive: 0, nextInspectionAt: null,
+    }, {
+      runId: run.runId, revision: null, purpose: "initial", defects: [],
+      requiredOutputs: ["o"], nodeId: "__plan__",
+    });
+    await new Promise((r) => setTimeout(r, 50));
+    expect(calls).toBe(2);
+    // Only the external ModelCall input is captured: the full task tail and
+    // the bound workspace arrive intact on BOTH rounds.
+    expect(prompts.length).toBe(2);
+    for (const prompt of prompts) {
+      expect(prompt).toContain(tailMarker);
+      expect(prompt).toContain(`Workspace root: ${ws}`);
+    }
+    expect(prompts[1]).toContain("REJECTED");
+    expect(store.currentRevision(run.runId)).toBe(1);
   });
 });

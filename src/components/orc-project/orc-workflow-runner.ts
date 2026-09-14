@@ -29,7 +29,10 @@ import {
   type WorkflowRunState,
 } from "./orc-workflow-store.js";
 import { mkdirSync, realpathSync } from "node:fs";
+import { isAbsolute, normalize, relative, resolve } from "node:path";
 import type { TaskDatabase } from "../tasks/kanban-board.js";
+import { parseReportContractSnapshot } from "../tasks/task-state-store.js";
+import { isPathWithinRoot } from "../workspace-paths.js";
 import { ensureRunnerTables } from "./orc-workflow-ensure.js";
 import {
   kanbanGetCard,
@@ -322,7 +325,7 @@ export class WorkflowRunner {
     if (this.store.currentRevision(runId) !== 0) {
       throw new Error(`workflow runner: run ${runId} already has a plan; use submitPlanProposal`);
     }
-    const problems = this.validatePlan(proposal);
+    const problems = this.validatePlanForRun(runId, proposal);
     if (problems.length > 0) {
       // Invalid proposal: no worker side effects. Each rejection consumes the
       // plan_revision allowance; exhaustion fails the run with the diagnostics.
@@ -461,6 +464,165 @@ export class WorkflowRunner {
   }
 
   /**
+   * #1795: immutable bound project workspace for a run (the supervision
+   * binding; null when nothing is bound). Read-only; the binding itself is
+   * owned by admission and never re-pointed here.
+   */
+  boundWorkspaceOf(runId: string): string | null {
+    const run = this.store.getRun(runId);
+    if (!run) return null;
+    const reviewStore = new ProjectReviewStore(this.store.db);
+    return reviewStore.getSupervision(run.rootCardId)?.workspace_cwd ?? null;
+  }
+
+  /**
+   * #1795: host-owned final-report constraint for scheduled report tasks.
+   * Reads the already-persisted `task_runs.report_contract_json` snapshot for
+   * the run's scheduled occurrence through the shared store connection (no
+   * migration, no Markdown parsing, no title inference) and expresses the
+   * artifact path relative to the bound workspace.
+   *
+   * Returns `{ ref: null, problem: null }` when the task carries no report
+   * contract (generic flow unchanged). A present-but-unusable contract
+   * (unreadable/malformed/invalid, unbound workspace, path escaping the
+   * workspace) returns an explicit problem naming the contract — never a
+   * model-guess substitution. Containment is purely lexical (no filesystem
+   * touch): a future output file is not required to exist.
+   */
+  reportConstraintOf(runId: string): { ref: string | null; problem: string | null } {
+    const run = this.store.getRun(runId);
+    const scheduledRunId = run?.scheduledRunId;
+    if (!run || !scheduledRunId) return { ref: null, problem: null };
+    let raw: string | null = null;
+    try {
+      const row = this.store.db
+        .prepare(`SELECT report_contract_json FROM task_runs WHERE run_id = ?`)
+        .get(scheduledRunId) as { report_contract_json: string | null } | undefined;
+      raw = row?.report_contract_json ?? null;
+    } catch {
+      return { ref: null, problem: `requiredOutputs: scheduled report contract unreadable for run ${scheduledRunId}` };
+    }
+    if (raw === null) return { ref: null, problem: null };
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(raw);
+    } catch {
+      return { ref: null, problem: `requiredOutputs: scheduled report contract malformed for run ${scheduledRunId}` };
+    }
+    const snapshot = parseReportContractSnapshot(parsed);
+    if (!snapshot) {
+      return { ref: null, problem: `requiredOutputs: scheduled report contract invalid for run ${scheduledRunId}` };
+    }
+    const workspace = this.boundWorkspaceOf(runId);
+    if (!workspace) {
+      return { ref: null, problem: `requiredOutputs: scheduled report contract present but project workspace unbound for run ${runId}` };
+    }
+    const root = normalize(workspace);
+    const target = isAbsolute(snapshot.artifactPath)
+      ? normalize(snapshot.artifactPath)
+      : resolve(root, snapshot.artifactPath);
+    if (!isPathWithinRoot(root, target)) {
+      return { ref: null, problem: `requiredOutputs: scheduled report contract escapes the bound workspace for run ${scheduledRunId}` };
+    }
+    const ref = relative(root, target);
+    if (ref === "") {
+      return { ref: null, problem: `requiredOutputs: scheduled report contract names the workspace root for run ${scheduledRunId}` };
+    }
+    return { ref, problem: null };
+  }
+
+  /**
+   * #1795: the single run-aware plan validation boundary. Supplies the
+   * current cumulative outputs plus the host report constraint, then
+   * delegates to the pure `validatePlan` (unchanged signature, kept for
+   * unit-level use). The planner prevalidation, `acceptPlan`, and
+   * `submitPlanProposal` — including direct callers — all funnel through
+   * here, so no validation call resolves a scheduled contract without the
+   * run id, and both planner-side and admission-side checks share the same
+   * cumulative context (a repair retaining the report while changing another
+   * artifact passes on both sides).
+   */
+  validatePlanForRun(runId: string, proposal: PlanProposal): PlanDiagnostic[] {
+    const current = this.store.currentRevision(runId);
+    const problems = this.validatePlan(proposal, this.cumulativeOutputs(runId, current));
+    const constraint = this.reportConstraintOf(runId);
+    if (constraint.problem) {
+      problems.push({ field: "requiredOutputs", reason: constraint.problem });
+    } else if (constraint.ref && !(proposal.requiredOutputs ?? []).includes(constraint.ref)) {
+      problems.push({ field: "requiredOutputs", reason: `missing host-required report output ${constraint.ref}` });
+    }
+    return problems;
+  }
+
+  /**
+   * #1795: planner `requiredOutputs` input for every purpose (initial,
+   * repair, next wave). The host report ref is populated from revision 0 —
+   * the union of the host ref (when present) and the latest admitted plan —
+   * so the initial planner receives the exact report ref even though no
+   * revision exists yet, replacing trust-the-first-model-plan.
+   */
+  private plannerRequiredOutputs(runId: string): string[] {
+    const base = this.requiredOutputsOf(runId);
+    const constraint = this.reportConstraintOf(runId);
+    if (constraint.ref && !base.includes(constraint.ref)) return [constraint.ref, ...base];
+    return base;
+  }
+
+  /**
+   * #1795: durable rejection handoff shared by admission and the planner
+   * backend's exhausted corrections. Records PlanRejected, consumes one
+   * `plan_revision`, and requeues the same planning round — or fails the run
+   * with the rejection diagnostics when the budget is exhausted. Returns the
+   * outcome with the bounded reason text. Throws only on ingress conflict.
+   */
+  rejectPlanRound(
+    runId: string,
+    problems: PlanDiagnostic[],
+    opts?: { opId?: string; planRound?: { nodeId: string; ordinal: number; payloadJson: string } },
+  ): { outcome: "requeued" | "failed"; reason: string } {
+    const run = this.requireLive(runId);
+    const text = boundText(problems.map((p) => `${p.field}: ${p.reason}`).join("; "), 2000);
+    let outcome: "requeued" | "failed" = "requeued";
+    const res = this.commitKind(run, "PlanRejected", { problems }, () => {
+      const ok = this.store.consumeBudget(runId, "plan_revision");
+      if (!ok) {
+        if (opts?.opId) this.store.upsertOperation({ opId: opts.opId, runId, kind: "planning", status: "failed", resultJson: text });
+        outcome = "failed";
+        return { nextState: "failed" as const, failureCode: "plan_rejected", failureReason: text };
+      }
+      // Budget remains: the failed round must not strand the run. The
+      // backend that reported it is done (it throws past this call), so
+      // supersede its command and requeue the same planning round for a
+      // fresh model attempt — bounded by the budget consumed above.
+      // (Without this, rejection + swallowed backend error left a claimed
+      // command whose inspection could only fail the run as no_workers.)
+      if (opts?.planRound) {
+        const pr = opts.planRound;
+        this.store.supersedeCommand({ runId, generation: run.generation, nodeId: pr.nodeId, action: "plan", ordinal: pr.ordinal });
+        let opId = opts.opId;
+        try {
+          const parsed = JSON.parse(pr.payloadJson) as { opId?: unknown };
+          if (typeof parsed.opId === "string") opId = parsed.opId;
+        } catch {
+          // Unparseable payload: fall back to the deterministic op id.
+        }
+        this.store.upsertOperation({
+          opId: opId ?? opIdFor(runId, this.store.currentRevision(runId), pr.nodeId), runId, kind: "planning",
+          status: "pending", resultJson: JSON.stringify({ purpose: "retry" }),
+        });
+        this.store.queueCommand({
+          runId, generation: run.generation, nodeId: pr.nodeId, action: "plan",
+          ordinal: this.store.nextCommandOrdinal(runId, run.generation, pr.nodeId, "plan"),
+          payloadJson: pr.payloadJson,
+        });
+      }
+      return { nextState: "planning" as const };
+    });
+    if (res.disposition === "conflict") throw new Error(`workflow runner: ${res.diagnostics}`);
+    return { outcome, reason: text };
+  }
+
+  /**
    * Find a node's proposal spec by host id (ids embed `n{rev}_{i}_{label}`).
    * Single home for the id scheme (replaces ad-hoc reconstruction).
    */
@@ -511,45 +673,10 @@ export class WorkflowRunner {
     if (opts?.baseRevision !== undefined && opts.baseRevision !== current) {
       throw new Error(`workflow runner: revision ${opts.baseRevision} stale for run ${runId} (current ${current})`);
     }
-    const problems = this.validatePlan(proposal, this.cumulativeOutputs(runId, current));
+    const problems = this.validatePlanForRun(runId, proposal);
     if (problems.length > 0) {
-      const text = boundText(problems.map((p) => `${p.field}: ${p.reason}`).join("; "), 2000);
-      const res = this.commitKind(run, "PlanRejected", { problems }, () => {
-        const ok = this.store.consumeBudget(runId, "plan_revision");
-        if (!ok) {
-          if (opts?.opId) this.store.upsertOperation({ opId: opts.opId, runId, kind: "planning", status: "failed", resultJson: text });
-          return { nextState: "failed" as const, failureCode: "plan_rejected", failureReason: text };
-        }
-        // Budget remains: the failed round must not strand the run. The
-        // backend that reported it is done (it throws past this call), so
-        // supersede its command and requeue the same planning round for a
-        // fresh model attempt — bounded by the budget consumed above.
-        // (Without this, rejection + swallowed backend error left a claimed
-        // command whose inspection could only fail the run as no_workers.)
-        if (opts?.planRound) {
-          const pr = opts.planRound;
-          this.store.supersedeCommand({ runId, generation: run.generation, nodeId: pr.nodeId, action: "plan", ordinal: pr.ordinal });
-          let opId = opts.opId;
-          try {
-            const parsed = JSON.parse(pr.payloadJson) as { opId?: unknown };
-            if (typeof parsed.opId === "string") opId = parsed.opId;
-          } catch {
-            // Unparseable payload: fall back to the deterministic op id.
-          }
-          this.store.upsertOperation({
-            opId: opId ?? opIdFor(runId, current, pr.nodeId), runId, kind: "planning",
-            status: "pending", resultJson: JSON.stringify({ purpose: "retry" }),
-          });
-          this.store.queueCommand({
-            runId, generation: run.generation, nodeId: pr.nodeId, action: "plan",
-            ordinal: this.store.nextCommandOrdinal(runId, run.generation, pr.nodeId, "plan"),
-            payloadJson: pr.payloadJson,
-          });
-        }
-        return { nextState: "planning" as const };
-      });
-      if (res.disposition === "conflict") throw new Error(`workflow runner: ${res.diagnostics}`);
-      throw new Error(`workflow runner: plan revision rejected: ${text}`);
+      const { reason } = this.rejectPlanRound(runId, problems, { opId: opts?.opId, planRound: opts?.planRound });
+      throw new Error(`workflow runner: plan revision rejected: ${reason}`);
     }
     let baseline: string[] = [];
     try {
@@ -1510,7 +1637,7 @@ export class WorkflowRunner {
           });
           planner.startPlanning(cmd, {
             runId: cmd.runId, revision: payload.revision, purpose: payload.purpose,
-            defects: payload.defects ?? [], requiredOutputs: this.requiredOutputsOf(cmd.runId),
+            defects: payload.defects ?? [], requiredOutputs: this.plannerRequiredOutputs(cmd.runId),
             nodeId: cmd.nodeId, opId: payload.opId,
           });
         },

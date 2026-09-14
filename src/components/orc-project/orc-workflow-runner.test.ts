@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { vi } from "vitest";
 import { computeDigest, computeEnvelopeDigest } from "../worker-contract.js";
+import { ProjectReviewStore } from "../project-acceptance/project-review-store.js";
 
 let TEST_HOME: string;
 let RunnerType: typeof import("./orc-workflow-runner.js").WorkflowRunner;
@@ -1268,5 +1269,158 @@ describe("WorkflowRunner durable acceptance (#1794)", () => {
       .get() as { disposition: string; payload_json: string };
     expect(ing.disposition).toBe("applied");
     expect(ing.payload_json).toBe(realPayload);
+  });
+});
+
+describe("host report constraint (#1795)", () => {
+  beforeEach(() => {
+    ({ runner, store } = makeRunner());
+    for (const t of ["workflow_ingress", "workflow_deliveries", "workflow_commands", "workflow_budgets", "workflow_node_deps", "workflow_nodes", "workflow_plan_revisions", "workflow_operations", "workflow_runs"]) {
+      store.db.exec(`DELETE FROM ${t}`);
+    }
+  });
+
+  let schedSeq = 0;
+  const REPORT_NAME = "Daily-Briefing-2026-09-14.md";
+
+  /** Scheduled run with a persisted report contract + optional workspace binding. */
+  function seedScheduledReport(opts?: {
+    contract?: "valid" | "malformed" | "invalid-shape" | "escaping" | "none";
+    bind?: boolean;
+  }): { run: ReturnType<typeof admit>; card: number; scheduledRunId: string; ws: string; ref: string } {
+    schedSeq++;
+    const n = schedSeq;
+    const scheduledRunId = `sched-1795-${n}`;
+    const card = cardSeq++;
+    store.db.prepare(`INSERT INTO kanban_board (id, title, source, source_id, type, status, goal) VALUES (?, ?, 'task', ?, 'O', 'running', ?)`)
+      .run(card, `wf-1795-${card}`, scheduledRunId, `deliver report ${card}`);
+    // One live occurrence per task (partial unique index): unique task per seed.
+    const taskId = `daily-ai-1795-${n}`;
+    store.db.prepare(`INSERT OR IGNORE INTO task_state (task_id) VALUES (?)`).run(taskId);
+    store.db.prepare(
+      `INSERT INTO task_runs (run_id, task_id, group_id, attempt, trigger, occurrence_at,
+        reserved_at, deadline_at, phase, last_progress_at, owner_pid)
+       VALUES (?, ?, ?, 1, 'schedule', 1000, 1000, 9999999999, 'executing', 1000, 123456)`,
+    ).run(scheduledRunId, taskId, taskId);
+    const ws = join(TEST_HOME, `ws-1795-${n}`);
+    mkdirSync(ws, { recursive: true });
+    const mode = opts?.contract ?? "valid";
+    if (mode !== "none") {
+      const raw = mode === "malformed" ? "{not json"
+        : mode === "invalid-shape" ? JSON.stringify({ artifactPath: "", minBytes: "lots" })
+        : mode === "escaping"
+          ? JSON.stringify({ artifactPath: "/etc/Daily-Briefing-2026-09-14.md", minBytes: 10, requiredSections: ["# H"], baseline: { existed: false } })
+          : JSON.stringify({ artifactPath: join(ws, REPORT_NAME), minBytes: 100, requiredSections: ["# H"], baseline: { existed: false } });
+      store.db.prepare(`UPDATE task_runs SET report_contract_json = ? WHERE run_id = ?`).run(raw, scheduledRunId);
+    }
+    copSeq++;
+    const scheduled = runner.admit({ rootKind: "scheduled", rootCardId: card, scheduledRunId, clientOperationId: `cop-1795-${n}` }).run;
+    if (opts?.bind !== false) {
+      const reviewStore = new ProjectReviewStore(store.db);
+      reviewStore.ensureAwaitingContract(card);
+      expect(reviewStore.bindWorkspace(card, ws)).toEqual({ ok: true });
+    }
+    return { run: scheduled, card, scheduledRunId, ws, ref: REPORT_NAME };
+  }
+
+  const reportPlan = (ref: string): Proposal => ({
+    requiredOutputs: [ref],
+    nodes: [
+      { label: "lane1", kind: "work", instructions: "gather a", capability: "research", outputs: ["notes-a"], acceptance: ["thorough"], dependsOn: [] },
+      { label: "lane2", kind: "work", instructions: "gather b", capability: "research", outputs: ["notes-b"], acceptance: ["thorough"], dependsOn: [] },
+      { label: "write", kind: "synthesis", instructions: "draft report", capability: "write", outputs: [ref], acceptance: ["complete"], dependsOn: ["lane1", "lane2"] },
+    ],
+  });
+
+  it("wrong final output rejected before workers; correction to the exact ref admitted", () => {
+    const { run, ref } = seedScheduledReport();
+    // The incident's guessed path: structurally valid, host-unknown.
+    const wrong: Proposal = {
+      requiredOutputs: ["out/daily-briefing-2026-09-14.md"],
+      nodes: [
+        { label: "w", kind: "synthesis", instructions: "draft", capability: "write", outputs: ["out/daily-briefing-2026-09-14.md"], acceptance: ["complete"], dependsOn: [] },
+      ],
+    };
+    expect(() => runner.acceptPlan(run.runId, wrong)).toThrow(/missing host-required report output Daily-Briefing-2026-09-14\.md/);
+    expect(store.currentRevision(run.runId)).toBe(0);
+    expect(store.countRunCommands(run.runId, "pending")).toBe(0);
+    expect(store.readBudgets(run.runId)["plan_revision"].consumed).toBe(1);
+    const acc = runner.acceptPlan(run.runId, reportPlan(ref));
+    expect(acc.revision).toBe(1);
+    expect(acc.queued).toBe(2);
+  });
+
+  it("direct revision cannot drop the report; repair retaining it passes via cumulative coverage", () => {
+    const { run, ref } = seedScheduledReport();
+    runner.acceptPlan(run.runId, reportPlan(ref));
+    const narrow: Proposal = {
+      requiredOutputs: ["notes-a"],
+      nodes: [
+        { label: "x", kind: "work", instructions: "do", capability: "research", outputs: ["notes-a"], acceptance: ["done"], dependsOn: [] },
+      ],
+    };
+    expect(() => runner.submitPlanProposal(run.runId, narrow, { baseRevision: 1 })).toThrow(/missing host-required|weakens acceptance/);
+    expect(store.currentRevision(run.runId)).toBe(1);
+    // Repair changes another artifact while retaining the report requirement:
+    // rev-2 nodes need not redeclare the report (shared cumulative context).
+    const repair: Proposal = {
+      requiredOutputs: [ref],
+      nodes: [
+        { label: "fix", kind: "work", instructions: "add sources", capability: "research", outputs: ["notes-c"], acceptance: ["thorough"], dependsOn: [] },
+      ],
+    };
+    const rev2 = runner.submitPlanProposal(run.runId, repair, { baseRevision: 1 });
+    expect(rev2.revision).toBe(2);
+  });
+
+  it("malformed, escaping, and unbound contracts fail admission explicitly", () => {
+    const bad = seedScheduledReport({ contract: "malformed" });
+    expect(() => runner.acceptPlan(bad.run.runId, reportPlan(bad.ref))).toThrow(/report contract malformed/);
+    const esc = seedScheduledReport({ contract: "escaping" });
+    expect(() => runner.acceptPlan(esc.run.runId, reportPlan(esc.ref))).toThrow(/escapes the bound workspace/);
+    const unb = seedScheduledReport({ bind: false });
+    expect(() => runner.acceptPlan(unb.run.runId, reportPlan(unb.ref))).toThrow(/workspace unbound/);
+  });
+
+  it("a prefixed ref does not satisfy the host constraint (no basename fallback)", () => {
+    const { run, ref } = seedScheduledReport();
+    const prefixed: Proposal = {
+      requiredOutputs: [`daily-ai/${ref}`],
+      nodes: [
+        { label: "w", kind: "synthesis", instructions: "draft", capability: "write", outputs: [`daily-ai/${ref}`], acceptance: ["complete"], dependsOn: [] },
+      ],
+    };
+    expect(() => runner.acceptPlan(run.runId, prefixed)).toThrow(/missing host-required report output/);
+    expect(store.currentRevision(run.runId)).toBe(0);
+  });
+
+  it("scheduled runs without a contract keep the generic flow", () => {
+    const { run } = seedScheduledReport({ contract: "none" });
+    const acc = runner.acceptPlan(run.runId, twoLane());
+    expect(acc.revision).toBe(1);
+  });
+
+  it("drain hands the host ref to the initial planner at revision 0", () => {
+    const { run, ref } = seedScheduledReport();
+    const seen: Array<{ purpose: string; requiredOutputs: string[] }> = [];
+    const { port } = fakePort();
+    const ports = {
+      executor: port,
+      reviewer: { name: "cap-reviewer", startReview: (_cmd: { nodeId: string }, _brief: ReviewBrief) => {} },
+      planner: {
+        name: "cap-planner",
+        startPlanning: (_cmd: { nodeId: string }, input: { purpose: string; requiredOutputs: string[] }) => {
+          seen.push({ purpose: input.purpose, requiredOutputs: input.requiredOutputs });
+        },
+      },
+    };
+    store.queueCommand({
+      runId: run.runId, generation: 1, nodeId: "__plan__", action: "plan", ordinal: 0,
+      payloadJson: JSON.stringify({ nodeId: "__plan__", revision: null, purpose: "initial", defects: [], opId: "op-1795-cap" }),
+    });
+    expect(runner.drain(10, ports)).toBe(1);
+    expect(seen.length).toBe(1);
+    expect(seen[0]?.purpose).toBe("initial");
+    expect(seen[0]?.requiredOutputs).toContain(ref);
   });
 });

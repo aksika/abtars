@@ -19,6 +19,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { vi } from "vitest";
 import { computeDigest, computeEnvelopeDigest } from "../../components/worker-contract.js";
+import { ProjectReviewStore } from "../../components/project-acceptance/project-review-store.js";
 
 let TEST_HOME: string;
 let ARTIFACTS: string;
@@ -292,6 +293,107 @@ describe("orc-workflow E2E (Task 6)", () => {
       const tick = runner.auditTick(0);
       expect(tick.ownerless).not.toContain(run.runId);
     }
+  });
+
+  // Journey 1b (#1795): scheduled lanes write declared refs in the bound
+  // workspace; the host-required report reaches reviewed delivery with an
+  // optional-source gap. Uses the production composition throughout —
+  // scripted only at the lane-worker, model, transport, and clock edges.
+  it("scheduled lanes write declared refs; host-required report delivered despite an optional gap", () => {
+    copSeq++;
+    const scheduledRunId = `sched-1795-${copSeq}`;
+    const card = seedCard(store, "task", scheduledRunId);
+    seedOccurrence(store, `daily-ai-1795`, scheduledRunId);
+    const run = runner.admit({
+      rootKind: "scheduled",
+      rootCardId: card, scheduledRunId, clientOperationId: `e2e-1795-${copSeq}`,
+    }).run;
+    // Isolated bound workspace (the incident's shape: the bound root already
+    // ends in the project directory, so bare handoff refs are exact).
+    const ws = join(TEST_HOME, `daily-ai-1795-${copSeq}`);
+    mkdirSync(ws, { recursive: true });
+    const reportRef = "Daily-Briefing-2026-09-14.md";
+    store.db.prepare(`UPDATE task_runs SET report_contract_json = ? WHERE run_id = ?`)
+      .run(JSON.stringify({
+        artifactPath: join(ws, reportRef), minBytes: 100,
+        requiredSections: ["# Briefing"], baseline: { existed: false },
+      }), scheduledRunId);
+    const reviewStore = new ProjectReviewStore(store.db);
+    reviewStore.ensureAwaitingContract(card);
+    expect(reviewStore.bindWorkspace(card, ws)).toEqual({ ok: true });
+
+    const lanes: Proposal = {
+      requiredOutputs: [reportRef],
+      nodes: [
+        { label: "lane1-x", kind: "work", instructions: "research x", capability: "research", outputs: ["lane1-x-handoff.md"], acceptance: ["fresh"], dependsOn: [] },
+        { label: "lane2-rss", kind: "work", instructions: "gather rss", capability: "research", outputs: ["lane2-rss-handoff.md"], acceptance: ["fresh"], dependsOn: [] },
+        { label: "lane3-newsletter", kind: "work", instructions: "read newsletter", capability: "research", outputs: ["lane3-newsletter-handoff.md"], acceptance: ["fresh"], dependsOn: [] },
+        { label: "lane4-web", kind: "work", instructions: "browse web", capability: "research", outputs: ["lane4-web-handoff.md"], acceptance: ["fresh"], dependsOn: [], optional: true },
+        { label: "synthesis", kind: "synthesis", instructions: "assemble briefing", capability: "write", outputs: [reportRef], acceptance: ["complete"], dependsOn: ["lane1-x", "lane2-rss", "lane3-newsletter", "lane4-web"] },
+        { label: "judge", kind: "review", instructions: "assess", capability: "general", outputs: [], acceptance: [], dependsOn: ["synthesis"] },
+      ],
+    };
+    // The incident's nested refs are rejected here, before any worker exists.
+    expect(() => runner.acceptPlan(run.runId, {
+      requiredOutputs: ["daily-ai/lane1-x-handoff.md"],
+      nodes: [
+        { label: "w", kind: "work", instructions: "do", capability: "research", outputs: ["daily-ai/lane1-x-handoff.md"], acceptance: ["done"], dependsOn: [] },
+      ],
+    })).toThrow(/missing host-required/);
+    const acc = runner.acceptPlan(run.runId, lanes);
+    const l1 = acc.nodeIds[0] as string;
+    const l2 = acc.nodeIds[1] as string;
+    const l3 = acc.nodeIds[2] as string;
+    const l4 = acc.nodeIds[3] as string;
+    const synth = acc.nodeIds[4] as string;
+    const judge = acc.nodeIds[5] as string;
+    const { ports, dispatched } = scriptedPorts();
+    runner.drain(10, ports);
+    // Scripted lane workers write dated files at the declared refs.
+    const handoffs = ["lane1-x-handoff.md", "lane2-rss-handoff.md", "lane3-newsletter-handoff.md"];
+    const laneNodes = [l1, l2, l3];
+    for (let i = 0; i < handoffs.length; i++) {
+      const path = join(ws, handoffs[i] as string);
+      writeFileSync(path, `Generated: 2026-09-14\n# ${handoffs[i]}\nsubstance line\n`);
+      runner.attemptSucceeded(run.runId, laneNodes[i] as string, `att-1795-${i}`, JSON.stringify({ artifact: path }));
+    }
+    // Optional lane 4 fails hard: the gap stays visible, synthesis still runs.
+    runner.attemptFailed(run.runId, l4, `att-1795-4`, "source unavailable", false);
+    runner.drain(10, ports);
+    expect(dispatched.map((d) => d.nodeId)).toContain(synth);
+    const reportPath = join(ws, reportRef);
+    writeFileSync(reportPath, `# Briefing\n\nGenerated: 2026-09-14\nAssembled from lanes 1-3; lane 4 unavailable.\n`);
+    runner.attemptSucceeded(run.runId, synth, `att-1795-s`, JSON.stringify({ artifact: reportPath }));
+    runner.drain(10, ports);
+    // Prepared review sees the actual host-required report, not a summary.
+    const brief = runner.assembleBrief(run.runId, 1, judge);
+    const art = JSON.parse((brief.nodes.find((n) => n.nodeId === synth)?.outcome ?? "{}") as string) as { artifact?: string };
+    expect(art.artifact).toBe(reportPath);
+    expect(readFileSync(art.artifact as string, "utf8")).toMatch(/lane 4 unavailable/);
+    expect(runner.submitVerdict(run.runId, judge, { verdict: "accept" })).toBe("accepted");
+    // Accepted content is not proof of delivery: run waits for ack.
+    expect(store.getRun(run.runId)?.state).not.toBe("succeeded");
+    const sends: string[] = [];
+    const sender = {
+      name: "e2e-1795-sender",
+      send: (doc: { runId: string; nodeId: string; obligation: string; idempotenceKey: string }) => {
+        sends.push(doc.idempotenceKey);
+        return `receipt:${doc.idempotenceKey}`;
+      },
+    };
+    expect(runner.executeDelivery(run.runId, judge, sender)).toBe("acknowledged");
+    expect(sends.length).toBe(1);
+    // Terminal agreement: run, card, and supervision tell the same story;
+    // the optional lane stays failed (visible gap), everything else done.
+    expect(store.getRun(run.runId)?.state).toBe("succeeded");
+    const cardRow = store.db.prepare(`SELECT status, result_summary FROM kanban_board WHERE id = ?`).get(card) as { status: string; result_summary: string | null };
+    expect(cardRow.status).toBe("done");
+    expect(typeof cardRow.result_summary).toBe("string");
+    const sup = store.db.prepare(`SELECT state FROM project_supervision WHERE project_card_id = ?`).get(card) as { state: string };
+    expect(sup.state).toBe("accepted");
+    expect(store.listNodes(run.runId, 1).find((n) => n["node_id"] === l4)?.["status"]).toBe("failed");
+    const tick = runner.auditTick(0);
+    expect(tick.ownerless).not.toContain(run.runId);
   });
 
   // Journey 2: invalid plan correction succeeds; exhaustion settles with zero workers.
