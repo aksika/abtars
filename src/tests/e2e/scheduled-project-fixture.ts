@@ -19,6 +19,9 @@
  * worker lifecycles directly — those are runner/settlement-owned now.
  */
 
+import { mkdirSync, writeFileSync } from "node:fs";
+import { dirname, resolve } from "node:path";
+import { isPathWithinRoot } from "../../components/workspace-paths.js";
 import { WorkflowRunner } from "../../components/orc-project/orc-workflow-runner.js";
 import type {
   PlanProposal,
@@ -438,11 +441,38 @@ export function makeScheduledProjectFixture(
     return { id: fresh.id, generation: fresh.generation || 1 };
   }
 
+  /** #1794: materialize the lane's contract-declared file outputs in the
+   *  bound workspace before settlement — the scripted-worker migration to the
+   *  durable acceptance gate. A production worker writes what its contract
+   *  promises; a fixture that settles a completion without the promised files
+   *  is truthfully rejected as unmet evidence. */
+  function materializeLaneOutputs(cardId: number, cwd: string | undefined): void {
+    if (!cwd) return;
+    const wb = new WorkerStore();
+    const latest = wb.getLatestAttempt(cardId);
+    const contract = latest ? wb.getContract(latest.contract_id) : undefined;
+    if (!contract) return;
+    let parsed: { expected_artifacts?: Array<{ ref?: string }> };
+    try {
+      parsed = JSON.parse(contract.contract_json) as typeof parsed;
+    } catch {
+      return; // Unreadable fixture contract: settlement fails closed on its own.
+    }
+    for (const artifact of parsed.expected_artifacts ?? []) {
+      if (typeof artifact.ref !== "string" || artifact.ref.length === 0) continue;
+      const target = resolve(cwd, artifact.ref);
+      if (!isPathWithinRoot(cwd, target)) continue;
+      mkdirSync(dirname(target), { recursive: true });
+      writeFileSync(target, `scripted lane output: ${artifact.ref}\n`, "utf-8");
+    }
+  }
+
   function settleLane(cardId: number, lifecycle: "completed" | "failed"): void {
     const cur = currentRun();
     const cwd = cur ? workspaceCwd(cur.rootCardId) : undefined;
     if (lifecycle === "completed") {
       const attempt = ensureClaimed(cardId);
+      materializeLaneOutputs(cardId, cwd);
       const outcome = new WorkerSvc().collectAndSettle(
         cardId, "<summary>lane finished</summary>", cwd, attempt.id, attempt.generation,
       );
