@@ -361,6 +361,33 @@ const MAX_TRANSITIONS_PER_CARD = 200;
 const MAX_JOURNAL_REASON = 300;
 
 /**
+ * #1799 — runner-root promotion predicate. Pins the exact live workflow run
+ * (identity, nonterminal state, scheduled-run authority) and the exact
+ * supervision generation/state at the card CAS, so a cancellation, a
+ * supervision generation change, or a scheduled-run completion committed
+ * before the CAS wins the race instead. Bound parameters, in order:
+ * [supervision generation, workflow run id, scheduled run id or null].
+ *
+ * The scheduled/non-scheduled split mirrors the existing #1644 identity
+ * rule: `source = 'task'` marks a scheduled root ONLY together with a
+ * durable source_id; a plain supervised project whose source string is
+ * 'task' but which carries no scheduled run identity takes the
+ * non-scheduled branch (which additionally requires wr.scheduled_run_id
+ * IS NULL).
+ */
+export const RUNNER_ROOT_RUNNING_PREDICATE =
+  "type = 'O'" +
+  " AND EXISTS (SELECT 1 FROM project_supervision ps WHERE ps.project_card_id = kanban_board.id" +
+  " AND ps.generation = ? AND ps.state IN ('executing', 'repairing'))" +
+  " AND EXISTS (SELECT 1 FROM workflow_runs wr WHERE wr.run_id = ? AND wr.root_card_id = kanban_board.id" +
+  " AND wr.scheduled_run_id IS ? AND wr.state NOT IN ('succeeded', 'failed', 'cancelled')" +
+  " AND ((kanban_board.source = 'task' AND kanban_board.source_id IS NOT NULL" +
+  " AND length(kanban_board.source_id) > 0 AND wr.scheduled_run_id = kanban_board.source_id" +
+  " AND EXISTS (SELECT 1 FROM task_runs tr WHERE tr.run_id = wr.scheduled_run_id AND tr.finished_at IS NULL))" +
+  " OR ((kanban_board.source IS NULL OR kanban_board.source != 'task'" +
+  " OR kanban_board.source_id IS NULL OR kanban_board.source_id = '') AND wr.scheduled_run_id IS NULL)))";
+
+/**
  * #1590 — allowlisted extra CAS predicates. Callers reference these fixed
  * internal strings only; caller-supplied SQL text is rejected in
  * kanbanTransition.
@@ -389,6 +416,7 @@ const EXTRA_PREDICATES = new Set<string>([
   // superseded generation or a foreign run must mutate nothing.
   "type = 'O' AND source = 'task' AND source_id = ? AND EXISTS (SELECT 1 FROM project_supervision ps WHERE ps.project_card_id = kanban_board.id AND ps.generation = ?)",
   "type = 'O' AND source != 'task' AND EXISTS (SELECT 1 FROM project_supervision ps WHERE ps.project_card_id = kanban_board.id AND ps.generation = ?)",
+  RUNNER_ROOT_RUNNING_PREDICATE,
 ]);
 
 /** #1644: trace a project-aware CAS rejection with only bounded authority

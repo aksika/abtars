@@ -995,17 +995,18 @@ describe("#1799 runner-root boot recovery", () => {
   });
 
   it("one candidate throwing records its failure without blocking the next repair or the pump kick", async () => {
-    // Bad first (lower card id): a scheduled root whose task_runs table is
-    // gone — the authority check throws inside the projection. Good second:
-    // an ordinary queued root with a pending child.
-    const schedId = "1799-boom-run";
-    const bad = await seedRunnerRoot({
-      title: "1799 bad root", rootKind: "scheduled",
-      source: "task", sourceId: schedId, scheduledRunId: schedId,
-    });
+    // Bad first (lower card id): a card-scoped write-failure trigger aborts
+    // its promotion CAS inside the real kanbanTransition — a genuine durable
+    // write error, not a mocked projection. Good second: an ordinary queued
+    // root with a pending child.
+    const bad = await seedRunnerRoot({ title: "1799 bad root" });
     const good = await seedRunnerRoot({ title: "1799 good root" });
     const { attemptId } = seedAgentChild(good.rootId, "good");
-    kanban.requireTaskDatabase().exec(`DROP TABLE task_runs`);
+    kanban.requireTaskDatabase().exec(
+      `CREATE TRIGGER trg_1799_boom BEFORE UPDATE ON kanban_board
+       WHEN NEW.id = ${bad.rootId} AND NEW.status = 'running'
+       BEGIN SELECT RAISE(ABORT, '1799 boom'); END`,
+    );
 
     const starts: string[] = [];
     await startGeneration({

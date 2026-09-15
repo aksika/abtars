@@ -52,7 +52,7 @@ export function startWorkflowDriver(deps: {
   // stays capability-based and explicit (isPiCapability).
   const runner = new WorkflowRunner(store, workflowCapabilities());
   const ports: DrainPorts = deps.ports ?? {
-    executor: new RoutingWorkflowWorkerPort({ runner, db: deps.db }),
+    executor: new RoutingWorkflowWorkerPort({ runner }),
     reviewer: new SpinReviewerBackend({ runner, callModel: deps.callModel, onSettled: () => drainWake("model:verdict") }),
     planner: new SpinPlannerBackend({ runner, callModel: deps.callModel, onSettled: () => drainWake("model:proposal") }),
     // AstraMaster-2: production delivery is connected — without a sender the

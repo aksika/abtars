@@ -77,6 +77,18 @@ export interface CommandKey {
   ordinal: number;
 }
 
+/**
+ * #1799: storage-owned identity reference for a runner-owned root's
+ * workflow run. An identity, not a state snapshot: consumers re-read the
+ * run and pin its live state before any write. Owned by the store so
+ * storage never imports its execution layer (ports import this as a type).
+ */
+export interface RunnerRootRunRef {
+  runId: string;
+  rootCardId: number;
+  scheduledRunId: string | null;
+}
+
 export interface CommandRow extends CommandKey {
   status: CommandStatus;
   payloadJson: string;
@@ -802,6 +814,36 @@ export class WorkflowStore {
       .prepare(`SELECT * FROM workflow_runs WHERE root_card_id = ? ORDER BY created_at DESC, rowid DESC LIMIT 1`)
       .get(rootCardId) as Record<string, unknown> | undefined;
     return row ? rowToRun(row) : null;
+  }
+
+  /**
+   * #1799: startup recovery prefilter — queued runner-owned roots whose
+   * workflow run is nonterminal and whose supervision is executing/repairing.
+   * Joins only runner-owned tables (no `orc_project_runs` dependency, no
+   * pending-child dependency). The partial unique index on nonterminal
+   * `workflow_runs(root_card_id)` bounds the result to one run per root.
+   * A prefilter only: `projectRunnerRootRunning` re-verifies live
+   * card/run/authority state before any write.
+   */
+  listRecoverableRunnerRoots(): RunnerRootRunRef[] {
+    const rows = this.db
+      .prepare(
+        `SELECT r.run_id, r.root_card_id, r.scheduled_run_id
+           FROM workflow_runs r
+           JOIN kanban_board b        ON b.id = r.root_card_id
+           JOIN project_supervision s ON s.project_card_id = r.root_card_id
+          WHERE r.state NOT IN ('succeeded', 'failed', 'cancelled')
+            AND b.type = 'O'
+            AND b.status = 'queued'
+            AND s.state IN ('executing', 'repairing')
+          ORDER BY r.root_card_id`,
+      )
+      .all() as Array<Record<string, unknown>>;
+    return rows.map((r) => ({
+      runId: r["run_id"] as string,
+      rootCardId: Number(r["root_card_id"]),
+      scheduledRunId: (r["scheduled_run_id"] as string | null) ?? null,
+    }));
   }
 
   consumeBudget(runId: string, scope: BudgetScope): boolean {

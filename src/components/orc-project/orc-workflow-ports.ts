@@ -25,9 +25,10 @@
  * is itself a configured Pi workspace alias carries the workspace; a generic
  * Pi capability (pi-coding/pi) resolves to the first configured alias.
  */
-import { ProjectReviewStore } from "../project-acceptance/project-review-store.js";
+import { ProjectReviewStore, authorizeActiveProjectWork } from "../project-acceptance/project-review-store.js";
 import { WorkerSupervisionService } from "../worker-supervision-service.js";
 import { channelPostOnce } from "../tasks/kanban-channel.js";
+import { RUNNER_ROOT_RUNNING_PREDICATE, kanbanTransition, type TaskDatabase } from "../tasks/kanban-board.js";
 import { loadPiConfig } from "../pi-executor/config.js";
 import {
   WorkflowRunner,
@@ -42,8 +43,7 @@ import {
   type ReviewBrief,
   type ReviewVerdict,
 } from "./orc-workflow-runner.js";
-import type { CommandRow } from "./orc-workflow-store.js";
-import type { TaskDatabase } from "../tasks/kanban-board.js";
+import type { CommandRow, RunnerRootRunRef } from "./orc-workflow-store.js";
 
 /** Dispatch failures fail the node visibly (bounded); never wedge the drain. */
 export class WorkflowDispatchError extends Error {
@@ -146,25 +146,127 @@ function parseVerdict(text: string): ReviewVerdict {
 }
 
 /**
+ * #1799: outcome of the shared runner-root projection. A rejection is a
+ * skip, never an exception: callers fail the dispatch (or skip the recovery
+ * candidate) through their existing paths.
+ */
+export type RootProjectionOutcome = { ok: true } | { ok: false; reason: string };
+
+const TERMINAL_RUN_STATES: ReadonlySet<string> = new Set(["succeeded", "failed", "cancelled"]);
+
+/**
+ * #1799: shared runner-root projection — the single operation that may move
+ * a runner-owned root card `queued → running`.
+ *
+ * The passed run is an identity, never a state snapshot: the live
+ * `workflow_runs` row is re-read on the caller's connection and its
+ * root-card/scheduled-run identities must match the reference. Preflight
+ * reads produce useful rejection reasons; the card CAS carries the fixed
+ * `RUNNER_ROOT_RUNNING_PREDICATE` so a terminal state, supervision
+ * generation change, or scheduled-run completion committed before the CAS
+ * wins the race (failed CAS writes neither a promotion event nor a journal
+ * entry). The projection may win before a later cancellation; subsequent
+ * dispatch/claim fences stay responsible for rejecting stale work.
+ *
+ * Called outside admission transactions and before child publication; no
+ * outer transaction may publish nerve events before commit. All writes go
+ * through `kanbanTransition` on the caller's connection (never the
+ * global-database `kanbanRunning`).
+ */
+export function projectRunnerRootRunning(
+  db: TaskDatabase,
+  run: RunnerRootRunRef,
+): RootProjectionOutcome {
+  // 1. Re-read the workflow run; never trust a passed run.state.
+  let live: { root_card_id: unknown; scheduled_run_id: unknown; state: unknown } | undefined;
+  try {
+    live = db.prepare(`SELECT root_card_id, scheduled_run_id, state FROM workflow_runs WHERE run_id = ?`)
+      .get(run.runId) as { root_card_id: unknown; scheduled_run_id: unknown; state: unknown } | undefined;
+  } catch (err) {
+    return { ok: false, reason: `workflow run ${run.runId} unreadable: ${err instanceof Error ? err.message : String(err)}` };
+  }
+  if (!live) return { ok: false, reason: `workflow run ${run.runId} missing` };
+  if (Number(live.root_card_id) !== run.rootCardId) {
+    return { ok: false, reason: `workflow run ${run.runId} root mismatch` };
+  }
+  const liveScheduled = (live.scheduled_run_id as string | null) ?? null;
+  const refScheduled = run.scheduledRunId ?? null;
+  if (liveScheduled !== refScheduled) {
+    return { ok: false, reason: `workflow run ${run.runId} scheduled-run mismatch` };
+  }
+  if (typeof live.state !== "string" || TERMINAL_RUN_STATES.has(live.state)) {
+    return { ok: false, reason: `workflow run ${run.runId} terminal (${String(live.state)})` };
+  }
+  // 2. Supervision must exist for the root.
+  const sup = db.prepare(`SELECT state, generation FROM project_supervision WHERE project_card_id = ?`)
+    .get(run.rootCardId) as { state: string; generation: number } | undefined;
+  if (!sup) return { ok: false, reason: `supervision missing for card ${run.rootCardId}` };
+  // 3. Only executing/repairing supervision is evidence of executable work.
+  if (sup.state !== "executing" && sup.state !== "repairing") {
+    return { ok: false, reason: `supervision not executable (state ${sup.state})` };
+  }
+  // 4. Existing active-project authority (supervision generation, never the
+  // workflow generation).
+  const rejection = authorizeActiveProjectWork(db, {
+    projectCardId: run.rootCardId,
+    projectGeneration: Number(sup.generation),
+    scheduledRunId: refScheduled ?? undefined,
+  });
+  if (rejection) return { ok: false, reason: `authority rejected: ${rejection}` };
+  // 5. Project the card. Already-running is idempotent (no journal, no
+  // event); terminal/missing cards never become running.
+  const card = db.prepare(`SELECT status FROM kanban_board WHERE id = ?`)
+    .get(run.rootCardId) as { status: string } | undefined;
+  if (!card) return { ok: false, reason: `root card ${run.rootCardId} missing` };
+  if (card.status === "running") return { ok: true };
+  if (card.status !== "queued") {
+    return { ok: false, reason: `root card ${run.rootCardId} not queued (state ${card.status})` };
+  }
+  const outcome = kanbanTransition({
+    cardId: run.rootCardId,
+    from: ["queued"],
+    to: "running",
+    actor: "dispatch",
+    reason: `workflow run ${run.runId} executing`,
+    extraPredicate: RUNNER_ROOT_RUNNING_PREDICATE,
+    extraPredicateParams: [Number(sup.generation), run.runId, refScheduled],
+  }, db);
+  if (outcome.kind === "applied") return { ok: true };
+  // `reasserted` is unreachable with from: ["queued"]; any other outcome is
+  // a lost CAS — a concurrent terminal/authority change won.
+  return { ok: false, reason: `root promotion CAS lost (observed ${outcome.observed ?? "missing"})` };
+}
+
+/**
  * First-dispatch execution start shared by both worker ports. The retained
  * executor claim fence only claims under executing/repairing supervision;
- * the runner owns this transition post-cutover. Idempotent: a second call
- * with any non-awaiting state is a no-op (stateTransition CAS misses).
+ * the runner owns this transition post-cutover. Only `awaiting_contract`
+ * transitions (a rejected CAS is reported); re-entry under `executing` /
+ * `repairing` is ok without resetting supervision or bumping its
+ * generation; every other state is not dispatchable. The authority always
+ * uses the supervision generation read in-call.
  */
 function markExecutingForDispatch(
   reviewStore: ProjectReviewStore,
   run: { rootCardId: number; scheduledRunId?: string | null },
-  generation?: number,
-): void {
+): { ok: true } | { ok: false; reason: string } {
   const sup = reviewStore.getSupervision(run.rootCardId);
-  if (!sup || sup.state !== "awaiting_contract") return;
-  reviewStore.stateTransition(run.rootCardId, ["awaiting_contract"], "executing", undefined, {
+  if (!sup) return { ok: false, reason: `supervision missing for card ${run.rootCardId}` };
+  if (sup.state === "executing" || sup.state === "repairing") return { ok: true };
+  if (sup.state !== "awaiting_contract") {
+    return { ok: false, reason: `supervision not dispatchable (state ${sup.state})` };
+  }
+  const transitioned = reviewStore.stateTransition(run.rootCardId, ["awaiting_contract"], "executing", undefined, {
     authority: {
       projectCardId: run.rootCardId,
-      projectGeneration: generation ?? sup.generation,
+      projectGeneration: sup.generation,
       scheduledRunId: run.scheduledRunId ?? undefined,
     },
   });
+  if (!transitioned) {
+    return { ok: false, reason: `supervision execution transition rejected for card ${run.rootCardId}` };
+  }
+  return { ok: true };
 }
 
 export class WorkflowWorkerPort implements ExecutionPort {  readonly name = "workflow-worker";
@@ -173,10 +275,12 @@ export class WorkflowWorkerPort implements ExecutionPort {  readonly name = "wor
   private readonly reviewStore: ProjectReviewStore;
   private readonly wakePump: () => void;
 
-  constructor(deps: { runner: WorkflowRunner; db?: TaskDatabase; wakePump?: () => void }) {
+  constructor(deps: { runner: WorkflowRunner; wakePump?: () => void }) {
     this.runner = deps.runner;
-    this.workers = new WorkerSupervisionService(deps.db);
-    this.reviewStore = new ProjectReviewStore(deps.db);
+    // #1799: the runner's own connection is the sole database — never the
+    // module-global one, which may differ (or be unavailable) under test.
+    this.workers = new WorkerSupervisionService(deps.runner.store.db);
+    this.reviewStore = new ProjectReviewStore(deps.runner.store.db);
     this.wakePump = deps.wakePump ?? (() => {});
   }
 
@@ -202,7 +306,15 @@ export class WorkflowWorkerPort implements ExecutionPort {  readonly name = "wor
     // (pre-cutover define_project_contract initialized executing). Awaiting
     // stays until a worker actually dispatches; terminal projections accept
     // from either state.
-    markExecutingForDispatch(this.reviewStore, run);
+    const transition = markExecutingForDispatch(this.reviewStore, run);
+    if (!transition.ok) throw new WorkflowDispatchError(cmd.nodeId, transition.reason);
+    // #1799: project the runner-owned root to running BEFORE the child's
+    // card:queued event publishes, so the dispatch pump (which skips
+    // children of non-running roots) sees an already-running root. A
+    // dispatch that cannot establish a running, authorized root creates no
+    // child.
+    const projected = projectRunnerRootRunning(this.runner.store.db, run);
+    if (!projected.ok) throw new WorkflowDispatchError(cmd.nodeId, `root not dispatchable: ${projected.reason}`);
     // Evidence path (worker-contract #1588 gate): every criterion needs a
     // required artifact or verification command. Declared node outputs become
     // REQUIRED artifacts, each linked to all of the node's criteria (coarse
@@ -306,7 +418,6 @@ export function workflowCapabilities(): string[] {
 
 export interface PiPortDeps {
   runner: WorkflowRunner;
-  db?: TaskDatabase;
   wakePump?: () => void;
   /** Test seam: resolve the workspace alias for a node spec (default: capability-derived). */
   workspaceAliasFor?: (spec: { capability?: string }) => string | undefined;
@@ -335,8 +446,9 @@ export class WorkflowPiPort implements ExecutionPort {
 
   constructor(deps: PiPortDeps) {
     this.runner = deps.runner;
-    this.workers = new WorkerSupervisionService(deps.db);
-    this.reviewStore = new ProjectReviewStore(deps.db);
+    // #1799: the runner's own connection is the sole database (see Spin port).
+    this.workers = new WorkerSupervisionService(deps.runner.store.db);
+    this.reviewStore = new ProjectReviewStore(deps.runner.store.db);
     this.wakePump = deps.wakePump ?? (() => {});
     this.workspaceAliasFor = deps.workspaceAliasFor;
   }
@@ -354,7 +466,11 @@ export class WorkflowPiPort implements ExecutionPort {
     if (!sup || sup.state === "accepted" || sup.state === "blocked") {
       throw new WorkflowDispatchError(cmd.nodeId, `supervision not dispatchable (state ${sup?.state ?? "missing"})`);
     }
-    markExecutingForDispatch(this.reviewStore, run, sup.generation);
+    const transition = markExecutingForDispatch(this.reviewStore, run);
+    if (!transition.ok) throw new WorkflowDispatchError(cmd.nodeId, transition.reason);
+    // #1799: same root projection as the Spin port — before child creation.
+    const projected = projectRunnerRootRunning(this.runner.store.db, run);
+    if (!projected.ok) throw new WorkflowDispatchError(cmd.nodeId, `root not dispatchable: ${projected.reason}`);
     const workspaceAlias = this.workspaceAliasFor
       ? this.workspaceAliasFor(spec)
       : resolvePiWorkspaceAlias(spec.capability);
@@ -405,10 +521,10 @@ export class RoutingWorkflowWorkerPort implements ExecutionPort {
   private readonly spinPort: WorkflowWorkerPort;
   private readonly piPort: WorkflowPiPort;
 
-  constructor(deps: { runner: WorkflowRunner; db?: TaskDatabase; wakePump?: () => void; workspaceAliasFor?: (spec: { capability?: string }) => string | undefined }) {
+  constructor(deps: { runner: WorkflowRunner; wakePump?: () => void; workspaceAliasFor?: (spec: { capability?: string }) => string | undefined }) {
     this.runner = deps.runner;
-    this.spinPort = new WorkflowWorkerPort({ runner: deps.runner, db: deps.db, wakePump: deps.wakePump });
-    this.piPort = new WorkflowPiPort({ runner: deps.runner, db: deps.db, wakePump: deps.wakePump, workspaceAliasFor: deps.workspaceAliasFor });
+    this.spinPort = new WorkflowWorkerPort({ runner: deps.runner, wakePump: deps.wakePump });
+    this.piPort = new WorkflowPiPort({ runner: deps.runner, wakePump: deps.wakePump, workspaceAliasFor: deps.workspaceAliasFor });
   }
 
   dispatch(cmd: CommandRow): void {

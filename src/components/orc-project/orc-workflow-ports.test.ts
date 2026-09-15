@@ -9,6 +9,8 @@ let TEST_HOME: string;
 let RunnerType: typeof import("./orc-workflow-runner.js").WorkflowRunner;
 let StoreType: typeof import("./orc-workflow-store.js").WorkflowStore;
 let Ports: typeof import("./orc-workflow-ports.js");
+let Kanban: typeof import("../tasks/kanban-board.js");
+let nerve: typeof import("../nerve.js")["nerve"];
 
 beforeAll(async () => {
   vi.resetModules();
@@ -18,6 +20,8 @@ beforeAll(async () => {
   const runnerMod = await import("./orc-workflow-runner.js");
   const storeMod = await import("./orc-workflow-store.js");
   Ports = await import("./orc-workflow-ports.js");
+  Kanban = await import("../tasks/kanban-board.js");
+  nerve = (await import("../nerve.js")).nerve;
   RunnerType = runnerMod.WorkflowRunner;
   StoreType = storeMod.WorkflowStore;
 });
@@ -381,5 +385,443 @@ describe("WorkflowPorts", () => {
     }
     expect(prompts[1]).toContain("REJECTED");
     expect(store.currentRevision(run.runId)).toBe(1);
+  });
+});
+
+// ── #1799 runner-root promotion ─────────────────────────────────────────────
+
+describe("#1799 runner-root promotion", () => {
+  let runner: Runner;
+  let store: Store;
+
+  beforeEach(() => {
+    ({ runner, store } = setup());
+    for (const t of ["workflow_ingress", "workflow_deliveries", "workflow_commands", "workflow_budgets", "workflow_node_deps", "workflow_nodes", "workflow_plan_revisions", "workflow_operations", "workflow_runs"]) {
+      store.db.exec(`DELETE FROM ${t}`);
+    }
+  });
+
+  function seedQueuedCard(opts?: { source?: string; sourceId?: string | null; title?: string }): number {
+    const res = store.db.prepare(
+      `INSERT INTO kanban_board (title, source, source_id, type, status) VALUES (?, ?, ?, 'O', 'queued')`,
+    ).run(
+      opts?.title ?? `wf-port-q-${Date.now()}-${Math.random().toString(36).slice(2)}`,
+      opts?.source ?? "agent",
+      opts?.sourceId ?? null,
+    );
+    return Number(res.lastInsertRowid);
+  }
+
+  function admitFor(card: number, rootKind: "peer" | "interactive" | "scheduled", scheduledRunId?: string) {
+    copSeq++;
+    return runner.admit({
+      rootKind, rootCardId: card,
+      scheduledRunId: scheduledRunId ?? null,
+      clientOperationId: `port-q-${copSeq}`,
+    }).run;
+  }
+
+  function claimDispatchRow(runId: string, nodeId: string) {
+    const claimed = store.claimCommand(
+      { runId, generation: 1, nodeId, action: "dispatch", ordinal: 0 }, "workflow-worker",
+    );
+    expect(claimed).not.toBeNull();
+    return claimed!.row;
+  }
+
+  function cardStatus(cardId: number): string {
+    return (store.db.prepare(`SELECT status FROM kanban_board WHERE id = ?`).get(cardId) as { status: string }).status;
+  }
+
+  function supervisionState(cardId: number): string {
+    return (store.db.prepare(`SELECT state FROM project_supervision WHERE project_card_id = ?`).get(cardId) as { state: string }).state;
+  }
+
+  function promotionRows(cardId: number): Record<string, unknown>[] {
+    const t = store.db.prepare(`SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'kanban_card_transitions'`).get();
+    if (!t) return [];
+    return store.db.prepare(
+      `SELECT * FROM kanban_card_transitions WHERE card_id = ? AND to_status = 'running' AND actor = 'dispatch'`,
+    ).all(cardId) as Record<string, unknown>[];
+  }
+
+  function childCards(rootId: number): Record<string, unknown>[] {
+    return store.db.prepare(`SELECT id FROM kanban_board WHERE parent_id = ?`).all(rootId) as Record<string, unknown>[];
+  }
+
+  function rootAttempts(rootId: number): Record<string, unknown>[] {
+    const t = store.db.prepare(`SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'worker_attempts'`).get();
+    if (!t) return [];
+    return store.db.prepare(`SELECT id, lifecycle FROM worker_attempts WHERE root_project_card_id = ?`).all(rootId) as Record<string, unknown>[];
+  }
+
+  function captureCardEvents() {
+    const events: Array<{ event: string; cardId: number }> = [];
+    const onQueued = (cardId: number) => events.push({ event: "card:queued", cardId });
+    const onRunning = (cardId: number) => events.push({ event: "card:running", cardId });
+    nerve.on("card:queued", onQueued);
+    nerve.on("card:running", onRunning);
+    return {
+      events,
+      stop: () => {
+        nerve.off("card:queued", onQueued);
+        nerve.off("card:running", onRunning);
+      },
+    };
+  }
+
+  /** Seed a live scheduled task run row (project-authority.test.ts shape). */
+  function seedLiveTaskRun(runId: string): void {
+    store.db.prepare(
+      `INSERT INTO task_runs (run_id, task_id, group_id, attempt, trigger, occurrence_at, reserved_at, deadline_at, phase, last_progress_at, owner_pid)
+       VALUES (?, ?, ?, 1, 'schedule', 0, 0, 9999999999999, 'executing', 0, 1)`,
+    ).run(runId, `task-${runId}`, `g-${runId}`);
+  }
+
+  /**
+   * #1799: commit a durable write in the exact concurrent-write window —
+   * after the projection preflight SELECTs, before the promotion CAS UPDATE
+   * executes. Interposes on the first `UPDATE kanban_board SET` prepare (the
+   * promotion CAS; the preflight is SELECT-only) and runs the mutation on the
+   * base connection first. The real kanbanTransition then executes against
+   * post-mutation state: no mocked success, no mocked transition.
+   */
+  function racingDb(
+    base: Store["db"],
+    mutate: (db: Store["db"]) => void,
+  ): Store["db"] {
+    let armed = true;
+    return {
+      prepare(sql: string) {
+        if (armed && sql.startsWith("UPDATE kanban_board SET")) {
+          armed = false;
+          mutate(base);
+          return base.prepare(sql);
+        }
+        return base.prepare(sql);
+      },
+      exec(sql: string) { base.exec(sql); },
+      transaction<T>(fn: () => T): T { return base.transaction(fn); },
+      transactionImmediate<T>(fn: () => T): T { return base.transactionImmediate(fn); },
+    };
+  }
+
+  for (const kind of ["peer", "interactive"] as const) {
+    it(`first dispatch promotes a queued ${kind} root before the child publishes`, () => {
+      const card = seedQueuedCard();
+      const run = admitFor(card, kind);
+      const acc = runner.acceptPlan(run.runId, workPlan());
+      const nodeId = acc.nodeIds[0] as string;
+      const cap = captureCardEvents();
+      // Root status at the exact moment the child's card:queued is observed.
+      let rootStatusAtChildEvent: string | null = null;
+      const probe = (childId: number) => {
+        const child = store.db.prepare(`SELECT parent_id FROM kanban_board WHERE id = ?`).get(childId) as { parent_id: number | null } | undefined;
+        if (child?.parent_id === card) rootStatusAtChildEvent = cardStatus(card);
+      };
+      nerve.on("card:queued", probe);
+      try {
+        const port = new Ports.WorkflowWorkerPort({ runner });
+        port.dispatch(claimDispatchRow(run.runId, nodeId));
+      } finally {
+        nerve.off("card:queued", probe);
+        cap.stop();
+      }
+      // The child's post-commit card:queued pumped against an already-running root.
+      expect(rootStatusAtChildEvent).toBe("running");
+      const node = store.listNodes(run.runId, 1).find((n) => n["node_id"] === nodeId);
+      const childId = Number(node?.["worker_card_id"]);
+      expect(childId).toBeGreaterThan(0);
+      const runningIdx = cap.events.findIndex((e) => e.event === "card:running" && e.cardId === card);
+      const queuedIdx = cap.events.findIndex((e) => e.event === "card:queued" && e.cardId === childId);
+      expect(runningIdx).toBeGreaterThanOrEqual(0);
+      expect(queuedIdx).toBeGreaterThanOrEqual(0);
+      expect(runningIdx).toBeLessThan(queuedIdx);
+      // Durable and correct.
+      expect(cardStatus(card)).toBe("running");
+      expect(childCards(card)).toHaveLength(1);
+      const attempts = rootAttempts(card);
+      expect(attempts).toHaveLength(1);
+      expect(attempts[0]!["lifecycle"]).toBe("pending");
+      expect(attempts[0]!["id"]).toBe(node?.["attempt_id"]);
+      expect(supervisionState(card)).toBe("executing");
+    });
+  }
+
+  it("re-entry under executing supervision repairs a queued root with exactly one journal row", () => {
+    const card = seedQueuedCard();
+    const run = admitFor(card, "interactive");
+    const acc = runner.acceptPlan(run.runId, workPlan());
+    const nodeId = acc.nodeIds[0] as string;
+    // Crash window: supervision reached executing, the card never left queued.
+    const review = new ProjectReviewStore(store.db);
+    review.ensureAwaitingContract(card);
+    expect(review.stateTransition(card, ["awaiting_contract"], "executing")).toBe(true);
+    expect(cardStatus(card)).toBe("queued");
+
+    const port = new Ports.WorkflowWorkerPort({ runner });
+    const row = claimDispatchRow(run.runId, nodeId);
+    port.dispatch(row);
+    expect(cardStatus(card)).toBe("running");
+    expect(promotionRows(card)).toHaveLength(1);
+    // A second dispatch creates its own child but no second promotion row:
+    // already-running is idempotent, journal-free, event-free.
+    const cap = captureCardEvents();
+    try {
+      port.dispatch(row);
+    } finally {
+      cap.stop();
+    }
+    expect(cardStatus(card)).toBe("running");
+    expect(promotionRows(card)).toHaveLength(1);
+    expect(cap.events.filter((e) => e.event === "card:running" && e.cardId === card)).toHaveLength(0);
+  });
+
+  it("non-executable supervision fails the dispatch with no child or attempt", () => {
+    const card = seedQueuedCard();
+    const run = admitFor(card, "peer");
+    const acc = runner.acceptPlan(run.runId, workPlan());
+    const nodeId = acc.nodeIds[0] as string;
+    const review = new ProjectReviewStore(store.db);
+    review.ensureAwaitingContract(card);
+    expect(review.stateTransition(card, ["awaiting_contract"], "reviewing")).toBe(true);
+
+    const port = new Ports.WorkflowWorkerPort({ runner });
+    expect(() => port.dispatch(claimDispatchRow(run.runId, nodeId)))
+      .toThrow(Ports.WorkflowDispatchError);
+    expect(cardStatus(card)).toBe("queued");
+    expect(childCards(card)).toHaveLength(0);
+    expect(rootAttempts(card)).toHaveLength(0);
+  });
+
+  it("a rejected execution transition fails the dispatch with no child or attempt", () => {
+    // Scheduled root whose owning run finished after admission: the
+    // awaiting_contract → executing CAS loses its authority check.
+    const schedId = `sched-rej-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    seedLiveTaskRun(schedId);
+    const card = seedQueuedCard({ source: "task", sourceId: schedId });
+    const run = admitFor(card, "scheduled", schedId);
+    const acc = runner.acceptPlan(run.runId, workPlan());
+    const nodeId = acc.nodeIds[0] as string;
+    store.db.prepare(`UPDATE task_runs SET finished_at = ?, outcome = 'success' WHERE run_id = ?`).run(Date.now(), schedId);
+
+    const port = new Ports.WorkflowWorkerPort({ runner });
+    expect(() => port.dispatch(claimDispatchRow(run.runId, nodeId)))
+      .toThrow(Ports.WorkflowDispatchError);
+    expect(cardStatus(card)).toBe("queued");
+    expect(childCards(card)).toHaveLength(0);
+    expect(rootAttempts(card)).toHaveLength(0);
+  });
+
+  it("all dispatch writes land on the runner database, never the global one", async () => {
+    const { resolveNativeDep } = await import("../../utils/lazy-require.js") as {
+      resolveNativeDep: (name: string) => unknown;
+    };
+    const Database = resolveNativeDep("better-sqlite3") as new (p: string) => {
+      prepare(sql: string): {
+        run(...p: unknown[]): { changes: number; lastInsertRowid: number | bigint };
+        get(...p: unknown[]): Record<string, unknown> | undefined;
+        all(...p: unknown[]): Record<string, unknown>[];
+      };
+      exec(sql: string): void;
+      transaction<T>(fn: () => T): () => T;
+      close(): void;
+    };
+    const rawIso = new Database(":memory:");
+    try {
+      const isoDb = Kanban.wrapTaskDatabase(rawIso as never);
+      Kanban.ensureKanbanBoardSchema(isoDb);
+      // A real runner database carries the full bootstrap: the promotion CAS
+      // predicate joins task_runs for the scheduled branch, so the isolated
+      // database needs that schema too (production always has it).
+      const taskState = await import("../tasks/task-state-schema.js");
+      taskState.initTaskStateSchema(isoDb as never);
+      const isoStore = new StoreType(isoDb);
+      const isoRunner = new RunnerType(isoStore, ["general", "research", "write"]);
+      const title = `iso-root-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+      const card = Number(isoDb.prepare(
+        `INSERT INTO kanban_board (title, source, type, status) VALUES (?, 'agent', 'O', 'queued')`,
+      ).run(title).lastInsertRowid);
+      copSeq++;
+      const isoRun = isoRunner.admit({
+        rootKind: "interactive", rootCardId: card, clientOperationId: `port-iso-${copSeq}`,
+      }).run;
+      const acc = isoRunner.acceptPlan(isoRun.runId, workPlan());
+      const nodeId = acc.nodeIds[0] as string;
+      const claimed = isoStore.claimCommand(
+        { runId: isoRun.runId, generation: 1, nodeId, action: "dispatch", ordinal: 0 }, "workflow-worker",
+      );
+      expect(claimed).not.toBeNull();
+      new Ports.WorkflowWorkerPort({ runner: isoRunner }).dispatch(claimed!.row);
+
+      // Everything landed on the injected connection.
+      expect((isoDb.prepare(`SELECT status FROM kanban_board WHERE id = ?`).get(card) as { status: string }).status).toBe("running");
+      expect((isoDb.prepare(`SELECT state FROM project_supervision WHERE project_card_id = ?`).get(card) as { state: string }).state).toBe("executing");
+      const isoChildren = isoDb.prepare(`SELECT id FROM kanban_board WHERE parent_id = ?`).all(card) as Record<string, unknown>[];
+      expect(isoChildren).toHaveLength(1);
+      const isoAttempt = isoDb.prepare(`SELECT id, lifecycle FROM worker_attempts WHERE root_project_card_id = ?`).all(card) as Record<string, unknown>[];
+      expect(isoAttempt).toHaveLength(1);
+      expect(isoAttempt[0]!["lifecycle"]).toBe("pending");
+      // Nothing leaked to the global database (unique run/title/attempt ids).
+      expect(store.db.prepare(`SELECT id FROM kanban_board WHERE title = ?`).get(title)).toBeUndefined();
+      expect(store.db.prepare(`SELECT run_id FROM workflow_runs WHERE run_id = ?`).get(isoRun.runId)).toBeUndefined();
+      expect(store.db.prepare(`SELECT id FROM worker_attempts WHERE id = ?`).get(isoAttempt[0]!["id"] as string)).toBeUndefined();
+    } finally {
+      rawIso.close();
+    }
+  });
+
+  it("a stale run reference after cancellation fails the dispatch with no child", () => {
+    const card = seedQueuedCard();
+    const run = admitFor(card, "interactive");
+    const acc = runner.acceptPlan(run.runId, workPlan());
+    const nodeId = acc.nodeIds[0] as string;
+    store.db.prepare(`UPDATE workflow_runs SET state = 'cancelled' WHERE run_id = ?`).run(run.runId);
+
+    const cap = captureCardEvents();
+    try {
+      const port = new Ports.WorkflowWorkerPort({ runner });
+      expect(() => port.dispatch(claimDispatchRow(run.runId, nodeId)))
+        .toThrow(/root not dispatchable/);
+    } finally {
+      cap.stop();
+    }
+    expect(cardStatus(card)).toBe("queued");
+    expect(childCards(card)).toHaveLength(0);
+    expect(rootAttempts(card)).toHaveLength(0);
+    expect(promotionRows(card)).toHaveLength(0);
+    expect(cap.events.filter((e) => e.event === "card:running" && e.cardId === card)).toHaveLength(0);
+  });
+
+  it("a cancellation racing the promotion CAS wins: no journal, no event", () => {
+    const card = seedQueuedCard();
+    const run = admitFor(card, "peer");
+    runner.acceptPlan(run.runId, workPlan());
+    const review = new ProjectReviewStore(store.db);
+    review.ensureAwaitingContract(card);
+    expect(review.stateTransition(card, ["awaiting_contract"], "executing")).toBe(true);
+
+    const raced = racingDb(store.db, (db) => {
+      db.prepare(`UPDATE workflow_runs SET state = 'cancelled' WHERE run_id = ?`).run(run.runId);
+    });
+    const cap = captureCardEvents();
+    let outcome: Ports.RootProjectionOutcome;
+    try {
+      outcome = Ports.projectRunnerRootRunning(raced, {
+        runId: run.runId, rootCardId: card, scheduledRunId: null,
+      });
+    } finally {
+      cap.stop();
+    }
+    expect(outcome.ok).toBe(false);
+    expect(cardStatus(card)).toBe("queued");
+    expect(promotionRows(card)).toHaveLength(0);
+    expect(cap.events.filter((e) => e.event === "card:running" && e.cardId === card)).toHaveLength(0);
+  });
+
+  it("a supervision generation change racing the promotion CAS wins", () => {
+    const card = seedQueuedCard();
+    const run = admitFor(card, "interactive");
+    runner.acceptPlan(run.runId, workPlan());
+    const review = new ProjectReviewStore(store.db);
+    review.ensureAwaitingContract(card);
+    expect(review.stateTransition(card, ["awaiting_contract"], "executing")).toBe(true);
+
+    const raced = racingDb(store.db, (db) => {
+      db.prepare(`UPDATE project_supervision SET generation = generation + 1 WHERE project_card_id = ?`).run(card);
+    });
+    const outcome = Ports.projectRunnerRootRunning(raced, {
+      runId: run.runId, rootCardId: card, scheduledRunId: null,
+    });
+    expect(outcome.ok).toBe(false);
+    expect(cardStatus(card)).toBe("queued");
+    expect(promotionRows(card)).toHaveLength(0);
+  });
+
+  it("a scheduled-run completion racing the promotion CAS wins", () => {
+    const schedId = `sched-race-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    seedLiveTaskRun(schedId);
+    const card = seedQueuedCard({ source: "task", sourceId: schedId });
+    const run = admitFor(card, "scheduled", schedId);
+    runner.acceptPlan(run.runId, workPlan());
+    const review = new ProjectReviewStore(store.db);
+    review.ensureAwaitingContract(card);
+    expect(review.stateTransition(card, ["awaiting_contract"], "executing")).toBe(true);
+
+    const raced = racingDb(store.db, (db) => {
+      db.prepare(`UPDATE task_runs SET finished_at = ?, outcome = 'success' WHERE run_id = ?`).run(Date.now(), schedId);
+    });
+    const cap = captureCardEvents();
+    let outcome: Ports.RootProjectionOutcome;
+    try {
+      outcome = Ports.projectRunnerRootRunning(raced, {
+        runId: run.runId, rootCardId: card, scheduledRunId: schedId,
+      });
+    } finally {
+      cap.stop();
+    }
+    expect(outcome.ok).toBe(false);
+    expect(cardStatus(card)).toBe("queued");
+    expect(promotionRows(card)).toHaveLength(0);
+    expect(cap.events.filter((e) => e.event === "card:running" && e.cardId === card)).toHaveLength(0);
+  });
+
+  for (const sourceId of [null, ""] as const) {
+    it(`a task-sourced root without a durable source id (${sourceId === null ? "NULL" : "empty"}) dispatches as non-scheduled`, () => {
+      const card = seedQueuedCard({ source: "task", sourceId });
+      const run = admitFor(card, "interactive");
+      const acc = runner.acceptPlan(run.runId, workPlan());
+      const nodeId = acc.nodeIds[0] as string;
+      new Ports.WorkflowWorkerPort({ runner }).dispatch(claimDispatchRow(run.runId, nodeId));
+      expect(cardStatus(card)).toBe("running");
+      expect(childCards(card)).toHaveLength(1);
+      expect(rootAttempts(card)).toHaveLength(1);
+      expect(supervisionState(card)).toBe("executing");
+    });
+  }
+
+  it("the Pi port promotes the root before publishing its child", () => {
+    const piRunner = new RunnerType(store, ["general", "pi-coding"]);
+    const card = seedQueuedCard();
+    copSeq++;
+    const run = piRunner.admit({
+      rootKind: "interactive", rootCardId: card, clientOperationId: `port-pi-${copSeq}`,
+    }).run;
+    const piPlan = {
+      requiredOutputs: ["report"],
+      nodes: [
+        { label: "a", kind: "work", instructions: "research thoroughly", capability: "pi-coding", outputs: ["notes"], acceptance: ["thorough"], dependsOn: [] as string[] },
+        { label: "s", kind: "synthesis", instructions: "draft it", capability: "general", outputs: ["report"], acceptance: ["complete"], dependsOn: ["a"] },
+      ],
+    };
+    const acc = piRunner.acceptPlan(run.runId, piPlan);
+    const nodeId = acc.nodeIds[0] as string;
+    const claimed = store.claimCommand(
+      { runId: run.runId, generation: 1, nodeId, action: "dispatch", ordinal: 0 }, "workflow-pi-worker",
+    );
+    expect(claimed).not.toBeNull();
+
+    let rootStatusAtChildEvent: string | null = null;
+    const probe = (childId: number) => {
+      const child = store.db.prepare(`SELECT parent_id FROM kanban_board WHERE id = ?`).get(childId) as { parent_id: number | null } | undefined;
+      if (child?.parent_id === card) rootStatusAtChildEvent = cardStatus(card);
+    };
+    nerve.on("card:queued", probe);
+    try {
+      new Ports.WorkflowPiPort({ runner: piRunner, workspaceAliasFor: () => "testalias" }).dispatch(claimed!.row);
+    } finally {
+      nerve.off("card:queued", probe);
+    }
+    expect(rootStatusAtChildEvent).toBe("running");
+    expect(cardStatus(card)).toBe("running");
+    expect(supervisionState(card)).toBe("executing");
+    const node = store.listNodes(run.runId, 1).find((n) => n["node_id"] === nodeId);
+    const childId = Number(node?.["worker_card_id"]);
+    expect(childId).toBeGreaterThan(0);
+    // The executor boundary is the only thing replaced: the child is Pi work.
+    const attempt = store.db.prepare(`SELECT lifecycle, executor_kind FROM worker_attempts WHERE id = ?`)
+      .get(node?.["attempt_id"] as string) as { lifecycle: string; executor_kind: string };
+    expect(attempt.lifecycle).toBe("pending");
+    expect(attempt.executor_kind).toBe("pi");
   });
 });
