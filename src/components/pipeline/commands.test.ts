@@ -114,6 +114,72 @@ describe("commandMiddleware interrupt routing (#1534)", () => {
   });
 });
 
+describe("CommandContext transport freshness (#1800)", () => {
+  function makeOldNew() {
+    const oldTransport = {
+      sendInterrupt: vi.fn().mockResolvedValue(undefined),
+      resetSession: vi.fn().mockResolvedValue(undefined),
+    };
+    const newTransport = {
+      sendInterrupt: vi.fn().mockResolvedValue(undefined),
+      resetSession: vi.fn().mockResolvedValue(undefined),
+    };
+    return { oldTransport, newTransport };
+  }
+
+  it("routes resetAndPrepare to the rebuilt transport after a successful rebuild", async () => {
+    const { triggerResetSession } = await import("../commands/registry.js");
+    const { oldTransport, newTransport } = makeOldNew();
+    const session = makeSession({ busy: false });
+    const spinMod = await import("../spin.js");
+    vi.spyOn(spinMod.spin, "getSessionById").mockReturnValue(undefined);
+    const hooksMod = await import("../hooks/hook-system.js");
+    vi.spyOn(hooksMod, "hasHooks").mockReturnValue(false);
+    const ctx = makeCtx(session, "/reset");
+    ctx.deps.transport = oldTransport;
+    ctx.deps.rebuildTransport = vi.fn(async () => { ctx.deps.transport = newTransport; });
+    ctx.deps.memoryConfig = { memoryEnabled: false };
+    ctx.deps.idleSave = { save: vi.fn().mockResolvedValue(undefined) };
+    vi.mocked(handleCommand).mockImplementationOnce(async (_text, cmdCtx) => {
+      await triggerResetSession(cmdCtx);
+      return true;
+    });
+
+    await commandMiddleware(ctx, vi.fn());
+
+    expect(ctx.deps.rebuildTransport).toHaveBeenCalledOnce();
+    expect(newTransport.resetSession).toHaveBeenCalledTimes(1);
+    expect(newTransport.resetSession).toHaveBeenCalledWith("1_A_01");
+    expect(oldTransport.resetSession).not.toHaveBeenCalled();
+  });
+
+  it("keeps the retained instance when the replacement is rejected", async () => {
+    const { triggerResetSession } = await import("../commands/registry.js");
+    const { oldTransport, newTransport } = makeOldNew();
+    const session = makeSession({ busy: false });
+    const spinMod = await import("../spin.js");
+    vi.spyOn(spinMod.spin, "getSessionById").mockReturnValue(undefined);
+    const hooksMod = await import("../hooks/hook-system.js");
+    vi.spyOn(hooksMod, "hasHooks").mockReturnValue(false);
+    const ctx = makeCtx(session, "/reset");
+    ctx.deps.transport = oldTransport;
+    ctx.deps.rebuildTransport = vi.fn(async () => { /* rejected: no publication */ });
+    ctx.deps.memoryConfig = { memoryEnabled: false };
+    ctx.deps.idleSave = { save: vi.fn().mockResolvedValue(undefined) };
+    vi.mocked(handleCommand).mockImplementationOnce(async (_text, cmdCtx) => {
+      await triggerResetSession(cmdCtx);
+      return true;
+    });
+
+    await commandMiddleware(ctx, vi.fn());
+
+    expect(ctx.deps.rebuildTransport).toHaveBeenCalledOnce();
+    expect(oldTransport.resetSession).toHaveBeenCalledTimes(1);
+    expect(oldTransport.resetSession).toHaveBeenCalledWith("1_A_01");
+    expect(newTransport.resetSession).not.toHaveBeenCalled();
+  });
+});
+
 describe("handleStop (#1534)", () => {
   it("interrupts the selected session's own transport via Spin with the boot transport as fallback", async () => {
     const spinMod = await import("../spin.js");
