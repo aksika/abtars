@@ -18,11 +18,17 @@ vi.mock("../components/message-pipeline.js", () => ({
 }));
 
 function makeMockPipelineDeps(): PipelineDeps {
-  return { handleInbound: vi.fn() } as unknown as PipelineDeps;
+  // #1800: the pipeline fixture carries its own transport holder, distinct
+  // from ctx.transport, so getter tests can prove read-through.
+  return { handleInbound: vi.fn(), transport: makeMockPipelineTransport() } as unknown as PipelineDeps;
 }
 
 function makeMockTransport() {
   return { isReady: true } as unknown as BootCtx["transport"];
+}
+
+function makeMockPipelineTransport() {
+  return { isReady: true, kind: "pipeline-holder" };
 }
 
 function makeTelegramAdapter() {
@@ -83,7 +89,30 @@ describe("wireTelegram (#1306)", () => {
     expect(adapter.setMessageHandler).toHaveBeenCalledOnce();
     const call = adapter.setMessageHandler.mock.calls[0]![0] as Record<string, unknown>;
     expect(call["pipeline"]).toBe(ctx.pipelineDeps);
-    expect(call["transport"]).toBe(ctx.transport);
+    // #1800: the adapter reads the pipeline holder, not the wire-time ctx copy.
+    expect(call["transport"]).toBe((ctx.pipelineDeps as PipelineDeps).transport);
+    expect(call["transport"]).not.toBe(ctx.transport);
+  });
+
+  it("tracks pipeline publication and survives ctx.transport clearing (#1800)", async () => {
+    const ctx = createBootCtx();
+    const adapter = makeTelegramAdapter();
+    ctx.telegramAdapter = adapter as unknown as BootCtx["telegramAdapter"];
+    ctx.pipelineDeps = makeMockPipelineDeps();
+    ctx.transport = makeMockTransport();
+    ctx.config = { mainChatId: null } as unknown as BootCtx["config"];
+
+    const { wireTelegram } = await import("./wire-platform.js");
+    await wireTelegram(ctx);
+
+    const deps = adapter.setMessageHandler.mock.calls[0]![0] as { transport: unknown };
+    expect(deps.transport).toBe((ctx.pipelineDeps as PipelineDeps).transport);
+    const replacement = makeMockPipelineTransport();
+    (ctx.pipelineDeps as PipelineDeps).transport = replacement as never;
+    expect(deps.transport).toBe(replacement);
+    // Degraded branch: clearing BootCtx transport must not surface null.
+    ctx.transport = null;
+    expect(deps.transport).toBe(replacement);
   });
 });
 
@@ -114,6 +143,24 @@ describe("wireDiscord (#1306)", () => {
     await wireDiscord(ctx);
 
     expect(adapter.setMessageHandler).toHaveBeenCalledOnce();
+  });
+
+  it("tracks pipeline publication (#1800)", async () => {
+    const ctx = createBootCtx();
+    const adapter = makeDiscordAdapter();
+    ctx.discordAdapter = adapter as unknown as BootCtx["discordAdapter"];
+    ctx.pipelineDeps = makeMockPipelineDeps();
+    ctx.transport = makeMockTransport();
+    ctx.config = { mainChatId: null } as unknown as BootCtx["config"];
+
+    const { wireDiscord } = await import("./wire-platform.js");
+    await wireDiscord(ctx);
+
+    const deps = adapter.setMessageHandler.mock.calls[0]![0] as { transport: unknown };
+    expect(deps.transport).toBe((ctx.pipelineDeps as PipelineDeps).transport);
+    const replacement = makeMockPipelineTransport();
+    (ctx.pipelineDeps as PipelineDeps).transport = replacement as never;
+    expect(deps.transport).toBe(replacement);
   });
 });
 

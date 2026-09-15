@@ -20,10 +20,13 @@ export async function wireTelegram(ctx: BootCtx): Promise<void> {
   const adapter = ctx.telegramAdapter;
   if (!adapter || !ctx.pipelineDeps || !ctx.transport) return;
 
+  const pipelineDeps = ctx.pipelineDeps;
   adapter.setMessageHandler({
-    pipeline: ctx.pipelineDeps,
+    pipeline: pipelineDeps,
     conversationBuffer: ctx.conversationBuffer,
-    transport: ctx.transport,
+    // #1800: read the live pipeline transport at use so a completed
+    // transport rebuild is visible without re-wiring the adapter.
+    get transport() { return pipelineDeps.transport; },
     memoryRuntime: ctx.memoryRuntime,
     sessionManager: ctx.sessionManager,
     actionGate: ctx.actionGate,
@@ -56,9 +59,11 @@ export async function wireDiscord(ctx: BootCtx): Promise<void> {
   const adapter = ctx.discordAdapter;
   if (!adapter || !ctx.pipelineDeps || !ctx.transport) return;
 
+  const pipelineDeps = ctx.pipelineDeps;
   adapter.setMessageHandler({
-    pipeline: ctx.pipelineDeps,
-    transport: ctx.transport,
+    pipeline: pipelineDeps,
+    // #1800: read the live pipeline transport at use (same as wireTelegram).
+    get transport() { return pipelineDeps.transport; },
     memoryRuntime: ctx.memoryRuntime,
     conversationBuffer: ctx.conversationBuffer,
   });
