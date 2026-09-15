@@ -538,6 +538,16 @@ export async function rebuildTransport(ctx: BootCtx): Promise<PhaseResult> {
   if (ctx.idleSave && ctx.transport) {
     (ctx.idleSave as unknown as { transport: IKiroTransport }).transport = ctx.transport;
   }
+  // #1699: bridge-owned sessions are the last holder of the old instance.
+  // Rebind them to the rebuilt transport so /models, /status, and the next
+  // persistent turn resolve the new provider.
+  if (ctx.sessionManager && ctx.transport) {
+    try {
+      ctx.sessionManager.rebindBridgeTransports(ctx.transport);
+    } catch (err) {
+      logWarn("main", `Bridge transport rebind failed (sessions keep old attachment): ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
   logInfo("main", "✓ Transport rebuilt");
   return "ran";
 }

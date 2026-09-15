@@ -69,6 +69,70 @@ describe("Spin — unified session router (#943)", () => {
     });
   });
 
+  describe("rebindBridgeTransports (#1699)", () => {
+    it("rebinds only bridge-owned sessions and returns the count", async () => {
+      const oldTransport = mockTransport();
+      const newTransport = mockTransport();
+      spin.registerMasterSession({ userId: "aksika", chatId: 111, platform: "telegram", transport: oldTransport });
+      const master = spin.getActiveSession("aksika", "telegram");
+
+      const worker = await spin.resolveSession("adrika", "telegram", 222);
+      const workerTransport = worker.transport;
+      expect(worker.transportOwner).toBe("runtime");
+
+      const guest = spin.getActiveSession("visitor", "telegram");
+      expect(guest.transport).toBeUndefined();
+
+      const count = spin.rebindBridgeTransports(newTransport);
+
+      expect(count).toBe(1);
+      expect(master.transport).toBe(newTransport);
+      expect(master.transportOwner).toBe("bridge");
+      expect(worker.transport).toBe(workerTransport);
+      expect(guest.transport).toBeUndefined();
+    });
+
+    it("refreshes pid and leaves lifecycle fields unchanged", () => {
+      const oldTransport = mockTransport();
+      spin.registerMasterSession({ userId: "aksika", chatId: 111, platform: "telegram", transport: oldTransport });
+      const master = spin.getActiveSession("aksika", "telegram");
+      master.busy = true;
+      master.queue = [{ kind: "injected" } as never];
+      master.seen = true;
+      master.pendingStart = true;
+
+      const newTransport = { ...mockTransport(), _rawClient: { pid: 4242 } } as unknown as IKiroTransport;
+      spin.rebindBridgeTransports(newTransport);
+
+      expect(master.transport).toBe(newTransport);
+      expect(master.pid).toBe(4242);
+      expect(master.status).toBe("ready");
+      expect(master.busy).toBe(true);
+      expect(master.queue).toHaveLength(1);
+      expect(master.seen).toBe(true);
+      expect(master.pendingStart).toBe(true);
+      expect(master.delivery).toBe("streaming");
+      expect(master.transportOwner).toBe("bridge");
+    });
+
+    it("is a no-op with no bridge-owned sessions", async () => {
+      await spin.resolveSession("adrika", "telegram", 222);
+      expect(spin.rebindBridgeTransports(mockTransport())).toBe(0);
+    });
+
+    it("consecutive rebuilds land on the latest instance", () => {
+      const t1 = mockTransport();
+      const t2 = mockTransport();
+      const t3 = mockTransport();
+      spin.registerMasterSession({ userId: "aksika", chatId: 111, platform: "telegram", transport: t1 });
+      const master = spin.getActiveSession("aksika", "telegram");
+      spin.rebindBridgeTransports(t2);
+      expect(master.transport).toBe(t2);
+      spin.rebindBridgeTransports(t3);
+      expect(master.transport).toBe(t3);
+    });
+  });
+
   describe("resolveSession", () => {
     it("returns master session with transport when registered", async () => {
       const transport = mockTransport();

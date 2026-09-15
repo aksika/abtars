@@ -240,6 +240,12 @@ describe("transport readiness contract (#1573)", () => {
     ctx.transport = oldTransport;
     ctx.pipelineDeps = { transport: oldTransport } as never;
     ctx.idleSave = { transport: oldTransport } as never;
+    // #1699: a rejected replacement must not rebind sessions either.
+    const { Spin } = await import("../components/spin.js");
+    const sessions = new Spin();
+    ctx.sessionManager = sessions;
+    sessions.registerMasterSession({ userId: "test-master", chatId: 1, platform: "telegram", transport: oldTransport });
+    const masterId = sessions.getActiveSession("test-master", "telegram").id;
     vi.mocked(validatePiRuntimeContract).mockRejectedValueOnce(
       new PiRuntimeContractError("Pi runtime contract incompatible (0.84.0; openai-responses; missing stream).", {
         component: "openai-responses", capability: "stream",
@@ -250,6 +256,7 @@ describe("transport readiness contract (#1573)", () => {
     expect(ctx.transport).toBe(oldTransport);
     expect((ctx.pipelineDeps as { transport: IKiroTransport }).transport).toBe(oldTransport);
     expect((ctx.idleSave as unknown as { transport: IKiroTransport }).transport).toBe(oldTransport);
+    expect(sessions.getSessionById(masterId)?.transport).toBe(oldTransport);
   });
 
   it("rebuildTransport rewires downstream references only after a successful replacement", async () => {
@@ -263,6 +270,30 @@ describe("transport readiness contract (#1573)", () => {
     expect(ctx.transport).not.toBe(oldTransport);
     expect((ctx.pipelineDeps as { transport: IKiroTransport }).transport).toBe(ctx.transport);
     expect((ctx.idleSave as unknown as { transport: IKiroTransport }).transport).toBe(ctx.transport);
+  });
+
+  it("rebuildTransport rebinds bridge-owned sessions to the rebuilt transport (#1699)", async () => {
+    const ctx = makeBootCtx();
+    const oldTransport = makeOldTransport();
+    ctx.transport = oldTransport;
+    ctx.pipelineDeps = { transport: oldTransport } as never;
+    ctx.idleSave = { transport: oldTransport } as never;
+    const { Spin } = await import("../components/spin.js");
+    const sessions = new Spin();
+    ctx.sessionManager = sessions;
+    sessions.registerMasterSession({ userId: "test-master", chatId: 1, platform: "telegram", transport: oldTransport });
+    const masterId = sessions.getActiveSession("test-master", "telegram").id;
+
+    const result = await rebuildTransport(ctx);
+
+    expect(result).toBe("ran");
+    expect(oldTransport.destroy).toHaveBeenCalledTimes(1);
+    expect(sessions.getSessionById(masterId)?.transport).toBe(ctx.transport);
+    // /models read path: the session attachment now reports the rebuilt candidate.
+    const { resolveAttachedTransport } = await import("../components/commands/handlers-transport.js");
+    const attached = resolveAttachedTransport({ sessionManager: sessions, sessionKey: masterId, transport: oldTransport } as never);
+    expect(attached).toBe(ctx.transport);
+    expect(attached.getRuntimeStatus?.()).toMatchObject({ provider: "test-provider", model: TEST_MODEL });
   });
 
   it("preloads Pi's clamp before a rebuild constructs the replacement transport", async () => {

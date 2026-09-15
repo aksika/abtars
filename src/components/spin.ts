@@ -389,6 +389,27 @@ export class Spin {
     this.tryFireGreeting();
   }
 
+  /**
+   * #1699: after a successful live transport rebuild, swap the rebuilt
+   * instance onto every bridge-owned session. Reference swap only — session
+   * lifecycle fields (status, busy, queue, delivery, ownership) are untouched.
+   * Runtime-owned sessions hold their own transports and are never rebound.
+   * Returns the number of rebound sessions.
+   */
+  rebindBridgeTransports(transport: IKiroTransport): number {
+    let rebound = 0;
+    for (const session of this.listAllSessions()) {
+      if (session.transportOwner !== "bridge") continue;
+      session.transport = transport;
+      const t = transport as { _rawClient?: { pid?: number }; agent?: { pid?: number } };
+      session.pid = t?._rawClient?.pid ?? t?.agent?.pid ?? undefined;
+      pushLog(session, "master transport rebound after rebuild");
+      rebound++;
+    }
+    logInfo(TAG, `Bridge-owned transports rebound: ${rebound}`);
+    return rebound;
+  }
+
   /** Set the adapter for boot greeting. Called after platforms are up. */
   setGreetingAdapter(adapter: { injectMessage: (msg: any) => void }): void {
     this._greetingAdapter = adapter;
