@@ -242,6 +242,17 @@ describe("evaluation arming (#1793)", () => {
     expect(new Date(result.nextEvaluationAt as string).getTime()).toBe(now);
   });
 
+  it("arming recomputes when the existing instant is unparseable", () => {
+    const now = Date.now();
+    const corrupt = { ...BASE_SNAPSHOT, nextEvaluationAt: "not-a-date" };
+    const result = reduceFact(corrupt, {
+      ...BASE_FACT,
+      kind: "alive",
+      fact_id: "arm5",
+    }, DEFAULT_LOCAL_POLICY, now);
+    expect(Number.isFinite(new Date(result.nextEvaluationAt as string).getTime())).toBe(true);
+  });
+
   it("arming clamps to the hard deadline", () => {
     const now = Date.now();
     // Hard deadline inside the warning window: both deadlines clamp to it,

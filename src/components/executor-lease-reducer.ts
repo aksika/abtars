@@ -221,9 +221,12 @@ export function reduceFact(
   // #1793: keep the schedule armed on every fact. Take the earlier of any
   // existing arming (e.g. the stalled immediate evaluation above) and the
   // recomputation from the refreshed deadlines — never push an armed
-  // evaluation later.
+  // evaluation later. An unparseable existing instant is treated as absent.
   const armed = armEvaluation(policy, next.livenessDeadlineAt, next.progressDeadlineAt, now, hardDeadlineAt);
-  if (next.nextEvaluationAt === undefined || new Date(next.nextEvaluationAt).getTime() > new Date(armed).getTime()) {
+  const existingAt = next.nextEvaluationAt !== undefined
+    ? new Date(next.nextEvaluationAt).getTime()
+    : Number.NaN;
+  if (!Number.isFinite(existingAt) || existingAt > new Date(armed).getTime()) {
     next.nextEvaluationAt = armed;
   }
 

@@ -189,6 +189,43 @@ describe("ExecutorLeaseStore", () => {
     expect(store.getDueSnapshots()).toHaveLength(0);
   });
 
+  it("#1793 setUpcomingEvaluation keeps the snapshot JSON and the scheduling column in lockstep", () => {
+    const store = new ExecutorLeaseStore();
+    store.appendFact(ALIVE_FACT);
+    const future = new Date(Date.now() + 200_000).toISOString();
+    store.setUpcomingEvaluation(TEST_ATTEMPT_ID, future);
+    expect(store.getSnapshot(TEST_ATTEMPT_ID)!.nextEvaluationAt).toBe(future);
+  });
+
+  it("#1793 a fact does not rewind an armed future evaluation to a past instant", () => {
+    vi.useFakeTimers();
+    try {
+      const store = new ExecutorLeaseStore();
+      store.appendFact(ALIVE_FACT);
+      const future = new Date(Date.now() + 200_000).toISOString();
+      store.setUpcomingEvaluation(TEST_ATTEMPT_ID, future);
+      // The first arming is now in the past; a later fact must not reset the
+      // schedule to it (which would wake the evaluator on every fact).
+      vi.setSystemTime(Date.now() + 95_000);
+      store.appendFact({ ...MILESTONE_FACT, fact_id: "fact_after_arm" });
+      expect(store.getDueSnapshots()).toHaveLength(0);
+      const snap = store.getSnapshot(TEST_ATTEMPT_ID)!;
+      expect(new Date(snap.nextEvaluationAt as string).getTime()).toBeGreaterThan(Date.now());
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("#1793 updateEvaluation cannot overwrite a cancellation intent", () => {
+    const store = new ExecutorLeaseStore();
+    store.appendFact(ALIVE_FACT);
+    const snap = store.getSnapshot(TEST_ATTEMPT_ID)!;
+    expect(store.recordCancelIntent(TEST_ATTEMPT_ID, "test_cancel", 1, snap.stateVersion)).toBe(true);
+    const cancelled = store.getSnapshot(TEST_ATTEMPT_ID)!;
+    expect(store.updateEvaluation(TEST_ATTEMPT_ID, "healthy", cancelled.stateVersion)).toBe(false);
+    expect(store.getSnapshot(TEST_ATTEMPT_ID)!.evaluation.phase).toBe("cancel_requested");
+  });
+
   it("getActiveSnapshots returns only non-closed snapshots", () => {
     const store = new ExecutorLeaseStore();
     store.appendFact(ALIVE_FACT);
