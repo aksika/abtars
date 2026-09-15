@@ -1262,6 +1262,12 @@ async function runRunnerSaturation(): Promise<LocalSwarmResult> {
   // Release exactly one execution through real settlement. The fourth lane
   // must start with no further manual pump call: the only legal driver is
   // the terminal-card redrive (onDone/onFailed rearm the coalesced pump).
+  //
+  // The saturation poll above observes DB claims, which land before the
+  // executions park in passGate(). A blind shift() here can release nothing
+  // while all three later park forever (autoRelease is still false) — a lost
+  // wakeup that hangs the scenario. Wait until all three are held first.
+  await eventually("three-executions-parked", () => (gates.length >= 3 ? true : null), 30000);
   gates.shift()?.();
   const fourthStarted = await eventually("fourth-started-without-manual-pump", () => {
     maxDurableActive = Math.max(maxDurableActive, durableActive());
