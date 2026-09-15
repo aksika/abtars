@@ -1650,5 +1650,133 @@ describe("Reconciler — #1664 error boundary", () => {
       expect(dispatchMock).not.toHaveBeenCalled();
       activeTestHandle = await startTestGeneration();
     });
+
+    it("#1801 delayed cleanup: a held slot blocks the claim, the real release wake starts it with no other event", async () => {
+      await activeTestHandle?.stop();
+      activeTestHandle = null;
+      const { createExecutionSupervisor } = await import("./execution-control.js");
+      const { ReconcileQuarantineStore } = await import("./reconcile-quarantine-store.js");
+      // Real supervisor, cap one: the cancelled lane's slot is still held
+      // while cleanup runs, so physical capacity reads zero.
+      const supervisor = createExecutionSupervisor({ maxConcurrent: { W: 1 } });
+      expect(supervisor.admit("W", 9001, "held:1")).toBe(true);
+      const starts: number[] = [];
+      const testAdapter = {
+        kind: "agent",
+        schedulingPolicy: { recovery: "process_bound" },
+        capacity: async () => ({
+          available: 1 - supervisor.runningCount("W"),
+          max: 1,
+        }),
+        start: async (claim: { cardId: number }) => {
+          starts.push(claim.cardId);
+          return { kind: "started", attemptId: `a_${claim.cardId}`, generation: 1, executorId: "spin-local" };
+        },
+        cancel: async () => ({ kind: "cancelled", attemptId: "a_x" }),
+        inspect: async () => ({ kind: "running", lifecycle: "running" }),
+      } as never;
+      const handle = await mod.startReconciler({
+        generationId: `test-delayed-${++testGenerationCounter}`,
+        coordinator: makeTestCoordinator() as never,
+        wakeScheduler: testWakeScheduler,
+        workerAdapter: testAdapter,
+        piService: null as never,
+        createPiAdapter: (() => testPiAdapter) as never,
+        getQuarantineStore: () => new ReconcileQuarantineStore(),
+        projectRunProgress: () => {},
+        // Real subscription port — removing production wiring fails this test.
+        subscribeCapacityReleased: ((listener: (type: string) => void) =>
+          supervisor.subscribeCapacityReleased(listener as never)) as never,
+      } as never);
+      activeTestHandle = handle;
+      try {
+        cardHasContractMock.mockReturnValue(true);
+        getContractForCardMock.mockReturnValue({ id: "c_1" });
+        getLatestAttemptMock.mockImplementation((cardId: number) => ({
+          id: `a_${cardId}`, lifecycle: "pending", executor_kind: "agent",
+          executor_id: "spin-local", generation: 1, contract_id: "c_1",
+        }));
+        const pending = {
+          id: 9002, parent_id: 100, status: "queued", type: "W",
+          title: "fourth lane", priority: "MEDIUM", created_at: new Date().toISOString(),
+        } as never;
+        kanbanQueuedDispatchOrderMock.mockReturnValue([pending]);
+        kanbanGetCardMock.mockImplementation((id: number) => {
+          if (id === 9002) return pending;
+          if (id === 100) return { id: 100, status: "running", max_tokens: null, tokens_used: 0, type: "O" } as never;
+          return null;
+        });
+        // First pump pass sees occupied capacity: the lane stays pending.
+        mod.requestReconcile(9002);
+        await flush();
+        await new Promise((r) => setTimeout(r, 10));
+        await flush();
+        expect(starts, "held occupancy must block the claim").toHaveLength(0);
+        // Cleanup finishes: the real release notification alone starts it.
+        supervisor.release("W", 9001);
+        await flush();
+        await new Promise((r) => setTimeout(r, 10));
+        await flush();
+        expect(starts, "release wake must start the pending lane exactly once").toEqual([9002]);
+      } finally {
+        await handle.stop();
+        activeTestHandle = null;
+        activeTestHandle = await startTestGeneration();
+      }
+    });
+
+    it("#1801 containment: one card's projection failure does not block the other lane", async () => {
+      const starts: number[] = [];
+      await swapTestGeneration({
+        workerAdapter: {
+          kind: "agent",
+          schedulingPolicy: { recovery: "process_bound" },
+          capacity: async () => ({ available: 3, max: 3 }),
+          start: async (claim: { cardId: number }) => {
+            starts.push(claim.cardId);
+            return { kind: "started", attemptId: `a_${claim.cardId}`, generation: 1, executorId: "spin-local" };
+          },
+          cancel: async () => ({ kind: "cancelled", attemptId: "a_x" }),
+          inspect: async () => ({ kind: "running", lifecycle: "running" }),
+        } as never,
+      });
+      cardHasContractMock.mockReturnValue(true);
+      getContractForCardMock.mockReturnValue({ id: "c_1" });
+      // Card 31 is terminal-completed but its envelope read throws inside the
+      // shared helper; card 32 is a healthy pending lane that must still
+      // dispatch in the same pass (#1664 containment).
+      getLatestAttemptMock.mockImplementation((cardId: number) => {
+        if (cardId === 31) {
+          return {
+            id: "a_31", lifecycle: "completed", executor_kind: "agent",
+            executor_id: "spin-local", generation: 1, contract_id: "c_1",
+          };
+        }
+        return {
+          id: `a_${cardId}`, lifecycle: "pending", executor_kind: "agent",
+          executor_id: "spin-local", generation: 1, contract_id: "c_1",
+        };
+      });
+      getResultByAttemptMock.mockImplementation((attemptId: string) => {
+        if (attemptId === "a_31") throw new Error("projection read boom");
+        return undefined;
+      });
+      const badCard = { id: 31, parent_id: 100, status: "queued", type: "W", title: "bad", priority: "MEDIUM", created_at: new Date().toISOString() } as never;
+      const goodCard = { id: 32, parent_id: 100, status: "queued", type: "W", title: "good", priority: "MEDIUM", created_at: new Date().toISOString() } as never;
+      kanbanQueuedDispatchOrderMock.mockReturnValue([badCard, goodCard]);
+      kanbanGetCardMock.mockImplementation((id: number) => {
+        if (id === 31) return badCard;
+        if (id === 32) return goodCard;
+        if (id === 100) return { id: 100, status: "running", max_tokens: null, tokens_used: 0, type: "O" } as never;
+        return null;
+      });
+      // Drive the dispatch pump directly: the bad card's failure is contained.
+      mod.requestReconcile(32);
+      await flush();
+      await new Promise((r) => setTimeout(r, 10));
+      await flush();
+      expect(starts, "the healthy lane must progress despite its sibling failing").toEqual([32]);
+      await swapTestGeneration({});
+    });
   });
 });

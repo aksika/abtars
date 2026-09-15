@@ -915,6 +915,28 @@ describe("orc-workflow long turns under the run-idle budget (#1793)", () => {
       expect(["cancel_requested", "cancelled", "timed_out", "failed"].includes(attempt1?.lifecycle ?? ""),
         `executor policy must terminate the silent attempt (saw ${attempt1?.lifecycle})`).toBe(true);
 
+      // #1801: terminal attempt ⇒ terminal card + dispatch redrive. The
+      // cancelled lanes' W cards must fail (not linger running), the pending
+      // fourth lane must dispatch without the idle budget firing, and the run
+      // must reach a reasoned node failure — never deadline_exceeded.
+      const laneCards = workNodes(stack).map((n) => n.cardId);
+      const liveCardIds = new Set(live.map((t) => t.cardId));
+      const pendingCards = laneCards.filter((c) => !liveCardIds.has(c));
+      expect(pendingCards, "the fourth lane must wait pending behind the cap").toHaveLength(1);
+      const pendingCard = pendingCards[0] as number;
+      // Cancelled lanes project to failed W cards.
+      await converge(stack, "cancelled-cards-failed", () =>
+        live.every((t) => kanban.kanbanGetCard(t.cardId)?.status === "failed"),
+      );
+      // The pending lane starts from the card-failure redrive alone — the
+      // occurrence idle budget must never fire to produce this progress.
+      await converge(stack, "pending-lane-redriven", () =>
+        liveWorkTurns(stack).some((t) => t.cardId === pendingCard),
+      );
+      expect(stack.deadlineSpy, "the idle budget must not fire to start the pending lane").not.toHaveBeenCalled();
+      expect(stack.adapter.starts.some((s) => s.cardId === pendingCard),
+        "the pending lane must dispatch exactly via the redrive").toBe(true);
+
       // The occurrence settles through the composed runner/settler path.
       let guard = 0;
       while (historyStore.getRun(stack.runId) === undefined && guard < 90) {
@@ -924,6 +946,9 @@ describe("orc-workflow long turns under the run-idle budget (#1793)", () => {
       const hist = historyStore.getRun(stack.runId);
       expect(hist, "a run with no meaningful facts must settle").toBeDefined();
       expect(hist?.outcome, "a run with no meaningful facts must not succeed").not.toBe("success");
+      expect(hist?.diagnostic?.code, "loss must settle by node failure, never the idle deadline").not.toBe("deadline_exceeded");
+      expect(stack.deadlineSpy, "the idle budget must never fire for the loss scenario").not.toHaveBeenCalled();
+      expect(stack.store.getRun(lossWfId)?.state, "workflow run must reach its reasoned failure verdict").toBe("failed");
       expect(stack.adapter.starts.length, "bounded attempts across retries").toBeLessThanOrEqual(8);
       // eslint-disable-next-line no-console
       console.log(JSON.stringify({
