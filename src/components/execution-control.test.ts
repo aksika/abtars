@@ -119,3 +119,79 @@ describe("createExecutionSupervisor — owned occupancy (#1778)", () => {
     expect(sup.runningCount("W")).toBe(1);
   });
 });
+
+describe("createExecutionSupervisor — capacity-release subscription (#1801)", () => {
+  it("release notifies once after the mutation with the updated active set", () => {
+    const sup = createExecutionSupervisor({ maxConcurrent: { W: 5 } });
+    expect(sup.admit("W", 8001, "r1:1")).toBe(true);
+    expect(sup.runningCount("W")).toBe(1);
+    const seen: Array<{ type: string; countAtNotify: number }> = [];
+    const unsub = sup.subscribeCapacityReleased((type) => {
+      seen.push({ type, countAtNotify: sup.runningCount("W") });
+    });
+    sup.release("W", 8001);
+    // Notified after deletion: the slot is already free when the listener runs.
+    expect(seen).toEqual([{ type: "W", countAtNotify: 0 }]);
+    unsub();
+    // Unsubscribed: further releases notify nothing.
+    expect(sup.admit("W", 8002, "r2:1")).toBe(true);
+    sup.release("W", 8002);
+    expect(seen).toHaveLength(1);
+  });
+
+  it("admit, duplicate release, stale-owner release, and clear notify nothing", () => {
+    const sup = createExecutionSupervisor({ maxConcurrent: { W: 5 } });
+    const seen: string[] = [];
+    sup.subscribeCapacityReleased((type) => seen.push(type));
+    // Admit is not a release.
+    expect(sup.admit("W", 8101, "o1:1")).toBe(true);
+    expect(seen).toHaveLength(0);
+    // Duplicate release: second delete is a no-op.
+    sup.release("W", 8101);
+    expect(seen).toEqual(["W"]);
+    sup.release("W", 8101);
+    expect(seen).toHaveLength(1);
+    // Stale-owner release via close: successor holds the slot.
+    expect(sup.admit("W", 8102, "old:1")).toBe(true);
+    sup.open({ executionRef: "old:1", cardId: 8102, type: "W" });
+    sup.bindSession("old:1", "s-old");
+    expect(sup.admit("W", 8102, "new:2")).toBe(true);
+    sup.open({ executionRef: "new:2", cardId: 8102, type: "W" });
+    sup.bindSession("new:2", "s-new");
+    const before = seen.length;
+    sup.close("old:1", "failed");
+    expect(seen).toHaveLength(before);
+    expect(sup.runningCount("W")).toBe(1);
+    // Shutdown clear notifies nothing.
+    sup.clear();
+    expect(seen).toHaveLength(before);
+  });
+
+  it("close delegates to the owned release exactly once (no double-notify)", () => {
+    const sup = createExecutionSupervisor({ maxConcurrent: { W: 5 } });
+    sup.open({ executionRef: "c1:1", attemptId: "c1", generation: 1, cardId: 8201, type: "W" });
+    expect(sup.admit("W", 8201, "c1:1")).toBe(true);
+    sup.bindSession("c1:1", "s-c1");
+    let calls = 0;
+    sup.subscribeCapacityReleased(() => calls += 1);
+    expect(sup.close("c1:1", "completed")).toBe(true);
+    expect(calls).toBe(1);
+    // Second close is a terminal no-op with no further notification.
+    expect(sup.close("c1:1", "completed")).toBe(false);
+    expect(calls).toBe(1);
+  });
+
+  it("listener exceptions are contained and cannot interrupt cleanup", () => {
+    const sup = createExecutionSupervisor({ maxConcurrent: { W: 5 } });
+    expect(sup.admit("W", 8301, "e1:1")).toBe(true);
+    sup.subscribeCapacityReleased(() => {
+      throw new Error("listener boom");
+    });
+    const second: string[] = [];
+    sup.subscribeCapacityReleased((type) => second.push(type));
+    // Must not throw; the slot still frees and the second listener still runs.
+    sup.release("W", 8301);
+    expect(sup.runningCount("W")).toBe(0);
+    expect(second).toEqual(["W"]);
+  });
+});

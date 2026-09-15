@@ -363,6 +363,7 @@ async function startTestGeneration(
     createPiAdapter: (() => testPiAdapter) as never,
     getQuarantineStore: () => new ReconcileQuarantineStore(),
     projectRunProgress: () => {},
+    subscribeCapacityReleased: () => () => {},
   } as never);
 }
 
@@ -522,6 +523,45 @@ describe("Reconciler — #1411 domain guard", () => {
       expect(dispatchMock).toHaveBeenCalledWith(
         expect.objectContaining({ cardId: 1, type: "W" }),
       );
+    });
+
+    it("#1801 two pending cards compete for one physical slot: the pass budget is consumed once", async () => {
+      const starts: number[] = [];
+      await swapTestGeneration({
+        workerAdapter: {
+          kind: "agent",
+          schedulingPolicy: { recovery: "process_bound" },
+          capacity: async () => ({ available: 1, max: 3 }),
+          start: async (claim: { cardId: number }) => {
+            starts.push(claim.cardId);
+            return { kind: "started", attemptId: `a_${claim.cardId}`, generation: 1, executorId: "spin-local" };
+          },
+          cancel: async () => ({ kind: "cancelled", attemptId: "a_1" }),
+          inspect: async () => ({ kind: "running", lifecycle: "running" }),
+        } as never,
+      });
+      cardHasContractMock.mockReturnValue(true);
+      getContractForCardMock.mockReturnValue({ id: "c_1" });
+      getLatestAttemptMock.mockImplementation((cardId: number) => ({
+        id: `a_${cardId}`, lifecycle: "pending", executor_kind: "agent",
+        executor_id: "spin-local", generation: 1, contract_id: "c_1",
+      }));
+      const card1 = { id: 11, parent_id: 100, status: "queued", type: "W", title: "lane-1", priority: "MEDIUM", created_at: new Date().toISOString() } as never;
+      const card2 = { id: 12, parent_id: 100, status: "queued", type: "W", title: "lane-2", priority: "MEDIUM", created_at: new Date().toISOString() } as never;
+      kanbanQueuedDispatchOrderMock.mockReturnValue([card1, card2]);
+      kanbanGetCardMock.mockImplementation((id: number) => {
+        if (id === 11) return card1;
+        if (id === 12) return card2;
+        if (id === 100) return { id: 100, status: "running", max_tokens: null, tokens_used: 0, type: "O" } as never;
+        return null;
+      });
+      mod.requestReconcile(11);
+      await flush();
+      await new Promise((r) => setTimeout(r, 10));
+      await flush();
+      // One physical slot: exactly one lane claims it in this pass.
+      expect(starts).toHaveLength(1);
+      await swapTestGeneration({});
     });
 
     it("dispatches exactly once under duplicate wakeups", async () => {
@@ -1524,6 +1564,91 @@ describe("Reconciler — #1664 error boundary", () => {
         await flush();
         expect(kanbanTransitionMock).not.toHaveBeenCalled();
       }
+    });
+  });
+
+  describe("#1801 generation-owned capacity-release subscription", () => {
+    async function startWithCapture() {
+      await activeTestHandle?.stop();
+      activeTestHandle = null;
+      const captured: Array<(type: string) => void> = [];
+      const subscribeCalls: number[] = [];
+      const unsubscribeCalls: number[] = [];
+      const { SpinWorkerAdapter } = await import("./spin-worker-adapter.js");
+      const { ReconcileQuarantineStore } = await import("./reconcile-quarantine-store.js");
+      const handle = await mod.startReconciler({
+        generationId: `test-cap-${++testGenerationCounter}`,
+        coordinator: makeTestCoordinator() as never,
+        wakeScheduler: testWakeScheduler,
+        workerAdapter: new SpinWorkerAdapter() as never,
+        piService: null as never,
+        createPiAdapter: (() => testPiAdapter) as never,
+        getQuarantineStore: () => new ReconcileQuarantineStore(),
+        projectRunProgress: () => {},
+        subscribeCapacityReleased: ((listener: (type: string) => void) => {
+          subscribeCalls.push(1);
+          captured.push(listener);
+          return () => {
+            unsubscribeCalls.push(1);
+          };
+        }) as never,
+      } as never);
+      activeTestHandle = handle;
+      return { captured, subscribeCalls, unsubscribeCalls, handle };
+    }
+
+    it("subscribes once and disposes on normal stop", async () => {
+      const { subscribeCalls, unsubscribeCalls, handle } = await startWithCapture();
+      expect(subscribeCalls).toHaveLength(1);
+      await handle.stop();
+      activeTestHandle = null;
+      expect(unsubscribeCalls).toHaveLength(1);
+      // Restart for afterEach hygiene.
+      activeTestHandle = await startTestGeneration();
+    });
+
+    it("W releases wake dispatch while active; non-W releases and late callbacks do not", async () => {
+      const { captured, handle } = await startWithCapture();
+      expect(captured).toHaveLength(1);
+      const notify = captured[0]!;
+      // Pending lane behind the cap: a W release must re-arm the pump.
+      cardHasContractMock.mockReturnValue(true);
+      getContractForCardMock.mockReturnValue({ id: "c_1" });
+      getLatestAttemptMock.mockReturnValue({
+        id: "a_1", lifecycle: "pending", executor_kind: "agent",
+        executor_id: "spin-local", generation: 1, contract_id: "c_1",
+      });
+      const card = {
+        id: 2, parent_id: 100, status: "queued", type: "W",
+        title: "lane", priority: "MEDIUM", created_at: new Date().toISOString(),
+      } as never;
+      kanbanQueuedDispatchOrderMock.mockReturnValue([card]);
+      kanbanGetCardMock.mockImplementation((id: number) => {
+        if (id === 2) return card;
+        if (id === 100) return { id: 100, status: "running", max_tokens: null, tokens_used: 0, type: "O" } as never;
+        return null;
+      });
+      dispatchMock.mockClear();
+      // Non-W release: no pump.
+      notify("T");
+      await flush();
+      await new Promise((r) => setTimeout(r, 10));
+      await flush();
+      expect(dispatchMock).not.toHaveBeenCalled();
+      // W release: pump runs and dispatches the pending lane.
+      notify("W");
+      await flush();
+      await new Promise((r) => setTimeout(r, 10));
+      await flush();
+      expect(dispatchMock).toHaveBeenCalled();
+      // Late callback after stop cannot schedule the replacement generation.
+      await handle.stop();
+      activeTestHandle = null;
+      dispatchMock.mockClear();
+      notify("W");
+      await flush();
+      expect(dispatchMock).not.toHaveBeenCalled();
+      activeTestHandle = await startTestGeneration();
     });
   });
 });

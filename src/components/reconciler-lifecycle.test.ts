@@ -115,6 +115,7 @@ async function startGeneration(overrides: GenerationOverrides = {}): Promise<imp
     }))) as never,
     getQuarantineStore: (overrides.getQuarantineStore ?? (() => new quarantineMod.ReconcileQuarantineStore())) as never,
     projectRunProgress: (overrides.projectRunProgress ?? (() => {})) as never,
+    subscribeCapacityReleased: () => () => {},
   } as never);
   await scheduler.start();
   return activeHandle;
@@ -776,5 +777,249 @@ describe("#1794 dispatch pump redrive on worker terminal", () => {
     nerveBus.fire("card:done", 1);
     for (let i = 0; i < 15; i++) await flush();
     expect(JSON.parse(attemptRowJson(attemptId)).lifecycle).toBe("failed");
+  });
+});
+
+// ── #1799 runner-root boot recovery ─────────────────────────────────────────
+// Crash window: supervision reached executing/repairing but the root card
+// never left queued (or predates the first-dispatch projection). The
+// dispatch pump skips children of non-running roots forever, and the legacy
+// active-project scan cannot see runner-owned roots — startup repair from
+// durable workflow-run state plus one pump kick is the only recovery.
+
+describe("#1799 runner-root boot recovery", () => {
+  let wfStoreMod: typeof import("./orc-project/orc-workflow-store.js");
+  let wfRunnerMod: typeof import("./orc-project/orc-workflow-runner.js");
+  let wfCopSeq = 0;
+
+  async function workflowMods(): Promise<void> {
+    // No caching: beforeEach resets the module registry for a fresh TEST_HOME,
+    // so these must resolve against the current test's registry every time
+    // (a cached instance would write to the previous test's database file).
+    wfStoreMod = await import("./orc-project/orc-workflow-store.js");
+    wfRunnerMod = await import("./orc-project/orc-workflow-runner.js");
+  }
+
+  function makeSpinAdapter(starts: string[]) {
+    return {
+      kind: "agent",
+      schedulingPolicy: { recovery: "process_bound" },
+      capacity: async () => ({ available: 1, max: 1 }),
+      start: async (claim: { attemptId: string; generation: number }) => {
+        starts.push(claim.attemptId);
+        return { kind: "started", attemptId: claim.attemptId, generation: claim.generation, executorId: "spin-local" };
+      },
+      cancel: async () => ({ kind: "cancelled", attemptId: "" }),
+      inspect: async () => ({ kind: "running", lifecycle: "running" }),
+    };
+  }
+
+  async function waitFor(cond: () => boolean, label: string): Promise<void> {
+    for (let i = 0; i < 200; i++) {
+      if (cond()) return;
+      await new Promise((r) => setTimeout(r, 10));
+    }
+    throw new Error(`timed out waiting for ${label}`);
+  }
+
+  function rootStatus(rootId: number): string {
+    return (kanban.requireTaskDatabase().prepare(`SELECT status FROM kanban_board WHERE id = ?`).get(rootId) as { status: string }).status;
+  }
+
+  function attemptLifecycle(attemptId: string): string {
+    return (JSON.parse(attemptRowJson(attemptId)) as { lifecycle: string }).lifecycle;
+  }
+
+  /** Queued O root + live workflow run + supervision at the given state. */
+  async function seedRunnerRoot(opts: {
+    title: string;
+    rootKind?: "interactive" | "peer" | "scheduled";
+    source?: string;
+    sourceId?: string | null;
+    scheduledRunId?: string | null;
+    supState?: "awaiting_contract" | "executing" | "repairing";
+    running?: boolean;
+  }): Promise<{ rootId: number; runId: string }> {
+    await workflowMods();
+    const rootId = kanban.kanbanEnqueue(opts.title, opts.source ?? "agent", opts.sourceId ?? undefined, { type: "O", goal: "g" });
+    if (opts.scheduledRunId) {
+      kanban.requireTaskDatabase().prepare(
+        `INSERT INTO task_runs (run_id, task_id, group_id, attempt, trigger, occurrence_at, reserved_at, deadline_at, phase, last_progress_at, owner_pid)
+         VALUES (?, ?, ?, 1, 'schedule', 0, 0, 9999999999999, 'executing', 0, 1)`,
+      ).run(opts.scheduledRunId, `task-${opts.scheduledRunId}`, `g-${opts.scheduledRunId}`);
+    }
+    const wfStore = new wfStoreMod.WorkflowStore();
+    const wfRunner = new wfRunnerMod.WorkflowRunner(wfStore, ["general"]);
+    wfCopSeq++;
+    const { run } = wfRunner.admit({
+      rootKind: opts.rootKind ?? "interactive", rootCardId: rootId,
+      scheduledRunId: opts.scheduledRunId ?? null,
+      clientOperationId: `1799-${wfCopSeq}`,
+    });
+    const review = new reviewStoreMod.ProjectReviewStore();
+    review.ensureAwaitingContract(rootId);
+    if ((opts.supState ?? "executing") !== "awaiting_contract") {
+      const ok = review.stateTransition(rootId, ["awaiting_contract"], opts.supState ?? "executing");
+      if (!ok) throw new Error(`test setup: supervision transition failed for ${rootId}`);
+    }
+    if (opts.running) kanban.kanbanRunning(rootId);
+    return { rootId, runId: run.runId };
+  }
+
+  /** W child with worker contract + never-started pending agent attempt. */
+  function seedAgentChild(rootId: number, tag: string): { childId: number; attemptId: string } {
+    const childId = kanban.kanbanEnqueue(`${tag} child`, "agent", undefined, { type: "W", parent_id: rootId });
+    const supStore = new workerStoreMod.WorkerSupervisionStore();
+    const contractId = `ct_1799_${tag}_${childId}`;
+    supStore.insertContract({
+      schema_version: 1, id: contractId, digest: `d_${contractId}`, goal: "g",
+      criteria: [{ id: "c1", description: "c", required: true, evidence_expectation: "synthesis" }],
+      expected_artifacts: [], verification_commands: [], required_capabilities: [], supports_root_criteria: ["c1"], limits: {},
+      provenance: { root_card_id: rootId, card_id: childId, authored_by: "orc", created_at: new Date().toISOString() },
+    } as never, childId);
+    const attemptId = `a_1799_${tag}_${childId}`;
+    supStore.insertAttempt({
+      id: attemptId, card_id: childId, contract_id: contractId, ordinal: 1,
+      executor_kind: "agent", executor_id: "spin-local", status: "pending",
+      started_at: new Date().toISOString(),
+      root_project_card_id: rootId, root_project_generation: 1, scheduled_run_id: null,
+    } as never);
+    return { childId, attemptId };
+  }
+
+  function dropLegacyTable(): void {
+    kanban.requireTaskDatabase().exec(`DROP TABLE IF EXISTS orc_project_runs`);
+  }
+
+  function hasLegacyTable(): boolean {
+    return kanban.requireTaskDatabase().prepare(
+      `SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'orc_project_runs'`,
+    ).get() !== undefined;
+  }
+
+  /** Boot without the legacy Orc run store anywhere in the path. */
+  function minimalCoordinator() {
+    return { bootRecovery: () => [] as number[], onOwnershipReleased: () => () => {} };
+  }
+
+  it("a queued runner root with a pending child is promoted and started without the legacy table", async () => {
+    const { rootId } = await seedRunnerRoot({ title: "1799 main root" });
+    const { attemptId } = seedAgentChild(rootId, "main");
+    dropLegacyTable();
+    expect(hasLegacyTable()).toBe(false);
+
+    const starts: string[] = [];
+    await startGeneration({
+      coordinator: minimalCoordinator() as never,
+      workerAdapter: makeSpinAdapter(starts) as never,
+    });
+    // Recovery read its candidates from runner-owned storage: nothing
+    // recreated the legacy table.
+    expect(hasLegacyTable()).toBe(false);
+    await waitFor(() => rootStatus(rootId) === "running", "root promotion");
+    await waitFor(() => starts.includes(attemptId), "attempt start through the adapter");
+    await waitFor(() => attemptLifecycle(attemptId) === "running", "attempt running");
+  });
+
+  it("a candidate with no child yet is still promoted", async () => {
+    const { rootId } = await seedRunnerRoot({ title: "1799 childless root" });
+    dropLegacyTable();
+    await startGeneration({ coordinator: minimalCoordinator() as never });
+    // Discovery is independent of child publication.
+    await waitFor(() => rootStatus(rootId) === "running", "childless promotion");
+  });
+
+  it("an already-running root with a pending child is started by the pump kick", async () => {
+    const { rootId } = await seedRunnerRoot({ title: "1799 running root", running: true });
+    const { attemptId } = seedAgentChild(rootId, "kick");
+    const starts: string[] = [];
+    await startGeneration({
+      coordinator: minimalCoordinator() as never,
+      workerAdapter: makeSpinAdapter(starts) as never,
+    });
+    await waitFor(() => starts.includes(attemptId), "pump-kick start");
+    expect(rootStatus(rootId)).toBe("running");
+  });
+
+  it("awaiting-contract supervision is not promoted", async () => {
+    const { rootId } = await seedRunnerRoot({ title: "1799 awaiting root", supState: "awaiting_contract" });
+    await startGeneration({ coordinator: minimalCoordinator() as never });
+    for (let i = 0; i < 10; i++) await flush();
+    expect(rootStatus(rootId)).toBe("queued");
+  });
+
+  it("a terminal workflow is not promoted", async () => {
+    const { rootId, runId } = await seedRunnerRoot({ title: "1799 cancelled root" });
+    await workflowMods();
+    new wfStoreMod.WorkflowStore().db.prepare(`UPDATE workflow_runs SET state = 'cancelled' WHERE run_id = ?`).run(runId);
+    await startGeneration({ coordinator: minimalCoordinator() as never });
+    for (let i = 0; i < 10; i++) await flush();
+    expect(rootStatus(rootId)).toBe("queued");
+  });
+
+  it("a terminal card is not promoted", async () => {
+    const { rootId } = await seedRunnerRoot({ title: "1799 done root" });
+    kanban.kanbanRunning(rootId);
+    kanban.kanbanComplete(rootId, null, "done in setup");
+    expect(rootStatus(rootId)).toBe("done");
+    await startGeneration({ coordinator: minimalCoordinator() as never });
+    for (let i = 0; i < 10; i++) await flush();
+    expect(rootStatus(rootId)).toBe("done");
+  });
+
+  it("rejected authority is not promoted", async () => {
+    const schedId = "1799-neg-run";
+    const { rootId } = await seedRunnerRoot({
+      title: "1799 sched root", rootKind: "scheduled",
+      source: "task", sourceId: schedId, scheduledRunId: schedId,
+    });
+    // The owning scheduled run finished after admission: authority rejects.
+    kanban.requireTaskDatabase().prepare(`UPDATE task_runs SET finished_at = ?, outcome = 'success' WHERE run_id = ?`)
+      .run(Date.now(), schedId);
+    await startGeneration({ coordinator: minimalCoordinator() as never });
+    for (let i = 0; i < 10; i++) await flush();
+    expect(rootStatus(rootId)).toBe("queued");
+  });
+
+  it("a queued quarantined root is not promoted", async () => {
+    const { rootId } = await seedRunnerRoot({ title: "1799 quarantined root" });
+    const qs = new quarantineMod.ReconcileQuarantineStore();
+    for (let i = 0; i < 5; i++) qs.recordFailure(rootId, "boom", new Date().toISOString());
+    expect(qs.isQuarantined(rootId)).toBe(true);
+    await startGeneration({
+      coordinator: minimalCoordinator() as never,
+      getQuarantineStore: (() => qs) as never,
+    });
+    for (let i = 0; i < 10; i++) await flush();
+    expect(rootStatus(rootId)).toBe("queued");
+  });
+
+  it("one candidate throwing records its failure without blocking the next repair or the pump kick", async () => {
+    // Bad first (lower card id): a scheduled root whose task_runs table is
+    // gone — the authority check throws inside the projection. Good second:
+    // an ordinary queued root with a pending child.
+    const schedId = "1799-boom-run";
+    const bad = await seedRunnerRoot({
+      title: "1799 bad root", rootKind: "scheduled",
+      source: "task", sourceId: schedId, scheduledRunId: schedId,
+    });
+    const good = await seedRunnerRoot({ title: "1799 good root" });
+    const { attemptId } = seedAgentChild(good.rootId, "good");
+    kanban.requireTaskDatabase().exec(`DROP TABLE task_runs`);
+
+    const starts: string[] = [];
+    await startGeneration({
+      coordinator: minimalCoordinator() as never,
+      workerAdapter: makeSpinAdapter(starts) as never,
+    });
+    // The loop continued past the throw and the final pump kick ran.
+    await waitFor(() => rootStatus(good.rootId) === "running", "good root promotion");
+    await waitFor(() => starts.includes(attemptId), "good attempt start");
+    // The thrower recorded its failure and stayed queued.
+    expect(rootStatus(bad.rootId)).toBe("queued");
+    const q = kanban.requireTaskDatabase().prepare(
+      `SELECT failure_count FROM reconcile_quarantine WHERE card_id = ?`,
+    ).get(bad.rootId) as { failure_count: number } | undefined;
+    expect(q?.failure_count).toBe(1);
   });
 });

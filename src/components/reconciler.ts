@@ -47,6 +47,9 @@ export interface ReconcilerDeps {
   readonly getQuarantineStore: () => ReconcileQuarantineStore;
   readonly projectRunProgress: (cardId: number) => void;
   readonly failureCascade?: (event: import("./sha/sha-types.js").ScheduledFailureEvent) => void;
+  /** #1801: required Spin capacity-release subscription port. W releases wake
+   * the internal dispatch pump while the subscribing generation is active. */
+  readonly subscribeCapacityReleased: (listener: (type: import("./spin-types.js").SessionType) => void) => () => void;
 }
 
 export type RecoveryAttemptResult =
@@ -617,7 +620,10 @@ function projectTerminalAttemptIfDue(
 
 async function dispatchOnePass(generation: ReconcilerGeneration): Promise<void> {
   const store = new WorkerSupervisionStore();
-  const capacities = new Map<string, { adapter: SwarmExecutorAdapter; max: number }>();
+  // #1801: per-executor dispatch-pass capacity record retains both the
+  // durable max and the remaining physical budget. A terminal-but-
+  // still-occupied Spin lane must block new claims until its release wake.
+  const capacities = new Map<string, { adapter: SwarmExecutorAdapter; max: number; available: number }>();
   const rootDeadlines = new Map<number, string | undefined>();
 
   const queued = kanbanQueuedDispatchOrder();
@@ -695,10 +701,15 @@ async function dispatchOnePass(generation: ReconcilerGeneration): Promise<void> 
     let capacity = capacities.get(capacityKey);
     if (!capacity) {
       const snapshot = await executor.adapter.capacity();
-      capacity = { adapter: executor.adapter, max: snapshot.max };
+      capacity = { adapter: executor.adapter, max: snapshot.max, available: snapshot.available };
       capacities.set(capacityKey, capacity);
     }
     if (capacity.max <= 0) continue;
+    // #1801: physical-capacity admission — a first pump pass that still sees
+    // occupied executor capacity must not claim the pending lane. The
+    // release subscription supplies the later wake. Never spend a free slot
+    // twice in the same pass; the next pass re-samples capacity.
+    if (capacity.available <= 0) continue;
     if (store.getActiveAttemptCountForExecutor(executor.kind, executor.id) >= capacity.max) continue;
 
     if (latestAttempt.source_attempt_id) {
@@ -782,6 +793,10 @@ async function dispatchOnePass(generation: ReconcilerGeneration): Promise<void> 
 
     if (result.kind !== "claimed") continue;
     const claim = (result as { kind: "claimed"; claim: ExecutionClaim }).claim;
+    // #1801: consume one physical slot before the awaited start — never spend
+    // a free slot twice in the same pass. Conservative when start fails, but
+    // the next pass re-samples capacity.
+    capacity.available -= 1;
     if (!store.markAttemptStartObservable(claim.attemptId)) {
       store.terminalSettlement({
         attemptId: claim.attemptId,
@@ -1031,7 +1046,7 @@ export async function startReconciler(deps: ReconcilerDeps): Promise<ReconcilerH
   if (activeGeneration) {
     throw new Error(`Reconciler already active (generation ${activeGeneration.id}) — duplicate start rejected`);
   }
-  if (!deps.coordinator || !deps.wakeScheduler || !deps.workerAdapter || !deps.createPiAdapter || !deps.getQuarantineStore || !deps.projectRunProgress) {
+  if (!deps.coordinator || !deps.wakeScheduler || !deps.workerAdapter || !deps.createPiAdapter || !deps.getQuarantineStore || !deps.projectRunProgress || !deps.subscribeCapacityReleased) {
     throw new Error("Reconciler start rejected: incomplete dependency set");
   }
 
@@ -1091,6 +1106,16 @@ export async function startReconciler(deps: ReconcilerDeps): Promise<ReconcilerH
 
     // 5. Executor-lease due source (returns its scheduler disposer).
     generation.disposers.push(registerExecutorLeaseSource(generation));
+
+    // #1801: generation-owned Spin capacity-release subscription. W releases
+    // wake the internal dispatch pump only while this generation is active;
+    // closing/stopped releases schedule nothing. Unsubscribe is owned by the
+    // generation disposers, so normal stop and failed startup both dispose.
+    const unsubscribeCapacity = deps.subscribeCapacityReleased((type) => {
+      if (type !== "W") return;
+      requestWorkerDispatchFor(generation);
+    });
+    generation.disposers.push(unsubscribeCapacity);
 
     // 6. Static lease-changed hook — retain the exact callback identity so
     // stop can clear it only when still owned by this generation.

@@ -198,6 +198,7 @@ async function startGeneration(coordinator: InstanceType<typeof coordinatorMod.O
     })) as never,
     getQuarantineStore: () => new ReconcileQuarantineStore(),
     projectRunProgress: () => {},
+    subscribeCapacityReleased: () => () => {},
   } as never);
   await wakeScheduler.start();
 }

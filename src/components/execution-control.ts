@@ -11,8 +11,7 @@
  */
 
 import { logDebug, logWarn } from "./logger.js";
-import { logAndSwallow } from "./log-and-swallow.js";
-import { kanbanQueuedDispatchOrder, kanbanFail, kanbanGetCard, isUnblocked, type KanbanCard } from "./tasks/kanban-board.js";
+import { logAndSwallow } from "./log-and-swallow.js";import { kanbanQueuedDispatchOrder, kanbanFail, kanbanGetCard, isUnblocked, type KanbanCard } from "./tasks/kanban-board.js";
 import { isValidSessionType } from "./spin-profiles.js";
 import { WorkerSupervisionStore } from "./worker-supervision-store.js";
 import { ProjectReviewStore } from "./project-acceptance/project-review-store.js";
@@ -186,6 +185,12 @@ export interface ExecutionSupervisor {
    * `kanban-retry` due source alongside Reconciler dispatch.
    */
   drainLegacyQueued(dispatch: (request: SpinRequest) => void): void;
+  /**
+   * #1801: capacity-release subscription. Notifies after an actual occupancy
+   * deletion with the released SessionType. Returns an unsubscribe function.
+   * No notification for admit, duplicate/stale release, or clear.
+   */
+  subscribeCapacityReleased(listener: (type: SessionType) => void): () => void;
   clear(): void;
 }
 
@@ -265,6 +270,20 @@ export function createExecutionSupervisor(options: ExecutionSupervisorOptions): 
 
   let lastHealerDoneAt = 0;
 
+  /** #1801: capacity-release listeners — notified once per actual slot free. */
+  const capacityReleasedListeners = new Set<(type: SessionType) => void>();
+
+  function notifyCapacityReleased(type: SessionType): void {
+    for (const listener of [...capacityReleasedListeners]) {
+      try {
+        listener(type);
+      } catch (err) {
+        // Contained: a failing listener must never interrupt cleanup.
+        logWarn(TAG, `capacity-release listener failed: ${err instanceof Error ? err.message : String(err)}`);
+      }
+    }
+  }
+
   function activeCardIds(): number[] {
     const ids: number[] = [];
     for (const set of running.values()) {
@@ -298,10 +317,13 @@ export function createExecutionSupervisor(options: ExecutionSupervisorOptions): 
   }
 
   function release(type: SessionType, cardId: number): void {
-    running.get(type)?.delete(cardId);
+    const deleted = running.get(type)?.delete(cardId) ?? false;
+    if (!deleted) return;
     occupancyOwner.delete(`${type}:${cardId}`);
     if (type === "H") lastHealerDoneAt = now();
     publishActiveCardIds();
+    // #1801: notify after the occupancy mutation, once per released slot.
+    notifyCapacityReleased(type);
   }
 
   /**
@@ -318,6 +340,9 @@ export function createExecutionSupervisor(options: ExecutionSupervisorOptions): 
       occupancyOwner.delete(`${type}:${cardId}`);
       if (type === "H") lastHealerDoneAt = now();
       publishActiveCardIds();
+      // #1801: notify after the mutation — close() delegates here and must
+      // not notify again.
+      notifyCapacityReleased(type);
       break;
     }
   }
@@ -472,6 +497,13 @@ export function createExecutionSupervisor(options: ExecutionSupervisorOptions): 
       drainLegacyQueued(dispatch);
     },
 
+    subscribeCapacityReleased(listener) {
+      capacityReleasedListeners.add(listener);
+      return () => {
+        capacityReleasedListeners.delete(listener);
+      };
+    },
+
     clear() {
       controls.clear();
       sessionBindings.clear();
@@ -479,6 +511,7 @@ export function createExecutionSupervisor(options: ExecutionSupervisorOptions): 
       running.clear();
       occupancyOwner.clear();
       lastHealerDoneAt = 0;
+      // #1801: shutdown clear notifies nothing — releases are explicit.
     },
   };
 }

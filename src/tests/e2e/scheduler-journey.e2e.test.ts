@@ -330,6 +330,7 @@ async function startGeneration(coordinator: unknown): Promise<void> {
     createPiAdapter: (() => ({ kind: "pi", capacity: async () => ({ available: 0, max: 0 }), start: async () => ({ kind: "start_failed", reason: "unavailable", retryable: false }), cancel: async () => ({ kind: "cancelled", attemptId: "" }), inspect: async () => ({ kind: "running", lifecycle: "running" }) })) as never,
     getQuarantineStore: () => new ReconcileQuarantineStore(),
     projectRunProgress: () => {},
+    subscribeCapacityReleased: () => () => {},
   } as never);
   await scheduler.start();
 }

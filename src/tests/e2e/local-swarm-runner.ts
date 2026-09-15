@@ -251,6 +251,7 @@ async function startTestReconciler(
     getQuarantineStore: () => new ReconcileQuarantineStore(),
     projectRunProgress: deps.projectRunProgress ?? (() => {}),
     failureCascade: deps.failureCascade,
+    subscribeCapacityReleased: deps.subscribeCapacityReleased ?? (() => () => {}),
   });
   await scheduler.start();
 }

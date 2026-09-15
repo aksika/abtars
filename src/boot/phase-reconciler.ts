@@ -14,6 +14,7 @@ import { logWarn, logInfo } from "../components/logger.js";
 import type { BootCtx, PhaseResult } from "./context.js";
 import { OrcProjectCoordinator } from "../components/orc-project/orc-project-coordinator.js";
 import { SpinWorkerAdapter } from "../components/spin-worker-adapter.js";
+import { spin as spinInstance } from "../components/spin.js";
 import { ReconcileQuarantineStore } from "../components/reconcile-quarantine-store.js";
 import { WorkerSupervisionStore } from "../components/worker-supervision-store.js";
 import { PiExecutorAdapter } from "../components/pi-executor-adapter.js";
@@ -79,6 +80,10 @@ export async function phaseReconciler(ctx: BootCtx): Promise<PhaseResult> {
       getQuarantineStore,
       projectRunProgress: inputs.projectRunProgress,
       failureCascade: inputs.failureCascade,
+      // #1801: generation-owned Spin capacity-release subscription through the
+      // existing executionSupervisor getter — no new facade setter.
+      subscribeCapacityReleased: (listener) =>
+        spinInstance.executionSupervisor.subscribeCapacityReleased(listener),
     };
 
     handle = await startReconciler(deps);

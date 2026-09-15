@@ -583,6 +583,7 @@ async function startStack(entryId: string, opts: { ceilingMs: number; silentStar
       return coordinator.projectCardProgress(cardId);
     },
     failureCascade: coordinator.failureCallback,
+    subscribeCapacityReleased: () => () => {},
   } as never);
 
   const driver = driverMod.startWorkflowDriver({
