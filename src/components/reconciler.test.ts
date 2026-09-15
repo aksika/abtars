@@ -1423,4 +1423,107 @@ describe("Reconciler — #1664 error boundary", () => {
       expect.objectContaining({ cardId: 1, signature: "Error:deterministic failure #1664" }),
     ]);
   });
+
+  describe("#1801 terminal-attempt projection in reconcileChildCard", () => {
+    const completedContract = { id: "c_1", digest: "d", criteria: [{ id: "c1" }] };
+    function passingEnvelope() {
+      return {
+        envelope: {
+          schema_version: 1,
+          outcome: "completed",
+          attempt: { id: "a_1", ordinal: 1, contract_id: "c_1", contract_digest: "d", executor_kind: "agent", executor_id: "spin-local", started_at: "", finished_at: "" },
+          criteria: [{ criterion_id: "c1", status: "passed", evidence_ids: ["a1"] }],
+          checks: [],
+          artifacts: [],
+          worker_report: { summary: "x", claims: [], unresolved_risks: [] },
+        },
+      };
+    }
+    function setupTerminalCard(cardStatus: string, lifecycle: string, envelope: unknown = undefined) {
+      cardHasContractMock.mockReturnValue(true);
+      getContractForCardMock.mockReturnValue(completedContract);
+      getResultByAttemptMock.mockReturnValue(envelope);
+      getLatestAttemptMock.mockReturnValue({
+        id: "a_1", card_id: 1, lifecycle, executor_kind: "agent", executor_id: "spin-local",
+        generation: 1, contract_id: "c_1", ordinal: 1,
+      });
+      const card = makeCard({ id: 1, status: cardStatus, type: "W", parent_id: 100 });
+      kanbanTransitionMock.mockImplementation((req: { cardId: number; to: string }) => {
+        if (req.cardId === 1) card.status = req.to;
+        return { kind: "applied", from: cardStatus };
+      });
+      kanbanQueuedDispatchOrderMock.mockReturnValue([]);
+      kanbanGetCardMock.mockReturnValue(card);
+      return card;
+    }
+
+    it("completed with acceptance projects a queued card to done", async () => {
+      setupTerminalCard("queued", "completed", passingEnvelope());
+      mod.requestReconcile(1);
+      await flush();
+      expect(kanbanTransitionMock).toHaveBeenCalled();
+      expect(kanbanTransitionMock.mock.calls[0]?.[0]).toMatchObject(
+        { cardId: 1, to: "done", attemptId: "a_1" },
+      );
+    });
+
+    it("completed without acceptance projects a running card to failed with a bounded reason", async () => {
+      setupTerminalCard("running", "completed", undefined);
+      mod.requestReconcile(1);
+      await flush();
+      expect(kanbanTransitionMock).toHaveBeenCalled();
+      expect(kanbanTransitionMock.mock.calls[0]?.[0]).toMatchObject(
+        { cardId: 1, to: "failed", attemptId: "a_1" },
+      );
+    });
+
+    it("cancelled/timed-out/failed project to failed with a bounded reason", async () => {
+      for (const lifecycle of ["cancelled", "timed_out", "failed"]) {
+        kanbanTransitionMock.mockClear();
+        setupTerminalCard("running", lifecycle);
+        mod.requestReconcile(1);
+        await flush();
+        expect(kanbanTransitionMock).toHaveBeenCalled();
+        expect(kanbanTransitionMock.mock.calls[0]?.[0]).toMatchObject(
+          { cardId: 1, to: "failed", attemptId: "a_1" },
+        );
+      }
+    });
+
+    it("repeated projection is a no-op: a second wake does not re-transition", async () => {
+      const card = setupTerminalCard("queued", "cancelled");
+      mod.requestReconcile(1);
+      await flush();
+      expect(kanbanTransitionMock).toHaveBeenCalledTimes(1);
+      expect(card.status).toBe("failed");
+      // Second wake sees an already-failed card: the legacy retry branch owns
+      // it now, never a second card:failed transition.
+      kanbanTransitionMock.mockClear();
+      getLatestAttemptMock.mockReturnValue({
+        id: "a_1", card_id: 1, lifecycle: "cancelled", executor_kind: "agent",
+        executor_id: "spin-local", generation: 1, contract_id: "c_1", ordinal: 1,
+      });
+      mod.requestReconcile(1);
+      await flush();
+      expect(kanbanTransitionMock).not.toHaveBeenCalled();
+    });
+
+    it("an already-terminal card is never re-decided", async () => {
+      setupTerminalCard("failed", "cancelled");
+      mod.requestReconcile(1);
+      await flush();
+      // Failed cards retain the legacy retry branch — no projection write.
+      expect(kanbanTransitionMock).not.toHaveBeenCalled();
+    });
+
+    it("cancel_requested and pending attempts are not projected", async () => {
+      for (const lifecycle of ["cancel_requested", "pending"]) {
+        kanbanTransitionMock.mockClear();
+        setupTerminalCard("queued", lifecycle);
+        mod.requestReconcile(1);
+        await flush();
+        expect(kanbanTransitionMock).not.toHaveBeenCalled();
+      }
+    });
+  });
 });

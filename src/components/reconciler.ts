@@ -3,7 +3,7 @@ import {
   kanbanFail,
   kanbanGetCard, kanbanGetChildren, kanbanRunningProjectIds, kanbanStrandedQueuedProjectIds,
   kanbanQueuedDispatchOrder, kanbanTransition, sqliteNow,
-  isUnblocked, cascadeFail, type KanbanCard, type TaskDatabase,
+  isUnblocked, cascadeFail, type KanbanCard, type CardStatus, type TaskDatabase, type TransitionOutcome,
 } from "./tasks/kanban-board.js";
 import { logInfo, logWarn, logError, redactSecrets } from "./logger.js";
 import { logAndSwallow } from "./log-and-swallow.js";
@@ -23,6 +23,8 @@ import { ExecutorLeaseStore } from "./executor-lease-store.js";
 import { AGENT_EXECUTOR_ID, type ExecutorKind } from "./worker-executor-identity.js";
 import { ProjectReviewStore } from "./project-acceptance/project-review-store.js";
 import { isRunnerManagedCard } from "./orc-project/orc-workflow-settlement.js";
+import { WorkflowStore } from "./orc-project/orc-workflow-store.js";
+import { projectRunnerRootRunning } from "./orc-project/orc-workflow-ports.js";
 import { drainPeerCallbackOutbox } from "./peer-callback-outbox.js";
 import type { PiRunService } from "./pi-executor/pi-run-service.js";
 import type { AttemptLifecycle, AttemptRow } from "./worker-supervision-store.js";
@@ -418,6 +420,21 @@ async function reconcileChildCard(generation: ReconcilerGeneration, card: Kanban
 
   const latestAttempt = getLatestAttemptInfo(card.id);
 
+  // #1801: terminal-attempt projection for lagging queued/running cards.
+  // A cancellation (or any executor settlement) that never emitted a card
+  // event leaves the W card behind its durable attempt — project it here
+  // from the winning verdict so the card:failed event re-arms the pump.
+  // Both terminal results stop lease evaluation and dispatch admission for
+  // this card. Already-failed cards never reach this branch: their legacy
+  // retry handling below must remain reachable.
+  if (card.status === "queued" || card.status === "running") {
+    const projStore = new WorkerSupervisionStore();
+    // Read/transition errors propagate to the #1664 per-card containment
+    // (runReconcileBehindBoundary) — never translated into a card failure.
+    const projection = projectTerminalAttemptIfDue(projStore.db, card, projStore, svc);
+    if (projection !== "nonterminal") return;
+  }
+
   if (card.status === "queued") {
     if (!isUnblocked(card)) return;
     if (latestAttempt && latestAttempt.lifecycle === "pending") {
@@ -493,6 +510,9 @@ async function runWorkerDispatch(generation: ReconcilerGeneration): Promise<void
  * projection is auditable to its owner instead of posing as an unattributed
  * card write. Field and from-set parity with kanbanComplete/kanbanFail is
  * deliberate — only the correlation is new.
+ *
+ * #1801: returns the actual kanbanTransition outcome so callers report
+ * success from the CAS result instead of guessing from the pre-read.
  */
 function projectAttemptCard(
   db: TaskDatabase,
@@ -500,7 +520,7 @@ function projectAttemptCard(
   to: "done" | "failed",
   attempt: { id: string; generation: number },
   summary: string,
-): void {
+): TransitionOutcome {
   // #1792: the dispatch pump reads its card snapshot at pass start while
   // settlement commits mid-pass on another stack — re-read at decision time
   // and never re-decide a terminal card. A done card whose attempt completed
@@ -509,12 +529,14 @@ function projectAttemptCard(
   // case (Pi lanes) always presents queued/running and is unaffected.
   try {
     const current = db.prepare(`SELECT status FROM kanban_board WHERE id = ?`).get(cardId) as { status: string } | undefined;
-    if (current && (current.status === "done" || current.status === "failed" || current.status === "delivered")) return;
+    if (current && (current.status === "done" || current.status === "failed" || current.status === "delivered")) {
+      return { kind: "no_op", observed: current.status as CardStatus };
+    }
   } catch {
     // Unreadable card: fall through to the CAS below, which fails closed.
   }
   if (to === "done") {
-    kanbanTransition({
+    return kanbanTransition({
       cardId,
       from: ["running", "queued"],
       to: "done",
@@ -529,7 +551,7 @@ function projectAttemptCard(
       },
     }, db);
   } else {
-    kanbanTransition({
+    return kanbanTransition({
       cardId,
       from: ["queued", "running", "done"],
       to: "failed",
@@ -540,6 +562,57 @@ function projectAttemptCard(
       fields: { error: summary.slice(0, 1000), completed_at: sqliteNow() },
     }, db);
   }
+}
+
+/**
+ * #1801: shared terminal-attempt projection. Extracted from the two
+ * dispatchOnePass branches (pre-dispatch and post-start) and reused by
+ * reconcileChildCard for queued/running cards whose latest attempt is
+ * terminal while the card still lags.
+ *
+ * Contract: read the latest durable attempt synchronously; if terminal and
+ * the card snapshot is queued/running, project via projectAttemptCard —
+ * completed uses the exact-contract acceptance predicate, every other
+ * terminal lifecycle fails with a bounded reason. A terminal card is never
+ * re-decided (projectAttemptCard guards). Returns the closed result from the
+ * actual transition outcome: only `projected` (applied CAS) marks the pump
+ * dirty; a no-op CAS must not cause an endless dirty-pass loop.
+ *
+ * Synchronous by contract: read/identity-check/project with no intervening
+ * await. Attempt correlation fields alone are not an ownership fence — the
+ * fresh latest read is the authority. Read/transition errors propagate to
+ * the caller's per-card containment; an unreadable verdict is never
+ * translated into failure here.
+ */
+type TerminalProjectionResult = "nonterminal" | "terminal_unchanged" | "projected";
+
+function projectTerminalAttemptIfDue(
+  db: TaskDatabase,
+  card: KanbanCard,
+  store: WorkerSupervisionStore,
+  supSvc: WorkerSupervisionService,
+): TerminalProjectionResult {
+  if (card.status !== "queued" && card.status !== "running") return "terminal_unchanged";
+  // Unreadable durable verdicts propagate to the caller's per-card
+  // containment — never translated into a card failure here.
+  const latest: AttemptRow | undefined = store.getLatestAttempt(card.id);
+  if (!latest) return "nonterminal";
+  if (!isTerminal(latest.lifecycle)) return "nonterminal";
+  let outcome: TransitionOutcome | undefined;
+  if (latest.lifecycle === "completed") {
+    const resultData = store.getResultByAttempt(latest.id);
+    const completedContract = resultData ? supSvc.getContractForCard(card.id) : undefined;
+    if (completedContract && resultData && acceptancePassed(completedContract, resultData.envelope)) {
+      outcome = projectAttemptCard(db, card.id, "done", { id: latest.id, generation: latest.generation || 1 }, "worker completed");
+    } else {
+      outcome = projectAttemptCard(db, card.id, "failed", { id: latest.id, generation: latest.generation || 1 }, "worker completed without passing acceptance");
+    }
+  } else {
+    outcome = projectAttemptCard(db, card.id, "failed", { id: latest.id, generation: latest.generation || 1 }, `worker ${latest.lifecycle}`);
+  }
+  // A mocked kanbanTransition (unit tests) may return undefined — treat any
+  // non-applied outcome as terminal_unchanged; only an applied CAS projects.
+  return outcome?.kind === "applied" ? "projected" : "terminal_unchanged";
 }
 
 async function dispatchOnePass(generation: ReconcilerGeneration): Promise<void> {
@@ -570,22 +643,19 @@ async function dispatchOnePass(generation: ReconcilerGeneration): Promise<void> 
     // #1656: a `completed` lifecycle means the executor finished, not that
     // acceptance passed. The exact-contract predicate decides the W card:
     // a completed envelope whose criteria did not all pass fails the card.
+    // #1801: shared helper — returns the closed result from the actual CAS.
     if (!latestAttempt) continue;
     if (store.isAttemptTerminal(latestAttempt.lifecycle)) {
-      if (card.status === "queued" || card.status === "running") {
-        if (latestAttempt.lifecycle === "completed") {
-          const resultData = store.getResultByAttempt(latestAttempt.id);
-          const completedContract = resultData ? supSvc.getContractForCard(card.id) : undefined;
-          if (completedContract && resultData && acceptancePassed(completedContract, resultData.envelope)) {
-            projectAttemptCard(store.db, card.id, "done", { id: latestAttempt.id, generation: latestAttempt.generation || 1 }, "worker completed");
-          } else {
-            projectAttemptCard(store.db, card.id, "failed", { id: latestAttempt.id, generation: latestAttempt.generation || 1 }, "worker completed without passing acceptance");
-          }
-        } else {
-          projectAttemptCard(store.db, card.id, "failed", { id: latestAttempt.id, generation: latestAttempt.generation || 1 }, `worker ${latestAttempt.lifecycle}`);
-        }
-        generation.dispatchPump.dirty = true;
+      let projection: TerminalProjectionResult;
+      try {
+        projection = projectTerminalAttemptIfDue(store.db, card, store, supSvc);
+      } catch (err) {
+        // #1664 containment: one card's projection failure never blocks the
+        // rest of the pass.
+        logWarn(TAG, `Card ${card.id}: terminal projection failed — continuing pass: ${err instanceof Error ? err.message : String(err)}`);
+        continue;
       }
+      if (projection === "projected") generation.dispatchPump.dirty = true;
       continue;
     }
     if (latestAttempt.lifecycle !== "pending") continue;
@@ -740,20 +810,13 @@ async function dispatchOnePass(generation: ReconcilerGeneration): Promise<void> 
       // durable attempt state and re-run the pump.
       // #1656: a `completed` lifecycle means the executor finished, not that
       // acceptance passed — the exact-contract envelope predicate decides.
-      const afterStart = store.getLatestAttempt(card.id);
-      if (afterStart && store.isAttemptTerminal(afterStart.lifecycle) && (card.status === "queued" || card.status === "running")) {
-        if (afterStart.lifecycle === "completed") {
-          const afterResult = store.getResultByAttempt(afterStart.id);
-          const afterContract = afterResult ? supSvc.getContractForCard(card.id) : undefined;
-          if (afterContract && afterResult && acceptancePassed(afterContract, afterResult.envelope)) {
-            projectAttemptCard(store.db, card.id, "done", { id: afterStart.id, generation: afterStart.generation || 1 }, "worker completed");
-          } else {
-            projectAttemptCard(store.db, card.id, "failed", { id: afterStart.id, generation: afterStart.generation || 1 }, "worker completed without passing acceptance");
-          }
-        } else {
-          projectAttemptCard(store.db, card.id, "failed", { id: afterStart.id, generation: afterStart.generation || 1 }, `worker ${afterStart.lifecycle}`);
+      // #1801: shared helper — only an applied CAS re-arms the pump.
+      try {
+        if (projectTerminalAttemptIfDue(store.db, card, store, supSvc) === "projected") {
+          generation.dispatchPump.dirty = true;
         }
-        generation.dispatchPump.dirty = true;
+      } catch (err) {
+        logWarn(TAG, `Card ${card.id}: post-start projection failed — continuing pass: ${err instanceof Error ? err.message : String(err)}`);
       }
     } else if (observation.kind === "deferred" && observation.provesNoStart === true) {
       // #1638: proven-no-start contention (Pi capacity/workspace busy). The
@@ -1058,6 +1121,43 @@ export async function startReconciler(deps: ReconcilerDeps): Promise<ReconcilerH
       else skipped.push(projectId);
     }
     if (skipped.length > 0) logWarn(TAG, `Skipped ${skipped.length} quarantined project(s): ${skipped.join(", ")}`);
+
+    // 10b. #1799: runner-owned root projection repair (startup only). Roots
+    // whose supervision reached executing/repairing but whose card never left
+    // queued (crash between the supervision transition and the first-dispatch
+    // projection, or a pre-#1799 dispatch) are invisible to the dispatch pump
+    // (`project.status !== "running"` skips their children forever). Repair
+    // them from durable workflow-run state, one bounded SELECT, per-candidate
+    // containment. Expected predicate rejections are skips, not quarantine
+    // failures; only unexpected throws record a reconcile failure.
+    let repaired = 0;
+    try {
+      const workflowStore = new WorkflowStore();
+      for (const candidate of workflowStore.listRecoverableRunnerRoots()) {
+        if (safeIsQuarantined(generation, candidate.rootCardId)) {
+          logWarn(TAG, `Root projection skipped for quarantined card ${candidate.rootCardId}`);
+          continue;
+        }
+        try {
+          const outcome = projectRunnerRootRunning(workflowStore.db, candidate);
+          if (outcome.ok) repaired += 1;
+          else logWarn(TAG, `Root projection skipped for card ${candidate.rootCardId}: ${outcome.reason}`);
+        } catch (err) {
+          safeRecordReconcileFailure(generation, candidate.rootCardId, err);
+        }
+      }
+    } catch (err) {
+      logWarn(TAG, `Runner root recovery scan unavailable: ${err instanceof Error ? err.message : String(err)}`);
+    }
+    if (repaired > 0) logInfo(TAG, `Recovered ${repaired} queued runner root(s)`);
+
+    // Unconditional generation-bound pump kick: promoted roots publish no
+    // card:queued (the projection emits card:running, which no pump listens
+    // for), and startup listeners may have missed a child card:queued that
+    // predates boot. Already-running roots with pending children recover
+    // through the same pass.
+    requestWorkerDispatchFor(generation);
+
     logInfo(TAG, `Reconciler started — recovered ${count} running project(s)`);
 
     // 11. Freeze/expose the report.
