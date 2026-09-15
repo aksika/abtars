@@ -49,6 +49,24 @@ vi.mock("./telegram-poller.js", () => ({
   }),
 }));
 
+// #1800: partial mock so the real model picker resolves deterministically.
+// Everything not listed is the real module, so other adapter flows are
+// unaffected. Journey tests set explicit return values per case.
+const tcMocks = vi.hoisted(() => ({
+  loadTransport: vi.fn(),
+  writeTransportConfig: vi.fn(),
+  getModelsForProvider: vi.fn(),
+  validateProviderReady: vi.fn(),
+  formatValidationError: vi.fn(),
+  resolveAgent: vi.fn(),
+  cleanDemotedModels: vi.fn(),
+}));
+
+vi.mock("../../components/transport-config.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../../components/transport-config.js")>();
+  return { ...actual, ...tcMocks };
+});
+
 const TelegramPollerMock: any = {};
 
 function makeConfig(): TelegramAdapterConfig {
@@ -330,6 +348,168 @@ describe("TelegramAdapter", () => {
 
       await (TelegramPollerMock as any)._handler(update);
       expect(transport.sendPrompt).not.toHaveBeenCalled();
+    });
+  });
+
+  describe("transport freshness after rebuild (#1800)", () => {
+    const MODEL = "tencent/hy3-preview";
+
+    function mockSwitchableTransport() {
+      return {
+        initialize: vi.fn().mockResolvedValue(undefined),
+        sendPrompt: vi.fn().mockResolvedValue("response"),
+        resetSession: vi.fn().mockResolvedValue(undefined),
+        sendInterrupt: vi.fn().mockResolvedValue(undefined),
+        destroy: vi.fn(),
+        setModel: vi.fn().mockResolvedValue(undefined),
+        switchProvider: vi.fn(),
+        transportCommands: [],
+        get isReady() { return true; },
+      };
+    }
+
+    function routeConfig(mainProvider: string, mainModel: string, providers: Record<string, unknown>) {
+      return {
+        activeRoute: "pi-ai",
+        routes: { "pi-ai": { agents: { main: { model: mainModel, provider: mainProvider } }, fallbacks: [] } },
+        providers,
+      };
+    }
+
+    function resolvedAgent(transport: string) {
+      return {
+        model: MODEL,
+        provider: { transport, endpoint: "https://api.test/v1", apiKeyEnv: "TEST_API_KEY" },
+        providerName: "test-provider",
+        contextWindow: 128000,
+      };
+    }
+
+    const apiProviders = {
+      openrouter: { transport: "api", endpoint: "https://api.test/v1" },
+      codex: { transport: "api", endpoint: "https://api.test/v1" },
+      localacp: { transport: "acp", cli: "kiro-cli" },
+    };
+
+    let pipelineDeps: any;
+    let oldTransport: ReturnType<typeof mockSwitchableTransport>;
+    let newTransport: ReturnType<typeof mockSwitchableTransport>;
+
+    async function wireWithLiveGetter() {
+      const { createBootCtx } = await import("../../boot/context.js");
+      const { wireTelegram } = await import("../../boot/wire-platform.js");
+      pipelineDeps = (deps.pipeline as unknown) as any;
+      pipelineDeps.transport = oldTransport;
+      pipelineDeps.rebuildTransport = vi.fn(async () => {
+        pipelineDeps.transport = newTransport;
+      });
+      const bootCtx = createBootCtx() as any;
+      bootCtx.pipelineDeps = pipelineDeps;
+      bootCtx.transport = oldTransport;
+      bootCtx.telegramAdapter = adapter;
+      bootCtx.config = { mainChatId: null };
+      bootCtx.conversationBuffer = deps.conversationBuffer;
+      bootCtx.memoryRuntime = deps.memoryRuntime;
+      bootCtx.sessionManager = deps.sessionManager;
+      await wireTelegram(bootCtx);
+      await adapter.start();
+    }
+
+    function injectModelCallback(data: string) {
+      return (TelegramPollerMock as any)._handler({
+        update_id: 100,
+        callback_query: {
+          id: "cb-1800",
+          from: { id: 42, first_name: "Test" },
+          message: { message_id: 301, chat: { id: 42, type: "private" } },
+          data,
+        },
+      });
+    }
+
+    function sentTexts(): string[] {
+      const api = capturedApi as unknown as { sendMessage: ReturnType<typeof vi.fn> };
+      return api.sendMessage.mock.calls.map((c) => String(c[1]));
+    }
+
+    beforeEach(() => {
+      oldTransport = mockSwitchableTransport();
+      newTransport = mockSwitchableTransport();
+      tcMocks.loadTransport.mockReset();
+      tcMocks.resolveAgent.mockReset();
+      tcMocks.writeTransportConfig.mockReset();
+      tcMocks.getModelsForProvider.mockReset();
+      tcMocks.validateProviderReady.mockReset();
+      tcMocks.formatValidationError.mockReset();
+      tcMocks.cleanDemotedModels.mockReset();
+      tcMocks.writeTransportConfig.mockReturnValue({ ok: true });
+      tcMocks.getModelsForProvider.mockReturnValue([{ id: MODEL }]);
+      tcMocks.validateProviderReady.mockReturnValue({ ok: true });
+      tcMocks.formatValidationError.mockReturnValue("");
+      tcMocks.cleanDemotedModels.mockReturnValue(undefined);
+    });
+
+    it("calls setModel on the live transport after a completed rebuild", async () => {
+      await wireWithLiveGetter();
+      tcMocks.loadTransport.mockReturnValue(
+        routeConfig("openrouter", "codex-old-model", { openrouter: apiProviders.openrouter }),
+      );
+      // Model a previously completed rebuild on the same holder; the adapter
+      // stays wired. A value capture would keep using oldTransport here.
+      pipelineDeps.transport = newTransport;
+
+      await injectModelCallback(`mset:openrouter:${MODEL}`);
+
+      expect(newTransport.setModel).toHaveBeenCalledTimes(1);
+      expect(newTransport.setModel).toHaveBeenCalledWith(MODEL);
+      expect(oldTransport.setModel).not.toHaveBeenCalled();
+      expect(pipelineDeps.rebuildTransport).not.toHaveBeenCalled();
+      expect(sentTexts().some((t) => t.includes(`✓ Switched to ${MODEL}`))).toBe(true);
+    });
+
+    it("calls switchProvider on the live transport for a same-type provider change", async () => {
+      await wireWithLiveGetter();
+      tcMocks.loadTransport.mockReturnValue(
+        routeConfig("codex", "codex-model", { openrouter: apiProviders.openrouter, codex: apiProviders.codex }),
+      );
+      tcMocks.resolveAgent.mockImplementation((slot: string) =>
+        slot === "_old" ? resolvedAgent("api") : resolvedAgent("api"),
+      );
+      pipelineDeps.transport = newTransport;
+
+      const envMod = await import("../../components/env-schema.js");
+      const realEnv = envMod.getEnv();
+      vi.spyOn(envMod, "getEnv").mockReturnValue({ ...realEnv, getApiKey: () => "test-key" } as never);
+
+      await injectModelCallback(`mset:openrouter:${MODEL}`);
+
+      expect(newTransport.switchProvider).toHaveBeenCalledTimes(1);
+      expect(newTransport.switchProvider).toHaveBeenCalledWith(
+        expect.objectContaining({ provider: "openrouter", model: MODEL, apiKey: "test-key" }),
+      );
+      expect(oldTransport.switchProvider).not.toHaveBeenCalled();
+      expect(pipelineDeps.rebuildTransport).not.toHaveBeenCalled();
+      expect(sentTexts().some((t) => t.includes(`✓ Switched to ${MODEL} (openrouter)`))).toBe(true);
+    });
+
+    it("rebuilds and resets the live transport for a cross-transport change", async () => {
+      await wireWithLiveGetter();
+      tcMocks.loadTransport.mockReturnValue(
+        routeConfig("localacp", "local-model", { openrouter: apiProviders.openrouter, localacp: apiProviders.localacp }),
+      );
+      tcMocks.resolveAgent.mockImplementation((slot: string) =>
+        slot === "_old" ? resolvedAgent("acp") : resolvedAgent("api"),
+      );
+
+      await injectModelCallback(`mset:openrouter:${MODEL}`);
+
+      expect(pipelineDeps.rebuildTransport).toHaveBeenCalledTimes(1);
+      expect(newTransport.resetSession).toHaveBeenCalledTimes(1);
+      expect(newTransport.resetSession).toHaveBeenCalledWith("telegram:42");
+      expect(oldTransport.resetSession).not.toHaveBeenCalled();
+      expect(newTransport.switchProvider).not.toHaveBeenCalled();
+      expect(oldTransport.switchProvider).not.toHaveBeenCalled();
+      expect(sentTexts().some((t) => t.includes("Transport rebuilt"))).toBe(true);
     });
   });
 });
