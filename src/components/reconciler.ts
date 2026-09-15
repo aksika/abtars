@@ -880,7 +880,27 @@ function evaluateLease(generation: ReconcilerGeneration, card: KanbanCard): void
       return undefined;
     };
 
-    const service = new LeaseReconciliationService(adapterResolver);
+    // #1801: generation-captured cancellation wake. The lease service
+    // notifies only from the durable terminal verdict; this callback wakes
+    // the captured generation's internal reconcile path (never the public
+    // facade) and only while that generation is still active. A late promise
+    // must not wake a replacement generation, and identity is revalidated
+    // here so a stale callback never fails a replacement attempt.
+    const service = new LeaseReconciliationService(adapterResolver, undefined, undefined, undefined, {
+      onTerminalAttempt: ({ cardId, attemptId, attemptGeneration }) => {
+        if (!isActive(generation)) return;
+        try {
+          const store = new WorkerSupervisionStore();
+          const latest = store.getLatestAttempt(cardId);
+          if (!latest || latest.id !== attemptId) return;
+          if ((latest.generation || 1) !== (attemptGeneration || 1)) return;
+          if (!store.isAttemptTerminal(latest.lifecycle)) return;
+        } catch {
+          return;
+        }
+        wakeCard(generation, cardId);
+      },
+    });
     service.evaluateAndAct(latestAttempt.id, card.id);
     scheduleLeaseEvaluations(generation);
   } catch (err) {

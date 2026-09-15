@@ -14,22 +14,39 @@ export interface AdapterResolver {
   (executorKind: ExecutorKind, executorId: string): SwarmExecutorAdapter | undefined;
 }
 
+export interface LeaseTerminalNotification {
+  readonly cardId: number;
+  readonly attemptId: string;
+  readonly attemptGeneration: number;
+}
+
+export interface LeaseReconciliationHooks {
+  /** #1801: generation-captured reconciliation notification. Called only when
+   * the durable latest attempt for the card is terminal and still the
+   * cancelled attempt — never from an adapter observation alone, never a
+   * card verdict write. */
+  readonly onTerminalAttempt?: (info: LeaseTerminalNotification) => void;
+}
+
 export class LeaseReconciliationService {
   private leaseStore: ExecutorLeaseStore;
   private supervisionStore: WorkerSupervisionStore;
   private resolveAdapter: AdapterResolver;
   private policy: LeasePolicy;
+  private hooks?: LeaseReconciliationHooks;
 
   constructor(
     resolveAdapter: AdapterResolver,
     leaseStore?: ExecutorLeaseStore,
     supervisionStore?: WorkerSupervisionStore,
     policy?: LeasePolicy,
+    hooks?: LeaseReconciliationHooks,
   ) {
     this.leaseStore = leaseStore ?? new ExecutorLeaseStore();
     this.supervisionStore = supervisionStore ?? new WorkerSupervisionStore();
     this.resolveAdapter = resolveAdapter;
     this.policy = policy ?? DEFAULT_LOCAL_POLICY;
+    this.hooks = hooks;
   }
 
   /** Evaluate one attempt's lease and take policy action. */
@@ -159,6 +176,8 @@ export class LeaseReconciliationService {
     const committed = this.leaseStore.recordCancelIntent(attemptId, reason, attempt.generation, stateVersion);
     if (!committed) return;
 
+    const attemptGeneration = attempt.generation || 1;
+
     if (reason === "hard_deadline") {
       logSwarmTrace({ event: "deadline_expired", card: cardId, attempt: attemptId, reason: "hard_deadline" });
       const settlement = this.supervisionStore.terminalSettlement({
@@ -170,12 +189,19 @@ export class LeaseReconciliationService {
       if (settlement.kind === "settled" || settlement.kind === "replayed") {
         logInfo(TAG, `Hard deadline settlement for attempt ${attemptId}: ${settlement.kind}`);
       }
+      // #1801: the durable verdict exists — wake reconciliation from the
+      // winning attempt state, preserving a concurrent winner. No adapter
+      // call on this branch by design.
+      this.notifyIfTerminal(cardId, attemptId, attemptGeneration);
       return;
     }
 
     const adapter = this.resolveAdapter(attempt.executor_kind, attempt.executor_id);
     if (!adapter) {
       logWarn(TAG, `No adapter for ${attempt.executor_kind}/${attempt.executor_id} — cancel intent recorded but no runtime cancel`);
+      // #1801: read-only terminal check — a concurrently settled winner still
+      // wakes; a live attempt notifies nothing. Never manufacture settlement.
+      this.notifyIfTerminal(cardId, attemptId, attemptGeneration);
       return;
     }
 
@@ -191,10 +217,53 @@ export class LeaseReconciliationService {
     };
 
     const cancelReason: CancelReason = reason === "hard_deadline" ? "deadline" : "operator";
-    adapter.cancel(claim, cancelReason).catch(err => {
-      logWarn(TAG, `Cancel failed for attempt ${attemptId}: ${err}`);
-    });
+    // #1801: notify from durable state, not the adapter observation. Both
+    // fulfillment (including cancel_failed/not_found with a terminal winner)
+    // and rejection (including throws after a durable commit) re-read the
+    // latest attempt — a still-live/missing attempt notifies nothing.
+    adapter.cancel(claim, cancelReason).then(
+      () => {
+        this.notifyIfTerminal(cardId, attemptId, attemptGeneration);
+      },
+      (err) => {
+        logWarn(TAG, `Cancel failed for attempt ${attemptId}: ${err}`);
+        this.notifyIfTerminal(cardId, attemptId, attemptGeneration);
+      },
+    );
 
     logInfo(TAG, `Cancel requested for attempt ${attemptId}: ${reason}`);
+  }
+
+  /**
+   * #1801: read-only terminal gate for the cancellation wake. Re-reads the
+   * durable latest attempt and notifies only when it is terminal and still
+   * the cancelled attempt — a replacement attempt is untouched, a live or
+   * missing attempt produces no verdict. Never writes a card verdict.
+   */
+  private notifyIfTerminal(cardId: number, attemptId: string, attemptGeneration: number): void {
+    const notify = this.hooks?.onTerminalAttempt;
+    if (!notify) return;
+    let latest: { id: string; generation: number; lifecycle: string } | undefined;
+    try {
+      const row = this.supervisionStore.getLatestAttempt(cardId) as
+        | { id: string; generation: number; lifecycle: string }
+        | undefined;
+      latest = row;
+    } catch {
+      return;
+    }
+    if (!latest) return;
+    if (latest.id !== attemptId) return;
+    if ((latest.generation || 1) !== (attemptGeneration || 1)) return;
+    try {
+      if (!this.supervisionStore.isAttemptTerminal(latest.lifecycle as never)) return;
+    } catch {
+      return;
+    }
+    try {
+      notify({ cardId, attemptId: latest.id, attemptGeneration: latest.generation || 1 });
+    } catch (err) {
+      logWarn(TAG, `Terminal notification failed for attempt ${attemptId}: ${err}`);
+    }
   }
 }
