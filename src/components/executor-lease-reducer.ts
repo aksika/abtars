@@ -9,6 +9,32 @@ export interface PendingInputResolver {
   isOpenRequest(attemptId: string, generation: number, requestId: string): boolean;
 }
 
+/**
+ * #1793: arm the lease evaluation schedule for a snapshot write. The
+ * executor-lease due source only lists snapshots with a non-null
+ * next_evaluation_at, and the only other writer is the evaluation cycle
+ * itself — so a snapshot written without an arming is never evaluated (no
+ * warning, inspection, or cancel) and a silent attempt only ever meets the
+ * occurrence idle budget. The arming mirrors evaluateLease's healthy
+ * next-instant: the earlier policy deadline minus the warning lead, clamped
+ * to the hard deadline and floored at now so an already-due snapshot
+ * evaluates immediately.
+ */
+function armEvaluation(
+  policy: LeasePolicy,
+  livenessDeadlineAt: string,
+  progressDeadlineAt: string,
+  now: number,
+  hardDeadlineAt?: number,
+): string {
+  const evalAt = Math.min(
+    new Date(livenessDeadlineAt).getTime() - policy.warningBeforeMs,
+    new Date(progressDeadlineAt).getTime() - policy.warningBeforeMs,
+    hardDeadlineAt ?? Number.POSITIVE_INFINITY,
+  );
+  return new Date(Math.max(now, evalAt)).toISOString();
+}
+
 export function createInitialSnapshot(
   fact: ExecutorProgressFactV1,
   cardId: number,
@@ -21,6 +47,8 @@ export function createInitialSnapshot(
   const progressDeadline = now + policy.meaningfulProgressMs;
 
   const clamp = (v: number) => hardDeadlineAt !== undefined ? Math.min(v, hardDeadlineAt) : v;
+  const livenessDeadlineAt = new Date(clamp(livenessDeadline)).toISOString();
+  const progressDeadlineAt = new Date(clamp(progressDeadline)).toISOString();
 
   return {
     schemaVersion: 1,
@@ -37,8 +65,9 @@ export function createInitialSnapshot(
     lastReceivedAt: nowStr,
     lastLivenessAt: nowStr,
     lastMeaningfulProgressAt: nowStr,
-    livenessDeadlineAt: new Date(clamp(livenessDeadline)).toISOString(),
-    progressDeadlineAt: new Date(clamp(progressDeadline)).toISOString(),
+    livenessDeadlineAt,
+    progressDeadlineAt,
+    nextEvaluationAt: armEvaluation(policy, livenessDeadlineAt, progressDeadlineAt, now, hardDeadlineAt),
     evaluation: {
       phase: "healthy",
       inspectionCount: 0,
@@ -187,6 +216,15 @@ export function reduceFact(
       next.nextEvaluationAt = nowStr;
       break;
     }
+  }
+
+  // #1793: keep the schedule armed on every fact. Take the earlier of any
+  // existing arming (e.g. the stalled immediate evaluation above) and the
+  // recomputation from the refreshed deadlines — never push an armed
+  // evaluation later.
+  const armed = armEvaluation(policy, next.livenessDeadlineAt, next.progressDeadlineAt, now, hardDeadlineAt);
+  if (next.nextEvaluationAt === undefined || new Date(next.nextEvaluationAt).getTime() > new Date(armed).getTime()) {
+    next.nextEvaluationAt = armed;
   }
 
   next.updatedAt = nowStr;

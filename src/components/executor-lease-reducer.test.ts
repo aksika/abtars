@@ -183,3 +183,74 @@ describe("reduceFact — dual clocks", () => {
     expect(r2.lastMeaningfulProgressAt).not.toBe(oldMeaningful);
   });
 });
+
+describe("evaluation arming (#1793)", () => {
+  it("createInitialSnapshot arms the first evaluation at the earlier deadline minus the warning lead", () => {
+    const now = Date.now();
+    const snap = createInitialSnapshot(BASE_FACT, 42, DEFAULT_LOCAL_POLICY, now);
+    expect(snap.nextEvaluationAt).toBeDefined();
+    const expected = Math.min(
+      now + DEFAULT_LOCAL_POLICY.livenessMs,
+      now + DEFAULT_LOCAL_POLICY.meaningfulProgressMs,
+    ) - DEFAULT_LOCAL_POLICY.warningBeforeMs;
+    expect(new Date(snap.nextEvaluationAt as string).getTime()).toBe(expected);
+  });
+
+  it("reduceFact arms the schedule on every fact", () => {
+    const now = Date.now();
+    const unarmed = { ...BASE_SNAPSHOT, nextEvaluationAt: undefined };
+    const result = reduceFact(unarmed, {
+      ...BASE_FACT,
+      kind: "alive",
+      fact_id: "arm1",
+    }, DEFAULT_LOCAL_POLICY, now);
+    expect(result.nextEvaluationAt).toBeDefined();
+    const expected = Math.min(
+      new Date(result.livenessDeadlineAt).getTime(),
+      new Date(result.progressDeadlineAt).getTime(),
+    ) - DEFAULT_LOCAL_POLICY.warningBeforeMs;
+    expect(new Date(result.nextEvaluationAt as string).getTime()).toBe(expected);
+  });
+
+  it("reduceFact never pushes an existing earlier arming later", () => {
+    const now = Date.now();
+    const immediate = new Date(now).toISOString();
+    const armed = { ...BASE_SNAPSHOT, nextEvaluationAt: immediate };
+    const result = reduceFact(armed, {
+      ...BASE_FACT,
+      kind: "alive",
+      fact_id: "arm2",
+    }, DEFAULT_LOCAL_POLICY, now);
+    expect(result.nextEvaluationAt).toBe(immediate);
+  });
+
+  it("arming floors at now when the deadlines already passed", () => {
+    const now = Date.now();
+    const stale = {
+      ...BASE_SNAPSHOT,
+      livenessDeadlineAt: new Date(now - 60_000).toISOString(),
+      progressDeadlineAt: new Date(now - 60_000).toISOString(),
+      nextEvaluationAt: undefined,
+    };
+    const result = reduceFact(stale, {
+      ...BASE_FACT,
+      kind: "alive",
+      fact_id: "arm3",
+    }, DEFAULT_LOCAL_POLICY, now);
+    // alive renews liveness but not meaningful progress, so the progress
+    // deadline stays past and the arming floors at now: already-due.
+    expect(new Date(result.nextEvaluationAt as string).getTime()).toBe(now);
+  });
+
+  it("arming clamps to the hard deadline", () => {
+    const now = Date.now();
+    // Hard deadline inside the warning window: both deadlines clamp to it,
+    // so the arming lands one warning lead before it.
+    const hardAt = now + 60_000;
+    const snap = createInitialSnapshot(BASE_FACT, 42, DEFAULT_LOCAL_POLICY, now, hardAt);
+    expect(new Date(snap.nextEvaluationAt as string).getTime()).toBe(hardAt - DEFAULT_LOCAL_POLICY.warningBeforeMs);
+    // Hard deadline nearer than the warning lead: evaluate immediately.
+    const snapDue = createInitialSnapshot(BASE_FACT, 42, DEFAULT_LOCAL_POLICY, now, now + 10_000);
+    expect(new Date(snapDue.nextEvaluationAt as string).getTime()).toBe(now);
+  });
+});

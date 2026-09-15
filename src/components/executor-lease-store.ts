@@ -315,6 +315,12 @@ export class ExecutorLeaseStore {
     const snapshot = JSON.parse(row.snapshot_json) as AttemptLeaseSnapshotV1;
     snapshot.evaluation.phase = phase as AttemptLeaseSnapshotV1["evaluation"]["phase"];
     snapshot.evaluation.version++;
+    // #1793: keep the JSON stateVersion in lockstep with the column CAS.
+    // Without this bump every later updateEvaluation CAS fails: the column
+    // moves to N+1 while readers keep seeing N, so a silent attempt can never
+    // advance past its first evaluation phase change (no inspect, no grace,
+    // no cancel) and only ever meets the occurrence idle budget.
+    snapshot.stateVersion = row.state_version + 1;
     if (nextEvaluationAt !== undefined) snapshot.nextEvaluationAt = nextEvaluationAt;
     snapshot.updatedAt = new Date().toISOString();
     const result = this.db.prepare(`
