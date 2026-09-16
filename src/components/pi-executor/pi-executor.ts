@@ -40,8 +40,26 @@ const READINESS_RETRY_DELAY_MS = 250;
 
 /** #1804 — readiness outcome for a supervised attempt (pre-submission only). */
 type PiReadinessResult =
-  | { ready: true; selected: { provider: string; id: string } }
+  | { ready: true }
   | { ready: false; kind: "unavailable" | "probe_failed"; reason: string };
+
+/** #1804 — definitive unready state: the selected model is not available. */
+function readinessUnavailable(detail: string): PiReadinessResult {
+  return {
+    ready: false,
+    kind: "unavailable",
+    reason: `Pi model unavailable: ${detail} (no task submitted)`.slice(0, 500),
+  };
+}
+
+/** #1804 — indeterminate evidence deadline: the probe could not conclude. */
+function readinessProbeFailed(detail: string): PiReadinessResult {
+  return {
+    ready: false,
+    kind: "probe_failed",
+    reason: `Pi readiness probe failed: ${detail} (no task submitted)`.slice(0, 500),
+  };
+}
 
 interface OwnedProcess {
   client: SupervisedPiRpcClient;
@@ -441,88 +459,49 @@ export class PiExecutor {
   ): Promise<PiReadinessResult> {
     // #1804: scoped to supervised runs — shared runtime use (standalone,
     // interactive, TUI) keeps its existing admission with no extra probe.
-    if (run.origin !== "supervised") {
-      return { ready: true, selected: { provider: "unspecified", id: "unspecified" } };
-    }
-    let lastProbeCause = "unreadable Pi state";
+    if (run.origin !== "supervised") return { ready: true };
+    // Only the availability snapshot is retried: empty or provider-incomplete
+    // snapshots are indeterminate (refresh timeout / re-registration), while
+    // an unreadable RPC is a probe failure now. `get_state`/`get_available_models`
+    // carry their own bounded command timeout.
+    let snapshotCause = "available-model snapshot indeterminate";
     for (let read = 1; read <= READINESS_MAX_READS; read++) {
+      if (read > 1) {
+        await new Promise((r) => setTimeout(r, READINESS_RETRY_DELAY_MS));
+      }
       let state: { model?: { provider: string; id: string } } | null = null;
       try {
         state = await owned.client.getState();
       } catch (err) {
-        lastProbeCause = err instanceof Error ? err.message : String(err);
-        if (read < READINESS_MAX_READS) {
-          await new Promise((r) => setTimeout(r, READINESS_RETRY_DELAY_MS));
-          continue;
-        }
-        return {
-          ready: false,
-          kind: "probe_failed",
-          reason: `Pi readiness probe failed: Pi state unreadable (${lastProbeCause.slice(0, 160)}) (no task submitted)`.slice(0, 500),
-        };
+        return readinessProbeFailed(`Pi state unreadable (${boundedError(err)})`);
       }
       const selected = state?.model;
       if (!selected) {
-        return {
-          ready: false,
-          kind: "unavailable",
-          reason: "Pi model unavailable: Pi reported no selected model (no task submitted)",
-        };
+        // Definitive (verified against Pi 0.85.1): no selected model is not
+        // indeterminate evidence — it is the unready state itself.
+        return readinessUnavailable("Pi reported no selected model");
       }
       let models: Array<{ provider: string; id: string }>;
       try {
         models = await owned.client.getAvailableModels();
       } catch (err) {
-        lastProbeCause = err instanceof Error ? err.message : String(err);
-        if (read < READINESS_MAX_READS) {
-          await new Promise((r) => setTimeout(r, READINESS_RETRY_DELAY_MS));
-          continue;
-        }
-        return {
-          ready: false,
-          kind: "probe_failed",
-          reason: `Pi readiness probe failed: available-model snapshot unreadable (${lastProbeCause.slice(0, 160)}) (no task submitted)`.slice(0, 500),
-        };
+        return readinessProbeFailed(`available-model snapshot unreadable (${boundedError(err)})`);
       }
       if (models.length === 0) {
-        lastProbeCause = "available-model snapshot empty";
-        if (read < READINESS_MAX_READS) {
-          await new Promise((r) => setTimeout(r, READINESS_RETRY_DELAY_MS));
-          continue;
-        }
-        return {
-          ready: false,
-          kind: "probe_failed",
-          reason: `Pi readiness probe failed: ${lastProbeCause} after ${READINESS_MAX_READS} reads (no task submitted)`,
-        };
+        snapshotCause = "available-model snapshot empty";
+        continue;
       }
       const providerModels = models.filter((m) => m.provider === selected.provider);
       if (providerModels.length === 0) {
-        lastProbeCause = `no snapshot entry for provider ${selected.provider}`;
-        if (read < READINESS_MAX_READS) {
-          await new Promise((r) => setTimeout(r, READINESS_RETRY_DELAY_MS));
-          continue;
-        }
-        return {
-          ready: false,
-          kind: "probe_failed",
-          reason: `Pi readiness probe failed: ${lastProbeCause} after ${READINESS_MAX_READS} reads (no task submitted)`.slice(0, 500),
-        };
+        snapshotCause = `no snapshot entry for provider ${selected.provider}`;
+        continue;
       }
       if (!providerModels.some((m) => m.id === selected.id)) {
-        return {
-          ready: false,
-          kind: "unavailable",
-          reason: `Pi model unavailable: ${selected.provider}/${selected.id} not available in Pi runtime (no task submitted)`.slice(0, 500),
-        };
+        return readinessUnavailable(`${selected.provider}/${selected.id} not available in Pi runtime`);
       }
-      return { ready: true, selected };
+      return { ready: true };
     }
-    return {
-      ready: false,
-      kind: "probe_failed",
-      reason: `Pi readiness probe failed: ${lastProbeCause.slice(0, 160)} (no task submitted)`.slice(0, 500),
-    };
+    return readinessProbeFailed(`${snapshotCause} after ${READINESS_MAX_READS} reads`);
   }
 
   /**

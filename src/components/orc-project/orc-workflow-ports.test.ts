@@ -1,9 +1,11 @@
 import { describe, it, expect, beforeAll, afterAll, beforeEach } from "vitest";
-import { mkdirSync, rmSync, existsSync } from "node:fs";
+import { mkdirSync, rmSync, existsSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { vi } from "vitest";
 import { ProjectReviewStore } from "../project-acceptance/project-review-store.js";
+import { resolveWorkerExecutorIntent } from "../worker-executor-routing.js";
+import type { WorkerAcceptanceContractV1 } from "../worker-contract.js";
 import type { RootProjectionOutcome } from "./orc-workflow-ports.js";
 
 let TEST_HOME: string;
@@ -829,8 +831,6 @@ describe("#1799 runner-root promotion", () => {
 
 describe("WorkflowPorts #1804 planner vocabulary and alias compatibility", () => {
   function writePiConfigWithDefaultAlias(wsPath: string): void {
-    const { mkdirSync, writeFileSync } = require("node:fs") as typeof import("node:fs");
-    const { join } = require("node:path") as typeof import("node:path");
     mkdirSync(join(TEST_HOME, "config"), { recursive: true });
     mkdirSync(wsPath, { recursive: true });
     writeFileSync(
@@ -844,10 +844,12 @@ describe("WorkflowPorts #1804 planner vocabulary and alias compatibility", () =>
     );
   }
 
-  it("separates the model vocabulary from runner compatibility with a configured default alias", async () => {
-    const { join } = await import("node:path");
-    const { tmpdir } = await import("node:os");
-    const { mkdirSync, rmSync } = await import("node:fs");
+  function cleanupPiConfig(wsPath: string): void {
+    try { rmSync(wsPath, { recursive: true, force: true }); } catch {}
+    try { rmSync(join(TEST_HOME, "config", "pi-executor.json"), { force: true }); } catch {}
+  }
+
+  it("separates the model vocabulary from runner compatibility with a configured default alias", () => {
     const wsPath = join(tmpdir(), `wf-1804-ws-${Date.now()}-${Math.random().toString(36).slice(2)}`);
     writePiConfigWithDefaultAlias(wsPath);
     try {
@@ -867,8 +869,7 @@ describe("WorkflowPorts #1804 planner vocabulary and alias compatibility", () =>
       expect(Ports.resolvePiWorkspaceAlias("default")).toBe("default");
       expect(Ports.resolvePiWorkspaceAlias("pi-coding")).toBe("default");
     } finally {
-      try { rmSync(wsPath, { recursive: true, force: true }); } catch {}
-      try { rmSync(join(TEST_HOME, "config", "pi-executor.json"), { force: true }); } catch {}
+      cleanupPiConfig(wsPath);
     }
   });
 
@@ -926,14 +927,10 @@ describe("WorkflowPorts #1804 planner vocabulary and alias compatibility", () =>
     expect(proposal.nodes[0]?.capability).toBe("general");
   });
 
-  it("keeps explicit alias admission compatible and routes durable contracts without Spin fallback", async () => {
-    const { join } = await import("node:path");
-    const { tmpdir } = await import("node:os");
-    const { mkdirSync, rmSync } = await import("node:fs");
+  it("keeps explicit alias admission compatible and routes durable contracts without Spin fallback", () => {
     const wsPath = join(tmpdir(), `wf-1804-route-${Date.now()}-${Math.random().toString(36).slice(2)}`);
     writePiConfigWithDefaultAlias(wsPath);
     try {
-      const { resolveWorkerExecutorIntent } = await import("../worker-executor-routing.js");
       const store = new StoreType();
       const runner = new RunnerType(store, Ports.workflowCapabilities());
       const res = store.db.prepare(`INSERT INTO kanban_board (title, source, type, status) VALUES (?, 'agent', 'O', 'running')`)
@@ -943,33 +940,46 @@ describe("WorkflowPorts #1804 planner vocabulary and alias compatibility", () =>
       const run = runner.admit({ rootKind: "interactive", rootCardId: card, clientOperationId: `port-1804-r-${copSeq}` }).run;
       // Explicit programmatic alias admission stays compatible (not a model proposal).
       const acc = runner.acceptPlan(run.runId, {
-        requiredOutputs: ["o"],
+        requiredOutputs: ["o1", "o2"],
         nodes: [
-          { label: "a", kind: "work", instructions: "code it", capability: "default", outputs: ["o"], acceptance: ["done"], dependsOn: [] },
+          { label: "a", kind: "work", instructions: "code it", capability: "default", outputs: ["o1"], acceptance: ["done"], dependsOn: [] },
+          { label: "b", kind: "work", instructions: "collect it", capability: "general", outputs: ["o2"], acceptance: ["done"], dependsOn: [] },
         ],
       });
-      const nodeId = acc.nodeIds[0] as string;
-      const claimed = store.claimCommand(
-        { runId: run.runId, generation: 1, nodeId, action: "dispatch", ordinal: 0 }, "workflow-worker-routing",
-      );
-      expect(claimed).not.toBeNull();
-      new Ports.RoutingWorkflowWorkerPort({ runner }).dispatch(claimed!.row);
-      const node = store.listNodes(run.runId, 1).find((n) => n["node_id"] === nodeId);
-      const attemptId = node?.["attempt_id"] as string;
-      expect(Number(node?.["worker_card_id"])).toBeGreaterThan(0);
-      const attempt = store.db.prepare(`SELECT executor_kind FROM worker_attempts WHERE id = ?`).get(attemptId) as { executor_kind: string };
-      expect(attempt.executor_kind).toBe("pi");
-      const contractRow = store.db.prepare(`SELECT contract_json FROM worker_contracts WHERE id = (SELECT contract_id FROM worker_attempts WHERE id = ?)`).get(attemptId) as { contract_json: string };
-      const contract = JSON.parse(contractRow.contract_json) as { workspace_alias?: string };
-      // General nodes carry no alias and select Spin; the alias contract
-      // carries its workspace and selects Pi with no fallback.
-      expect(contract.workspace_alias).toBe("default");
-      expect(resolveWorkerExecutorIntent(contract as never)).toMatchObject({ kind: "pi", workspaceAlias: "default" });
-      const spinIntent = resolveWorkerExecutorIntent({ workspace_alias: undefined } as never);
-      expect(spinIntent.kind).toBe("agent");
+      const routing = new Ports.RoutingWorkflowWorkerPort({ runner });
+      const dispatchNode = (nodeId: string): { attemptId: string; contract: WorkerAcceptanceContractV1; executorKind: string } => {
+        const claimed = store.claimCommand(
+          { runId: run.runId, generation: 1, nodeId, action: "dispatch", ordinal: 0 }, "workflow-worker-routing",
+        );
+        expect(claimed).not.toBeNull();
+        routing.dispatch(claimed!.row);
+        const node = store.listNodes(run.runId, 1).find((n) => n["node_id"] === nodeId);
+        expect(Number(node?.["worker_card_id"])).toBeGreaterThan(0);
+        const attemptId = node?.["attempt_id"] as string;
+        const attempt = store.db.prepare(`SELECT contract_id, executor_kind FROM worker_attempts WHERE id = ?`)
+          .get(attemptId) as { contract_id: string; executor_kind: string };
+        const contractRow = store.db.prepare(`SELECT contract_json FROM worker_contracts WHERE id = ?`)
+          .get(attempt.contract_id) as { contract_json: string };
+        return {
+          attemptId,
+          contract: JSON.parse(contractRow.contract_json) as WorkerAcceptanceContractV1,
+          executorKind: attempt.executor_kind,
+        };
+      };
+
+      // The explicit alias contract carries its workspace and selects Pi;
+      // a general node carries no alias and selects Spin — no fallback.
+      const alias = dispatchNode(acc.nodeIds[0] as string);
+      expect(alias.executorKind).toBe("pi");
+      expect(alias.contract.workspace_alias).toBe("default");
+      expect(resolveWorkerExecutorIntent(alias.contract)).toMatchObject({ kind: "pi", workspaceAlias: "default" });
+
+      const general = dispatchNode(acc.nodeIds[1] as string);
+      expect(general.executorKind).toBe("agent");
+      expect(general.contract.workspace_alias).toBeUndefined();
+      expect(resolveWorkerExecutorIntent(general.contract)).toMatchObject({ kind: "agent", id: "spin-local" });
     } finally {
-      try { rmSync(wsPath, { recursive: true, force: true }); } catch {}
-      try { rmSync(join(TEST_HOME, "config", "pi-executor.json"), { force: true }); } catch {}
+      cleanupPiConfig(wsPath);
     }
   });
 });
