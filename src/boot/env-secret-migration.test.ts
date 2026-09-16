@@ -77,7 +77,7 @@ describe("runSecretMigration — single value", () => {
     ]);
     expect(io.store["OPENAI_API_KEY"]).toBe("sk-abc");
     expect(r.committedSecrets).toEqual(["OPENAI_API_KEY"]);
-    expect(r.files[0].content).toBe("DEFAULT_PROVIDER=openrouter\nLOG_LEVEL=debug\n");
+    expect(r.files[0]!.content).toBe("DEFAULT_PROVIDER=openrouter\nLOG_LEVEL=debug\n");
     expect(r.envKeysToUnset).toEqual([]);
     // values never appear in structured results
     expect(JSON.stringify(r)).not.toContain("sk-abc");
@@ -92,8 +92,8 @@ describe("runSecretMigration — single value", () => {
     expect(r.decisions[0]).toMatchObject({ key: "OPENAI_API_KEY", outcome: "migrated", sources: [".env", ".env.skills"] });
     expect(io.store["OPENAI_API_KEY"]).toBe("same");
     expect(r.files).toHaveLength(2);
-    expect(r.files[0].content).toBe("");
-    expect(r.files[1].content).toBe("HA_URL=http://x\n");
+    expect(r.files[0]!.content).toBe("");
+    expect(r.files[1]!.content).toBe("HA_URL=http://x\n");
   });
 
   it("keeps an existing equal secret and removes plaintext", () => {
@@ -101,7 +101,7 @@ describe("runSecretMigration — single value", () => {
     const r = runSecretMigration(file("OPENAI_API_KEY=sk-abc\n"), io);
     expect(r.decisions[0]).toMatchObject({ key: "OPENAI_API_KEY", outcome: "kept-existing" });
     expect(r.committedSecrets).toEqual([]);
-    expect(r.files[0].content).toBe("");
+    expect(r.files[0]!.content).toBe("");
   });
 
   it("keeps an existing differing secret, warns, removes plaintext", () => {
@@ -109,7 +109,7 @@ describe("runSecretMigration — single value", () => {
     const r = runSecretMigration(file("OPENAI_API_KEY=sk-plaintext\n"), io);
     expect(r.decisions[0]).toMatchObject({ key: "OPENAI_API_KEY", outcome: "conflict-kept-existing" });
     expect(io.store["OPENAI_API_KEY"]).toBe("sk-stored");
-    expect(r.files[0].content).toBe("");
+    expect(r.files[0]!.content).toBe("");
     expect(JSON.stringify(r)).not.toContain("sk-plaintext");
     expect(JSON.stringify(r)).not.toContain("sk-stored");
   });
@@ -117,7 +117,7 @@ describe("runSecretMigration — single value", () => {
   it("handles quoted values", () => {
     const io = fakeStore();
     const r = runSecretMigration(file('OPENAI_API_KEY="sk-quoted"\n'), io);
-    expect(r.decisions[0].outcome).toBe("migrated");
+    expect(r.decisions[0]!.outcome).toBe("migrated");
     expect(io.store["OPENAI_API_KEY"]).toBe("sk-quoted");
   });
 
@@ -164,7 +164,7 @@ describe("runSecretMigration — fail closed", () => {
     const io = fakeStore({}, true);
     const r = runSecretMigration([{ path: ENV, content: "OPENAI_API_KEY=sk-never-written\n" }], io);
     expect(r.decisions[0]).toMatchObject({ key: "OPENAI_API_KEY", outcome: "rejected-unsafe" });
-    expect(r.decisions[0].reason).toContain("disk full");
+    expect(r.decisions[0]!.reason).toContain("disk full");
     expect(r.files).toEqual([]);
     expect(r.envKeysToUnset).toEqual(["OPENAI_API_KEY"]);
     expect(JSON.stringify(r)).not.toContain("sk-never-written");
@@ -176,7 +176,7 @@ describe("runSecretMigration — fail closed", () => {
       commit: () => { throw new Error("should not be called"); },
     };
     const r = runSecretMigration([{ path: ENV, content: "OPENAI_API_KEY=sk-x\n" }], io);
-    expect(r.decisions[0].outcome).toBe("rejected-unsafe");
+    expect(r.decisions[0]!.outcome).toBe("rejected-unsafe");
     expect(r.files).toEqual([]);
     expect(r.envKeysToUnset).toEqual(["OPENAI_API_KEY"]);
   });
@@ -187,7 +187,7 @@ describe("runSecretMigration — policy exceptions", () => {
     const io = fakeStore();
     const r = runSecretMigration([{ path: ENV, content: "WEB_AUTH=abc\nOPENAI_API_KEY=sk-x\n" }], io);
     expect(r.decisions.map(d => d.key)).toEqual(["OPENAI_API_KEY"]);
-    expect(r.files[0].content).toBe("WEB_AUTH=abc\n");
+    expect(r.files[0]!.content).toBe("WEB_AUTH=abc\n");
     expect(io.store).not.toHaveProperty("WEB_AUTH");
   });
 
@@ -202,7 +202,7 @@ describe("runSecretMigration — policy exceptions", () => {
     ].join("\n");
     const r = runSecretMigration([{ path: ENV, content }], io);
     expect(r.decisions.map(d => d.key)).toEqual(["OPENAI_API_KEY"]);
-    expect(r.files[0].content).toBe([
+    expect(r.files[0]!.content).toBe([
       "SOME_WEIRD_LINE=1",
       "DEFAULT_PROVIDER=openrouter",
       "BROKEN no equals",
@@ -213,8 +213,8 @@ describe("runSecretMigration — policy exceptions", () => {
   it("is idempotent: second run finds the secret already stored", () => {
     const io = fakeStore();
     const first = runSecretMigration([{ path: ENV, content: "OPENAI_API_KEY=sk-x\n" }], io);
-    expect(first.decisions[0].outcome).toBe("migrated");
-    const second = runSecretMigration([{ path: ENV, content: first.files[0].content }], io);
+    expect(first.decisions[0]!.outcome).toBe("migrated");
+    const second = runSecretMigration([{ path: ENV, content: first.files[0]!.content }], io);
     expect(second.decisions).toEqual([]);
   });
 });

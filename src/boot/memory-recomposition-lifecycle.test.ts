@@ -60,7 +60,7 @@ describe("#1706 boot-boundary: recomposition vs graph finalization", () => {
     let resolveCalls = 0;
     const resolveEndpoint = vi.fn(() => {
       resolveCalls++;
-      if (resolveCalls === 1) throw new AbmindEndpointConfigError("missing", "endpoint config not written yet");
+      if (resolveCalls === 1) throw new AbmindEndpointConfigError("config_invalid", "endpoint config not written yet");
       return { mode: "local" as const, source: "default" as const };
     });
     const fakeModule = { getMemoryClient: vi.fn().mockResolvedValue({

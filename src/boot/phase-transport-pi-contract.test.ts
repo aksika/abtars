@@ -105,7 +105,7 @@ function validAcpResolvedAgent(): ReturnType<typeof resolveAgentMock> {
 
 function makeBootCtx(): BootCtx {
   return createBootCtx({
-    memoryConfig: { memoryEnabled: false, memoryDir: "/tmp/no-memory" },
+    memoryConfig: { memoryEnabled: false, memoryDir: "/tmp/no-memory" } as BootCtx["memoryConfig"],
     config: {
       transport: {
         agentCliPath: "node", workingDir: "/tmp/work", trustMode: true,
@@ -211,8 +211,8 @@ describe("transport readiness contract (#1573)", () => {
     expect(ctx.transport).toBeInstanceOf(PiCoreTransport);
     expect(ctx.transport).not.toBe(oldTransport);
     expect(oldTransport.destroy).toHaveBeenCalledTimes(1);
-    const probeOrder = vi.mocked(validatePiRuntimeContract).mock.invocationCallOrder[0];
-    const destroyOrder = (oldTransport.destroy as ReturnType<typeof vi.fn>).mock.invocationCallOrder[0];
+    const probeOrder = vi.mocked(validatePiRuntimeContract).mock.invocationCallOrder[0]!;
+    const destroyOrder = (oldTransport.destroy as ReturnType<typeof vi.fn>).mock.invocationCallOrder[0]!;
     expect(probeOrder).toBeLessThan(destroyOrder);
     expect(ctx.modelName).toBe(TEST_MODEL);
     expect(ctx.modelProvider).toBe("test-provider");
@@ -311,8 +311,8 @@ describe("transport readiness contract (#1573)", () => {
       expect(ensureSpy).toHaveBeenCalledTimes(1);
       const replacement = ctx.transport;
       if (!replacement) throw new Error("rebuild did not install a transport");
-      expect(replacement.getRuntimeStatus().reasoning).toBe("high");
-      expect(replacement.getRuntimeStatus().reasoningRequested).toBe("xhigh");
+      expect(replacement.getRuntimeStatus!().reasoning).toBe("high");
+      expect(replacement.getRuntimeStatus!().reasoningRequested).toBe("xhigh");
     } finally {
       ensureSpy.mockRestore();
     }

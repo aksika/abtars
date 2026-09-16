@@ -1,6 +1,8 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { createBootCtx } from "./context.js";
 import { _resetSystemTaskRegistry } from "../components/tasks/system-task-registry.js";
+import type { SleepCycleOutcome, SleepHandle, SleepStartResult } from "../capabilities/sleep/index.js";
+import type { ScheduledTask } from "../components/tasks/task-types.js";
 
 const mockUnavailable = vi.hoisted(() => vi.fn((code: string) => ({
   status: "unavailable" as const,
@@ -8,7 +10,7 @@ const mockUnavailable = vi.hoisted(() => vi.fn((code: string) => ({
   reason: `reason:${code}`,
 })));
 
-const mockCreateSleepHandle = vi.hoisted(() => vi.fn(() => ({
+const mockCreateSleepHandle = vi.hoisted(() => vi.fn((..._args: any[]): SleepHandle => ({
   isActive: false,
   progress: null,
   startScheduled: vi.fn(() => ({
@@ -16,7 +18,7 @@ const mockCreateSleepHandle = vi.hoisted(() => vi.fn(() => ({
     admission: Promise.resolve({ status: "accepted" as const, runId: "run-1" }),
     completion: Promise.resolve({ status: "completed" as const, failedSteps: [] as string[], report: "test report" }),
   })),
-  startManual: vi.fn(() => ({ status: "accepted" })),
+  startManual: vi.fn(acceptedStart),
 })));
 
 vi.mock("../capabilities/sleep/index.js", () => ({
@@ -35,6 +37,16 @@ vi.mock("../components/logger.js", () => ({
 vi.mock("../components/env-schema.js", () => ({
   getEnv: vi.fn(() => ({ modelApiTimeoutMs: 30000 })),
 }));
+
+/** Accepted start shape shared by the handle mocks; startManual is never
+ * exercised, but its mock must still satisfy the SleepHandle contract. */
+function acceptedStart(): SleepStartResult {
+  return {
+    status: "accepted" as const,
+    admission: Promise.resolve({ status: "accepted" as const, runId: "run-1" }),
+    completion: Promise.resolve({ status: "completed" as const, failedSteps: [] as string[], report: "test report" }),
+  };
+}
 
 function makeFakeClient(): any {
   return {
@@ -66,7 +78,7 @@ describe("phaseSleep — #1429 precedence and construction", () => {
         admission: Promise.resolve({ status: "accepted" as const, runId: "run-1" }),
         completion: Promise.resolve({ status: "completed" as const, failedSteps: [] as string[], report: "test report" }),
       })),
-      startManual: vi.fn(() => ({ status: "accepted" })),
+      startManual: vi.fn(acceptedStart),
     }));
   });
 
@@ -208,7 +220,7 @@ describe("phaseSleep — #1429 precedence and construction", () => {
         admission: Promise.resolve({ status: "accepted" as const, runId: "run-1" }),
         completion: Promise.resolve({ status: "failed" as const, failedSteps: ["retro-derive"] as string[], report: "report" }),
       })),
-      startManual: vi.fn(() => ({ status: "accepted" })),
+      startManual: vi.fn(acceptedStart),
     }));
     const fakeSessionManager = {
       spin: vi.fn().mockResolvedValue({ result: "ok", sessionId: "sess-1" }),
@@ -240,9 +252,9 @@ describe("phaseSleep — #1429 precedence and construction", () => {
       startScheduled: vi.fn(() => ({
         status: "accepted" as const,
         admission: Promise.resolve({ status: "rejected" as const, code: "not_found" as const, reason: "No resumable run found" }),
-        completion: new Promise(() => {}),
+        completion: new Promise<SleepCycleOutcome>(() => {}),
       })),
-      startManual: vi.fn(() => ({ status: "accepted" })),
+      startManual: vi.fn(acceptedStart),
     }));
     const ctx = createBootCtx({
       memoryConfig: { memoryEnabled: true, memoryDir: "/tmp" } as any,
@@ -279,7 +291,7 @@ describe("#1706 late composition", () => {
         admission: Promise.resolve({ status: "accepted" as const, runId: "run-1" }),
         completion: Promise.resolve({ status: "completed" as const, failedSteps: [] as string[], report: "test report" }),
       })),
-      startManual: vi.fn(() => ({ status: "accepted" })),
+      startManual: vi.fn(acceptedStart),
     }));
   });
 
@@ -300,7 +312,7 @@ describe("#1706 late composition", () => {
 
     const registry = (await import("../components/tasks/system-task-registry.js")).getSystemTaskRegistry();
     expect(registry.has("sleep-cycle")).toBe(true);
-    const entry = { id: "sleep-cycle", kind: "system", action: "sleep-cycle", schedule: "0 2 * * *", enabled: true, priority: "medium", delivery: "silent" };
+    const entry: ScheduledTask = { id: "sleep-cycle", kind: "system", action: "sleep-cycle", schedule: "0 2 * * *", enabled: true, priority: "medium", delivery: "silent" };
     const taskCtx = { progress: vi.fn(), signal: new AbortController().signal };
 
     const before = await registry.dispatch(entry, taskCtx);

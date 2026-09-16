@@ -14,7 +14,7 @@ function makeService(overrides?: {
   const resolveHandle = overrides?.handleResolver ?? (async (binding: { memoryId: number; semanticRevision: number }) => ({
     value: FAKE_VALUE,
   }));
-  const actionGate = { requestAuth: vi.fn(async () => true) } as never;
+  const actionGate = { requestAuth: vi.fn(async () => true) };
   const service = new HostToolService({
     handles,
     actionGate: actionGate as never,

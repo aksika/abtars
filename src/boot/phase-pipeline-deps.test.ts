@@ -73,7 +73,7 @@ describe("phasePipelineDeps #1527", () => {
       memoryRuntime: memoryState("ready", false),
     });
     await expect(phasePipelineDeps(ctx)).rejects.toThrow();
-    expect(transport.destroy).toHaveBeenCalledTimes(1);
+    expect((transport as unknown as { destroy: ReturnType<typeof vi.fn> }).destroy).toHaveBeenCalledTimes(1);
   });
 
   it("does not refuse when the Pi route negotiated the durable-context capability", async () => {

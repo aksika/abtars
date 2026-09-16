@@ -205,7 +205,7 @@ describe("phaseMemory — endpoint selection (#1508)", () => {
 
   it("invalid endpoint config defers composition with the bounded reason code", async () => {
     const resolveEndpoint = vi.fn().mockImplementation(() => {
-      throw new AbmindEndpointConfigError("unknown_field", "config rejected: unknown field");
+      throw new AbmindEndpointConfigError("config_invalid", "config rejected: unknown field");
     });
     const ctx = ctxWithMemory(true);
 
@@ -232,7 +232,7 @@ describe("phaseMemory — endpoint selection (#1508)", () => {
     let resolveCalls = 0;
     const resolveEndpoint = vi.fn(() => {
       resolveCalls++;
-      if (resolveCalls === 1) throw new AbmindEndpointConfigError("missing", "endpoint config not written yet");
+      if (resolveCalls === 1) throw new AbmindEndpointConfigError("config_invalid", "endpoint config not written yet");
       return { mode: "local" as const, source: "default" as const };
     });
     const fakeModule = { getMemoryClient: vi.fn().mockResolvedValue(fakeClient()) };
@@ -273,7 +273,7 @@ describe("phaseMemory — endpoint selection (#1508)", () => {
 
 describe("classifyCompositionFailure (#1706)", () => {
   it("maps typed and fallback failures to the closed code union", () => {
-    expect(classifyCompositionFailure(new AbmindEndpointConfigError("invalid_url", "bad url"))).toBe("config_invalid");
+    expect(classifyCompositionFailure(new AbmindEndpointConfigError("config_invalid", "bad url"))).toBe("config_invalid");
     expect(classifyCompositionFailure(new AbmindModuleMissingError())).toBe("package_missing");
     expect(classifyCompositionFailure(new Error("explicit local memory endpoint selected but the abmind package is not installed"))).toBe("package_missing");
     expect(classifyCompositionFailure(new MemoryEndpointUnavailableError("pin_mismatch", "pin"))).toBe("pin_mismatch");
@@ -370,7 +370,7 @@ describe("createMemoryRuntimeFromEndpoint", () => {
     };
     mockLoadAbmind.mockResolvedValue(fakeModule);
 
-    const endpoint = { mode: "local", source: "explicit", socketPath: join(factoryHome, "memory.sock") };
+    const endpoint = { mode: "local" as const, source: "explicit" as const, socketPath: join(factoryHome, "memory.sock") };
     await expect(createMemoryRuntimeFromEndpoint(endpoint, factoryHome)).rejects.toThrow("socket connect failed");
 
     expect(client.negotiate).toHaveBeenCalledTimes(1);

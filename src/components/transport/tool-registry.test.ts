@@ -284,7 +284,7 @@ describe("memory tools with runtime wired (#1507)", () => {
     };
     const db = new Database(join(quotaDir, "quota.db"));
     try {
-      return db.prepare("SELECT COUNT(*) AS n FROM memory_store_quota_reservations").get().n as number;
+      return db.prepare("SELECT COUNT(*) AS n FROM memory_store_quota_reservations").get()!.n as number;
     } finally {
       db.close();
     }

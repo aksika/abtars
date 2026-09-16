@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { vi } from "vitest";
 import { ProjectReviewStore } from "../project-acceptance/project-review-store.js";
+import type { RootProjectionOutcome } from "./orc-workflow-ports.js";
 
 let TEST_HOME: string;
 let RunnerType: typeof import("./orc-workflow-runner.js").WorkflowRunner;
@@ -705,7 +706,7 @@ describe("#1799 runner-root promotion", () => {
       db.prepare(`UPDATE workflow_runs SET state = 'cancelled' WHERE run_id = ?`).run(run.runId);
     });
     const cap = captureCardEvents();
-    let outcome: Ports.RootProjectionOutcome;
+    let outcome: RootProjectionOutcome;
     try {
       outcome = Ports.projectRunnerRootRunning(raced, {
         runId: run.runId, rootCardId: card, scheduledRunId: null,
@@ -752,7 +753,7 @@ describe("#1799 runner-root promotion", () => {
       db.prepare(`UPDATE task_runs SET finished_at = ?, outcome = 'success' WHERE run_id = ?`).run(Date.now(), schedId);
     });
     const cap = captureCardEvents();
-    let outcome: Ports.RootProjectionOutcome;
+    let outcome: RootProjectionOutcome;
     try {
       outcome = Ports.projectRunnerRootRunning(raced, {
         runId: run.runId, rootCardId: card, scheduledRunId: schedId,
@@ -787,7 +788,7 @@ describe("#1799 runner-root promotion", () => {
     const run = piRunner.admit({
       rootKind: "interactive", rootCardId: card, clientOperationId: `port-pi-${copSeq}`,
     }).run;
-    const piPlan = {
+    const piPlan: Proposal = {
       requiredOutputs: ["report"],
       nodes: [
         { label: "a", kind: "work", instructions: "research thoroughly", capability: "pi-coding", outputs: ["notes"], acceptance: ["thorough"], dependsOn: [] as string[] },
