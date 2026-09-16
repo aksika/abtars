@@ -11,7 +11,8 @@
  */
 
 import { logDebug, logWarn } from "./logger.js";
-import { logAndSwallow } from "./log-and-swallow.js";import { kanbanQueuedDispatchOrder, kanbanFail, kanbanGetCard, isUnblocked, type KanbanCard } from "./tasks/kanban-board.js";
+import { logAndSwallow } from "./log-and-swallow.js";
+import { kanbanQueuedDispatchOrder, kanbanFail, kanbanGetCard, isUnblocked, type KanbanCard } from "./tasks/kanban-board.js";
 import { isValidSessionType } from "./spin-profiles.js";
 import { WorkerSupervisionStore } from "./worker-supervision-store.js";
 import { ProjectReviewStore } from "./project-acceptance/project-review-store.js";
@@ -318,12 +319,16 @@ export function createExecutionSupervisor(options: ExecutionSupervisorOptions): 
 
   function release(type: SessionType, cardId: number): void {
     const deleted = running.get(type)?.delete(cardId) ?? false;
-    if (!deleted) return;
+    // Preserve the legacy side effects on a duplicate/blind release (owner
+    // cleanup, Healer completion stamp, health publish) — only the #1801
+    // notification is gated on an actual occupancy deletion.
     occupancyOwner.delete(`${type}:${cardId}`);
     if (type === "H") lastHealerDoneAt = now();
     publishActiveCardIds();
-    // #1801: notify after the occupancy mutation, once per released slot.
-    notifyCapacityReleased(type);
+    if (deleted) {
+      // #1801: notify after the occupancy mutation, once per released slot.
+      notifyCapacityReleased(type);
+    }
   }
 
   /**

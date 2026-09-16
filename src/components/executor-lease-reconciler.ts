@@ -4,7 +4,7 @@ import { ExecutorLeaseStore } from "./executor-lease-store.js";
 import { evaluateLease, applyInspectionOutcome } from "./executor-lease-policy.js";
 import type { LeasePolicy, AttemptLeaseSnapshotV1 } from "./executor-progress.js";
 import { DEFAULT_LOCAL_POLICY } from "./executor-progress.js";
-import { WorkerSupervisionStore } from "./worker-supervision-store.js";
+import { WorkerSupervisionStore, type AttemptRow } from "./worker-supervision-store.js";
 import { logInfo, logWarn } from "./logger.js";
 import { logSwarmTrace } from "./swarm-trace.js";
 
@@ -243,21 +243,15 @@ export class LeaseReconciliationService {
   private notifyIfTerminal(cardId: number, attemptId: string, attemptGeneration: number): void {
     const notify = this.hooks?.onTerminalAttempt;
     if (!notify) return;
-    let latest: { id: string; generation: number; lifecycle: string } | undefined;
+    let latest: AttemptRow | undefined;
     try {
-      const row = this.supervisionStore.getLatestAttempt(cardId) as
-        | { id: string; generation: number; lifecycle: string }
-        | undefined;
-      latest = row;
+      latest = this.supervisionStore.getLatestAttempt(cardId);
+      if (!latest) return;
+      if (latest.id !== attemptId) return;
+      if ((latest.generation || 1) !== (attemptGeneration || 1)) return;
+      if (!this.supervisionStore.isAttemptTerminal(latest.lifecycle)) return;
     } catch {
-      return;
-    }
-    if (!latest) return;
-    if (latest.id !== attemptId) return;
-    if ((latest.generation || 1) !== (attemptGeneration || 1)) return;
-    try {
-      if (!this.supervisionStore.isAttemptTerminal(latest.lifecycle as never)) return;
-    } catch {
+      // Unreadable durable verdict: never fabricate a wake.
       return;
     }
     try {

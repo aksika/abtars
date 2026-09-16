@@ -1607,6 +1607,43 @@ describe("Reconciler — #1664 error boundary", () => {
       activeTestHandle = await startTestGeneration();
     });
 
+    it("failed startup disposes the subscription and cannot schedule work", async () => {
+      await activeTestHandle?.stop();
+      activeTestHandle = null;
+      const unsubscribeCalls: number[] = [];
+      const captured: Array<(type: string) => void> = [];
+      const { SpinWorkerAdapter } = await import("./spin-worker-adapter.js");
+      const { ReconcileQuarantineStore } = await import("./reconcile-quarantine-store.js");
+      await expect(mod.startReconciler({
+        generationId: `test-fail-${++testGenerationCounter}`,
+        coordinator: {
+          ...makeTestCoordinator(),
+          bootRecovery: () => {
+            throw new Error("boot recovery boom");
+          },
+        } as never,
+        wakeScheduler: testWakeScheduler,
+        workerAdapter: new SpinWorkerAdapter() as never,
+        piService: null as never,
+        createPiAdapter: (() => testPiAdapter) as never,
+        getQuarantineStore: () => new ReconcileQuarantineStore(),
+        projectRunProgress: () => {},
+        subscribeCapacityReleased: ((listener: (type: string) => void) => {
+          captured.push(listener);
+          return () => {
+            unsubscribeCalls.push(1);
+          };
+        }) as never,
+      } as never)).rejects.toThrow("boot recovery boom");
+      expect(unsubscribeCalls, "failed startup must dispose the subscription").toHaveLength(1);
+      // A late release from the failed generation cannot schedule the pump.
+      dispatchMock.mockClear();
+      captured[0]?.("W");
+      await flush();
+      expect(dispatchMock).not.toHaveBeenCalled();
+      activeTestHandle = await startTestGeneration();
+    });
+
     it("W releases wake dispatch while active; non-W releases and late callbacks do not", async () => {
       const { captured, handle } = await startWithCapture();
       expect(captured).toHaveLength(1);
