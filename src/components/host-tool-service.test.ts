@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from "vitest";
-import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { HostToolService, redactLiterals } from "./host-tool-service.js";
@@ -141,6 +141,89 @@ describe("HostToolService secret_env execution", () => {
     );
     expect(JSON.parse(blocked)).toMatchObject({ error: "policy_rejected" });
     expect(resolver).not.toHaveBeenCalled();
+  });
+});
+
+describe("shell syntax pre-validation (#1595, via service since #1797)", () => {
+  const ctx = { userId: "u1", executionId: "e1" };
+
+  it("rejects a malformed trailing 2>& without executing, with a correction hint and untouched audit fields", async () => {
+    const { service } = makeService();
+    const result = await service.runBash({ command: "tail -f /var/log/x 2>&" }, ctx);
+    const parsed = JSON.parse(result) as {
+      error?: string; exit_code?: number; syntax_hint?: string;
+      command_fingerprint?: string; command_preview?: string; stderr?: string;
+    };
+    expect(parsed.error).toBe("shell_syntax_error");
+    expect(parsed.exit_code).toBe(2);
+    expect(parsed.syntax_hint).toContain("2>&1");
+    expect(parsed.command_preview).toBe("tail -f /var/log/x 2>&");
+    expect(parsed.command_fingerprint).toMatch(/^[0-9a-f]{16}$/);
+    expect(parsed.stderr).toContain("syntax error");
+  });
+
+  it("does not run side effects from a syntactically invalid command", async () => {
+    const { service } = makeService();
+    const cwd = mkdtempSync(join(tmpdir(), "abtars-syntax-side-effect-"));
+    const marker = join(cwd, "must-not-exist");
+    try {
+      const result = await service.runBash(
+        { command: `printf touched > ${JSON.stringify(marker)} 2>&` },
+        { ...ctx, executionScope: { cwd, env: Object.freeze({}) } },
+      );
+      expect(JSON.parse(result)).toMatchObject({ error: "shell_syntax_error" });
+      expect(existsSync(marker)).toBe(false);
+    } finally {
+      rmSync(cwd, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects other malformed syntax with a structured error and no execution side effect", async () => {
+    const { service } = makeService();
+    const result = await service.runBash({ command: "echo 'unterminated" }, ctx);
+    expect(JSON.parse(result)).toMatchObject({ error: "shell_syntax_error" });
+  });
+
+  it("does not emit the 2>&1 hint for truncations that are not stderr redirects", async () => {
+    const { service } = makeService();
+    const result = await service.runBash({ command: "echo hi >" }, ctx);
+    const parsed = JSON.parse(result) as { error?: string; syntax_hint?: string };
+    expect(parsed.error).toBe("shell_syntax_error");
+    expect(parsed.syntax_hint).toBeUndefined();
+  });
+
+  it("does not guess a correction for the out-of-scope 1>& family", async () => {
+    const { service } = makeService();
+    const result = await service.runBash({ command: "echo hi 1>&" }, ctx);
+    const parsed = JSON.parse(result) as { error?: string; syntax_hint?: string };
+    expect(parsed.error).toBe("shell_syntax_error");
+    expect(parsed.syntax_hint).toBeUndefined();
+  });
+
+  it("still executes valid redirects unchanged (2>&1, 2>&2, 2>&-)", async () => {
+    const { service } = makeService();
+    for (const suffix of ["2>&1", "2>&2", "2>&-"]) {
+      const result = await service.runBash({ command: `echo ok ${suffix} >/dev/null` }, ctx);
+      const parsed = JSON.parse(result) as { error?: string; exit_code?: number };
+      expect(parsed.error).toBeUndefined();
+      expect(parsed.exit_code).toBe(0);
+    }
+  });
+
+  it("does not rewrite quoted or heredoc content", async () => {
+    const { service } = makeService();
+    const result = await service.runBash({ command: "cat << 'EOF'\n2>& is literal text here\nEOF" }, ctx);
+    const parsed = JSON.parse(result) as { exit_code?: number; stdout?: string };
+    expect(parsed.exit_code).toBe(0);
+    expect(parsed.stdout).toContain("2>& is literal text here");
+  });
+
+  it("does not rewrite commands whose syntax is valid even with redirects mid-command", async () => {
+    const { service } = makeService();
+    const result = await service.runBash({ command: "echo a > /tmp/x 2>&1; echo done" }, ctx);
+    const parsed = JSON.parse(result) as { exit_code?: number; stdout?: string };
+    expect(parsed.exit_code).toBe(0);
+    expect(parsed.stdout).toContain("done");
   });
 });
 

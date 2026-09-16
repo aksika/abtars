@@ -3,7 +3,6 @@
  * Phase 2: native tool schemas. Phase 3: in-process memory when available.
  */
 
-import { execFileSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { appendFileSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
@@ -13,14 +12,13 @@ import { logAndSwallow } from "../log-and-swallow.js";
 import { checkTool, checkPath, auditDeny, type SandboxPolicy } from "../tool-sandbox.js";
 import { getMasterUserId } from "../master-user.js";
 import { isDefinitivePreDispatchFailure } from "../memory-runtime.js";
-import { getEnv } from "../env-schema.js";
 import { runBashCommand } from "../bash-runner.js";
 import type { ToolExecutionScope } from "../tasks/task-package.js";
 import type { OrcInvocationContextV2 } from "../orc-project/orc-project-contracts.js";
 import { formatRunReason } from "../orc-project/orc-project-contracts.js";
 import { OrcProjectRunStore } from "../orc-project/orc-project-run-store.js";
 import { orcToolAllowedOnIntent } from "../orc-project/orc-intent-policy.js";
-import { checkCommand, classifyCommand, isRootScopeAllow } from "../guardrails.js";
+import { isRootScopeAllow } from "../guardrails.js";
 import { SealedSecretHandles as staticSealedHandles } from "../sealed-secret-handles.js";
 
 const TAG = "tool_registry";
@@ -213,197 +211,21 @@ function boundedMemoryToolError(err: unknown): string {
     : `${redacted.slice(0, MEMORY_TOOL_ERROR_MAX - 3)}...`;
 }
 
-/**
- * #1595: parse-only shell validation before any execution. A malformed command
- * must never reach the executor: return a structured `shell_syntax_error` with
- * bounded diagnostics and an actionable correction hint for recognizable
- * truncated redirection operators. The command itself is never rewritten —
- * the model must re-submit a corrected command explicitly.
- */
-export function validateBashSyntax(cmd: string): { ok: true } | { ok: false; stderr: string; hint?: string } {
-  try {
-    // Do not source BASH_ENV or user startup files during validation. This is
-    // a parse-only probe and must not run ambient shell initialization before
-    // the real, authorized command is started.
-    execFileSync("bash", ["--noprofile", "--norc", "-n", "-c", cmd], { timeout: 5000, maxBuffer: 64 * 1024, stdio: "pipe" });
-    return { ok: true };
-  } catch (err) {
-    const e = err as { stderr?: Buffer | string; message?: string; code?: string | number; killed?: boolean; signal?: string };
-    // Fail OPEN on infrastructure failures — these are not syntax verdicts
-    // and must never block a possibly-valid command as shell_syntax_error:
-    // bash absent (ENOENT), oversized stderr/stdout (maxBuffer), or a
-    // hung/killed parse (timeout).
-    const msg = e.message ?? "";
-    if (e.code === "ENOENT" || e.code === "ETIMEDOUT" || e.code === "ENOBUFS" || e.killed === true || e.signal || /maxBuffer|timed out/i.test(msg)) return { ok: true };
-    const raw = typeof e.stderr === "string" ? e.stderr : e.stderr instanceof Buffer ? e.stderr.toString("utf-8") : "";
-    const stderr = redactSecrets(raw || msg || "syntax error").slice(0, 1000);
-    const trimmed = cmd.trimEnd();
-    let hint: string | undefined;
-    // Recognizable truncated redirection operator (e.g. trailing `2>&`) gets
-    // an actionable hint; other syntax errors rely on bash's own stderr.
-    if (/\b2>&\s*$/.test(trimmed)) {
-      hint = 'redirection operator truncated — did you mean "2>&1"? Re-submit the corrected command explicitly.';
-    }
-    return { ok: false, stderr, hint };
-  }
-}
-
-function shellSyntaxErrorResult(cmd: string, check: { stderr: string; hint?: string }): string {
-  logWarn("tool-registry", `Shell syntax error [${fingerprintCommand(cmd)}]: ${previewCommand(cmd)}`);
-  const result: Record<string, unknown> = {
-    error: "shell_syntax_error",
-    stderr: check.stderr,
-    exit_code: 2,
-    command_fingerprint: fingerprintCommand(cmd),
-    command_preview: previewCommand(cmd),
-  };
-  if (check.hint) result["syntax_hint"] = check.hint;
-  return JSON.stringify(result);
-}
-
 // #1266: when no in-process memory backend is wired, return this error
 // rather than silently shelling out to a CLI on PATH we don't trust.
 const MEMORY_BACKEND_ERROR = "memory backend not initialized — abmind failed to load or below supported floor";
 
-/**
- * Patterns that would spawn or restart a bridge/watchdog process.
- * Blocked to prevent the LLM (especially fallback models) from accidentally
- * starting a second bridge instance, which would cause port conflicts,
- * Telegram 409 errors, and bridge.lock PID confusion.
- *
- * See post-mortem of 2026-04-22 outage: cron agent ran execute_bash that
- * spawned a rogue bridge alongside the watchdog-supervised one.
- */
-const BLOCKED_PATTERNS: readonly RegExp[] = [
-  /\bmain\.js\b/,                                  // node .../current/dist/main.js ...
-  /\babtars\.sh\b/,                           // the launcher
-  /\bwatchdog\.sh\b/,                              // the watchdog
-  /\blaunchctl\s+(load|bootstrap|kickstart|start)\b/, // launchd bridge start
-];
-
-export function isBridgeSpawnCommand(cmd: string): boolean {
-  return BLOCKED_PATTERNS.some(p => p.test(cmd));
-}
-
-/** Block kill/pkill/killall targeting the bridge's own PID or process patterns (#414). */
-function isBridgeKillCommand(cmd: string): boolean {
-  const pid = process.pid;
-  const ppid = process.ppid;
-  // Direct kill of own PID or parent
-  if (new RegExp(`\\bkill\\s+(-\\d+\\s+)?${pid}\\b`).test(cmd)) return true;
-  if (new RegExp(`\\bkill\\s+(-\\d+\\s+)?${ppid}\\b`).test(cmd)) return true;
-  // pkill/killall targeting bridge patterns
-  if (/\b(pkill|killall)\b.*\b(abtars|main\.js|watchdog)\b/.test(cmd)) return true;
-  if (/\bkill\b.*\$\(.*pgrep.*abtars/.test(cmd)) return true;
-  return false;
-}
-
-function defaultBashTimeoutMs(): number {
-  return getEnv().bashToolTimeoutSec * 1000;
-}
-
-function runBash(cmd: string, timeout = defaultBashTimeoutMs(), signal?: AbortSignal, executionScope?: ToolExecutionScope, authorizationMode?: import("../action-gate.js").ToolAuthorizationMode): Promise<string> {
-  // Normal sleep is explicitly unrestricted. Keep this legacy path aligned
-  // with HostToolService so an unwired adapter cannot reintroduce a Telegram
-  // authorization wait or reject a model-produced command by classification.
-  if (authorizationMode !== "unattended-sleep") {
-    // Single deterministic policy result for guardrail/auth/audit (#1752)
-    const tier = classifyCommand(cmd, executionScope?.cwd);
-    if (tier === "block") {
-      const cmdBlock = checkCommand(cmd, executionScope?.cwd);
-      if (cmdBlock) {
-        logWarn("tool-registry", `Guardrails blocked [${fingerprintCommand(cmd)}]: ${previewCommand(cmd)}`);
-        return Promise.resolve(JSON.stringify({ error: "policy_rejected", stderr: cmdBlock, exit_code: 126, command_fingerprint: fingerprintCommand(cmd), command_preview: previewCommand(cmd) }));
-      }
-    }
-
-    if (isBridgeSpawnCommand(cmd)) {
-      logWarn("tool-registry", `Blocked bridge-spawn command [${fingerprintCommand(cmd)}]: ${previewCommand(cmd)}`);
-      return Promise.resolve(JSON.stringify({
-        error: "policy_rejected",
-        stderr: "Command blocked: this would spawn/restart a bridge or watchdog process. The bridge is already running under launchd+watchdog supervision; use launchctl inspection commands (launchctl list, launchctl print) or signal the existing process instead.",
-        exit_code: 126,
-        command_fingerprint: fingerprintCommand(cmd),
-        command_preview: previewCommand(cmd),
-      }));
-    }
-    if (isBridgeKillCommand(cmd)) {
-      logWarn("tool-registry", `Blocked bridge-kill command [${fingerprintCommand(cmd)}]: ${previewCommand(cmd)}`);
-      return Promise.resolve(JSON.stringify({
-        error: "policy_rejected",
-        stderr: "Command blocked: this would kill the bridge process (yourself). Ask the user to send /restart for a session reset or restart the bridge manually.",
-        exit_code: 126,
-        command_fingerprint: fingerprintCommand(cmd),
-        command_preview: previewCommand(cmd),
-      }));
-    }
-
-    // Action gate: auth-required commands for non-sleep modes
-    if (tier === "auth-required" && _actionGate) {
-      // #1629: the trusted mode comes from the execution context, never from
-      // the command text or tool arguments. ActionGate applies persistent rules
-      // first, then its bash-only unattended fallback.
-      return _actionGate.requestAuth("bash-auth", cmd, { mode: authorizationMode }).then((granted) => {
-        if (!granted) {
-          logWarn("tool-registry", `Auth denied [${fingerprintCommand(cmd)}]: ${previewCommand(cmd)}`);
-          return JSON.stringify({ error: "policy_rejected", stderr: "Command requires authorization. Master denied or timed out.", exit_code: 126, command_fingerprint: fingerprintCommand(cmd), command_preview: previewCommand(cmd) });
-        }
-        return executeBash(cmd, timeout, signal, executionScope);
-      });
-    }
-  }
-
-  return executeBash(cmd, timeout, signal, executionScope);
-}
-
-let _seatbeltActive = false;
-let _seatbeltPolicy: import("../seatbelt/policy.js").SeatbeltPolicy | null = null;
-
-/** Wire seatbelt for OS-level command sandboxing (#906). */
-export function setSeatbelt(active: boolean, policy?: import("../seatbelt/policy.js").SeatbeltPolicy): void {
-  _seatbeltActive = active;
-  _seatbeltPolicy = policy ?? null;
-}
-
-import { fingerprintCommand, previewCommand } from "./tool-failure-diagnostic.js";
-
-function executeBash(cmd: string, timeout: number, signal?: AbortSignal, executionScope?: ToolExecutionScope): Promise<string> {
-  // #1595: parse-only validation before any execution (every caller routes
-  // through this choke point, including the auth-granted path). A malformed
-  // command is never executed; the model receives a structured
-  // shell_syntax_error and must re-submit a corrected command. The original
-  // command text is never rewritten (fingerprint/preview are untouched).
-  const syntaxCheck = validateBashSyntax(cmd);
-  if (!syntaxCheck.ok) return Promise.resolve(shellSyntaxErrorResult(cmd, syntaxCheck));
-
-  // #906: Wrap in OS sandbox if seatbelt active and command needs sandboxing
-  let bin = "bash";
-  let args = ["-c", cmd];
-  if (_seatbeltActive && _seatbeltPolicy) {
-    const { shouldSandbox, wrapCommand } = require("../seatbelt/index.js") as typeof import("../seatbelt/index.js");
-    if (shouldSandbox(cmd)) {
-      const wrapped = wrapCommand(cmd, _seatbeltPolicy);
-      bin = wrapped.bin;
-      args = wrapped.args;
-    }
-  }
-
+// #1797: fixed-command CLI spawn. cmd carries the display/audit spelling
+// only and is never parsed; argv is the execution boundary — no shell, no
+// syntax validation, no command policy on this path. Do not supply cwd,
+// env, signal or graceMs: the nine callers never had them.
+function runToolCli(bin: "abtars-task" | "abtars-todo", argv: readonly string[]): Promise<string> {
   return runBashCommand({
-    cmd,
+    cmd: [bin, ...argv].join(" "),
     bin,
-    args,
-    cwd: executionScope?.cwd,
-    env: executionScope ? { ...process.env, ...executionScope.env } : undefined,
-    signal,
-    timeoutMs: timeout,
+    args: argv,
+    timeoutMs: CLI_TIMEOUT_MS,
   }).then((result) => JSON.stringify(result));
-}
-
-let _actionGate: import("../action-gate.js").ActionGate | null = null;
-
-/** Wire action gate for auth-required commands. */
-export function setActionGate(gate: import("../action-gate.js").ActionGate | null): void {
-  _actionGate = gate;
 }
 
 // #1660: the single shared host bash service and the execution-scoped sealed
@@ -480,8 +302,10 @@ const bashTool: ToolDefinition = {
         },
       );
     }
-    // Legacy fallback (tests/CLI without a wired service): no secret_env.
-    return runBash(command, undefined, context?.signal, context?.executionScope, context?.authorizationMode);
+    // #1797: no service, no execution. The unwired fallback is deleted;
+    // return a structured failure without spawning anything (no syntax
+    // probe either) and without echoing command text or secret_env values.
+    return JSON.stringify({ error: "service_unavailable", stderr: "Host tool service is not initialized", exit_code: 126 });
   },
 };
 
@@ -790,10 +614,10 @@ const todoTool: ToolDefinition = {
   },
   execute: (args) => {
     const action = stringValue(args["action"] ?? "list");
-    if (action === "add") return runBash(`abtars-todo add ${JSON.stringify(stringValue(args["text"]))}`, CLI_TIMEOUT_MS);
-    if (action === "done") return runBash(`abtars-todo done ${stringValue(args["id"])}`, CLI_TIMEOUT_MS);
-    if (action === "remove") return runBash(`abtars-todo remove ${stringValue(args["id"])}`, CLI_TIMEOUT_MS);
-    return runBash("abtars-todo list", CLI_TIMEOUT_MS);
+    if (action === "add") return runToolCli("abtars-todo", ["add", stringValue(args["text"])]);
+    if (action === "done") return runToolCli("abtars-todo", ["done", stringValue(args["id"])]);
+    if (action === "remove") return runToolCli("abtars-todo", ["remove", stringValue(args["id"])]);
+    return runToolCli("abtars-todo", ["list"]);
   },
 };
 
@@ -873,21 +697,21 @@ const taskTool: ToolDefinition = {
       const result = remediateEscalate(id, ask, undefined);
       return JSON.stringify(result.ok ? { ok: true, message: result.message } : { error: result.reason });
     }
-    if (action === "list") return runBash("abtars-task list", CLI_TIMEOUT_MS);
-    if (action === "remove") return runBash(`abtars-task remove ${stringValue(args["id"])}`, CLI_TIMEOUT_MS);
-    if (action === "pause") return runBash(`abtars-task pause ${stringValue(args["id"])}`, CLI_TIMEOUT_MS);
-    if (action === "resume") return runBash(`abtars-task resume ${stringValue(args["id"])}`, CLI_TIMEOUT_MS);
+    if (action === "list") return runToolCli("abtars-task", ["list"]);
+    if (action === "remove") return runToolCli("abtars-task", ["remove", stringValue(args["id"])]);
+    if (action === "pause") return runToolCli("abtars-task", ["pause", stringValue(args["id"])]);
+    if (action === "resume") return runToolCli("abtars-task", ["resume", stringValue(args["id"])]);
     if (action === "run") {
       if (!_enqueueCron) return Promise.resolve(JSON.stringify({ error: "enqueueCron not available" }));
       const id = stringValue(args["id"]);
       const err = _enqueueCron(id, true);
       return Promise.resolve(JSON.stringify(err ? { error: err } : { ok: true, message: `Task ${id} enqueued for immediate execution` }));
     }
-    let cmd = `abtars-task add --message ${JSON.stringify(stringValue(args["message"]))}`;
-    if (args["schedule"]) cmd += ` --schedule ${JSON.stringify(stringValue(args["schedule"]))}`;
-    if (args["type"]) cmd += ` --type ${stringValue(args["type"])}`;
-    if (args["chat_id"]) cmd += ` --chat-id ${stringValue(args["chat_id"])}`;
-    return runBash(cmd, CLI_TIMEOUT_MS);
+    const argv: string[] = ["add", "--message", stringValue(args["message"])];
+    if (args["schedule"]) argv.push("--schedule", stringValue(args["schedule"]));
+    if (args["type"]) argv.push("--type", stringValue(args["type"]));
+    if (args["chat_id"]) argv.push("--chat-id", stringValue(args["chat_id"]));
+    return runToolCli("abtars-task", argv);
   },
 };
 

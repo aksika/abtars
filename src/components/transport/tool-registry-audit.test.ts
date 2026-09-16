@@ -17,15 +17,26 @@ process.env["ABTARS_HOME"] = home;
 process.env["BASH_TOOL_TIMEOUT_SEC"] = "1";
 
 let executeToolCall: typeof import("./tool-registry.js").executeToolCall;
+let setHostToolService: typeof import("./tool-registry.js").setHostToolService;
 let auditPath: string;
 
 beforeAll(async () => {
   const mod = await import("./tool-registry.js");
   executeToolCall = mod.executeToolCall;
+  setHostToolService = mod.setHostToolService;
+  // #1797: execute_bash only runs through a wired HostToolService.
+  const { HostToolService } = await import("../host-tool-service.js");
+  const { SealedSecretHandles } = await import("../sealed-secret-handles.js");
+  setHostToolService(new HostToolService({
+    handles: new SealedSecretHandles(),
+    actionGate: null,
+    resolveHandle: async () => null,
+  }));
   auditPath = join(home, "logs", "audit.jsonl");
 });
 
 afterAll(() => {
+  setHostToolService(null);
   rmSync(home, { recursive: true, force: true });
 });
 

@@ -13,7 +13,10 @@ vi.mock("../guardrails.js", () => ({
   classifyCommand: () => guardrailMocks.classifyImpl,
   isRootScopeAllow: () => false,
 }));
-import { isBridgeSpawnCommand, getToolDefinitions, getToolSchemas, executeToolCall, getToolDescriptor, setActionGate, setSendDocument } from "./tool-registry.js";
+import { getToolDefinitions, getToolSchemas, executeToolCall, getToolDescriptor, setSendDocument, setHostToolService } from "./tool-registry.js";
+import { HostToolService } from "../host-tool-service.js";
+import { SealedSecretHandles } from "../sealed-secret-handles.js";
+import type { ActionGate } from "../action-gate.js";
 import { createClientRuntime } from "../memory-runtime.js";
 import { MemoryStoreQuota } from "../memory-store-quota.js";
 import { resolveNativeDep } from "../../utils/lazy-require.js";
@@ -58,7 +61,25 @@ function structuredStoreError(code: string, message: string, stage: string): Err
   });
 }
 
-describe("isBridgeSpawnCommand", () => {
+/** #1797: wire a real HostToolService — the registry no longer owns any
+ * Bash policy path, so execute_bash tests must go through the service. */
+function wireRealService(gate: ActionGate | null): void {
+  setHostToolService(new HostToolService({
+    handles: new SealedSecretHandles(),
+    actionGate: gate,
+    resolveHandle: (async () => null) as never,
+  }));
+}
+
+describe("bridge self-protection through wired execute_bash", () => {
+  beforeEach(() => {
+    wireRealService(null);
+  });
+
+  afterEach(() => {
+    setHostToolService(null);
+  });
+
   it.each([
     "node current/dist/main.js --all --web --agent",
     "node /Users/akos/.abtars/current/dist/main.js",
@@ -70,22 +91,17 @@ describe("isBridgeSpawnCommand", () => {
     "launchctl bootstrap gui/501 ~/Library/LaunchAgents/com.abtars.watchdog.plist",
     "launchctl kickstart -k gui/501/com.abtars.watchdog",
     "launchctl start com.abtars.watchdog",
-  ])("blocks bridge-spawn command: %s", (cmd) => {
-    expect(isBridgeSpawnCommand(cmd)).toBe(true);
+  ])("rejects bridge-spawn command without executing: %s", async (cmd) => {
+    const result = await executeToolCall("execute_bash", { command: cmd }, { userId: "test", executionId: "e1" });
+    expect(JSON.parse(result)).toMatchObject({ error: "policy_rejected", exit_code: 126 });
   });
 
-  it.each([
-    "ls ~/.abtars/",
-    "cat bridge.lock",
-    "ps aux | grep node",
-    "tail -f logs/bridge.log",
-    "launchctl list | grep abtars",
-    "launchctl unload ~/Library/LaunchAgents/com.abtars.my-agent.plist",
-    "launchctl print gui/501/com.abtars.watchdog",
-    "git log --oneline",
-    "echo main is the branch",
-  ])("allows safe command: %s", (cmd) => {
-    expect(isBridgeSpawnCommand(cmd)).toBe(false);
+  it("still runs a safe command containing a blocked substring", async () => {
+    // The other former predicate-allow cases (tail -f, launchctl unload,
+    // …) cannot be executed safely, so only the over-block property that is
+    // provable without side effects is kept here.
+    const result = await executeToolCall("execute_bash", { command: "echo main is the branch" }, { userId: "test", executionId: "e1" });
+    expect(JSON.parse(result)).toMatchObject({ exit_code: 0 });
   });
 });
 
@@ -152,6 +168,7 @@ describe("executeToolCall", () => {
   it("runs bash inside an explicit task scope without mutating the parent environment (#1502 Task 10)", async () => {
     const cwd = mkdtempSync(join(tmpdir(), "abtars-task-scope-"));
     const before = process.env["WORKSPACE"];
+    wireRealService(null);
     try {
       delete process.env["WORKSPACE"];
       const result = await executeToolCall("execute_bash", {
@@ -165,6 +182,7 @@ describe("executeToolCall", () => {
       expect(parsed.stdout.trim().split("\n")).toEqual([cwd, cwd]);
       expect(process.env["WORKSPACE"]).toBeUndefined();
     } finally {
+      setHostToolService(null);
       if (before === undefined) delete process.env["WORKSPACE"];
       else process.env["WORKSPACE"] = before;
       rmSync(cwd, { recursive: true, force: true });
@@ -172,78 +190,8 @@ describe("executeToolCall", () => {
   });
 });
 
-describe("shell syntax pre-validation (#1595)", () => {
-  it("rejects a malformed trailing 2>& without executing, with a correction hint and untouched audit fields", async () => {
-    const result = await executeToolCall("execute_bash", { command: "tail -f /var/log/x 2>&" }, { userId: "test" });
-    const parsed = JSON.parse(result) as {
-      error?: string; exit_code?: number; syntax_hint?: string;
-      command_fingerprint?: string; command_preview?: string; stderr?: string;
-    };
-    expect(parsed.error).toBe("shell_syntax_error");
-    expect(parsed.exit_code).toBe(2);
-    expect(parsed.syntax_hint).toContain("2>&1");
-    expect(parsed.command_preview).toBe("tail -f /var/log/x 2>&");
-    expect(parsed.command_fingerprint).toMatch(/^[0-9a-f]{16}$/);
-    expect(parsed.stderr).toContain("syntax error");
-  });
-
-  it("does not run side effects from a syntactically invalid command", async () => {
-    const cwd = mkdtempSync(join(tmpdir(), "abtars-syntax-side-effect-"));
-    const marker = join(cwd, "must-not-exist");
-    try {
-      const result = await executeToolCall("execute_bash", {
-        command: `printf touched > ${JSON.stringify(marker)} 2>&`,
-      }, { userId: "test", executionScope: { cwd, env: Object.freeze({}) } });
-      expect(JSON.parse(result)).toMatchObject({ error: "shell_syntax_error" });
-      expect(existsSync(marker)).toBe(false);
-    } finally {
-      rmSync(cwd, { recursive: true, force: true });
-    }
-  });
-
-  it("rejects other malformed syntax with a structured error and no execution side effect", async () => {
-    const result = await executeToolCall("execute_bash", { command: "echo 'unterminated" }, { userId: "test" });
-    const parsed = JSON.parse(result) as { error?: string };
-    expect(parsed.error).toBe("shell_syntax_error");
-  });
-
-  it("does not emit the 2>&1 hint for truncations that are not stderr redirects", async () => {
-    const result = await executeToolCall("execute_bash", { command: "echo hi >" }, { userId: "test" });
-    const parsed = JSON.parse(result) as { error?: string; syntax_hint?: string };
-    expect(parsed.error).toBe("shell_syntax_error");
-    expect(parsed.syntax_hint).toBeUndefined();
-  });
-
-  it("does not guess a correction for the out-of-scope 1>& family", async () => {
-    const result = await executeToolCall("execute_bash", { command: "echo hi 1>&" }, { userId: "test" });
-    const parsed = JSON.parse(result) as { error?: string; syntax_hint?: string };
-    expect(parsed.error).toBe("shell_syntax_error");
-    expect(parsed.syntax_hint).toBeUndefined();
-  });
-
-  it("still executes valid redirects unchanged (2>&1, 2>&2, 2>&-)", async () => {
-    for (const suffix of ["2>&1", "2>&2", "2>&-"]) {
-      const result = await executeToolCall("execute_bash", { command: `echo ok ${suffix} >/dev/null` }, { userId: "test" });
-      const parsed = JSON.parse(result) as { error?: string; exit_code?: number };
-      expect(parsed.error).toBeUndefined();
-      expect(parsed.exit_code).toBe(0);
-    }
-  });
-
-  it("does not rewrite quoted or heredoc content", async () => {
-    const result = await executeToolCall("execute_bash", { command: "cat << 'EOF'\n2>& is literal text here\nEOF" }, { userId: "test" });
-    const parsed = JSON.parse(result) as { exit_code?: number; stdout?: string };
-    expect(parsed.exit_code).toBe(0);
-    expect(parsed.stdout).toContain("2>& is literal text here");
-  });
-
-  it("does not rewrite commands whose syntax is valid even with redirects mid-command", async () => {
-    const result = await executeToolCall("execute_bash", { command: "echo a > /tmp/x 2>&1; echo done" }, { userId: "test" });
-    const parsed = JSON.parse(result) as { exit_code?: number; stdout?: string };
-    expect(parsed.exit_code).toBe(0);
-    expect(parsed.stdout).toContain("done");
-  });
-});
+// #1797: syntax pre-validation now lives in HostToolService — its cases moved
+// to host-tool-service.test.ts and run through service.runBash.
 
 // #1266/#1507: when no memory runtime is wired, memory_* tools return
 // clear non-retryable results rather than shelling out to a CLI on PATH.
@@ -645,7 +593,11 @@ describe("memory tools with runtime wired (#1507)", () => {
 describe("execute_bash — #1629 trusted authorization mode", () => {
   beforeEach(() => {
     guardrailMocks.classifyImpl = "allow";
-    setActionGate(null);
+    wireRealService(null);
+  });
+
+  afterEach(() => {
+    setHostToolService(null);
   });
 
   function fakeGate() {
@@ -660,7 +612,7 @@ describe("execute_bash — #1629 trusted authorization mode", () => {
   it("carries the trusted mode from the execution context to ActionGate and executes", async () => {
     guardrailMocks.classifyImpl = "auth-required";
     const gate = fakeGate();
-    setActionGate(gate as never);
+    wireRealService(gate as unknown as ActionGate);
     const result = await executeToolCall("execute_bash", { command: "echo boundary-out" }, {
       userId: "test",
       authorizationMode: "unattended-task",
@@ -676,7 +628,7 @@ describe("execute_bash — #1629 trusted authorization mode", () => {
   it("a missing context mode fails closed to interactive (no unattended grant)", async () => {
     guardrailMocks.classifyImpl = "auth-required";
     const gate = fakeGate();
-    setActionGate(gate as never);
+    wireRealService(gate as unknown as ActionGate);
     await executeToolCall("execute_bash", { command: "echo boundary-out" }, { userId: "test" });
     expect(gate.calls[0]?.options?.mode).toBeUndefined();
   });
@@ -684,7 +636,7 @@ describe("execute_bash — #1629 trusted authorization mode", () => {
   it("tool arguments cannot set or override the authorization mode", async () => {
     guardrailMocks.classifyImpl = "auth-required";
     const gate = fakeGate();
-    setActionGate(gate as never);
+    wireRealService(gate as unknown as ActionGate);
     // A forged extra argument named authorizationMode must be ignored: the
     // mode is read only from the trusted ToolExecutionContext.
     await executeToolCall("execute_bash", {
@@ -706,7 +658,7 @@ describe("execute_bash — #1629 trusted authorization mode", () => {
   it("unrestricted sleep does not invoke ActionGate for an auth-required command", async () => {
     guardrailMocks.classifyImpl = "auth-required";
     const gate = fakeGate();
-    setActionGate(gate as never);
+    wireRealService(gate as unknown as ActionGate);
     const result = await executeToolCall("execute_bash", { command: "printf '%s' sleep-unrestricted" }, {
       userId: "test",
       authorizationMode: "unattended-sleep",

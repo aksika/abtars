@@ -426,14 +426,12 @@ export async function buildTransport(ctx: BootCtx): Promise<PhaseResult> {
 
   logInfo("main", "✓ Transport ready");
 
-  // Wire ActionGate for auth-required commands
+  // Wire ActionGate for auth-required commands (owned by HostToolService below)
   const { join } = await import("node:path");
   const { abtarsHome } = await import("../paths.js");
   const { ActionGate } = await import("../components/action-gate.js");
-  const { setActionGate } = await import("../components/transport/tool-registry.js");
   const authDir = join(abtarsHome(), "auth");
   ctx.actionGate = new ActionGate(authDir);
-  setActionGate(ctx.actionGate);
   logDebug("main", "🔒 ActionGate wired");
   // REQUIREMENT: the 3 allowed directories stay prompt-free by default —
   // re-seed the trusted-root bash-auth allows on every boot (hence every
@@ -482,15 +480,9 @@ export async function buildTransport(ctx: BootCtx): Promise<PhaseResult> {
     logWarn("main", `Sealed tool socket failed to start: ${bridgeErr instanceof Error ? bridgeErr.message : String(bridgeErr)}`);
   }
 
-  // #906: Wire seatbelt into tool-registry
-  if (ctx.seatbeltActive) {
-    const { setSeatbelt } = await import("../components/transport/tool-registry.js");
-    const { getPolicy } = await import("../components/seatbelt/index.js");
-    const home = abtarsHome();
-    const policy = getPolicy("A", join(home, "workspace"), home); // Main session policy
-    setSeatbelt(true, policy);
-    logDebug("main", "🛡️ Seatbelt wired to tool-registry");
-  }
+  // #1797: the registry Seatbelt setter is deleted with the legacy Bash path.
+  // ctx.seatbeltActive stays set above for future OS-sandbox work (#1758),
+  // which must wire the sandbox at the service boundary, not the registry.
 
   // #1380: Direct API memory hydration is supplied by the daemon-backed
   // runtime during prompt construction. No abtars-side database or context
