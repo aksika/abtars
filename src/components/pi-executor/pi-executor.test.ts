@@ -25,20 +25,25 @@ const fake = vi.hoisted(() => {
   class FakeClient {
     static instances: FakeClient[] = [];
     /** Scripted initial state every new client reports. */
-    static defaultState: { sessionId: string; sessionFile?: string; isStreaming: boolean; isCompacting: boolean } = {
+    static defaultState: { sessionId: string; sessionFile?: string; isStreaming: boolean; isCompacting: boolean; model?: { provider: string; id: string } } = {
       sessionId: "fresh-process", sessionFile: undefined, isStreaming: false, isCompacting: false,
+      model: { provider: "test-provider", id: "model-x" },
     };
     /** When set, getState throws (wedged process simulation). */
     static getStateError: Error | null = null;
     /** Called after a switch_session write; tests flip the live state here. */
     static onSwitch: ((file: string, client: FakeClient) => void) | null = null;
+    /** Scripted available-model snapshot (credential-derived in production). */
+    static availableModels: Array<{ provider: string; id: string }> = [{ provider: "test-provider", id: "model-x" }];
+    /** Optional artificial delay for the availability snapshot (cancellation-window tests). */
+    static availableModelsDelayMs = 0;
     pid = 4242;
     closed = false;
     calls: Call[] = [];
     prompts: string[] = [];
     followUps: string[] = [];
     switches: string[] = [];
-    state: { sessionId: string; sessionFile?: string; isStreaming: boolean; isCompacting: boolean };
+    state: { sessionId: string; sessionFile?: string; isStreaming: boolean; isCompacting: boolean; model?: { provider: string; id: string } };
     private subs = new Set<(e: unknown) => void>();
     private termCbs = new Set<(e: unknown) => void>();
     private uiCbs = new Set<(e: unknown) => void>();
@@ -48,12 +53,17 @@ const fake = vi.hoisted(() => {
     }
     record(method: string, args: unknown[] = []): void { this.calls.push({ method, args }); }
     async launch(...args: unknown[]): Promise<void> { this.record("launch", args); }
-    async getState(): Promise<{ sessionId: string; sessionFile?: string; isStreaming: boolean; isCompacting: boolean }> {
+    async getState(): Promise<{ sessionId: string; sessionFile?: string; isStreaming: boolean; isCompacting: boolean; model?: { provider: string; id: string } }> {
       this.record("getState");
       if (FakeClient.getStateError) throw FakeClient.getStateError;
       return this.state;
     }
-    async getAvailableModels(): Promise<Array<{ id: string }>> { return [{ id: "model-x" }]; }
+    async getAvailableModels(): Promise<Array<{ provider: string; id: string }>> {
+      if (FakeClient.availableModelsDelayMs > 0) {
+        await new Promise((r) => setTimeout(r, FakeClient.availableModelsDelayMs));
+      }
+      return [...FakeClient.availableModels];
+    }
     async setModel(...args: unknown[]): Promise<void> { this.record("setModel", args); }
     async prompt(text: string): Promise<void> { this.record("prompt", [text]); this.prompts.push(text); }
     async followUp(text: string): Promise<void> { this.record("followUp", [text]); this.followUps.push(text); }
@@ -74,7 +84,9 @@ const fake = vi.hoisted(() => {
     emitUiRequest(e: unknown): void { for (const cb of [...this.uiCbs]) cb(e); }
     static reset(): void {
       FakeClient.instances = [];
-      FakeClient.defaultState = { sessionId: "fresh-process", sessionFile: undefined, isStreaming: false, isCompacting: false };
+      FakeClient.defaultState = { sessionId: "fresh-process", sessionFile: undefined, isStreaming: false, isCompacting: false, model: { provider: "test-provider", id: "model-x" } };
+      FakeClient.availableModels = [{ provider: "test-provider", id: "model-x" }];
+      FakeClient.availableModelsDelayMs = 0;
       FakeClient.getStateError = null;
       FakeClient.onSwitch = null;
     }
@@ -439,7 +451,7 @@ describe("PiExecutor #1643 — ask_orc enters the #1638 input suspension", () =>
 
     // Durable session proof: header file carries the reported session id.
     const sessionFile = writeSession(h.root, "ask2-session.json", "ask2-process");
-    fake.FakeClient.defaultState = { sessionId: "ask2-process", sessionFile, isStreaming: false, isCompacting: false };
+    fake.FakeClient.defaultState = { sessionId: "ask2-process", sessionFile, isStreaming: false, isCompacting: false, model: { provider: "test-provider", id: "model-x" } };
     const created = h.store.createSupervisedRun({ cardId: 9301, workspaceAlias: "repo-a", goal: "g", ownerPrincipalId: "p", sessionId: "c-ask2" });
     const claim = h.store.claimSupervisedGeneration({ runId: created.runId, expectedGeneration: created.generation, canonicalPath: h.wsPath });
     if (claim.kind !== "claimed") throw new Error(`claim failed: ${claim.kind}`);
@@ -513,5 +525,182 @@ describe("PiExecutor #1643 — ask_orc enters the #1638 input suspension", () =>
     });
     expect(workerStore.getAttemptsForCard(9301).length).toBe(resultsBefore);
     expect(h.store.get(created.runId)!.status).toBe("interrupted");
+  });
+});
+
+describe("PiExecutor #1804 supervised readiness gate", () => {
+  /**
+   * Supervised settlement without a coordinator fails closed by design
+   * (standalone settleTerminal never touches a supervised run row). Wire
+   * the production coordinator exactly as boot does so unready/cancelled
+   * outcomes commit through the Worker attempt.
+   */
+  async function wireSupervised(
+    h: Harness,
+    opts: { projectCard: number; childCard: number; runId: string; generation: number },
+  ): Promise<void> {
+    const now = new Date().toISOString();
+    h.db.prepare(`INSERT OR IGNORE INTO kanban_board (id, title, source, status, type, created_at, updated_at) VALUES (?, ?, 't', 'running', 'O', ?, ?)`).run(opts.projectCard, "proj", now, now);
+    h.db.prepare(`INSERT OR IGNORE INTO kanban_board (id, title, source, status, type, parent_id, created_at, updated_at) VALUES (?, ?, 't', 'queued', 'W', ?, ?, ?)`).run(opts.childCard, "child", opts.projectCard, now, now);
+    const { WorkerSupervisionStore } = await import("../worker-supervision-store.js");
+    const { SupervisedPiSettlement } = await import("./supervised-pi-settlement.js");
+    const workerStore = new WorkerSupervisionStore(h.db);
+    const contractId = `c_${opts.runId}`;
+    const attemptId = `a_${opts.runId}`;
+    workerStore.insertContract({ schema_version: 1, id: contractId, digest: "d", goal: "g", criteria: [{ id: "c1", description: "d" }], expected_artifacts: [], verification_commands: [], required_capabilities: [], limits: {}, provenance: { root_card_id: opts.projectCard, card_id: opts.childCard, authored_by: "t", created_at: now } }, opts.childCard);
+    workerStore.insertAttempt({ id: attemptId, card_id: opts.childCard, contract_id: contractId, ordinal: 1, executor_kind: "pi", executor_id: "pi-coding", status: "pending", started_at: now });
+    workerStore.lifecycleTransition(attemptId, ["pending"], "claimed");
+    workerStore.lifecycleTransition(attemptId, ["claimed"], "starting");
+    // Bind while starting (claimed|starting only); running rejects the bind.
+    workerStore.bindExecutorResource({ attemptId, expectedAttemptGeneration: 1, executorKind: "pi", resourceId: opts.runId, resourceGeneration: opts.generation, continuity: "initial" });
+    workerStore.lifecycleTransition(attemptId, ["starting"], "running");
+    const coordinator = new SupervisedPiSettlement(h.store, workerStore, h.executor.config);
+    h.executor.setSettlementRouter((obs) => coordinator.settlePiExecution(obs as never));
+  }
+
+  function seedSupervisedInitial(h: Harness, runId: string, cardId: number): void {
+    h.db.prepare(`INSERT INTO pi_runs (id, card_id, workspace_alias, operational_goal, owner_principal_id,
+      origin, execution_generation, generation_intent, current_session_id, status)
+      VALUES (?, ?, 'repo-a', 'sup goal', 'usr-1', 'supervised', 1, 'initial', 'c-sup', 'starting')`).run(runId, cardId);
+  }
+
+  it("blocks submission on an unavailable selected model with cleanup and a distinct reason", async () => {
+    const h = harness;
+    const runId = "sup-unready-model";
+    await wireSupervised(h, { projectCard: 9410, childCard: 9401, runId, generation: 1 });
+    seedSupervisedInitial(h, runId, 9401);
+    fake.FakeClient.defaultState = {
+      sessionId: "fresh-1", sessionFile: undefined, isStreaming: false, isCompacting: false,
+      model: { provider: "test-provider", id: "model-y" },
+    };
+    fake.FakeClient.availableModels = [{ provider: "test-provider", id: "model-x" }];
+
+    const result = await h.executor.startWithClaim(runId, 1, "c-sup");
+    expect(result).toBe("error");
+    const client = fake.FakeClient.instances[0]!;
+    expect(client.prompts).toEqual([]);
+    expect(client.followUps).toEqual([]);
+    const run = runRecord(h, runId);
+    expect(run.status).toBe("failed");
+    expect(run.error ?? "").toMatch(/model unavailable/);
+    expect(run.error ?? "").toContain("test-provider/model-y");
+    // Terminal cleanup: slot, workspace claim, and C session released.
+    expect(h.executor.host.reservedCount).toBe(0);
+    expect(h.store.listWorkspaceClaims()).toHaveLength(0);
+    expect(h.ended.some((e) => e.runId === runId && e.generation === 1)).toBe(true);
+    expect(client.closed).toBe(true);
+  });
+
+  it("blocks submission on an empty availability snapshot as a probe failure, distinct from unavailable", async () => {
+    const h = harness;
+    const runId = "sup-unready-probe";
+    await wireSupervised(h, { projectCard: 9411, childCard: 9402, runId, generation: 1 });
+    seedSupervisedInitial(h, runId, 9402);
+    fake.FakeClient.defaultState = {
+      sessionId: "fresh-1", sessionFile: undefined, isStreaming: false, isCompacting: false,
+      model: { provider: "test-provider", id: "model-x" },
+    };
+    fake.FakeClient.availableModels = [];
+
+    const result = await h.executor.startWithClaim(runId, 1, "c-sup");
+    expect(result).toBe("error");
+    const client = fake.FakeClient.instances[0]!;
+    expect(client.prompts).toEqual([]);
+    const run = runRecord(h, runId);
+    expect(run.status).toBe("failed");
+    expect(run.error ?? "").toMatch(/probe failed/);
+    expect(run.error ?? "").not.toMatch(/model unavailable/);
+    expect(h.executor.host.reservedCount).toBe(0);
+    expect(client.closed).toBe(true);
+  });
+
+  it("submits when the selected provider/model is available and rechecks afresh on a later attempt", async () => {
+    const h = harness;
+    const runId = "sup-ready";
+    await wireSupervised(h, { projectCard: 9412, childCard: 9403, runId, generation: 1 });
+    seedSupervisedInitial(h, runId, 9403);
+    const result = await h.executor.startWithClaim(runId, 1, "c-sup");
+    expect(result).toBe("started");
+    expect(fake.FakeClient.instances[0]!.prompts).toEqual(["sup goal"]);
+    expect(runRecord(h, runId).status).toBe("running");
+
+    // A later authorized attempt checks afresh (no cached readiness): a
+    // fresh executor reading a flipped snapshot blocks instead of reusing
+    // the earlier ready verdict.
+    const h2 = makeHarness();
+    try {
+      const runId2 = "sup-ready-2";
+      await wireSupervised(h2, { projectCard: 9413, childCard: 9404, runId: runId2, generation: 1 });
+      h2.db.prepare(`INSERT INTO pi_runs (id, card_id, workspace_alias, operational_goal, owner_principal_id,
+        origin, execution_generation, generation_intent, current_session_id, status)
+        VALUES (?, ?, 'repo-a', 'sup goal', 'usr-1', 'supervised', 1, 'initial', 'c-sup-2', 'starting')`).run(runId2, 9404);
+      fake.FakeClient.availableModels = [{ provider: "test-provider", id: "model-x" }];
+      fake.FakeClient.defaultState = {
+        sessionId: "fresh-1", sessionFile: undefined, isStreaming: false, isCompacting: false,
+        model: { provider: "test-provider", id: "model-y" },
+      };
+      const second = await h2.executor.startWithClaim(runId2, 1, "c-sup-2");
+      expect(second).toBe("error");
+      const launched = fake.FakeClient.instances[fake.FakeClient.instances.length - 1]!;
+      expect(launched.prompts).toEqual([]);
+      expect(h2.store.get(runId2)?.error ?? "").toMatch(/model unavailable/);
+    } finally {
+      h2.cleanup();
+    }
+  });
+
+  it("checks a resumed supervised run before follow_up and never submits the continuation when unready", async () => {
+    const h = harness;
+    const savedFile = writeSession(h.root, "sup-resume.jsonl", "sess-sup");
+    const runId = "sup-resume-unready";
+    await wireSupervised(h, { projectCard: 9414, childCard: 9405, runId, generation: 1 });
+    h.db.prepare(`INSERT INTO pi_runs (id, card_id, workspace_alias, operational_goal, owner_principal_id,
+      origin, execution_generation, generation_intent, current_session_id, status,
+      pi_session_id, pi_session_file, resume_capability)
+      VALUES (?, ?, 'repo-a', 'sup goal', 'usr-1', 'supervised', 1, 'resume', 'c-sup', 'starting', ?, ?, 'available')`).run(
+      runId, 9405, "sess-sup", savedFile,
+    );
+    fake.FakeClient.defaultState = {
+      sessionId: "sess-sup", sessionFile: savedFile, isStreaming: false, isCompacting: false,
+      model: { provider: "test-provider", id: "model-missing" },
+    };
+    fake.FakeClient.availableModels = [{ provider: "test-provider", id: "model-x" }];
+    fake.FakeClient.onSwitch = (_file, client) => {
+      client.state = {
+        sessionId: "sess-sup", sessionFile: savedFile, isStreaming: false, isCompacting: false,
+        model: { provider: "test-provider", id: "model-missing" },
+      };
+    };
+
+    const result = await h.executor.startWithClaim(runId, 1, "c-sup");
+    expect(result).toBe("error");
+    const client = fake.FakeClient.instances[0]!;
+    expect(client.followUps).toEqual([]);
+    expect(client.prompts).toEqual([]);
+    // Resume verification committed running first; the unready gate settles
+    // that running state through the terminal path.
+    expect(runRecord(h, runId).status).toBe("failed");
+    expect(runRecord(h, runId).error ?? "").toMatch(/model unavailable/);
+  });
+
+  it("lets cancellation during the probe win over a late ready result", async () => {
+    const h = harness;
+    const runId = "sup-cancel-probe";
+    await wireSupervised(h, { projectCard: 9415, childCard: 9406, runId, generation: 1 });
+    seedSupervisedInitial(h, runId, 9406);
+    fake.FakeClient.availableModelsDelayMs = 200;
+
+    const started = h.executor.startWithClaim(runId, 1, "c-sup");
+    await new Promise((r) => setTimeout(r, 30));
+    await h.executor.cancel(runId);
+    const result = await started;
+    expect(result).toBe("error");
+    const client = fake.FakeClient.instances[0]!;
+    // The late probe never submitted work after cancellation, and the run
+    // was not settled as an unready failure — cancellation owns it.
+    expect(client.prompts).toEqual([]);
+    expect(client.followUps).toEqual([]);
+    expect(["cancelling", "cancelled"]).toContain(runRecord(h, runId).status);
+    expect(runRecord(h, runId).error ?? "").not.toMatch(/model unavailable|probe failed/);
   });
 });

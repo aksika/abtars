@@ -131,14 +131,28 @@ export class SupervisedPiRpcClient {
     this.child.stdin!.on("error", () => {});
   }
 
-  async getState(): Promise<{ sessionId: string; sessionFile?: string; isStreaming: boolean; isCompacting: boolean }> {
+  async getState(): Promise<{ sessionId: string; sessionFile?: string; isStreaming: boolean; isCompacting: boolean; model?: { provider: string; id: string } }> {
     const result = await this.send({ type: "get_state" });
     const data = (result as Record<string, unknown>)?.data as Record<string, unknown> | undefined;
+    // #1804: carry the selected model identity (provider + id) when Pi
+    // reports it. RpcSessionState.model is optional; validate bounded
+    // strings and drop malformed values rather than throwing.
+    let model: { provider: string; id: string } | undefined;
+    const rawModel = data?.model as unknown;
+    if (rawModel && typeof rawModel === "object") {
+      const provider = (rawModel as Record<string, unknown>).provider;
+      const id = (rawModel as Record<string, unknown>).id;
+      if (typeof provider === "string" && provider.length > 0 && provider.length <= 128
+        && typeof id === "string" && id.length > 0 && id.length <= 256) {
+        model = { provider, id };
+      }
+    }
     return {
       sessionId: (data?.sessionId as string) ?? "",
       sessionFile: data?.sessionFile as string | undefined,
       isStreaming: (data?.isStreaming as boolean) ?? false,
       isCompacting: (data?.isCompacting as boolean) ?? false,
+      ...(model ? { model } : {}),
     };
   }
 
@@ -161,8 +175,20 @@ export class SupervisedPiRpcClient {
   async getAvailableModels(): Promise<Array<{ provider: string; id: string }>> {
     const result = await this.send({ type: "get_available_models" });
     const data = (result as Record<string, unknown>)?.data as Record<string, unknown> | undefined;
-    const models = data?.models as Array<{ provider: string; id: string }> | undefined;
-    return models ?? [];
+    const raw = data?.models as unknown;
+    if (!Array.isArray(raw)) return [];
+    // #1804: Pi's availability list is credential-derived; validate bounded
+    // provider/id pairs and drop malformed entries without throwing.
+    const models: Array<{ provider: string; id: string }> = [];
+    for (const entry of raw) {
+      if (!entry || typeof entry !== "object") continue;
+      const provider = (entry as Record<string, unknown>).provider;
+      const id = (entry as Record<string, unknown>).id;
+      if (typeof provider !== "string" || provider.length === 0 || provider.length > 128) continue;
+      if (typeof id !== "string" || id.length === 0 || id.length > 256) continue;
+      models.push({ provider, id });
+    }
+    return models;
   }
 
   async setModel(provider: string, modelId: string): Promise<void> {

@@ -26,6 +26,23 @@ export type EndExternalSession = (
 /** Bounded live-state probe before graceful interruption. */
 const INTERRUPT_PROBE_MS = 2_000;
 
+/**
+ * #1804 — supervised Pi readiness budget. Pi's availability list is a
+ * snapshot: an empty list or a list with no entry for the selected provider
+ * is indeterminate (a refresh may have timed out or re-registration may
+ * still be in flight), never proof of missing credentials. Re-read within
+ * this bounded budget; indeterminate evidence after the budget is a probe
+ * failure, never an unavailable-model verdict. Both block submission and
+ * stay distinguishable for operators.
+ */
+const READINESS_MAX_READS = 3;
+const READINESS_RETRY_DELAY_MS = 250;
+
+/** #1804 — readiness outcome for a supervised attempt (pre-submission only). */
+type PiReadinessResult =
+  | { ready: true; selected: { provider: string; id: string } }
+  | { ready: false; kind: "unavailable" | "probe_failed"; reason: string };
+
 interface OwnedProcess {
   client: SupervisedPiRpcClient;
   generation: number;
@@ -241,6 +258,16 @@ export class PiExecutor {
           await this._settleAndCleanup(owned, "failed", { error: "Failed to transition run to running" });
           return "error";
         }
+        // #1804 — initial readiness gate after the effective model/session
+        // selection and the starting -> running commit, before the first
+        // prompt. Cancellation/replacement during the probe wins: a late
+        // result never submits after it.
+        const readiness = await this._checkSupervisedReadiness(owned, run);
+        if (!this._stillOwnsForSubmission(owned)) return "error";
+        if (!readiness.ready) {
+          await this._settleAndCleanup(owned, "failed", { error: readiness.reason });
+          return "error";
+        }
         const promptOk = await this._submitPrompt(runId, run.operationalGoal, generation);
         if (!promptOk) {
           await this._settleAndCleanup(owned, "failed", { error: "Initial prompt submission failed" });
@@ -330,10 +357,26 @@ export class PiExecutor {
         return false;
       }
       this._fireTransition(run.id, "starting", "running");
+      // #1804 — resumed readiness gate: the run is already running (resume
+      // verification above committed starting -> running first, never
+      // reordered). Check the restored effective selection before follow_up;
+      // an unready result settles running through the terminal path.
+      const readiness = await this._checkSupervisedReadiness(owned, run);
+      if (!this._stillOwnsForSubmission(owned)) return false;
+      if (!readiness.ready) {
+        await this._settleAndCleanup(owned, "failed", { error: readiness.reason });
+        return false;
+      }
       await owned.client.followUp("Continue where we left off");
       this.store.touchActivity(run.id, run.executionGeneration);
       return true;
     } catch (err) {
+      // #1804: cancellation/replacement during the readiness probe or the
+      // follow-up send wins — never settle a newer generation or a
+      // cancelling run as a resume failure.
+      if (this.live.get(run.id) !== owned || owned.settling) return false;
+      const live = this.store.get(run.id);
+      if (!live || live.executionGeneration !== owned.generation || live.status !== "running") return false;
       await this._settleAndCleanup(owned, "failed", {
         error: `Resume failed: ${err instanceof Error ? err.message : String(err)}`,
       });
@@ -378,6 +421,122 @@ export class PiExecutor {
     } catch (err) {
       logWarn(TAG, `Model selection failed: ${err instanceof Error ? err.message : String(err)}`);
     }
+  }
+
+  /**
+   * #1804 — supervised Pi readiness: pre-submission check of the effective
+   * selected provider/model in the actual child runtime, after model/session
+   * selection and before `prompt`/`follow_up`. Scoped to supervised runs so
+   * shared runtime use never changes standalone, interactive, or TUI
+   * admission. Matches BOTH provider and model ID against Pi's
+   * credential-derived availability snapshot; never parses credential files,
+   * never forwards bridge credentials, never issues test inference, and
+   * never hard-codes providers. Never cached across attempts — every
+   * supervised start checks afresh. A successful check is advisory about
+   * local availability, never a guarantee that remote inference succeeds.
+   */
+  private async _checkSupervisedReadiness(
+    owned: OwnedProcess,
+    run: PiRunRecord,
+  ): Promise<PiReadinessResult> {
+    // #1804: scoped to supervised runs — shared runtime use (standalone,
+    // interactive, TUI) keeps its existing admission with no extra probe.
+    if (run.origin !== "supervised") {
+      return { ready: true, selected: { provider: "unspecified", id: "unspecified" } };
+    }
+    let lastProbeCause = "unreadable Pi state";
+    for (let read = 1; read <= READINESS_MAX_READS; read++) {
+      let state: { model?: { provider: string; id: string } } | null = null;
+      try {
+        state = await owned.client.getState();
+      } catch (err) {
+        lastProbeCause = err instanceof Error ? err.message : String(err);
+        if (read < READINESS_MAX_READS) {
+          await new Promise((r) => setTimeout(r, READINESS_RETRY_DELAY_MS));
+          continue;
+        }
+        return {
+          ready: false,
+          kind: "probe_failed",
+          reason: `Pi readiness probe failed: Pi state unreadable (${lastProbeCause.slice(0, 160)}) (no task submitted)`.slice(0, 500),
+        };
+      }
+      const selected = state?.model;
+      if (!selected) {
+        return {
+          ready: false,
+          kind: "unavailable",
+          reason: "Pi model unavailable: Pi reported no selected model (no task submitted)",
+        };
+      }
+      let models: Array<{ provider: string; id: string }>;
+      try {
+        models = await owned.client.getAvailableModels();
+      } catch (err) {
+        lastProbeCause = err instanceof Error ? err.message : String(err);
+        if (read < READINESS_MAX_READS) {
+          await new Promise((r) => setTimeout(r, READINESS_RETRY_DELAY_MS));
+          continue;
+        }
+        return {
+          ready: false,
+          kind: "probe_failed",
+          reason: `Pi readiness probe failed: available-model snapshot unreadable (${lastProbeCause.slice(0, 160)}) (no task submitted)`.slice(0, 500),
+        };
+      }
+      if (models.length === 0) {
+        lastProbeCause = "available-model snapshot empty";
+        if (read < READINESS_MAX_READS) {
+          await new Promise((r) => setTimeout(r, READINESS_RETRY_DELAY_MS));
+          continue;
+        }
+        return {
+          ready: false,
+          kind: "probe_failed",
+          reason: `Pi readiness probe failed: ${lastProbeCause} after ${READINESS_MAX_READS} reads (no task submitted)`,
+        };
+      }
+      const providerModels = models.filter((m) => m.provider === selected.provider);
+      if (providerModels.length === 0) {
+        lastProbeCause = `no snapshot entry for provider ${selected.provider}`;
+        if (read < READINESS_MAX_READS) {
+          await new Promise((r) => setTimeout(r, READINESS_RETRY_DELAY_MS));
+          continue;
+        }
+        return {
+          ready: false,
+          kind: "probe_failed",
+          reason: `Pi readiness probe failed: ${lastProbeCause} after ${READINESS_MAX_READS} reads (no task submitted)`.slice(0, 500),
+        };
+      }
+      if (!providerModels.some((m) => m.id === selected.id)) {
+        return {
+          ready: false,
+          kind: "unavailable",
+          reason: `Pi model unavailable: ${selected.provider}/${selected.id} not available in Pi runtime (no task submitted)`.slice(0, 500),
+        };
+      }
+      return { ready: true, selected };
+    }
+    return {
+      ready: false,
+      kind: "probe_failed",
+      reason: `Pi readiness probe failed: ${lastProbeCause.slice(0, 160)} (no task submitted)`.slice(0, 500),
+    };
+  }
+
+  /**
+   * #1804 — generation-fenced submission guard for the readiness window.
+   * Awaited readiness introduces an additional cancellation window:
+   * revalidate live ownership, generation, settling flag, and running
+   * status before submission. Cancellation/replacement wins over a late
+   * probe result; never touch a newer generation's resources.
+   */
+  private _stillOwnsForSubmission(owned: OwnedProcess): boolean {
+    if (this.live.get(owned.runId) !== owned || owned.settling) return false;
+    const run = this.store.get(owned.runId);
+    if (!run || run.executionGeneration !== owned.generation) return false;
+    return run.status === "running";
   }
 
   private async _startProcess(run: PiRunRecord, sessionId: string): Promise<OwnedProcess | null> {
@@ -468,6 +627,10 @@ export class PiExecutor {
   private async _submitPrompt(runId: string, goal: string, expectedGeneration: number): Promise<boolean> {
     const owned = this.live.get(runId);
     if (!owned || owned.generation !== expectedGeneration || owned.settling) return false;
+    // #1804: a late readiness result must not submit after cancellation or
+    // replacement — revalidate the durable generation/status at send time.
+    const live = this.store.get(runId);
+    if (!live || live.executionGeneration !== expectedGeneration || live.status !== "running") return false;
     try {
       await owned.client.prompt(goal);
       this.store.touchActivity(runId, expectedGeneration);

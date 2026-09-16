@@ -46,12 +46,12 @@ const fake = vi.hoisted(() => {
     constructor() { FakeClient.instances.push(this); }
     record(method: string, args: unknown[] = []): void { this.calls.push({ method, args }); }
     async launch(...args: unknown[]): Promise<void> { this.record("launch", args); }
-    async getState(): Promise<{ sessionId: string; sessionFile?: string; isStreaming: boolean; isCompacting: boolean }> {
+    async getState(): Promise<{ sessionId: string; sessionFile?: string; isStreaming: boolean; isCompacting: boolean; model?: { provider: string; id: string } }> {
       this.record("getState");
       if (FakeClient.getStateError) throw FakeClient.getStateError;
-      return { sessionId: "fresh-process", sessionFile: undefined, isStreaming: false, isCompacting: false };
+      return { sessionId: "fresh-process", sessionFile: undefined, isStreaming: false, isCompacting: false, model: { provider: "test-provider", id: "model-x" } };
     }
-    async getAvailableModels(): Promise<Array<{ id: string }>> { return [{ id: "model-x" }]; }
+    async getAvailableModels(): Promise<Array<{ provider: string; id: string }>> { return [{ provider: "test-provider", id: "model-x" }]; }
     async setModel(...args: unknown[]): Promise<void> { this.record("setModel", args); }
     async prompt(text: string): Promise<void> { this.record("prompt", [text]); }
     async followUp(text: string): Promise<void> { this.record("followUp", [text]); }

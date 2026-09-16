@@ -71,6 +71,58 @@ describe("SupervisedPiRpcClient", () => {
       expect(state.sessionFile).toBe("/tmp/sess.json");
     });
 
+    it("#1804: getState carries the selected model identity (provider + id) when Pi reports it", async () => {
+      const statePromise = client.getState();
+      const writeData = child.stdin.write.mock.calls.find(
+        (c: any[]) => typeof c[0] === "string",
+      )?.[0] as string;
+      const sent = JSON.parse(writeData);
+      child.stdout.write(JSON.stringify({
+        type: "response", id: sent.id, command: "get_state", success: true,
+        data: {
+          sessionId: "sess-1", isStreaming: false,
+          model: { provider: "test-provider", id: "model-x" },
+        },
+      }) + "\n");
+      const state = await statePromise;
+      expect(state.model).toEqual({ provider: "test-provider", id: "model-x" });
+    });
+
+    it("#1804: getState drops a malformed model rather than throwing", async () => {
+      const statePromise = client.getState();
+      const writeData = child.stdin.write.mock.calls.find(
+        (c: any[]) => typeof c[0] === "string",
+      )?.[0] as string;
+      const sent = JSON.parse(writeData);
+      child.stdout.write(JSON.stringify({
+        type: "response", id: sent.id, command: "get_state", success: true,
+        data: { sessionId: "sess-1", isStreaming: false, model: { provider: "", id: 42 } },
+      }) + "\n");
+      const state = await statePromise;
+      expect(state.model).toBeUndefined();
+    });
+
+    it("#1804: getAvailableModels validates provider/id pairs and drops malformed entries", async () => {
+      const modelsPromise = client.getAvailableModels();
+      const writeData = child.stdin.write.mock.calls.find(
+        (c: any[]) => typeof c[0] === "string",
+      )?.[0] as string;
+      const sent = JSON.parse(writeData);
+      child.stdout.write(JSON.stringify({
+        type: "response", id: sent.id, command: "get_available_models", success: true,
+        data: {
+          models: [
+            { provider: "test-provider", id: "model-x" },
+            { provider: "", id: "bad" },
+            { provider: "p", id: "" },
+            "not-an-object",
+          ],
+        },
+      }) + "\n");
+      const models = await modelsPromise;
+      expect(models).toEqual([{ provider: "test-provider", id: "model-x" }]);
+    });
+
     it("send uses official {id,type,...fields} format (no cmd/args)", async () => {
       const promptPromise = client.prompt("Hello");
       const writeData = child.stdin.write.mock.calls.find(

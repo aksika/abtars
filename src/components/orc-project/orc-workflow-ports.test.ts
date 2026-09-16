@@ -826,3 +826,150 @@ describe("#1799 runner-root promotion", () => {
     expect(attempt.executor_kind).toBe("pi");
   });
 });
+
+describe("WorkflowPorts #1804 planner vocabulary and alias compatibility", () => {
+  function writePiConfigWithDefaultAlias(wsPath: string): void {
+    const { mkdirSync, writeFileSync } = require("node:fs") as typeof import("node:fs");
+    const { join } = require("node:path") as typeof import("node:path");
+    mkdirSync(join(TEST_HOME, "config"), { recursive: true });
+    mkdirSync(wsPath, { recursive: true });
+    writeFileSync(
+      join(TEST_HOME, "config", "pi-executor.json"),
+      JSON.stringify({
+        enabled: true,
+        command: "fake-pi",
+        workspaceAliases: { default: { path: wsPath } },
+      }),
+      "utf-8",
+    );
+  }
+
+  it("separates the model vocabulary from runner compatibility with a configured default alias", async () => {
+    const { join } = await import("node:path");
+    const { tmpdir } = await import("node:os");
+    const { mkdirSync, rmSync } = await import("node:fs");
+    const wsPath = join(tmpdir(), `wf-1804-ws-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+    writePiConfigWithDefaultAlias(wsPath);
+    try {
+      const compat = Ports.workflowCapabilities();
+      expect(compat).toContain("general");
+      expect(compat).toContain("pi-coding");
+      expect(compat).toContain("pi");
+      expect(compat).toContain("default");
+      const vocab = Ports.plannerCapabilities();
+      expect(vocab).toEqual(["general", "pi-coding", "pi"]);
+      expect(vocab).not.toContain("default");
+      expect(Ports.isPlannerCapability("general")).toBe(true);
+      expect(Ports.isPlannerCapability("default")).toBe(false);
+      // Runner compatibility still routes the stored alias to Pi.
+      expect(Ports.isPiCapability("default")).toBe(true);
+      expect(Ports.isPiCapability("general")).toBe(false);
+      expect(Ports.resolvePiWorkspaceAlias("default")).toBe("default");
+      expect(Ports.resolvePiWorkspaceAlias("pi-coding")).toBe("default");
+    } finally {
+      try { rmSync(wsPath, { recursive: true, force: true }); } catch {}
+      try { rmSync(join(TEST_HOME, "config", "pi-executor.json"), { force: true }); } catch {}
+    }
+  });
+
+  it("rejects a bare alias proposal through correction and admits the general correction without silent rewrite", async () => {
+    const store = new StoreType();
+    const runner = new RunnerType(store, ["general", "pi-coding", "pi", "default"]);
+    const res = store.db.prepare(`INSERT INTO kanban_board (title, source, type, status) VALUES (?, 'agent', 'O', 'running')`)
+      .run(`wf-1804-${Date.now()}`);
+    const card = Number(res.lastInsertRowid);
+    copSeq++;
+    const run = runner.admit({ rootKind: "interactive", rootCardId: card, clientOperationId: `port-1804-${copSeq}` }).run;
+    const prompts: string[] = [];
+    let calls = 0;
+    const backend = new Ports.SpinPlannerBackend({
+      runner,
+      callModel: async (prompt: string) => {
+        prompts.push(prompt);
+        calls++;
+        if (calls === 1) {
+          return JSON.stringify({
+            nodes: [
+              { label: "a", kind: "work", instructions: "research", capability: "default", outputs: ["o"], acceptance: ["done"], dependsOn: [] },
+            ],
+            requiredOutputs: ["o"],
+          });
+        }
+        return JSON.stringify({
+          nodes: [
+            { label: "a", kind: "work", instructions: "research", capability: "general", outputs: ["o"], acceptance: ["done"], dependsOn: [] },
+          ],
+          requiredOutputs: ["o"],
+        });
+      },
+    });
+    store.queueCommand({ runId: run.runId, generation: 1, nodeId: "__plan__", action: "plan", ordinal: 0, payloadJson: "{}" });
+    store.claimCommand({ runId: run.runId, generation: 1, nodeId: "__plan__", action: "plan", ordinal: 0 }, "spin-planner");
+    backend.startPlanning({
+      runId: run.runId, generation: 1, nodeId: "__plan__", action: "plan" as const, ordinal: 0,
+      status: "claimed" as const, payloadJson: "{}",
+      createdAt: "", claimedAt: "", doneAt: null, owner: "spin-planner", claimToken: "t",
+      inspectGen: 0, consecutiveInconclusive: 0, nextInspectionAt: null,
+    }, {
+      runId: run.runId, revision: null, purpose: "initial", defects: [],
+      requiredOutputs: ["o"], nodeId: "__plan__",
+    });
+    await new Promise((r) => setTimeout(r, 80));
+    // The alias entered correction (two model turns) and the general
+    // correction was admitted — never a silent rewrite inside one turn.
+    expect(calls).toBe(2);
+    expect(store.currentRevision(run.runId)).toBe(1);
+    expect(prompts[0]).toContain("(one of: general, pi-coding, pi)");
+    expect(prompts[0]).toContain("Never emit a bare workspace alias");
+    expect(prompts[1]).toMatch(/unsupported planner capability default/);
+    const proposal = JSON.parse(store.getPlanJson(run.runId, 1)) as Proposal;
+    expect(proposal.nodes[0]?.capability).toBe("general");
+  });
+
+  it("keeps explicit alias admission compatible and routes durable contracts without Spin fallback", async () => {
+    const { join } = await import("node:path");
+    const { tmpdir } = await import("node:os");
+    const { mkdirSync, rmSync } = await import("node:fs");
+    const wsPath = join(tmpdir(), `wf-1804-route-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+    writePiConfigWithDefaultAlias(wsPath);
+    try {
+      const { resolveWorkerExecutorIntent } = await import("../worker-executor-routing.js");
+      const store = new StoreType();
+      const runner = new RunnerType(store, Ports.workflowCapabilities());
+      const res = store.db.prepare(`INSERT INTO kanban_board (title, source, type, status) VALUES (?, 'agent', 'O', 'running')`)
+        .run(`wf-1804-route-${Date.now()}`);
+      const card = Number(res.lastInsertRowid);
+      copSeq++;
+      const run = runner.admit({ rootKind: "interactive", rootCardId: card, clientOperationId: `port-1804-r-${copSeq}` }).run;
+      // Explicit programmatic alias admission stays compatible (not a model proposal).
+      const acc = runner.acceptPlan(run.runId, {
+        requiredOutputs: ["o"],
+        nodes: [
+          { label: "a", kind: "work", instructions: "code it", capability: "default", outputs: ["o"], acceptance: ["done"], dependsOn: [] },
+        ],
+      });
+      const nodeId = acc.nodeIds[0] as string;
+      const claimed = store.claimCommand(
+        { runId: run.runId, generation: 1, nodeId, action: "dispatch", ordinal: 0 }, "workflow-worker-routing",
+      );
+      expect(claimed).not.toBeNull();
+      new Ports.RoutingWorkflowWorkerPort({ runner }).dispatch(claimed!.row);
+      const node = store.listNodes(run.runId, 1).find((n) => n["node_id"] === nodeId);
+      const attemptId = node?.["attempt_id"] as string;
+      expect(Number(node?.["worker_card_id"])).toBeGreaterThan(0);
+      const attempt = store.db.prepare(`SELECT executor_kind FROM worker_attempts WHERE id = ?`).get(attemptId) as { executor_kind: string };
+      expect(attempt.executor_kind).toBe("pi");
+      const contractRow = store.db.prepare(`SELECT contract_json FROM worker_contracts WHERE id = (SELECT contract_id FROM worker_attempts WHERE id = ?)`).get(attemptId) as { contract_json: string };
+      const contract = JSON.parse(contractRow.contract_json) as { workspace_alias?: string };
+      // General nodes carry no alias and select Spin; the alias contract
+      // carries its workspace and selects Pi with no fallback.
+      expect(contract.workspace_alias).toBe("default");
+      expect(resolveWorkerExecutorIntent(contract as never)).toMatchObject({ kind: "pi", workspaceAlias: "default" });
+      const spinIntent = resolveWorkerExecutorIntent({ workspace_alias: undefined } as never);
+      expect(spinIntent.kind).toBe("agent");
+    } finally {
+      try { rmSync(wsPath, { recursive: true, force: true }); } catch {}
+      try { rmSync(join(TEST_HOME, "config", "pi-executor.json"), { force: true }); } catch {}
+    }
+  });
+});

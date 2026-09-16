@@ -155,12 +155,18 @@ export class PiExecutorAdapter implements SwarmExecutorAdapter {
       switch (result) {
         case "started":
           return { kind: "started", attemptId: claim.attemptId, generation: claim.generation, executorId: claim.executorId };
-        default:
+        default: {
           this.executor.piStore.releaseWorkspaceClaim({
             canonicalPath: ws.canonicalPath, runId: binding.runId, generation: binding.resourceGeneration,
           });
           this.executor.notifyCapacityReleased();
-          return { kind: "start_failed", reason: String(result), retryable: false };
+          // #1804: carry the supervised readiness/settlement reason (for
+          // example the unavailable-model vs probe-failure distinction)
+          // through the durable Pi run row instead of the generic "error"
+          // string. Bounded and sanitized at the source; never a payload dump.
+          const detail = this.executor.piStore.get(binding.runId)?.error?.slice(0, 500);
+          return { kind: "start_failed", reason: detail && detail.length > 0 ? detail : String(result), retryable: false };
+        }
       }
     } catch (err) {
       logWarn(TAG, `start failed for ${claim.attemptId}: ${err instanceof Error ? err.message : String(err)}`);

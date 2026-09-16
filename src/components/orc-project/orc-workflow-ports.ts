@@ -73,6 +73,13 @@ function planPrompt(input: {
     '{"nodes":[{"label":"short-id","kind":"work|synthesis","instructions":"...","capability":"...","outputs":["..."],"acceptance":["..."],"dependsOn":["..."],"optional":false}],"requiredOutputs":["..."],"allowPartial":false}',
     "Rules: every work/synthesis node needs non-empty instructions, capability (one of: "
       + `${input.capabilities.join(", ")}), outputs, acceptance, and dependsOn (possibly empty).`,
+    // #1804: the capability menu is the model-facing vocabulary only — bare
+    // Pi workspace aliases are never offered. Execution semantics: ordinary
+    // research, collection, writing, and synthesis run on the general agent
+    // lane; pi-coding/pi request the intentional coding executor. Writing
+    // files or having a workspace root does not imply coding.
+    "Capability semantics: general is ordinary agent work (research, collection, writing, synthesis); pi-coding/pi request the coding executor for deliberate coding work, including in scheduled workflows. Use general unless the node genuinely needs code execution.",
+    "Never emit a bare workspace alias (for example default) as a capability — only the listed vocabulary is accepted; an alias proposal is rejected through the correction path, never silently rewritten.",
     "Labels unique. Dependencies must reference declared labels. No cycles.",
     "Every requiredOutput must be declared in some node's outputs.",
     "All outputs must be workspace-relative paths (e.g. out/report.md) — never absolute paths, never ~, never /home or /tmp prefixes. Absolute outputs are rejected.",
@@ -402,7 +409,13 @@ export function resolvePiWorkspaceAlias(capability: string | undefined | null): 
   }
 }
 
-/** Runner capabilities for production admission (general + Pi). */
+/** Runner capabilities for production admission (general + Pi).
+ *
+ * #1804: this is the compatibility set — it still admits already-stored
+ * alias plans and explicit programmatic alias contracts through dispatch
+ * and retries. Model-generated proposals use the narrower planner
+ * vocabulary below, never this list.
+ */
 export function workflowCapabilities(): string[] {
   const caps = new Set<string>(["general", "pi-coding", "pi"]);
   try {
@@ -414,6 +427,50 @@ export function workflowCapabilities(): string[] {
     // Config unreadable: generic Pi names still route (dispatch fails closed).
   }
   return [...caps];
+}
+
+/**
+ * #1804 — model-facing planner vocabulary. Newly generated initial and
+ * revised plans are offered exactly these capabilities with the execution
+ * semantics stated in the planner prompt. Bare workspace aliases (for
+ * example a configured `default`) are never offered here; a model proposal
+ * naming one enters the bounded correction/revision path via
+ * `validatePlannerProposal`, never a silent rewrite to general.
+ */
+export const PLANNER_CAPABILITIES: readonly string[] = ["general", "pi-coding", "pi"];
+
+/** #1804 — planner-vocabulary view for the model prompt (copy, never the live set). */
+export function plannerCapabilities(): string[] {
+  return [...PLANNER_CAPABILITIES];
+}
+
+/** #1804 — whether a capability belongs to the model-facing vocabulary. */
+export function isPlannerCapability(capability: string | undefined | null): boolean {
+  if (!capability) return false;
+  return (PLANNER_CAPABILITIES as readonly string[]).includes(capability);
+}
+
+/**
+ * #1804 — planner-side admission for model-generated proposals. Rejects any
+ * capability outside the planner vocabulary (bare workspace aliases,
+ * pi-* variants, and unknown names) as a plan diagnostic so the existing
+ * bounded correction/revision logic handles it. Runner-side
+ * `validatePlanForRun` stays compatibility-wide for stored alias plans and
+ * explicit programmatic contracts.
+ */
+export function validatePlannerProposal(proposal: PlanProposal): PlanDiagnostic[] {
+  const problems: PlanDiagnostic[] = [];
+  for (let i = 0; i < (proposal.nodes ?? []).length; i++) {
+    const n = (proposal.nodes as Array<{ capability?: unknown }>)[i];
+    const capability = typeof n?.capability === "string" ? (n.capability as string) : undefined;
+    if (!isPlannerCapability(capability)) {
+      problems.push({
+        field: `nodes[${i}].capability`,
+        reason: `unsupported planner capability ${String(capability ?? "(missing)")} (use one of: ${PLANNER_CAPABILITIES.join(", ")})`,
+      });
+    }
+  }
+  return problems;
 }
 
 export interface PiPortDeps {
@@ -573,7 +630,9 @@ export class SpinPlannerBackend implements PlannerBackend {
     // keep the generic workspace-relative rule above (no concrete root to
     // state); a bound root is always stated explicitly, never assumed.
     const workspace = this.runner.boundWorkspaceOf(cmd.runId);
-    const caps = [...this.runner.capabilities];
+    // #1804: the model sees only the planner vocabulary, never the runner's
+    // compatibility set (which still admits stored alias plans elsewhere).
+    const caps = plannerCapabilities();
     let problems = "";
     let lastDiagnostics: PlanDiagnostic[] = [];
     for (let attempt = 0; attempt < 2; attempt++) {
@@ -592,7 +651,14 @@ export class SpinPlannerBackend implements PlannerBackend {
         if (attempt === 0) continue;
         break;
       }
-      const diagnostics = this.runner.validatePlanForRun(cmd.runId, proposal);
+      // #1804: model proposals are gated on the planner vocabulary first, so
+      // a bare alias (for example `default`) enters the bounded
+      // correction/revision path here. Runner-side admission stays
+      // compatibility-wide for stored alias plans and explicit contracts.
+      // Never silently rewrite a rejected Pi/alias proposal to general.
+      const plannerDiagnostics = validatePlannerProposal(proposal);
+      const runnerDiagnostics = this.runner.validatePlanForRun(cmd.runId, proposal);
+      const diagnostics = [...plannerDiagnostics, ...runnerDiagnostics];
       if (diagnostics.length > 0) {
         problems = diagnostics.map((p) => `${p.field}: ${p.reason}`).join("; ");
         lastDiagnostics = diagnostics;
