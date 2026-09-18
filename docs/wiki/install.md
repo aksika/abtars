@@ -29,6 +29,11 @@ abmind install --non-interactive \
 
 Step 3 automatically clones source, builds, deploys, and starts the bridge (daemon mode). The bot is live after this completes. Step 4 discovers username and agent name from the abtars config created in step 3 — no need to pass them again.
 
+`abtars install` uses the alpha channel by default (`--stable` or `--dev`
+select other channels). `--api-key` is required for cloud providers
+(OpenRouter/OpenAI/Anthropic); local providers (ollama, kiro, gemini) don't
+need one.
+
 ### What each step does
 
 | Step | What happens |
@@ -84,29 +89,34 @@ Daemon mode sets this automatically.
 |---|---|---|
 | **Stable** | `npm install -g abtars abmind` | Production use |
 | **Alpha** | `npm install -g abtars@alpha abmind@alpha` | Latest features, tested on live instances |
-| **Dev** | `git clone` + `abtars update --dev .` | Contributors |
+| **Dev** | `git clone` + `abtars update --dev <dir>` | Contributors |
 
 ## Commands reference
 
 ```bash
-abtars start          # Start bridge (simple mode) or load daemon
-abtars stop           # Stop bridge + watchdog
-abtars restart        # Warm restart (in-process)
-abtars restart --cold # Kill + fresh start
-abtars update         # Pull latest source, rebuild, deploy
-abtars doctor         # Health check
-abtars status         # Bridge status
-abtars deps list      # Show optional deps
-abtars deps install X # Install optional dep
+abtars start               # Start bridge (simple mode) or load daemon
+abtars stop                # Stop bridge + watchdog
+abtars restart             # Warm restart (in-process)
+abtars restart --cold      # Kill + fresh start
+abtars update --alpha      # Pull latest source, rebuild, deploy (--stable | --dev also work)
+abtars rollback            # Back to previous release (--to 1-3 for older slots)
+abtars doctor              # Health check
+abtars status              # Bridge status
+abtars deps list           # Show optional deps
+abtars deps install X      # Install optional dep
 ```
+
+See [Deploy Pipeline](./deploy.md) for the full update/rollback reference.
 
 ## Updating
 
 ```bash
-abtars update    # pulls latest source, rebuilds, deploys, restarts (daemon mode)
+abtars update --alpha    # pulls latest source, rebuilds, deploys, restarts (daemon mode)
 ```
 
-In simple mode, `update` deploys but doesn't restart. Run `abtars start` after.
+`--stable` tracks stable releases, `--dev` tracks dev (add a directory,
+`--dev <dir>`, to deploy from a local checkout). In simple mode, `update`
+deploys but doesn't restart. Run `abtars start` after.
 
 If `abtars` still behaves like the old version after updating, a stale `npm install -g abtars` may be shadowing the updated wrapper. See [troubleshooting](./troubleshooting.md#abtars-resolves-to-a-stale-version-after-update).
 
@@ -114,23 +124,27 @@ If `abtars` still behaves like the old version after updating, a stale `npm inst
 
 ```
 ~/.local/bin/
-├── abtars               # CLI wrapper (overwritten on every deploy)
+├── abtars               # CLI wrapper (refreshed on every deploy)
 ├── abtars-task          # task subprocess wrapper
 └── ...                  # other tool wrappers
 
 ~/.abtars/
+├── app -> ../.abtars-releases/current  # compat link to the active release
 ├── config/              # .env, transport.json, users.json, peers.json
 ├── secret/              # API keys (encrypted at rest after first boot)
 ├── skills/              # core/ + self/ + custom/ + downloaded/
 ├── node_modules/        # exact packages declared by skill scripts
-├── logs/                # bridge-YYYY-MM-DD.log, watchdog.log
-└── app -> releases/current  # symlink to active release
+├── logs/                # bridge + watchdog logs
+├── state/               # deploy + supervisor state
+├── manifest.json        # version, commit, source, installMode
+├── bridge.lock          # live PIDs + heartbeat
+└── deploy.state         # last deploy status
 
 ~/.abtars-releases/
-├── src/                 # source checkouts (abtars/, abmind/)
-├── <version>/           # deployed releases (e.g., 0.3.4-alpha.6)
-├── current -> <version> # active release symlink
-└── history.json         # release history
+├── <commit>/            # deployed releases (bundle/, templates/)
+├── current -> <commit>  # canonical activation point (atomic swap)
+├── history.json         # release history (rollback slots)
+└── src/                 # synced source checkouts (abtars/)
 
 ~/.local/lib/node_modules/   # unified native deps dir (better-sqlite3, optional deps)
 
@@ -167,7 +181,7 @@ abTARS stores all secrets in `~/.abtars/secret/` — one file per key, encrypted
 echo -n "sk-or-v1-abc123..." > ~/.abtars/secret/OPENROUTER_API_KEY
 
 # Restart to pick it up (encrypted automatically on boot)
-abtars stop --force && abtars start
+abtars stop && abtars start
 ```
 
 The filename becomes the environment variable name. That's the only rule.
@@ -184,7 +198,7 @@ The filename becomes the environment variable name. That's the only rule.
 
 | Service | Secret filename | Settings (in `.env.skills`) |
 |---------|----------------|----------------------------|
-| Home Assistant | `HA_TOKEN` | `HA_URL=http://192.168.1.4:8123` |
+| Home Assistant | `HA_TOKEN` | `HA_URL=http://<ha-host>:8123` |
 | Groq (voice STT) | `GROQ_API_KEY` | `STT_MODEL=whisper-large-v3` |
 | Google AI (images) | `GOOGLE_AI_API_KEY` | `GOOGLE_AI_MODEL=gemini-2.0-flash-preview-image-generation` |
 | Discord | `DISCORD_BOT_TOKEN` | `DISCORD_APP_ID=your-app-id` |
@@ -196,10 +210,10 @@ Example — adding Home Assistant:
 echo -n "eyJ0eXAi..." > ~/.abtars/secret/HA_TOKEN
 
 # 2. Add non-secret settings
-echo "HA_URL=http://192.168.1.4:8123" >> ~/.abtars/config/.env.skills
+echo "HA_URL=http://<ha-host>:8123" >> ~/.abtars/config/.env.skills
 
 # 3. Restart
-abtars stop --force && abtars start
+abtars stop && abtars start
 ```
 
 Your agent can now control Home Assistant. See [Adding a Service](./add-service.md) for the full guide.
@@ -208,7 +222,7 @@ Your agent can now control Home Assistant. See [Adding a Service](./add-service.
 
 ```bash
 rm ~/.abtars/secret/OPENAI_API_KEY
-abtars stop --force && abtars start
+abtars stop && abtars start
 ```
 
 ### How it stays safe

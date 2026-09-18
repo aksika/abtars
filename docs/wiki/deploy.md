@@ -1,166 +1,174 @@
 # Deploy Pipeline
 
-How code gets from source to a running bridge.
+How code gets from source to a running bridge. For first-time setup on a
+new machine, see [Installation](./install.md) — this page covers updates
+to an existing node.
 
 ## Quick reference
 
 ### CLI
 
 ```bash
-abtars update                # from npm (stable/alpha)
-abtars update --local   # build + deploy from local git checkout
-abtars update --dry-run      # preview, no mutations
-abtars rollback              # swap app/ ↔ app.prev/, restart
-abtars restart               # restart without rebuild
-abtars restart --cold        # starts supervisor if dead
+abtars update --alpha          # npm alpha channel
+abtars update --stable         # npm stable channel
+abtars update --dev            # latest dev (syncs source, builds, deploys)
+abtars update --dev <dir>      # build + deploy from a local checkout
+abtars rollback                # back to the previous release (slot 1)
+abtars rollback --to 2         # back to slot 2 (slots 1-3)
+abtars restart                 # warm restart without rebuild
+abtars restart --cold          # kill + fresh start
 ```
 
-### Telegram
+A channel flag is required — bare `abtars update` prints usage and exits.
+
+### Telegram (master role only)
 
 ```
-/update              # from npm
-/update pull         # git pull latest (no build)
-/update deploy        # build + deploy from checkout
-/software            # versions, source, rollback slots
+/update dev | alpha | stable   # build + deploy + restart
+/update abmind                 # update the memory system separately
+/software                      # versions, source, rollback slots
+/software rollback <slot>      # roll back to slot 1-3
 ```
 
-Remote deploy flow: `/update pull` → `/update deploy`
+`pull`, `deploy`, `build`, and `git` are legacy aliases for `/update dev`.
+Remote deploy is a single step: `/update dev` (or `alpha` / `stable`).
 
 ## What `abtars update` does
 
 ```
-0. Pre-flight: check sentinel, acquire lock, clean stale staging, register SIGHUP trap
-1. Resolve source (git fetch + staleness check, or npm package)
-2. Build into app.staging/ (esbuild bundle + external deps + copy abmind)
-3. Validate: entry point exists at app.staging/bundle/abtars.js
-4. Skill dependency gate: validate and prepare exact dependencies for staged core
+0. Pre-flight: acquire lock, clean stale staging
+1. Resolve source (sync dev checkout, or fetch npm channel;
+   --dev <dir> builds that checkout as-is)
+2. Build into staging (bundle + wrappers + templates)
+3. Validate: entry point exists at staging/bundle/abtars.js
+4. Pi compatibility preflight (skipped on first install)
+5. Skill dependency gate: prepare exact dependencies for staged core
    skills plus preserved user skills before activation; failure leaves the
    previous release active
-5. Config snapshot: rotate 3 slots, copy config/ → config/.pre-update/
-6. Atomic swap: rm app.prev/, mv app/ → app.prev/, mv app.staging/ → app/
-7. Post-swap: refresh scripts, bin wrappers, skills, config seeds, doctor --fix
-8. Write restart sentinel (status: "pending")
-9. Restart bridge (USR1 to watchdog or cold restart)
-10. Health probe: poll bridge.lock for 60s (fresh lastHeartbeat)
-11. On failure: auto-rollback (swap app/ ↔ app.prev/, re-restart)
+6. Copy staged → releases/<commit>/, update history.json (max 4, deduped)
+7. Atomic activation: repoint releases/current, normalize app → current
+8. Refresh: CLI wrappers, service files, skills/prompts from templates,
+   manifest + deploy.state
+9. Stop + respawn the bridge (full service restart from the CLI;
+   bridge-only kill + watchdog respawn on the Telegram /update path)
+10. Health probe: poll bridge.lock for ~3 min (new PID + fresh lastHeartbeat).
+    Writes deploy.state success / unhealthy / failed. No auto-rollback —
+    roll back manually if unhealthy.
 ```
 
 ## Directory layout
 
 ```
 ~/.abtars/
-  app/                  ← Active code (no symlinks)
-    bundle/abtars.js    ← Bridge entry point
-    node_modules/abmind/← Real copy of abmind dist
-    package.json
-    core/skills/
-    install-manifest.json
-  app.prev/             ← Previous version (one-step rollback)
-  bin/                  ← CLI wrapper scripts (→ app/bundle/)
-  scripts/              ← watchdog.sh, doctor.sh, abtars.sh
-  config/
-    .pre-update/        ← Config snapshot rotation (3 slots)
-  state/
-    update.sentinel     ← Tracks update lifecycle
-  manifest.json         ← Version, commit, installMode
+  app -> ../.abtars-releases/current  ← compat link (current is canonical)
+  config/ secret/ skills/ logs/ state/ auth/
+  manifest.json   ← version, commit, source, installMode, previous-*
+  bridge.lock     ← live PIDs + lastHeartbeat (single source of truth)
+  deploy.state    ← last deploy status (deploying/success/unhealthy/failed/rollback)
+
+~/.abtars-releases/
+  <commit>/       ← deployed releases (bundle/, templates/, install-manifest.json)
+  current -> <commit>  ← canonical activation point (atomic swap)
+  history.json    ← ordered release refs, max 4 (rollback slots 1-3)
+  src/abtars/     ← synced dev checkout
+  app.staging/    ← build staging (cleaned on every run)
+
+~/.local/bin/     ← CLI wrappers (abtars, abtars-task, ...)
+~/.local/lib/node_modules/  ← native deps (better-sqlite3, optional groups)
 ```
 
 ## What gets deployed
 
 | Source | Target | Contents |
 |--------|--------|----------|
-| `bundle/` (esbuild output) | `~/.abtars/app/bundle/` | Compiled+bundled JS |
-| `../abmind/dist/` | `~/.abtars/app/node_modules/abmind/` | Memory system (real copy) |
-| `core/skills/` | `~/.abtars/skills/core/` | Core skill files |
-| `scripts/*.sh` | `~/.abtars/scripts/` | watchdog, doctor, abtars launcher |
-| `config/*.example` | `~/.abtars/config/` | Seeds missing config files |
+| `bundle/` (esbuild output) | `releases/<commit>/bundle/` | Compiled JS, entry `bundle/abtars.js` |
+| `templates/` | `releases/<commit>/templates/` → reconciled into runtime | Skills, prompts, config seeds |
+| `scripts/*.sh|*.service|*.plist` | OS service files, reloaded if changed | watchdog, daemon units |
+| `install-manifest.json` | `~/.local/bin/` | CLI wrapper refresh |
+
+abmind is never bundled into a release. It ships as a separate global
+package and is discovered at runtime. Update it independently
+(`/update abmind` or `abmind update --dev`).
 
 ## Entry point
 
 ```bash
-# watchdog.sh spawns the bridge:
-NODE_PATH="${ABMIND_HOME:-$HOME/.abmind}/lib/node_modules"
-node "$AB/app/bundle/abtars.js" "$@"
+# watchdog.sh spawns the bridge through the links:
+node "$HOME/.abtars/app/bundle/abtars.js" "$@"
+# app → releases/current → releases/<commit>/ — never a direct version path
 ```
 
-No symlinks. One path. `NODE_PATH` only includes `$ABMIND_HOME/lib/node_modules/` for the `better-sqlite3` native addon.
+`NODE_PATH` includes `~/.local/lib/node_modules/` for native addons
+such as `better-sqlite3`.
 
 ## Restart modes
 
 | Mode | How | When to use |
 |------|-----|-------------|
-| Warm | Writes `restartRequested` to `bridge.lock` → heartbeat reads → `process.exit(0)` → supervisor respawns | Config changes |
-| Cold | Starts supervisor directly if bridge dead | After crashes, first boot |
-| USR1 | Signals watchdog → graceful TERM → respawn | Normal deploys (`abtars update`) |
+| Warm | Supervisor command → graceful restart (bridge back within ~30s) | Config changes |
+| Cold | `abtars restart --cold`: kill bridge + fresh start | After crashes, first boot |
+| Deploy | `abtars update`: stop service, activate release, respawn, health-probe | New code |
 
 ## Health probe
 
-After restart, `abtars update` polls `bridge.lock` every 3s for a `lastHeartbeat` newer than the restart timestamp. If healthy within 60s → success. If not → auto-rollback.
-
-## Auto-rollback
-
-If health probe fails:
-1. `mv app/ app.broken/`
-2. `mv app.prev/ app/`
-3. Restart bridge again
-4. If second restart healthy → print warning, exit 1
-5. If second also fails → print diagnostics, exit 2
-
-## Config snapshot
-
-3 rotating slots before every update:
-```
-config/.pre-update/       ← most recent
-config/.pre-update.1/     ← one update ago
-config/.pre-update.2/     ← two updates ago
-```
-
-Recovery: `cp ~/.abtars/config/.pre-update/* ~/.abtars/config/`
-
-## Restart sentinel
-
-`state/update.sentinel` — written before restart (status: "pending"), cleared by bridge on first heartbeat tick (status: "success"). If stale, `abtars status` warns.
+After respawn, the deploy polls `bridge.lock` every 3s for a new PID with
+a `lastHeartbeat` newer than the restart timestamp (~3 min timeout).
+Success writes `deploy.state: success`. Failure writes `unhealthy`/`failed`
+and the watchdog keeps retrying — check `abtars status` and the logs, then
+roll back manually. There is no automatic rollback.
 
 ## Deploy to a remote instance
 
-Via Telegram:
+Via Telegram (master role only):
+
 ```
-/update pull          ← fetches latest
-/update deploy         ← builds + deploys + restarts
+/update dev      ← pull latest dev, build, deploy, restart (one step)
+/update alpha    ← same from the npm alpha channel
 ```
 
 Or over SSH:
+
 ```bash
-ssh remote-host 'cd ~/abmind && git pull --ff-only origin dev && npm run build && cd ~/abtars && git pull --ff-only origin dev && abtars update --local'
+ssh remote-host 'abtars update --alpha'
+```
+
+Update abmind separately — it is not part of the abtars deploy:
+
+```bash
+ssh remote-host 'abmind update --dev'
 ```
 
 ## Rollback
 
 ```bash
-abtars rollback
-# Swaps app/ ↔ app.prev/, restarts, health-verifies, updates manifest
+abtars rollback            # previous release (slot 1)
+abtars rollback --to 2     # slot 2 (slots 1-3, from history.json)
+# or via Telegram: /software rollback 2
 ```
 
-Always works — `app.prev/` is a full copy of the previous working version. No "pruned release" edge cases.
+Repoints `releases/current` at the target, updates `manifest.json` and
+`deploy.state`, kills the bridge, and lets the watchdog respawn from the
+target release. Slots come from `history.json` (current + up to 3 priors).
 
 ## Manual recovery (when `abtars update` itself is broken)
 
-If the deployed CLI is in a state where it cannot run the update flow at all
-— typically `abtars: no release staged. Run 'abtars install' first.` from the
-wrapper, with a dead bridge the watchdog cannot respawn — use
-`scripts/emergency-update.sh`. It is a small standalone fallback that uses only
-plain `npm`/`node`, filesystem operations, and direct launchctl/systemd calls.
-It does not invoke any abtars CLI or supervisor-state helper.
+If the deployed CLI cannot run the update flow at all — for example the
+wrapper cannot locate the bundle, or the bridge is dead and the watchdog
+cannot respawn it — use `scripts/emergency-update.sh`. It is a small
+standalone fallback that uses only plain `npm`/`node`, filesystem
+operations, and direct launchd/systemd calls. It does not invoke any
+abtars CLI.
 
 ```bash
 bash ~/.abtars-releases/src/abtars/scripts/emergency-update.sh
 ```
 
-Source HEAD determines the deployed version. Pull or check out the commit you
-want first if needed. The script updates `manifest.json`, `history.json`, and
-the canonical `app -> current -> release` symlinks, then restarts the watchdog
-and verifies that the OS service is active. It intentionally does not mirror the
-normal deploy state machine; keep it limited to this recovery path.
+Source HEAD determines the deployed version. Pull or check out the commit
+you want first. The script builds the checkout, stages
+`releases/<commit>/`, updates `history.json`, repoints the `current` +
+`app` links, updates `manifest.json`, restarts the OS watchdog, and runs a
+liveness check. It intentionally does not mirror the normal deploy state
+machine; keep it limited to this recovery path.
 
 ## Doctor on every boot
 

@@ -77,7 +77,7 @@ Edit `~/.abmind/memory/core/SOUL.md` — this defines who your agent is: name, p
 ### Updating
 
 ```bash
-abtars update    # pulls latest source, rebuilds, deploys, restarts
+abtars update --alpha    # pulls latest source, rebuilds, deploys, restarts
 ```
 
 ### Something broke?
