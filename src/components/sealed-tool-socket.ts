@@ -11,8 +11,9 @@
  */
 
 import { createServer, type Socket } from "node:net";
+import { dirname } from "node:path";
 import { randomBytes } from "node:crypto";
-import { existsSync, unlinkSync, chmodSync } from "node:fs";
+import { existsSync, unlinkSync, chmodSync, mkdirSync } from "node:fs";
 import type { HostToolService } from "./host-tool-service.js";
 import type { AbtarsMemoryRuntime, FindSealedSecretsInput } from "./memory-runtime.js";
 import type { SealedSecretHandles } from "./sealed-secret-handles.js";
@@ -99,6 +100,9 @@ export function startSealedToolSocket(
     handles: SealedSecretHandles;
   },
 ): Promise<SealedSocketServer> {
+  // The parent dir (e.g. ~/.abtars/run/) is created by no installer or boot
+  // phase — make it here so listen() cannot fail on a missing directory (#1806).
+  mkdirSync(dirname(path), { recursive: true });
   if (existsSync(path)) {
     try { unlinkSync(path); } catch { /* stale socket ignored */ }
   }

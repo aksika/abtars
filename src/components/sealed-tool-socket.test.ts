@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { connect, type Socket } from "node:net";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync, existsSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import {
@@ -103,6 +103,28 @@ describe("#1660 sealed tool socket", () => {
     expect(result.results[0]!.label).toBe("label-github");
     expect(result.results[0]!.handle).toMatch(/^secret:/);
     socket.destroy();
+  });
+
+  it("starts when the parent directory does not exist (#1806)", async () => {
+    const nestedPath = join(tmpDir, "run", "sealed-tools.sock");
+    const nestedRegistry = new SealedTokenRegistry();
+    const nestedHandles = new SealedSecretHandles();
+    const nestedHost = new HostToolService({
+      handles: nestedHandles,
+      actionGate: null,
+      resolveHandle: async () => ({ memoryId: 7, semanticRevision: 1, value: "fixture-value" }),
+    });
+    const nested = await startSealedToolSocket(nestedPath, nestedRegistry, {
+      hostService: nestedHost,
+      runtimeHolder: { current: fakeRuntime() },
+      handles: nestedHandles,
+    });
+    try {
+      expect(existsSync(nestedPath)).toBe(true);
+      expect(statSync(nestedPath).mode & 0o777).toBe(0o600);
+    } finally {
+      await nested.close();
+    }
   });
 
   it("rejects inactive, revoked and missing tokens identically", async () => {
