@@ -1,6 +1,6 @@
 {
   "_comment": "Existing test-file typecheck debt, frozen by #1742. May shrink, never grow. A baseline increase is a review red flag; fix the test, do not raise the baseline.",
-  "_recorded": "2026-09-16",
+  "_recorded": "2026-09-20",
   "files": {
     "src/boot/wire-platform.test.ts": 1,
     "src/capabilities/power/power-transition-store.test.ts": 1,
@@ -8,7 +8,6 @@
     "src/capabilities/sleep/sleep-card.test.ts": 1,
     "src/cli/abtars-task.test.ts": 1,
     "src/cli/bootstrap.test.ts": 1,
-    "src/cli/commands/deps.test.ts": 1,
     "src/cli/commands/kanban.test.ts": 2,
     "src/cli/commands/tui-ui.test.ts": 7,
     "src/cli/deploy-lib/deploy.test.ts": 11,

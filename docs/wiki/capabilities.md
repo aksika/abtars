@@ -10,7 +10,6 @@ On boot, `discoverCapabilities()` scans `src/capabilities/` for directories with
 
 | Capability | What it provides |
 |------------|-----------------|
-| **Browser** | Browsie subagent, B-type Kanban delivery, SSRF guard |
 | **Hotskills** | Live-reload skill files, dependency preparation, and eligibility gating via `requires` frontmatter |
 | **Sleep** | Dreamy spawn + retry, progress protocol |
 
@@ -48,13 +47,7 @@ What a capability can register:
 
 ```bash
 # ~/.abtars/config/.env
-DISABLED_CAPABILITIES=browser,hotskills
+DISABLED_CAPABILITIES=hotskills
 ```
 
 Comma-separated names. Disabled capabilities are skipped at discovery — zero overhead.
-
-## Replacing a capability
-
-1. Drop a new capability directory (e.g. `browser-v2/`)
-2. Disable the old one: `DISABLED_CAPABILITIES=browser`
-3. Restart — old one skipped, new one loads

@@ -44,11 +44,27 @@ export interface SystemDep {
   readonly label: string;
   readonly installHint: string;
   readonly platform?: "linux" | "darwin";
+  /** External installer owned by abtars; all installer inputs are unpinned. */
+  readonly autoInstall?: "lightpanda" | "cloak";
+  /** Packages installed into the user-local npm prefix for the `cloak` installer. */
+  readonly npmPackages?: readonly string[];
 }
 
 export const SYSTEM_DEPS: Record<string, SystemDep> = {
   bwrap:      { bin: "bwrap",      label: "Seatbelt sandbox (Linux)", installHint: "apt install bubblewrap", platform: "linux" },
-  lightpanda: { bin: "lightpanda", label: "Web-fetch level 3",        installHint: "see https://lightpanda.io" },
+  lightpanda: {
+    bin: "lightpanda",
+    label: "Web-fetch level 3",
+    installHint: "curl -fsSL https://pkg.lightpanda.io/install.sh | bash",
+    autoInstall: "lightpanda",
+  },
+  cloak: {
+    bin: "cloak",
+    label: "CloakBrowser action-capable stealth browser",
+    installHint: "npm install -g @dreamor/cloakbrowser-cli@latest cloakbrowser@latest playwright-core@latest && cloak binary install",
+    autoInstall: "cloak",
+    npmPackages: ["@dreamor/cloakbrowser-cli", "cloakbrowser", "playwright-core"],
+  },
   ollama:     { bin: "ollama",     label: "Local embeddings",         installHint: "curl -fsSL https://ollama.ai/install.sh | sh" },
 };
 

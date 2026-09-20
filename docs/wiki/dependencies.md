@@ -27,6 +27,21 @@ These CLI-managed npm groups install under `~/.local/lib/node_modules/` — no
 sudo, no system paths. Daemon mode wires `NODE_PATH` automatically; simple mode
 needs the manual export documented in [Installation](./install.md).
 
+## Browser runtimes
+
+`lightpanda` and `cloak` are auto-managed external binaries rather than npm
+groups. They install into the user-local prefix and remain available under
+their original executable names:
+
+| Name | What it enables | Install/update behavior |
+|------|------------------|-------------------------|
+| `lightpanda` | JavaScript-rendered fetches in `web-fetch` level 3 | Runs Lightpanda's official installer on the nightly channel |
+| `cloak` | Action-capable stealth browser for Browsie | Installs the latest `@dreamor/cloakbrowser-cli`, `cloakbrowser`, and `playwright-core`, then ensures the CloakBrowser binary is downloaded |
+
+Use `abtars deps install lightpanda cloak` for a first setup and
+`abtars deps update lightpanda cloak` to refresh both from upstream. No
+versions are pinned. `abtars deps install all` includes both browser runtimes.
+
 ## Skill script dependencies
 
 Skill scripts use a separate, generic dependency contract. Any skill under
@@ -56,7 +71,8 @@ for the declaration and recovery details.
 
 `pi` (the coding-agent CLI/AI/TUI bundle) is managed through the same `deps install|update|remove pi` commands but is a separate external distribution with its own compatibility check — see [Pi Executor](./pi-executor.md).
 
-The browser capability (`cloakbrowser`) is **not** a `deps` group — it's a standalone external binary you install yourself. See [Browser](./browser.md).
+The browser capability is not embedded in abtars. Its external `cloak` runtime
+is managed by `abtars deps`; see [Browser](./browser.md).
 
 ## Native deps: shared with abmind
 
@@ -102,9 +118,11 @@ If you hit this, check what else writes to `~/.local/lib/node_modules/` on your 
 |--------|----------|------------------|
 | `ollama` | Local embeddings + local models | `curl -fsSL https://ollama.ai/install.sh \| sh` |
 | `bwrap` | Sandbox (Linux only) | `apt install bubblewrap` |
-| `lightpanda` | Fast web fetch | See https://lightpanda.io |
 
-abtars never runs a system installer or `sudo` for you. `abtars deps install ollama` (or any system binary name) just prints the upstream install command — it does not execute it. See [Prerequisites](./prerequisites.md#do-i-need-sudo-no) for why.
+These manual system dependencies are not installed by abtars and may require
+their own platform package manager. The browser runtimes above are different:
+their upstream installers are run by `abtars deps install/update` without sudo.
+See [Prerequisites](./prerequisites.md#do-i-need-sudo-no) for why.
 
 ## Troubleshooting
 

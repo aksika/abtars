@@ -6,17 +6,22 @@ import { createEmptyManifest, upsertRecord, writeManifest } from "../deploy-lib/
 import { hashContent } from "../deploy-lib/native-group.js";
 
 let tmpDir: string;
+let originalPath: string | undefined;
 vi.mock("node:os", async (importOriginal) => {
   const actual = await importOriginal<typeof import("node:os")>();
   return { ...actual, homedir: () => tmpDir };
 });
 
 beforeEach(() => {
+  originalPath = process.env.PATH;
+  process.env.PATH = "/usr/bin:/bin";
   tmpDir = mkdtempSync(join(tmpdir(), "deps-test-"));
   mkdirSync(join(tmpDir, ".local", "lib", "node_modules"), { recursive: true });
 });
 
 afterEach(() => {
+  if (originalPath === undefined) delete process.env.PATH;
+  else process.env.PATH = originalPath;
   rmSync(tmpDir, { recursive: true, force: true });
 });
 
@@ -150,6 +155,23 @@ describe("resolveGroupActions", () => {
     const actions = resolveGroupActions("update", ["pdf"]);
     expect(actions.some(a => a.group === "pdf" && a.reason === "missing")).toBe(true);
   });
+
+  it("all includes the auto-managed Lightpanda and Cloak binaries", async () => {
+    const { resolveSystemActions } = await import("./deps.js");
+    const actions = resolveSystemActions("install", ["all"]);
+    expect(actions.map(action => action.group)).toEqual(expect.arrayContaining(["lightpanda", "cloak"]));
+    expect(actions.every(action => action.reason === "missing")).toBe(true);
+  });
+
+  it("bare update refreshes installed auto-managed binaries and skips absent ones", async () => {
+    const localBin = join(tmpDir, ".local", "bin");
+    mkdirSync(localBin, { recursive: true });
+    writeFileSync(join(localBin, "cloak"), "");
+
+    const { resolveSystemActions } = await import("./deps.js");
+    const actions = resolveSystemActions("update", []);
+    expect(actions).toEqual([{ group: "cloak", reason: "refresh" }]);
+  });
 });
 
 // ── resolvePiUpdateAction (#1572) ─────────────────────────────────────────────
@@ -270,6 +292,47 @@ describe("abtars deps", () => {
     out.mockRestore();
   });
 
+  it("install cloak uses latest package specs and pre-downloads the browser", async () => {
+    const childProcess = await import("node:child_process");
+    const spawn = vi.mocked(childProcess.spawnSync);
+    let npmInstalled = false;
+    spawn.mockImplementation((cmd, args = []) => {
+      const result = (status: number, stdout = "", stderr = "") => ({
+        pid: -1,
+        output: [stdout, stderr],
+        status,
+        signal: null,
+        stdout,
+        stderr,
+      });
+      if (cmd === "which" && args[0] === "cloak") {
+        return npmInstalled
+          ? result(0, join(tmpDir, ".local", "bin", "cloak"))
+          : result(1);
+      }
+      if (cmd === "npm") npmInstalled = true;
+      return result(0);
+    });
+
+    const { deps } = await import("./deps.js");
+    const out = vi.spyOn(process.stdout, "write").mockImplementation(() => true);
+    const code = await deps(["install", "cloak"]);
+    expect(code).toBe(0);
+
+    const npmCall = spawn.mock.calls.find(call => call[0] === "npm");
+    expect(npmCall).toBeDefined();
+    expect(npmCall?.[1]).toEqual(expect.arrayContaining([
+      "@dreamor/cloakbrowser-cli@latest",
+      "cloakbrowser@latest",
+      "playwright-core@latest",
+    ]));
+    expect(npmCall?.[1]).not.toEqual(expect.arrayContaining([expect.stringMatching(/@\d+\.\d+/)]));
+
+    const binaryCall = spawn.mock.calls.find(call => call[1]?.[0] === "binary");
+    expect(binaryCall?.[1]).toEqual(["binary", "install"]);
+    out.mockRestore();
+  });
+
   it("install with no args defaults to native group", async () => {
     // Pre-create native packages at their exact targets so they appear "ready"
     const versions: Record<string, string> = { "better-sqlite3": "12.11.1", "sqlite-vec": "0.1.9" };
@@ -280,8 +343,10 @@ describe("abtars deps", () => {
     }
     let manifest = createEmptyManifest();
     for (const pkg of ["better-sqlite3", "sqlite-vec"] as const) {
+      const version = versions[pkg];
+      if (!version) throw new Error(`missing test version for ${pkg}`);
       manifest = upsertRecord(manifest, pkg, {
-        version: versions[pkg], nodeAbi: process.versions.modules, nodeVersion: process.version,
+        version, nodeAbi: process.versions.modules, nodeVersion: process.version,
         platform: process.platform, arch: process.arch, contentHash: hashContent(join(tmpDir, ".local", "lib", "node_modules", pkg)), installedAt: new Date().toISOString(),
         installedBy: "abtars", consumers: ["abtars"], probe: pkg === "better-sqlite3" ? "sqlite-open-select-v1" : "sqlite-vec-load-query-v1",
       });

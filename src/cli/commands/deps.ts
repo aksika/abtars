@@ -1,5 +1,5 @@
 import { printBanner } from './banner.js';
-import { OPTIONAL_DEPS, SYSTEM_DEPS } from "../../utils/lazy-require.js";
+import { OPTIONAL_DEPS, SYSTEM_DEPS, type SystemDep } from "../../utils/lazy-require.js";
 import { spawnSync } from "node:child_process";
 import { join } from "node:path";
 import { existsSync, rmSync, readFileSync } from "node:fs";
@@ -38,6 +38,11 @@ export type GroupAction = {
   group: string;
   reason: "missing" | "partial" | "invalid" | "drifted" | "refresh";
 };
+
+type SystemMutationResult = { group: string; ok: boolean; error?: string };
+
+const SYSTEM_DEP_TIMEOUT_MS = 10 * 60 * 1000;
+const LIGHTPANDA_INSTALL_URL = "https://pkg.lightpanda.io/install.sh";
 
 // ── External distribution registry ────────────────────────────────────────────
 
@@ -263,11 +268,12 @@ export function resolveGroupActions(
 
   const effectiveNames = requestedNames.filter(n => n === "all" || OPTIONAL_DEPS[n]);
   const hasExternalAll = requestedNames.includes("all") || requestedNames.some(n => !!EXTERNAL_DISTRIBUTIONS[n]);
+  const hasSystemRequest = requestedNames.some(n => !!SYSTEM_DEPS[n]);
 
   const allGroups = Object.keys(OPTIONAL_DEPS);
   let selected: string[];
 
-  if (effectiveNames.length === 0 && !hasExternalAll) {
+  if (effectiveNames.length === 0 && !hasExternalAll && !hasSystemRequest) {
     selected = operation === "install" ? ["native"] : allGroups;
   } else if (effectiveNames.includes("all")) {
     if (effectiveNames.length > 1) throw new Error("Cannot combine 'all' with other names.");
@@ -290,6 +296,59 @@ export function resolveGroupActions(
         if (operation === "update") actions.push({ group: name, reason: "refresh" });
         break;
     }
+  }
+
+  return actions;
+}
+
+function systemPlatformSupported(dep: SystemDep): boolean {
+  if (!dep.platform) return true;
+  return dep.platform === (process.platform === "darwin" ? "darwin" : "linux");
+}
+
+function resolveSystemExecutable(dep: SystemDep): string | null {
+  const localPath = join(homedir(), ".local", "bin", dep.bin);
+  if (existsSync(localPath)) return localPath;
+
+  const result = spawnSync("which", [dep.bin], {
+    stdio: "pipe",
+    shell: false,
+    encoding: "utf-8",
+    timeout: SYSTEM_DEP_TIMEOUT_MS,
+  });
+  if (result.status !== 0) return null;
+  const executable = (result.stdout ?? "").trim();
+  return executable || dep.bin;
+}
+
+function autoSystemNames(): string[] {
+  return Object.entries(SYSTEM_DEPS)
+    .filter(([, dep]) => dep.autoInstall && systemPlatformSupported(dep))
+    .map(([name]) => name);
+}
+
+/** Resolve install/update work for auto-managed system binaries. */
+export function resolveSystemActions(
+  operation: DependencyOperation,
+  requestedNames: string[],
+): GroupAction[] {
+  const updateAll = operation === "update" && requestedNames.length === 0;
+  const selected = requestedNames.includes("all") || updateAll
+    ? autoSystemNames()
+    : [...new Set(requestedNames.filter(name => Boolean(SYSTEM_DEPS[name]?.autoInstall)))];
+  const explicitlyNamed = !requestedNames.includes("all") && !updateAll;
+  const actions: GroupAction[] = [];
+
+  for (const name of selected) {
+    const dep = SYSTEM_DEPS[name];
+    if (!dep || !dep.autoInstall) continue;
+    const installed = resolveSystemExecutable(dep) !== null;
+    if (operation === "install") {
+      if (!installed) actions.push({ group: name, reason: "missing" });
+      continue;
+    }
+    if (installed) actions.push({ group: name, reason: "refresh" });
+    else if (explicitlyNamed) actions.push({ group: name, reason: "missing" });
   }
 
   return actions;
@@ -356,6 +415,101 @@ function mutateGroup(action: GroupAction, dep: (typeof OPTIONAL_DEPS)[string]): 
     return { group: action.group, ok: false, error: err instanceof Error ? err.message : String(err) };
   } finally {
     releaseLock(token);
+  }
+}
+
+function printCapturedSystemOutput(result: { stdout?: string | null; stderr?: string | null }): void {
+  if (result.stdout) process.stdout.write(result.stdout);
+  if (result.stderr) process.stderr.write(result.stderr);
+}
+
+function systemCommandError(result: { error?: Error | null; stderr?: string | null; status?: number | null }): string {
+  return result.error?.message || result.stderr?.trim().slice(0, 300) || `exit code ${result.status}`;
+}
+
+function mutateSystem(action: GroupAction, dep: SystemDep): SystemMutationResult {
+  if (!dep.autoInstall) {
+    return { group: action.group, ok: false, error: "system binary has no automatic installer" };
+  }
+
+  try {
+    if (dep.autoInstall === "lightpanda") {
+      const download = spawnSync("curl", ["-fsSL", LIGHTPANDA_INSTALL_URL], {
+        stdio: "pipe",
+        shell: false,
+        encoding: "utf-8",
+        timeout: SYSTEM_DEP_TIMEOUT_MS,
+      });
+      if (download.error || download.status !== 0) {
+        return { group: action.group, ok: false, error: `download failed: ${systemCommandError(download)}` };
+      }
+
+      const script = download.stdout ?? "";
+      if (!script.trim()) {
+        return { group: action.group, ok: false, error: "downloaded installer was empty" };
+      }
+
+      const install = spawnSync("bash", ["-s"], {
+        input: script,
+        env: {
+          ...process.env,
+          LIGHTPANDA_VERSION: "nightly",
+          LIGHTPANDA_DIR: join(homedir(), ".local", "bin"),
+        },
+        stdio: "pipe",
+        shell: false,
+        encoding: "utf-8",
+        timeout: SYSTEM_DEP_TIMEOUT_MS,
+      });
+      printCapturedSystemOutput(install);
+      if (install.error || install.status !== 0) {
+        return { group: action.group, ok: false, error: `installer failed: ${systemCommandError(install)}` };
+      }
+    } else {
+      const packages = dep.npmPackages ?? [];
+      const npmArgs = [
+        "install",
+        "--prefix", join(homedir(), ".local"),
+        "--global",
+        "--no-audit",
+        "--no-fund",
+        ...packages.map(pkg => `${pkg}@latest`),
+      ];
+      const npm = spawnSync("npm", npmArgs, {
+        stdio: "pipe",
+        shell: false,
+        encoding: "utf-8",
+        timeout: SYSTEM_DEP_TIMEOUT_MS,
+      });
+      printCapturedSystemOutput(npm);
+      if (npm.error || npm.status !== 0) {
+        return { group: action.group, ok: false, error: `npm install failed: ${systemCommandError(npm)}` };
+      }
+
+      const executable = resolveSystemExecutable(dep);
+      if (!executable) {
+        return { group: action.group, ok: false, error: `installed packages but ${dep.bin} was not found on PATH` };
+      }
+
+      const binaryAction = action.reason === "refresh" ? "update" : "install";
+      const binary = spawnSync(executable, ["binary", binaryAction], {
+        stdio: "pipe",
+        shell: false,
+        encoding: "utf-8",
+        timeout: SYSTEM_DEP_TIMEOUT_MS,
+      });
+      printCapturedSystemOutput(binary);
+      if (binary.error || binary.status !== 0) {
+        return { group: action.group, ok: false, error: `CloakBrowser binary ${binaryAction} failed: ${systemCommandError(binary)}` };
+      }
+    }
+
+    if (!resolveSystemExecutable(dep)) {
+      return { group: action.group, ok: false, error: `${dep.bin} was not found after installation` };
+    }
+    return { group: action.group, ok: true };
+  } catch (err) {
+    return { group: action.group, ok: false, error: err instanceof Error ? err.message : String(err) };
   }
 }
 
@@ -554,11 +708,58 @@ function piRemove(): MutationResult {
 function printSystemDepHint(name: string): boolean {
   const sys = SYSTEM_DEPS[name];
   if (!sys) return false;
+  if (sys.autoInstall) {
+    process.stdout.write(
+      `${name} is managed by abtars from its upstream distribution.\n` +
+      `Install it with:\n  abtars deps install ${name}\n` +
+      `Update it with:\n  abtars deps update ${name}\n`,
+    );
+    return true;
+  }
   process.stdout.write(
     `${name} is a system binary, not an npm package — abtars can't auto-install it.\n` +
     `Install it manually:\n  ${sys.installHint}\n`,
   );
   return true;
+}
+
+function validateRequestedDependencyNames(requestedNames: string[]): void {
+  for (const name of requestedNames) {
+    if (name === "all" || name === "pi" || OPTIONAL_DEPS[name] || SYSTEM_DEPS[name] || EXTERNAL_DISTRIBUTIONS[name]) continue;
+    const guide = guideLegacyGroup(name);
+    throw new Error(guide
+      ? `${guide}\nRun 'abtars deps list'.`
+      : `Unknown dep group: ${name}. Run 'abtars deps list'.`);
+  }
+}
+
+function processSystemDependencies(
+  operation: DependencyOperation,
+  names: string[],
+): { failed: boolean; handled: boolean } {
+  const handled = names.includes("all") || names.length === 0 && operation === "update" || names.some(name => Boolean(SYSTEM_DEPS[name]));
+  if (!handled) return { failed: false, handled: false };
+
+  for (const name of names) {
+    if (name !== "all" && SYSTEM_DEPS[name] && !SYSTEM_DEPS[name].autoInstall) {
+      printSystemDepHint(name);
+    }
+  }
+
+  let failed = false;
+  for (const action of resolveSystemActions(operation, names)) {
+    const dep = SYSTEM_DEPS[action.group];
+    if (!dep) continue;
+    process.stdout.write(`→ ${action.group}: ${action.reason}\n`);
+    const result = mutateSystem(action, dep);
+    if (result.ok) {
+      process.stdout.write(`✓ ${action.group} ${operation === "install" ? "installed" : "updated"}\n`);
+    } else {
+      process.stdout.write(`✗ ${action.group} failed: ${result.error}\n`);
+      failed = true;
+    }
+  }
+  return { failed, handled: true };
 }
 
 // ── Subcommands ───────────────────────────────────────────────────────────────
@@ -602,12 +803,16 @@ function list(): number {
     }
   }
 
-  process.stdout.write("\nSystem binaries (install manually — see hint):\n\n");
+  process.stdout.write("\nSystem binaries:\n\n");
   for (const [name, dep] of Object.entries(SYSTEM_DEPS)) {
-    if (dep.platform && dep.platform !== (process.platform === "darwin" ? "darwin" : "linux")) continue;
-    const installed = spawnSync("which", [dep.bin], { stdio: "pipe" }).status === 0;
+    if (!systemPlatformSupported(dep)) continue;
+    const installed = resolveSystemExecutable(dep) !== null;
     const icon = installed ? "✓" : "○";
-    const hint = installed ? "" : `  → ${dep.installHint}`;
+    const hint = installed
+      ? ""
+      : dep.autoInstall
+        ? `  → abtars deps install ${name}`
+        : `  → ${dep.installHint}`;
     process.stdout.write(`  ${icon} ${name.padEnd(12)} ${dep.label}${hint}\n`);
   }
 
@@ -646,18 +851,21 @@ function install(names: string[]): number {
   const force = names.includes("--force");
   names = names.filter(n => n !== "--force");
 
-  for (const n of names) {
-    if (n !== "all" && SYSTEM_DEPS[n]) {
-      printSystemDepHint(n);
-      return 0;
-    }
+  try {
+    validateRequestedDependencyNames(names);
+  } catch (err) {
+    process.stderr.write(`${err instanceof Error ? err.message : String(err)}\n`);
+    return 1;
   }
+
+  const system = processSystemDependencies("install", names);
 
   const hasPi = names.includes("pi") || names.includes("all");
   const onlyPi = names.length === 1 && names[0] === "pi";
-  const npmNames = names.filter(n => n !== "pi");
+  const npmNames = names.filter(n => n !== "pi" && !SYSTEM_DEPS[n]);
+  const hasOptionalRequest = names.length === 0 || names.includes("all") || names.some(name => Boolean(OPTIONAL_DEPS[name]));
 
-  let failed = false;
+  let failed = system.failed;
 
   if (hasPi) {
     const piState = observePi();
@@ -677,6 +885,7 @@ function install(names: string[]): number {
 
   // When only "pi" was requested, don't fall through to npm groups
   if (onlyPi) return failed ? 1 : 0;
+  if (!hasOptionalRequest) return failed ? 1 : 0;
 
   try {
     const actions = resolveGroupActions("install", npmNames);
@@ -715,11 +924,20 @@ function install(names: string[]): number {
 }
 
 function update(names: string[]): number {
+  try {
+    validateRequestedDependencyNames(names);
+  } catch (err) {
+    process.stderr.write(`${err instanceof Error ? err.message : String(err)}\n`);
+    return 1;
+  }
+
+  const system = processSystemDependencies("update", names);
   const hasPi = names.includes("pi") || names.includes("all") || names.length === 0;
   const onlyPi = names.length === 1 && names[0] === "pi";
-  const npmNames = names.filter(n => n !== "pi");
+  const npmNames = names.filter(n => n !== "pi" && !SYSTEM_DEPS[n]);
+  const hasOptionalRequest = names.length === 0 || names.includes("all") || names.some(name => Boolean(OPTIONAL_DEPS[name]));
 
-  let failed = false;
+  let failed = system.failed;
 
   if (hasPi) {
     const piState = observePi();
@@ -742,11 +960,12 @@ function update(names: string[]): number {
 
   // When only "pi" was requested, don't fall through to npm groups
   if (onlyPi) return failed ? 1 : 0;
+  if (!hasOptionalRequest) return failed ? 1 : 0;
 
   try {
     const actions = resolveGroupActions("update", npmNames);
     if (actions.length === 0) {
-      if (!failed) process.stdout.write("No installed optional dependencies to update.\n");
+      if (!failed && !system.handled) process.stdout.write("No installed optional dependencies to update.\n");
       return failed ? 1 : 0;
     }
 

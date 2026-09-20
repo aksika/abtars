@@ -71,7 +71,8 @@ abTARS works with any LLM that supports the OpenAI chat completions API format, 
 |-----------|----------|-------|-----------|
 | ollama | Local embeddings + models | `brew install ollama` | See [ollama.ai](https://ollama.ai) |
 | bubblewrap | Sandbox (Linux only) | N/A | `apt install bubblewrap` |
-| lightpanda | Fast web fetch | See [lightpanda.io](https://lightpanda.io) | See [lightpanda.io](https://lightpanda.io) |
+| lightpanda | Fast web fetch | `abtars deps install lightpanda` | `abtars deps install lightpanda` |
+| cloak | Action-capable stealth browser | `abtars deps install cloak` | `abtars deps install cloak` |
 
 Install all optional npm deps with one command once the CLI is available:
 
@@ -102,7 +103,10 @@ sudo loginctl enable-linger $USER
 
 That's a one-time system admin action. After that, you never need sudo again.
 
-**The optional system binaries above** (ollama, bwrap, lightpanda) are the only things that might ask for sudo — and only because their own upstream installers do (e.g. `apt install bubblewrap`). abtars itself never runs a system installer or `sudo` for you: `abtars deps install ollama` just prints the command to install it yourself.
+**Manual system binaries** (ollama and bwrap) are the only optional dependencies
+that may require a platform package manager. The Lightpanda and Cloak upstream
+installers run in the user-local prefix through `abtars deps`; abtars never runs
+sudo.
 
 **If npm defaults to `/usr/local/` (macOS):** macOS ships with npm pointing at `/usr/local/`, which requires sudo for `npm install -g`. Fix with one of:
 

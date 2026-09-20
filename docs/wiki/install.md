@@ -39,13 +39,13 @@ need one.
 | Step | What happens |
 |------|-------------|
 | `npm install -g abtars@alpha abmind@alpha` | Installs CLI tools globally |
-| `abtars deps install all` | Installs optional CLI npm package groups (native, twitter, pdf, youtube, image) |
+| `abtars deps install all` | Installs optional package groups plus the Lightpanda and Cloak browser runtimes |
 | `abtars install` | Creates config, clones source, builds, deploys release, starts bridge |
 | `abmind install` | Creates `~/.abmind/`, initializes memory DB, sets encryption (discovers user from abtars) |
 
 ### System dependencies (optional)
 
-`abtars deps` manages optional npm package groups (`native`, `twitter`, `pdf`, `youtube`, `image`, `pi`) and system binaries (`ollama`, `bwrap`, `lightpanda`). See [Dependencies](./dependencies.md) for the full command reference, group table, and the native-deps adoption/collision behavior shared with abmind.
+`abtars deps` manages optional npm package groups (`native`, `twitter`, `pdf`, `youtube`, `image`, `pi`) and external runtimes (`lightpanda`, `cloak`). Manual system binaries (`ollama`, `bwrap`) remain user-installed. See [Dependencies](./dependencies.md) for the full command reference.
 
 Dependencies declared by skill scripts are separate. Deploy, boot, and
 `/skill reload` prepare them under `~/.abtars/node_modules/`; `abtars deps
@@ -53,7 +53,7 @@ install all` is not required for a skill's declared package.
 
 ```bash
 abtars deps list          # shows every group + install status
-abtars deps install all   # installs the npm package groups
+abtars deps install all   # installs npm groups + Lightpanda + Cloak
 abtars deps install ollama # prints ollama's manual install command (does not run it)
 ```
 

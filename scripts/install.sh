@@ -58,10 +58,10 @@ abtars onboard
 
 # ── 6. Optional deps ──
 echo ""
-read -p "Install optional dependencies (browser, image, pdf, youtube)? [y/N] " -n 1 -r
+read -p "Install optional dependencies (lightpanda, cloak, image, pdf, youtube)? [y/N] " -n 1 -r
 echo ""
 if [[ $REPLY =~ ^[Yy]$ ]]; then
-  abtars deps install browser image pdf youtube
+  abtars deps install lightpanda cloak image pdf youtube
 fi
 
 # ── Done ──

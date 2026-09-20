@@ -52,7 +52,7 @@ The bridge starts in ordered phases: config → memory → transport → platfor
 
 Optional features that load at boot if their requirements are met:
 
-- **Browser** — web browsing via Playwright
+- **Browser** — external `cloak` CLI backed by the CloakBrowser stealth runtime
 - **Skills** — markdown-defined agent behaviors
 - **MCP** — external tool servers via mcporter
 

@@ -1,17 +1,19 @@
 # Browser Agent
 
-Browsie is the built-in web browsing capability. When enabled, the agent can navigate websites, extract content, and fill forms using the external `cloakbrowser` CLI.
+Browsie is the managed web-browsing capability. When enabled, the agent can
+navigate websites, extract content, and fill forms using the external `cloak`
+CLI backed by CloakBrowser's stealth Chromium runtime.
 
 ## How it works
 
-- Abtars does not ship or manage a browser binary.
-- The external `cloakbrowser` executable must be installed separately and available on PATH.
+- Abtars does not ship or manage a browser binary or browser wrapper.
+- The external `cloak` executable and CloakBrowser runtime are installed separately and available on PATH.
 - Abtars provides task dispatch: a B-type Kanban card with a detailed goal (via `kanban_manage` or `abtars kanban create`) is created for the Browsie agent — see `templates/skills/browser/SKILL.md`.
-- The Browsie agent calls `cloakbrowser` directly via shell.
+- The Browsie agent calls `cloak` directly via shell.
 
 ## Requirements
 
-- `cloakbrowser` CLI on PATH (installed separately)
+- `cloak` CLI on PATH (install with `abtars deps install cloak`)
 
 ## Usage
 
