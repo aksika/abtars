@@ -1,11 +1,37 @@
 #!/usr/bin/env node
 
 import { createRequire } from "node:module";
-import { mkdirSync, writeFileSync, symlinkSync, realpathSync } from "node:fs";
-import { join } from "node:path";
+import { mkdirSync, writeFileSync, symlinkSync, realpathSync, existsSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join, resolve, dirname, sep } from "node:path";
 
 const abtarsHome = process.env["ABTARS_HOME"];
-if (!abtarsHome || !abtarsHome.includes("/tmp/")) {
+// Sandbox guard: the home must live under a temp root. Linux uses /tmp/;
+// macOS TMPDIR is /var/folders/... (symlinked to /private/var/...), so also
+// accept the canonical platform tmpdir. The home may not exist yet when this
+// validation runs, so canonicalize through the nearest existing ancestor.
+function canonicalizeAllowingMissing(p: string): string {
+  const tail: string[] = [];
+  let cur = resolve(p);
+  while (!existsSync(cur)) {
+    const parent = dirname(cur);
+    if (parent === cur) break;
+    tail.unshift(cur.slice(parent.length + 1));
+    cur = parent;
+  }
+  return join(realpathSync(cur), ...tail);
+}
+function underSandboxRoot(home: string): boolean {
+  if (home.includes("/tmp/")) return true;
+  try {
+    const realHome = canonicalizeAllowingMissing(home);
+    const realTmp = realpathSync(tmpdir());
+    return realHome === realTmp || realHome.startsWith(realTmp + sep);
+  } catch {
+    return false;
+  }
+}
+if (!abtarsHome || !underSandboxRoot(abtarsHome)) {
   console.error("LOCAL_SWARM_RESULT=" + JSON.stringify({
     schemaVersion: 2, ok: false, scenario: "validation",
     failure: { stage: "validation", code: "INVALID_HOME", message: `ABTARS_HOME must be under /tmp/, got ${abtarsHome}` },
@@ -14,7 +40,9 @@ if (!abtarsHome || !abtarsHome.includes("/tmp/")) {
 }
 // Keep the validated value narrowed inside helper closures for the script
 // compiler; process.env values are otherwise treated as possibly undefined.
-const validatedAbtarsHome = abtarsHome;
+// Canonicalize once: every downstream store comparison uses canonical paths,
+// so a raw symlinked spelling would mismatch (macOS /var vs /private/var).
+const validatedAbtarsHome = canonicalizeAllowingMissing(abtarsHome);
 
 /**
  * #1656: give a non-scheduled E2E project a real canonical workspace. Worker

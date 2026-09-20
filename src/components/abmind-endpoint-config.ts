@@ -59,6 +59,12 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 /** The real config directory, rejecting group/world-writable parents. */
 function strictConfigDir(configDir: string): string {
+  // Reject only a symlink as the final component. Resolved-parent comparison
+  // false-positives on legitimate files under symlinked parents (macOS /var
+  // and /tmp tmpdirs) while adding no protection beyond the lstat check.
+  if (lstatSync(configDir).isSymbolicLink()) {
+    throw new AbmindEndpointConfigError("credentials_unsafe", `config directory resolves through a symlink: ${configDir}`);
+  }
   const real = realpathSync(configDir);
   const stat = statSync(real);
   if (stat.mode & 0o022) {
@@ -67,9 +73,6 @@ function strictConfigDir(configDir: string): string {
       `config directory is group/world-writable: ${configDir} (mode ${stat.mode.toString(8)})`,
     );
   }
-  if (real !== resolve(configDir)) {
-    throw new AbmindEndpointConfigError("credentials_unsafe", `config directory resolves through a symlink: ${configDir}`);
-  }
   return real;
 }
 
@@ -77,17 +80,18 @@ function readConfigFile(configDir: string): unknown {
   const p = join(configDir, CONFIG_FILE);
   let real: string;
   try {
+    if (lstatSync(p).isSymbolicLink()) {
+      throw new AbmindEndpointConfigError("credentials_unsafe", `${CONFIG_FILE} is a symlink`);
+    }
     real = realpathSync(p);
   } catch (err) {
+    if (err instanceof AbmindEndpointConfigError) throw err;
     if ((err as NodeJS.ErrnoException).code === "ENOENT") {
       throw new AbmindEndpointConfigError("credentials_unsafe", `${CONFIG_FILE} is a broken symlink`);
     }
     throw err;
   }
   const stat = statSync(real);
-  if (real !== resolve(p)) {
-    throw new AbmindEndpointConfigError("credentials_unsafe", `${CONFIG_FILE} is a symlink`);
-  }
   if (stat.mode & 0o077) {
     throw new AbmindEndpointConfigError(
       "credentials_unsafe",
@@ -133,10 +137,10 @@ function validateSigningKey(configDir: string, rawPath: unknown, where: string):
   if (!existsSync(resolved)) {
     throw new AbmindEndpointConfigError("endpoint_unavailable", `${where}: signing key not found: ${resolved}`);
   }
-  const real = realpathSync(resolved);
-  if (real !== resolved) {
+  if (lstatSync(resolved).isSymbolicLink()) {
     throw new AbmindEndpointConfigError("credentials_unsafe", `${where}: signing key resolves through a symlink`);
   }
+  const real = realpathSync(resolved);
   const stat = statSync(real);
   if (!stat.isFile()) {
     throw new AbmindEndpointConfigError("credentials_unsafe", `${where}: signing key is not a regular file`);
