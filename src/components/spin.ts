@@ -130,10 +130,13 @@ export class Spin {
    *  Non-active, platform="background" — visible in master /session (showAll) for the full cycle.
    *  Call at sleep start before the first runtime.complete(); the caller holds the returned id
    *  and passes it as sessionId to subsequent spin({ type:"D", sessionId }) calls. */
-  allocateDreamySession(name: string): ManagedSession {
+  allocateDreamySession(name: string, workingDir?: string): ManagedSession {
     const userId = getMasterUserId();
     const session = this.sessions.allocate({ type: "D", userId, platform: "background", chatId: 0, active: false });
     session.name = name;
+    // #1807: metadata mirror of the cycle cwd only — the runtime's recorded
+    // creation binding (not this field) attests how the transport was created.
+    if (workingDir) session.workingDir = workingDir;
     return session;
   }
 
@@ -876,11 +879,30 @@ export class Spin {
       //    already has one (A per-user main turn, D step N, O reuse). Only
       //    create+attach for a NEW persistent session.
       let sessionTransport = session.transport as IKiroTransport | undefined;
+      const attachAgent = session.executionAgent ?? agent;
+      // #1807: sleep executions carry the composed scope and key runtime
+      // acquisition by the cycle-owned D session identity. Anything else
+      // keeps existing behavior.
+      const sleepScope = spec.executionOrigin === "sleep" ? spec.executionScope : undefined;
+      const cycleKey = spec.executionOrigin === "sleep" && spec.sessionId ? spec.sessionId : undefined;
+      if (spec.executionOrigin === "sleep" && !sleepScope) {
+        throw new Error("sleep dispatch without execution scope — refusing to inherit daemon cwd");
+      }
+      if (sleepScope && cycleKey && sessionTransport) {
+        // Already-attached managed transport: verify against the runtime's
+        // recorded creation binding (absent is unverified, not a match).
+        // Fail before provider/tool work; never re-root in place.
+        const { canonicalizeCwd } = await import("./subagent-runtime.js");
+        const binding = this.runtime.verifyTransportBinding(attachAgent, cycleKey);
+        const requested = canonicalizeCwd(sleepScope.cwd);
+        if (binding === undefined || binding !== requested) {
+          throw new Error(`sleep transport binding mismatch/unverified for ${cycleKey} — failing before dispatch`);
+        }
+      }
       if (persistent && !sessionTransport) {
         // #1432: reattachment honors the selected executionAgent recorded at
         // allocation (K) so a resumed session keeps its model configuration.
-        const attachAgent = session.executionAgent ?? agent;
-        const agentSession = await this.runtime.session(attachAgent, profile.resolution === "active" ? userId : undefined, { candidatePolicy: requestedPolicy });
+        const agentSession = await this.runtime.session(attachAgent, profile.resolution === "active" ? userId : (cycleKey ?? undefined), { candidatePolicy: requestedPolicy, executionScope: sleepScope });
         sessionTransport = agentSession.transport as IKiroTransport;
         session.transport = sessionTransport;
         session.transportOwner = "runtime";

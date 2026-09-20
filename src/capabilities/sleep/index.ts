@@ -1,4 +1,7 @@
 import type { AbmindClientLike } from "../../components/abmind-client-contract.js";
+import type { ToolExecutionScope } from "../../components/tasks/task-package.js";
+import { abtarsHome } from "../../paths.js";
+import { statSync, realpathSync } from "node:fs";
 import { getEnv } from "../../components/env-schema.js";
 import { logInfo, logWarn, logError, redactSecrets } from "../../components/logger.js";
 import { logAndSwallow } from "../../components/log-and-swallow.js";
@@ -61,6 +64,12 @@ export interface SleepOpts {
   onComplete: () => void;
   onCycleEnd?: () => void;
   /**
+   * #1807: explicit host execution scope for every sleep spin. Composed at
+   * the sleep boundary (phase-sleep); when absent the handle resolves the
+   * verified runtime-home default below — daemon cwd is never inherited.
+   */
+  executionScope?: ToolExecutionScope;
+  /**
    * #1538: allocate the one named D session that owns the whole cycle and
    * return its id. The cycle requires the identity — a discarded id makes the
    * first provider generation allocate a second, unnamed sibling session.
@@ -72,7 +81,7 @@ export interface SleepOpts {
    * consumes Spin's classification; it never recomputes one from the raw
    * string.
    */
-  sessionManager: { spin: (opts: { type: string; prompt: string; sessionId?: string; timeoutMs: number; deadlineAt: number; providerInactivityTimeoutMs: number; candidatePolicy: "configured-only"; settlementOwner: "spin" | "caller"; await: true; executionOrigin?: "sleep" }) => Promise<import("../../components/spin-types.js").AwaitedSpinResult> };
+  sessionManager: { spin: (opts: { type: string; prompt: string; sessionId?: string; timeoutMs: number; deadlineAt: number; providerInactivityTimeoutMs: number; candidatePolicy: "configured-only"; settlementOwner: "spin" | "caller"; await: true; executionOrigin?: "sleep"; executionScope?: ToolExecutionScope }) => Promise<import("../../components/spin-types.js").AwaitedSpinResult> };
   /**
    * #1611: narrow exact-session quarantine callback. Fences the session by
    * exact id, cancels the active execution, releases the persistent
@@ -137,8 +146,7 @@ export type SleepStartResult =
   | { status: "already_running" }
   | SleepUnavailable;
 
-export function unavailable(code: SleepUnavailableCode): SleepUnavailable {
-  const reasons: Record<SleepUnavailableCode, string> = {
+export function unavailable(code: SleepUnavailableCode): SleepUnavailable {  const reasons: Record<SleepUnavailableCode, string> = {
     memory_disabled: "memory is disabled",
     abmind_not_loaded: "abmind did not initialize during boot",
     daemon_not_connected: "abmind daemon is not connected",
@@ -236,6 +244,23 @@ function settlementDeadlineAt(logicalDeadlineAt: number): number {
   return Math.min(logicalDeadlineAt, Date.now() + SLEEP_PROVIDER_CLEANUP_HEADROOM_MS);
 }
 
+/**
+ * #1807: backstop scope resolution. The boundary (phase-sleep) always
+ * composes an explicit scope; when absent the verified runtime-home default
+ * applies. Daemon cwd is never a fallback — an unverifiable home is an
+ * explicit error before any tool execution.
+ */
+export function defaultSleepScope(): { scope: ToolExecutionScope } | { error: string } {
+  try {
+    const home = abtarsHome();
+    if (!statSync(home).isDirectory()) return { error: `abtars home is not a directory: ${home}` };
+    const cwd = realpathSync(home);
+    return { scope: { cwd, env: Object.freeze({ WORKSPACE: cwd }) } };
+  } catch (err) {
+    return { error: `abtars home unavailable: ${err instanceof Error ? err.message : String(err)}` };
+  }
+}
+
 export function createSleepHandle(opts: SleepOpts): SleepHandle {
   const { client } = opts;
   let running = false;
@@ -243,6 +268,9 @@ export function createSleepHandle(opts: SleepOpts): SleepHandle {
   let currentRunId: string | null = null;
   let abortController = new AbortController();
   let nightSessionId: string | undefined;
+  // #1807: cycle-owned execution scope, set in startRun, consumed by the
+  // provider pump. Cleared with the session identity at cycle end.
+  let cycleExecutionScope: ToolExecutionScope | undefined;
 
   /** Fence and request exact-session quarantine synchronously. The callback is
    * local lifecycle work; do not let an optional async implementation delay
@@ -263,6 +291,7 @@ export function createSleepHandle(opts: SleepOpts): SleepHandle {
     running = false;
     progress = null;
     currentRunId = null;
+    cycleExecutionScope = undefined;
     // #1538: the cycle's D identity does not outlive the cycle. A retained id
     // would make the next cycle pump into a reaped session while its own
     // freshly named session sat idle.
@@ -384,6 +413,7 @@ export function createSleepHandle(opts: SleepOpts): SleepHandle {
               settlementOwner: "spin",
               await: true,
               executionOrigin: "sleep",
+              executionScope: cycleExecutionScope,
             }),
             providerRemainingMs,
           );
@@ -511,6 +541,16 @@ export function createSleepHandle(opts: SleepOpts): SleepHandle {
 
   function startRun(mode: "scheduled" | "manual" | "resume", level: string, fresh: boolean | undefined, options?: SleepStartOptions): SleepStartResult {
     if (running) return { status: "already_running" };
+    // #1807: resolve the execution scope before any state changes. No scope
+    // means no cycle — reported here, never as daemon-cwd inheritance.
+    const resolved = opts.executionScope ? { scope: opts.executionScope } : defaultSleepScope();
+    if ("error" in resolved) {
+      const reason = `sleep execution scope unavailable: ${resolved.error}`;
+      logWarn("sleep", `Sleep did not start (unavailable): ${reason}`);
+      return { status: "unavailable", code: "sleep_not_initialized", reason };
+    }
+    const executionScope = resolved.scope;
+    cycleExecutionScope = executionScope;
     running = true;
     progress = { percent: 0, step: "starting" };
     abortController = new AbortController();

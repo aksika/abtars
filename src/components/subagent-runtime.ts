@@ -8,6 +8,8 @@ import { logAndSwallow } from "./log-and-swallow.js";
 import type { IKiroTransport, PromptRequestContext, RuntimeUsageSnapshot } from "./transport/kiro-transport.js";
 import { logInfo, logDebug, logWarn } from "./logger.js";
 import { randomBytes } from "node:crypto";
+import { realpathSync } from "node:fs";
+import type { ToolExecutionScope } from "./tasks/task-package.js";
 
 import type { ModelHealthRegistry } from "./transport/model-health-registry.js";
 import type { CandidateSpec } from "./transport/model-candidates.js";
@@ -70,6 +72,21 @@ interface CachedAgent {
   sessionKey: string;
   /** #1611: immutable candidate policy captured at transport creation. */
   candidatePolicy?: import("./spin-types.js").CandidatePolicy;
+  /** #1807: immutable canonical cwd attested at transport creation. Absent
+   *  means created without a scope — unverified, never a match. */
+  cwdBinding?: string;
+}
+
+/**
+ * #1807: canonicalize an execution cwd. Throws when the directory is
+ * unavailable — callers fail the invocation instead of inheriting daemon cwd.
+ */
+export function canonicalizeCwd(cwd: string): string {
+  try {
+    return realpathSync(cwd);
+  } catch {
+    throw new Error(`sleep execution cwd unavailable: ${cwd}`);
+  }
 }
 
 const DEFAULT_SESSION: Record<AgentName, "fresh" | "reuse"> = {
@@ -269,9 +286,26 @@ export class SubagentRuntime {
   }
 
   /** Get a persistent session handle for multi-turn callers. */
-  async session(agent: AgentName, key?: string, opts?: { candidatePolicy?: import("./spin-types.js").CandidatePolicy }): Promise<AgentSession> {
+  async session(agent: AgentName, key?: string, opts?: { candidatePolicy?: import("./spin-types.js").CandidatePolicy; executionScope?: ToolExecutionScope }): Promise<AgentSession> {
     const cacheKey = key ? `${agent}:${key}` : agent;
-    const cached = this.cache.get(cacheKey) ?? await this.createAgent(agent, undefined, cacheKey, opts?.candidatePolicy);
+    // #1807: a requested scope must match the transport's recorded creation
+    // binding. Mismatch or unverified binding fails before any provider/tool
+    // work — never falls back, never re-roots in place.
+    const requestedCwd = opts?.executionScope ? canonicalizeCwd(opts.executionScope.cwd) : undefined;
+    const existing = this.cache.get(cacheKey);
+    if (existing) {
+      if (requestedCwd !== undefined) {
+        if (existing.cwdBinding === undefined) {
+          throw new Error(`sleep transport ${cacheKey} has no recorded cwd binding — refusing unverified reuse`);
+        }
+        if (existing.cwdBinding !== requestedCwd) {
+          throw new Error(`sleep transport ${cacheKey} bound to ${existing.cwdBinding}, requested ${requestedCwd} — refusing reuse`);
+        }
+      }
+    } else {
+      await this.createAgent(agent, undefined, cacheKey, opts?.candidatePolicy, requestedCwd);
+    }
+    const cached = this.cache.get(cacheKey)!;
     // #1611: the candidate policy is immutable per attached transport. A
     // conflicting request fails closed — it must never silently broaden a
     // configured-only session into a fallback chain.
@@ -283,12 +317,25 @@ export class SubagentRuntime {
       sendPrompt: (sessionKey: string, prompt: string) => cached.transport.sendPrompt(sessionKey, prompt),
       destroy: async () => {
         try { cached.transport.destroy(); } catch (err) { logAndSwallow("subagent_runtime", "op", err); }
-        this.cache.delete(cacheKey);
+        // #1807: identity-fenced release — a stale callback must not evict a
+        // newer entry under the same key or affect another session.
+        if (this.cache.get(cacheKey) === cached) this.cache.delete(cacheKey);
         logInfo(TAG, `${cacheKey} session destroyed`);
       },
       get isReady() { return cached.transport.isReady; },
       get transport() { return cached.transport; },
     };
+  }
+
+  /**
+   * #1807: read the recorded canonical cwd binding for a cached transport.
+   * Returns undefined when absent (no entry, or entry created without scope).
+   * Spin uses this on the already-attached reuse path; absent is unverified,
+   * never a match.
+   */
+  verifyTransportBinding(agent: AgentName, key?: string): string | undefined {
+    const cacheKey = key ? `${agent}:${key}` : agent;
+    return this.cache.get(cacheKey)?.cwdBinding;
   }
 
   /** Fire-and-forget: run complete() in background, deliver result via callback. */
@@ -350,7 +397,7 @@ export class SubagentRuntime {
     return true;
   }
 
-  private async createAgent(agent: AgentName, sessionType?: import("./spin-types.js").SessionType, cacheKey?: string, candidatePolicy?: import("./spin-types.js").CandidatePolicy): Promise<CachedAgent> {
+  private async createAgent(agent: AgentName, sessionType?: import("./spin-types.js").SessionType, cacheKey?: string, candidatePolicy?: import("./spin-types.js").CandidatePolicy, workingDir?: string): Promise<CachedAgent> {
     const typeMap: Partial<Record<AgentName, import("./spin-types.js").SessionType>> = { browsie: "B", coding: "C", task: "T" };
     const resolvedType = sessionType || typeMap[agent];
     const sandboxTypes = new Set(["B", "C", "W"]);
@@ -370,7 +417,7 @@ export class SubagentRuntime {
     // candidate that last produced a non-empty response.
     // #1611: configured-only restricts transport construction to the configured
     // candidate — applied before the first Dreamy prompt, never after the fact.
-    const { transport, model } = await createSubagentTransport(role, this._registry ?? undefined, this._lastSuccessfulMain, this._contextProvider, this._memoryToolDeps, candidatePolicy);
+    const { transport, model } = await createSubagentTransport(role, this._registry ?? undefined, this._lastSuccessfulMain, this._contextProvider, this._memoryToolDeps, candidatePolicy, workingDir);
 
     // #1290: attribute per-turn budget to the agent Spin resolved for this session.
     // External ACP keeps its own agent label; embedded Pi uses this label when
@@ -392,7 +439,7 @@ export class SubagentRuntime {
     }
 
     const sessionKey = `system:${cacheKey ?? agent}`;
-    const entry: CachedAgent = { transport, model, sessionKey, candidatePolicy };
+    const entry: CachedAgent = { transport, model, sessionKey, candidatePolicy, cwdBinding: workingDir };
     this.cache.set(cacheKey ?? agent, entry);
     return entry;
   }

@@ -130,32 +130,48 @@ describe("phaseSleep — #1429 precedence and construction", () => {
   });
 
   it("constructs handle and returns ran when all prerequisites pass", async () => {
-    const fakeSessionManager = {
-      spin: vi.fn().mockResolvedValue({ result: "ok", sessionId: "sess-1" }),
-      getSessionById: vi.fn().mockReturnValue(null),
-      allocateDreamySession: vi.fn(),
-    };
-    const ctx = createBootCtx({
-      memoryConfig: { memoryEnabled: true, memoryDir: "/tmp" } as any,
-      client: makeFakeClient(),
-      sendSystemMessage: vi.fn(),
-      sessionManager: fakeSessionManager as any,
-    });
+    // #1807: hermetic home so scope composition never depends on the real
+    // operator home; the composed scope must reach the sleep handle.
+    const { mkdtempSync } = await import("node:fs");
+    const { tmpdir } = await import("node:os");
+    const { join } = await import("node:path");
+    const { realpathSync } = await import("node:fs");
+    const home = mkdtempSync(join(tmpdir(), "phase-sleep-home-"));
+    vi.stubEnv("ABTARS_HOME", home);
+    try {
+      const fakeSessionManager = {
+        spin: vi.fn().mockResolvedValue({ result: "ok", sessionId: "sess-1" }),
+        getSessionById: vi.fn().mockReturnValue(null),
+        allocateDreamySession: vi.fn(),
+      };
+      const ctx = createBootCtx({
+        memoryConfig: { memoryEnabled: true, memoryDir: "/tmp" } as any,
+        client: makeFakeClient(),
+        sendSystemMessage: vi.fn(),
+        sessionManager: fakeSessionManager as any,
+      });
 
-    const { phaseSleep } = await import("./phase-sleep.js");
-    const result = await phaseSleep(ctx);
+      const { phaseSleep } = await import("./phase-sleep.js");
+      const result = await phaseSleep(ctx);
 
-    expect(result).toBe("ran");
-    expect(ctx.sleepUnavailable).toBeNull();
-    expect(ctx.sleepHandle).not.toBeNull();
-    expect(mockCreateSleepHandle).toHaveBeenCalledTimes(1);
-    expect(mockCreateSleepHandle.mock.calls[0]?.[0]?.client).toBe(ctx.client);
+      expect(result).toBe("ran");
+      expect(ctx.sleepUnavailable).toBeNull();
+      expect(ctx.sleepHandle).not.toBeNull();
+      expect(mockCreateSleepHandle).toHaveBeenCalledTimes(1);
+      expect(mockCreateSleepHandle.mock.calls[0]?.[0]?.client).toBe(ctx.client);
+      expect(mockCreateSleepHandle.mock.calls[0]?.[0]?.executionScope?.cwd).toBe(realpathSync(home));
 
-    const sleepOpts = mockCreateSleepHandle.mock.calls[0]?.[0] as {
-      sessionManager: { spin: (opts: Record<string, unknown>) => Promise<unknown> };
-    };
-    await sleepOpts.sessionManager.spin({ type: "D", prompt: "test", executionOrigin: "sleep" });
-    expect(fakeSessionManager.spin).toHaveBeenCalledWith(expect.objectContaining({ executionOrigin: "sleep" }));
+      const sleepOpts = mockCreateSleepHandle.mock.calls[0]?.[0] as {
+        sessionManager: { spin: (opts: Record<string, unknown>) => Promise<unknown> };
+      };
+      await sleepOpts.sessionManager.spin({ type: "D", prompt: "test", executionOrigin: "sleep" });
+      expect(fakeSessionManager.spin).toHaveBeenCalledWith(expect.objectContaining({
+        executionOrigin: "sleep",
+        executionScope: expect.objectContaining({ cwd: realpathSync(home) }),
+      }));
+    } finally {
+      vi.unstubAllEnvs();
+    }
   });
 
   it("memory disabled takes precedence over missing client", async () => {

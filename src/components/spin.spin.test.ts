@@ -514,6 +514,101 @@ describe("spin(spec) — unified session API (#1271)", () => {
       expect(runtime.complete).not.toHaveBeenCalled();
     });
 
+    describe("sleep execution scope (#1807)", () => {
+      async function tmpScope() {
+        const { mkdtempSync, realpathSync } = await import("node:fs");
+        const { tmpdir } = await import("node:os");
+        const { join } = await import("node:path");
+        const cwd = mkdtempSync(join(tmpdir(), "spin-sleep-scope-"));
+        return { cwd, canonical: realpathSync(cwd) };
+      }
+
+      function sleepRuntime(transport: IKiroTransport, binding: string | undefined) {
+        const agentSession: AgentSession = {
+          sendPrompt: vi.fn(async () => "sleep ok"),
+          destroy: vi.fn(),
+          get isReady() { return true; },
+          get transport() { return transport; },
+        };
+        return {
+          session: vi.fn().mockResolvedValue(agentSession),
+          verifyTransportBinding: vi.fn().mockReturnValue(binding),
+          complete: vi.fn(),
+          openExecution: vi.fn(),
+        };
+      }
+
+      function sleepScope(cwd: string) {
+        return { cwd, env: Object.freeze({ WORKSPACE: cwd }) };
+      }
+
+      it("keys sleep acquisition by the cycle session id and carries the scope", async () => {
+        const { cwd, canonical } = await tmpScope();
+        const transport = mockTransport({ sendPrompt: vi.fn().mockResolvedValue("sleep ok") });
+        const runtime = sleepRuntime(transport, canonical);
+        spin.setRuntime(runtime as any);
+
+        const dSession = spin.createSubSession("aksika", "telegram", "D") as import("./spin-types.js").ManagedSession;
+        const scope = sleepScope(cwd);
+        const r = await spin.spin({
+          settlementOwner: "spin", type: "D", sessionId: dSession.id, prompt: "step1",
+          executionOrigin: "sleep", executionScope: scope, await: true,
+        });
+        expect(r.sessionId).toBe(dSession.id);
+        expect(runtime.session).toHaveBeenCalledWith(
+          "dreamy", dSession.id, expect.objectContaining({ executionScope: scope }),
+        );
+      });
+
+      it("reuses an attached transport only when the binding matches", async () => {
+        const { cwd, canonical } = await tmpScope();
+        const transport = mockTransport({ sendPrompt: vi.fn().mockResolvedValue("sleep ok") });
+        const runtime = sleepRuntime(transport, canonical);
+        spin.setRuntime(runtime as any);
+
+        const dSession = spin.createSubSession("aksika", "telegram", "D") as import("./spin-types.js").ManagedSession;
+        dSession.transport = transport;
+        const r = await spin.spin({
+          settlementOwner: "spin", type: "D", sessionId: dSession.id, prompt: "step1",
+          executionOrigin: "sleep", executionScope: sleepScope(cwd), await: true,
+        });
+        expect(r.sessionId).toBe(dSession.id);
+        expect(runtime.verifyTransportBinding).toHaveBeenCalledWith("dreamy", dSession.id);
+        expect((transport.sendPrompt as any).mock.calls.length).toBe(1);
+      });
+
+      it("rejects mismatched or unverified attached transports before dispatch", async () => {
+        const { cwd } = await tmpScope();
+        for (const binding of ["/tmp/elsewhere-1807", undefined]) {
+          const transport = mockTransport({ sendPrompt: vi.fn().mockResolvedValue("sleep ok") });
+          const runtime = sleepRuntime(transport, binding);
+          spin.setRuntime(runtime as any);
+
+          const dSession = spin.createSubSession("aksika", "telegram", "D") as import("./spin-types.js").ManagedSession;
+          dSession.transport = transport;
+          await expect(spin.spin({
+            settlementOwner: "spin", type: "D", sessionId: dSession.id, prompt: "step1",
+            executionOrigin: "sleep", executionScope: sleepScope(cwd), await: true,
+          })).rejects.toThrow(/binding mismatch\/unverified/);
+          expect((transport.sendPrompt as any).mock.calls.length).toBe(0);
+        }
+      });
+
+      it("rejects sleep dispatch without a scope instead of inheriting daemon cwd", async () => {
+        const transport = mockTransport({ sendPrompt: vi.fn().mockResolvedValue("sleep ok") });
+        const runtime = sleepRuntime(transport, undefined);
+        spin.setRuntime(runtime as any);
+
+        const dSession = spin.createSubSession("aksika", "telegram", "D") as import("./spin-types.js").ManagedSession;
+        await expect(spin.spin({
+          settlementOwner: "spin", type: "D", sessionId: dSession.id, prompt: "step1",
+          executionOrigin: "sleep", await: true,
+        })).rejects.toThrow(/without execution scope/);
+        expect(runtime.session).not.toHaveBeenCalled();
+        expect((transport.sendPrompt as any).mock.calls.length).toBe(0);
+      });
+    });
+
     it("threads durableContextIntent through to the session transport unchanged (#1529)", async () => {
       const transport = mockTransport();
       const runtime = makeRuntime();

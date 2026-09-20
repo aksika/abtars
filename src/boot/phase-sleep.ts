@@ -16,6 +16,9 @@ import type { BootCtx, PhaseResult } from "./context.js";
 import { getSystemTaskRegistry, type SystemTaskContext } from "../components/tasks/system-task-registry.js";
 import { getMasterUserId } from "../components/master-user.js";
 import type { AbmindClientLike } from "../components/abmind-client-contract.js";
+import type { ToolExecutionScope } from "../components/tasks/task-package.js";
+import { abtarsHome } from "../paths.js";
+import { statSync, realpathSync } from "node:fs";
 import { unavailable, createSleepHandle } from "../capabilities/sleep/index.js";
 
 // The system-task registry is process-scoped, while the bridge creates a new
@@ -127,16 +130,31 @@ export function composeSleep(ctx: BootCtx, client: AbmindClientLike | null): voi
     return;
   }
 
+  // #1807: compose the explicit host execution scope at the sleep boundary.
+  // Verified here (reported, never daemon-cwd fallback) and re-verified per
+  // invocation by the runtime binding. An unverifiable home fails composition.
+  let executionScope: ToolExecutionScope;
+  try {
+    const home = abtarsHome();
+    if (!statSync(home).isDirectory()) throw new Error(`not a directory: ${home}`);
+    const cwd = realpathSync(home);
+    executionScope = { cwd, env: Object.freeze({ WORKSPACE: cwd }) };
+  } catch (err) {
+    markUnavailable("sleep_not_initialized", `sleep execution scope unavailable: ${err instanceof Error ? err.message : String(err)}`);
+    return;
+  }
+
   const handle = createSleepHandle({
     client,
     memoryEnabled: memoryConfig.memoryEnabled,
+    executionScope,
     onComplete: () => {
       resetAllCtxStarts(memoryConfig.memoryDir);
     },
     onCycleEnd: () => {
     },
     allocateSleepSession: (name: string) => {
-      return sessionManager.allocateDreamySession(name).id;
+      return sessionManager.allocateDreamySession(name, executionScope.cwd).id;
     },
     sessionManager: {
       spin: async (opts: { type: string; prompt: string; sessionId?: string; timeoutMs: number; deadlineAt: number; providerInactivityTimeoutMs: number; candidatePolicy: "configured-only"; await: true; executionOrigin?: "sleep" }) => {
@@ -144,7 +162,8 @@ export function composeSleep(ctx: BootCtx, client: AbmindClientLike | null): voi
         // candidate policy flow through to the transport construction.
         // #1651 v2: the awaited contract (result + outcome) passes through
         // unchanged — the pump consumes Spin's classification, never its own.
-        return sessionManager.spin({ type: opts.type as any, prompt: opts.prompt, sessionId: opts.sessionId, timeoutMs: opts.timeoutMs, deadlineAt: opts.deadlineAt, providerInactivityTimeoutMs: opts.providerInactivityTimeoutMs, candidatePolicy: opts.candidatePolicy, settlementOwner: "spin", await: true, executionOrigin: opts.executionOrigin });
+        // #1807: the composed execution scope travels with every sleep spin.
+        return sessionManager.spin({ type: opts.type as any, prompt: opts.prompt, sessionId: opts.sessionId, timeoutMs: opts.timeoutMs, deadlineAt: opts.deadlineAt, providerInactivityTimeoutMs: opts.providerInactivityTimeoutMs, candidatePolicy: opts.candidatePolicy, settlementOwner: "spin", await: true, executionOrigin: opts.executionOrigin, executionScope });
       },
     },
     // #1611: narrow exact-session quarantine — the capability never sees the

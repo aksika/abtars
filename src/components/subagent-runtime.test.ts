@@ -198,7 +198,9 @@ describe("SubagentRuntime shared registry", () => {
     const { createSubagentTransport } = await import("./agent-registry.js");
     // #1527: the late-bound durable context provider holder is the 4th arg;
     // #1552: the memory-tool deps holder is the 5th.
-    expect(createSubagentTransport).toHaveBeenCalledWith("sleep", registry, null, { current: null }, { current: null }, undefined);
+    // --- the transport factory's trailing workingDir override (#1807) is
+    // undefined here; the assertion pins forwarding of the first six args.
+    expect(createSubagentTransport).toHaveBeenCalledWith("sleep", registry, null, { current: null }, { current: null }, undefined, undefined);
   });
 
   it("forwards the composed durable context provider holder to lazy transports (#1527)", async () => {
@@ -216,7 +218,7 @@ describe("SubagentRuntime shared registry", () => {
     await runtime.complete("dreamy", "test");
 
     const { createSubagentTransport } = await import("./agent-registry.js");
-    expect(createSubagentTransport).toHaveBeenCalledWith("sleep", registry, null, holder, memoryDepsHolder, undefined);
+    expect(createSubagentTransport).toHaveBeenCalledWith("sleep", registry, null, holder, memoryDepsHolder, undefined, undefined);
   });
 
   it("#1611: a persistent session rejects conflicting candidate-policy reuse — never broadens configured-only", async () => {
@@ -235,5 +237,90 @@ describe("SubagentRuntime shared registry", () => {
       runtime.session("dreamy", undefined, { candidatePolicy: "fallback-chain" }),
     ).rejects.toThrow(/conflicting reuse/);
     expect(createSubagentTransport, "the cached transport must not be recreated").toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("SubagentRuntime sleep cwd binding (#1807)", () => {
+  let tmpA: string;
+  let tmpB: string;
+
+  beforeEach(async () => {
+    vi.clearAllMocks();
+    mockSendPrompt.mockResolvedValue("response text");
+    mockTransport.agentLabel = "professor";
+    const { mkdtempSync } = await import("node:fs");
+    const { tmpdir } = await import("node:os");
+    const { join } = await import("node:path");
+    tmpA = mkdtempSync(join(tmpdir(), "sleep-scope-a-"));
+    tmpB = mkdtempSync(join(tmpdir(), "sleep-scope-b-"));
+  });
+
+  function scope(cwd: string) {
+    return { cwd, env: Object.freeze({ WORKSPACE: cwd }) };
+  }
+
+  it("records the binding on scoped creation and reuses it for the same cycle", async () => {
+    const { realpathSync } = await import("node:fs");
+    const runtime = new SubagentRuntime();
+    const s1 = await runtime.session("dreamy", "cycle-1", { executionScope: scope(tmpA) });
+    const s2 = await runtime.session("dreamy", "cycle-1", { executionScope: scope(tmpA) });
+    expect(s1.isReady).toBe(true);
+    expect(s2.isReady).toBe(true);
+    const { createSubagentTransport } = await import("./agent-registry.js");
+    expect(createSubagentTransport).toHaveBeenCalledTimes(1);
+    expect(runtime.verifyTransportBinding("dreamy", "cycle-1")).toBe(realpathSync(tmpA));
+  });
+
+  it("allocates separately per cycle identity", async () => {
+    const runtime = new SubagentRuntime();
+    await runtime.session("dreamy", "cycle-1", { executionScope: scope(tmpA) });
+    await runtime.session("dreamy", "cycle-2", { executionScope: scope(tmpA) });
+    const { createSubagentTransport } = await import("./agent-registry.js");
+    expect(createSubagentTransport).toHaveBeenCalledTimes(2);
+  });
+
+  it("rejects mismatched scope reuse before any provider work", async () => {
+    const runtime = new SubagentRuntime();
+    await runtime.session("dreamy", "cycle-1", { executionScope: scope(tmpA) });
+    mockSendPrompt.mockClear();
+    await expect(
+      runtime.session("dreamy", "cycle-1", { executionScope: scope(tmpB) }),
+    ).rejects.toThrow(/refusing reuse/);
+    const { createSubagentTransport } = await import("./agent-registry.js");
+    expect(createSubagentTransport, "mismatched reuse must not recreate").toHaveBeenCalledTimes(1);
+    expect(mockSendPrompt).not.toHaveBeenCalled();
+  });
+
+  it("rejects scoped reuse of an unverified (scopeless) transport", async () => {
+    const runtime = new SubagentRuntime();
+    await runtime.session("dreamy", "legacy");
+    await expect(
+      runtime.session("dreamy", "legacy", { executionScope: scope(tmpA) }),
+    ).rejects.toThrow(/unverified/);
+  });
+
+  it("fails an unavailable cwd before creating anything", async () => {
+    const runtime = new SubagentRuntime();
+    const { createSubagentTransport } = await import("./agent-registry.js");
+    const callsBefore = (createSubagentTransport as any).mock.calls.length;
+    await expect(
+      runtime.session("dreamy", "cycle-9", { executionScope: scope("/nonexistent-1807-scope") }),
+    ).rejects.toThrow(/unavailable/);
+    expect((createSubagentTransport as any).mock.calls.length).toBe(callsBefore);
+  });
+
+  it("a stale destroy callback cannot evict a newer entry under the same key", async () => {
+    const runtime = new SubagentRuntime();
+    const s1 = await runtime.session("dreamy", "cycle-1", { executionScope: scope(tmpA) });
+    await s1.destroy();
+    const s2 = await runtime.session("dreamy", "cycle-1", { executionScope: scope(tmpA) });
+    const { createSubagentTransport } = await import("./agent-registry.js");
+    const creations = (createSubagentTransport as any).mock.calls.length;
+    // Stale callback from the first generation runs late: the live entry survives.
+    await s1.destroy();
+    const s3 = await runtime.session("dreamy", "cycle-1", { executionScope: scope(tmpA) });
+    expect((createSubagentTransport as any).mock.calls.length).toBe(creations);
+    expect(s3.isReady).toBe(true);
+    expect(s2.isReady).toBe(true);
   });
 });

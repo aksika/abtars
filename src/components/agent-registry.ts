@@ -81,7 +81,7 @@ const SUBAGENT_ACP_ROLE: Record<SubagentRole, AgentRole> = {
 
 /** Unified transport factory for all subagents. Reads from transport.json + models.json. */
 /** @internal Used only by SubagentRuntime. Do not call directly. */
-export async function createSubagentTransport(role: SubagentRole, registry?: import("./transport/model-health-registry.js").ModelHealthRegistry, lastSuccessfulMain?: CandidateSpec | null, contextProvider?: import("./transport/pi-core-context.js").DurableContextProviderHolder, memoryToolDeps?: import("./memory-store-quota.js").MemoryToolDependenciesHolder, candidatePolicy: import("./spin-types.js").CandidatePolicy = "fallback-chain"): Promise<{ transport: IKiroTransport; model: string }> {
+export async function createSubagentTransport(role: SubagentRole, registry?: import("./transport/model-health-registry.js").ModelHealthRegistry, lastSuccessfulMain?: CandidateSpec | null, contextProvider?: import("./transport/pi-core-context.js").DurableContextProviderHolder, memoryToolDeps?: import("./memory-store-quota.js").MemoryToolDependenciesHolder, candidatePolicy: import("./spin-types.js").CandidatePolicy = "fallback-chain", workingDir?: string): Promise<{ transport: IKiroTransport; model: string }> {
   const { resolveAgent, getEnvFallback, loadTransport } = await import("./transport-config.js");
   const tc = loadTransport();
   const agentName = SUBAGENT_TO_AGENT[role];
@@ -203,7 +203,9 @@ export async function createSubagentTransport(role: SubagentRole, registry?: imp
     const model = modelsToTry[i]!;
     const transport = createAgentTransport(SUBAGENT_ACP_ROLE[role], {
       cliPath: agent.provider.cli ?? config.transport.agentCliPath,
-      workingDir: config.transport.workingDir,
+      // #1807: an explicit sleep scope overrides the configured working dir
+      // so CLI session creation honors the same root as tool execution.
+      workingDir: workingDir ?? config.transport.workingDir,
       agentCli: agent.provider.cli ?? "kiro-cli",
       model,
     });

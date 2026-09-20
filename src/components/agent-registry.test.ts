@@ -191,4 +191,24 @@ describe("createSubagentTransport — configured-only candidate policy (#1611)",
     expect(mockAcpTransport).toHaveBeenCalledTimes(1);
     expect(mockAcpTransport.mock.calls[0]![2]).toMatchObject({ model: "dreamy-model" });
   });
+
+  it("ACP honors an explicit sleep workingDir override, else the configured one (#1807)", async () => {
+    mockResolveAgent.mockImplementation((agentName: string) => {
+      if (agentName === "dreamy") {
+        return {
+          ...dreamyAgent(),
+          provider: { transport: "acp", cli: "/usr/bin/kiro-cli" },
+        };
+      }
+      if (agentName === "main") return mainAgent();
+      return null;
+    });
+
+    await createSubagentTransport("sleep", undefined, INHERITED_MAIN, undefined, undefined, "configured-only", "/tmp/sleep-scope");
+    expect(mockAcpTransport.mock.calls[0]![1]).toBe("/tmp/sleep-scope");
+
+    vi.clearAllMocks();
+    await createSubagentTransport("sleep", undefined, INHERITED_MAIN, undefined, undefined, "configured-only");
+    expect(mockAcpTransport.mock.calls[0]![1]).toBe("/tmp/work");
+  });
 });
