@@ -22,6 +22,7 @@ import http from "node:http";
 import { createHash } from "node:crypto";
 import { spawnSync } from "node:child_process";
 import { deployActivation } from "../../cli/deploy-lib/deploy.js";
+import type { BootstrapFn } from "../../cli/deploy-lib/deploy.js";
 import { healthProbe } from "../../cli/deploy-lib/releases.js";
 import type { StagedRelease } from "../../cli/update-sources/types.js";
 
@@ -202,6 +203,12 @@ describe.skipIf(!npmAvailable())("Epic 23 E2E — skill dependency deploy (#1542
     return Promise.resolve({ healthy: true, pid: 9999, heartbeat: Date.now() });
   };
 
+  // The e2e subject is skill-dependency preparation, not launchd: mock the
+  // Darwin bootstrap like the Linux path mocks systemdStartFn. A real
+  // launchctl bootstrap cannot run from the sandboxed fake home (and must
+  // never touch the live user domain from a test).
+  const darwinBootstrapMock: BootstrapFn = () => ({ ok: true });
+
   function runDeploy(commit: string): Promise<number> {
     return deployActivation(
       {
@@ -216,7 +223,7 @@ describe.skipIf(!npmAvailable())("Epic 23 E2E — skill dependency deploy (#1542
         channel: "dev",
         repoRoot: root,
       },
-      undefined,
+      darwinBootstrapMock,
       healthMock,
       () => ({ ok: true }),
       () => {},

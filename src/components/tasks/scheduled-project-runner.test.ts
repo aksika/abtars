@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { vi } from "vitest";
@@ -14,7 +14,7 @@ let nerveBus: typeof import("../nerve.js")["nerve"];
 
 beforeEach(async () => {
   vi.resetModules();
-  TEST_HOME = join(tmpdir(), `scheduled-project-test-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+  TEST_HOME = join(realpathSync(tmpdir()), `scheduled-project-test-${Date.now()}-${Math.random().toString(36).slice(2)}`);
   mkdirSync(TEST_HOME, { recursive: true });
   vi.doMock("../../paths.js", () => ({ abtarsHome: () => TEST_HOME }));
   kanban = await import("./kanban-board.js");

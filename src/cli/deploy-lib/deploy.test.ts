@@ -213,7 +213,14 @@ describe("deployActivation — bootstrap success + health healthy (macOS)", () =
 });
 
 describe("deployActivation — health unhealthy (Linux)", () => {
+  const origPlatform = process.platform;
+
+  afterEach(() => {
+    Object.defineProperty(process, "platform", { value: origPlatform, configurable: true, writable: true });
+  });
+
   it("returns 0 on Linux (unchanged behavior)", { timeout: 30000 }, async () => {
+    Object.defineProperty(process, "platform", { value: "linux", configurable: true, writable: true });
     const unhealthyProbe: (...args: any[]) => Promise<{ healthy: false }> = async () => ({ healthy: false });
     const bootstrapFn: BootstrapFn = () => ({ ok: true });
 

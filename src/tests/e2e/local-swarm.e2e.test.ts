@@ -66,6 +66,10 @@ async function runChild(root: string, scenario: string): Promise<{ result?: Loca
       SCENARIO: scenario,
       PI_LOAD_GUARD: scenario === "emergency_gate_b" ? "1" : "",
       NODE_PATH: process.env["NODE_PATH"] ?? (process.env["HOME"] ? join(process.env["HOME"], ".local/lib/node_modules") : ""),
+      // Propagate TMPDIR so the child's os.tmpdir() matches the parent's.
+      // Without it the child falls back to /tmp and its sandbox validation
+      // rejects the parent-created home on macOS (TMPDIR=/var/folders/...).
+      ...(process.env["TMPDIR"] ? { TMPDIR: process.env["TMPDIR"] } : {}),
     },
     stdio: ["ignore", "pipe", "pipe"],
   });

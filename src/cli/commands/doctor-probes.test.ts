@@ -587,7 +587,7 @@ describe("doctor mind probe is endpoint health, not package availability (#1662)
 
     const { renderHuman } = await import("./doctor-render.js");
     const human = renderHuman(result);
-    const mindLine = human.split("\n").find(l => l.includes("mind")) ?? "";
+    const mindLine = human.split("\n").find(l => l.includes(" mind")) ?? "";
     expect(mindLine).toContain("✗ mind");
     expect(mindLine).not.toContain("✓ mind");
     expect(mindLine).toContain("[reachable]");

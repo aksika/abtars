@@ -17,7 +17,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { createRequire } from "node:module";
 import { join } from "node:path";
 import { tmpdir, homedir } from "node:os";
-import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync, existsSync } from "node:fs";
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync, existsSync } from "node:fs";
 import { PiRunStore } from "./pi-run-store.js";
 import { PiExecutor } from "./pi-executor.js";
 import type { PiExecutorConfig } from "./config.js";
@@ -128,7 +128,7 @@ describe("resolveWorkerOrcExtensionPath (#1643)", () => {
   });
 
   it("fails with the versioned artifact name when the file is missing", () => {
-    const root = mkdtempSync(join(tmpdir(), "worc-missing-"));
+    const root = realpathSync(mkdtempSync(join(tmpdir(), "worc-missing-")));
     mkdirSync(join(root, "templates", "pi-extensions"), { recursive: true });
     process.env.ABTARS_ROOT = root;
     const resolved = resolveWorkerOrcExtensionPath();
@@ -141,7 +141,7 @@ describe("resolveWorkerOrcExtensionPath (#1643)", () => {
   });
 
   it("rejects a symlink artifact instead of following it", () => {
-    const root = mkdtempSync(join(tmpdir(), "worc-symlink-"));
+    const root = realpathSync(mkdtempSync(join(tmpdir(), "worc-symlink-")));
     const extDir = join(root, "templates", "pi-extensions");
     mkdirSync(extDir, { recursive: true });
     const outside = join(root, "outside.ts");
@@ -170,7 +170,7 @@ describe("worker-orc-v1.ts packaging (#1643)", () => {
 
   it("resolves the artifact from a staged release tree (emergency-update cp -a templates → release)", () => {
     const { mkdirSync, cpSync } = require("node:fs") as typeof import("node:fs");
-    const staged = mkdtempSync(join(tmpdir(), "worc-staged-"));
+    const staged = realpathSync(mkdtempSync(join(tmpdir(), "worc-staged-")));
     // Exactly what scripts/emergency-update.sh does: the whole templates dir
     // is copied into the staged release root.
     cpSync(join(__dirname, "..", "..", "..", "templates"), join(staged, "templates"), { recursive: true });
@@ -194,7 +194,7 @@ describe("worker-orc-v1.ts packaging (#1643)", () => {
 
 describe("PiRuntimeHost.launch extensionPaths (#1643)", () => {
   it("appends one owned --extension pair per path before --mode rpc, preserving trust/fixed ordering", async () => {
-    const root = mkdtempSync(join(tmpdir(), "worc-host-"));
+    const root = realpathSync(mkdtempSync(join(tmpdir(), "worc-host-")));
     const wsPath = join(root, "ws");
     mkdirSync(wsPath, { recursive: true });
     const ext = join(root, "ext.ts");
@@ -217,7 +217,7 @@ describe("PiRuntimeHost.launch extensionPaths (#1643)", () => {
   });
 
   it("fails BEFORE spawn when an extension artifact is missing or unreadable", async () => {
-    const root = mkdtempSync(join(tmpdir(), "worc-host-"));
+    const root = realpathSync(mkdtempSync(join(tmpdir(), "worc-host-")));
     const wsPath = join(root, "ws");
     mkdirSync(wsPath, { recursive: true });
     const host = new PiRuntimeHost(makeConfig(wsPath));
@@ -237,7 +237,7 @@ describe("PiRuntimeHost.launch extensionPaths (#1643)", () => {
   });
 
   it("fails BEFORE spawn when an explicit extension path is a symlink", async () => {
-    const root = mkdtempSync(join(tmpdir(), "worc-host-symlink-"));
+    const root = realpathSync(mkdtempSync(join(tmpdir(), "worc-host-symlink-")));
     const wsPath = join(root, "ws");
     mkdirSync(wsPath, { recursive: true });
     const outside = join(root, "outside.ts");
@@ -275,7 +275,7 @@ describe("PiExecutor supervised-only extension loading (#1643)", () => {
   }
 
   it("passes the canonical extension path only for supervised origins", async () => {
-    const root = mkdtempSync(join(tmpdir(), "worc-exec-"));
+    const root = realpathSync(mkdtempSync(join(tmpdir(), "worc-exec-")));
     const supWs = join(root, "ws-sup");
     const stdWs = join(root, "ws-std");
     mkdirSync(supWs, { recursive: true });
@@ -312,7 +312,7 @@ describe("PiExecutor supervised-only extension loading (#1643)", () => {
   });
 
   it("a supervised run with a missing artifact settles failed through the coordinator: no spawn, no slot, no claim", async () => {
-    const root = mkdtempSync(join(tmpdir(), "worc-exec-"));
+    const root = realpathSync(mkdtempSync(join(tmpdir(), "worc-exec-")));
     const wsPath = join(root, "ws");
     mkdirSync(wsPath, { recursive: true });
     const db = createTestDb();
@@ -338,7 +338,7 @@ describe("PiExecutor supervised-only extension loading (#1643)", () => {
     const { SupervisedPiSettlement } = await import("./supervised-pi-settlement.js");
     executor.setSettlementRouter((obs) => new SupervisedPiSettlement(store, workerStore, config).settlePiExecution(obs));
 
-    const emptyRoot = mkdtempSync(join(tmpdir(), "worc-empty-"));
+    const emptyRoot = realpathSync(mkdtempSync(join(tmpdir(), "worc-empty-")));
     process.env.ABTARS_ROOT = emptyRoot;
 
     const result = await executor.startWithClaim(run.runId, run.generation, "s-miss");

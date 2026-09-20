@@ -236,7 +236,7 @@ describe("#1716 bounded settlement boundary", () => {
     const { service } = makeService();
     const ctx = { userId: "u1", executionId: "e1-timeout" };
     const start = Date.now();
-    const result = await service.runBash({ command: "sleep infinity" }, ctx);
+    const result = await service.runBash({ command: "sleep 30" }, ctx);
     const elapsed = Date.now() - start;
     expect(elapsed).toBeLessThan(10_000);
     const parsed = JSON.parse(result);

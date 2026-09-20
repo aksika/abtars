@@ -10,7 +10,7 @@ import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { createRequire } from "node:module";
 import { join } from "node:path";
 import { homedir } from "node:os";
-import { mkdirSync, rmSync, existsSync } from "node:fs";
+import { mkdirSync, realpathSync, rmSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { vi } from "vitest";
 import { PiRunStore } from "./pi-run-store.js";
@@ -28,7 +28,7 @@ let mod: any;
 
 beforeEach(async () => {
   vi.resetModules();
-  TEST_HOME = join(tmpdir(), `sup-pi-settle-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+  TEST_HOME = join(realpathSync(tmpdir()), `sup-pi-settle-${Date.now()}-${Math.random().toString(36).slice(2)}`);
   mkdirSync(TEST_HOME, { recursive: true });
   vi.doMock("../paths.js", () => ({ abtarsHome: () => TEST_HOME }));
   mod = await import("./supervised-pi-settlement.js");
@@ -67,8 +67,11 @@ function setupSupervisedAttempt(workerStore: WorkerSupervisionStore, piStore: Pi
   workerStore.lifecycleTransition("a_sup", ["pending"], "claimed");
   workerStore.lifecycleTransition("a_sup", ["claimed"], "starting");
   const run = piStore.createSupervisedRun({ cardId: 901, workspaceAlias: "repo-a", goal: "g", ownerPrincipalId: "p", sessionId: "s" });
-  // the adapter claims the shared workspace before launch — run queued->starting
-  const wsClaim = piStore.claimSupervisedGeneration({ runId: run.runId, expectedGeneration: run.generation, canonicalPath: "/tmp/repo-a" });
+  // the adapter claims the shared workspace before launch — run queued->starting.
+  // Claim the canonical path like production does: settlement releases the
+  // alias-resolved canonical path, so a raw spelling would leak the claim.
+  mkdirSync("/tmp/repo-a", { recursive: true });
+  const wsClaim = piStore.claimSupervisedGeneration({ runId: run.runId, expectedGeneration: run.generation, canonicalPath: realpathSync("/tmp/repo-a") });
   if (wsClaim.kind !== "claimed") throw new Error("setup: workspace claim failed");
   workerStore.bindExecutorResource({ attemptId: "a_sup", expectedAttemptGeneration: 1, executorKind: "pi", resourceId: run.runId, resourceGeneration: run.generation, continuity: "initial" });
   return { cardId: 901, attemptId: "a_sup", runId: run.runId };

@@ -586,7 +586,9 @@ describe("tmux command port", () => {
     ], { timeoutMs: 10_000, cwd: root });
     expect(result.ok).toBe(true);
     expect(existsSync(join(tmpdir(), marker))).toBe(false);
-    expect(result.stdout).toMatch(/not found/);
+    // Shell dialect differs: GNU sh says "not found", macOS sh says
+    // "No such file or directory" for a slash-containing command name.
+    expect(result.stdout).toMatch(/not found|No such file/i);
   });
 
   it("times out when the marker never completes", async () => {

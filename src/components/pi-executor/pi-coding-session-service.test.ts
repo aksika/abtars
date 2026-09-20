@@ -10,7 +10,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { createRequire } from "node:module";
 import { join } from "node:path";
 import { tmpdir, homedir } from "node:os";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { spawn, spawnSync } from "node:child_process";
 import { PiCodingSessionStore } from "./pi-coding-session-store.js";
 import { PiWorkspaceClaimStore } from "./pi-workspace-claim-store.js";
@@ -150,7 +150,7 @@ interface Harness {
 let harness: Harness;
 
 function makeHarness(opts?: { maxConcurrent?: number }): Harness {
-  const root = mkdtempSync(join(tmpdir(), "pi-coding-test-"));
+  const root = realpathSync(mkdtempSync(join(tmpdir(), "pi-coding-test-")));
   const wsPath = join(root, "ws");
   mkdirSync(wsPath, { recursive: true });
   const db = createTestDb();

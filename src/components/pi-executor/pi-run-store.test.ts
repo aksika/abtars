@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach } from "vitest";
 import { createRequire } from "node:module";
 import { join } from "node:path";
 import { homedir, tmpdir } from "node:os";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { PiRunStore, type CreatePiRunInput } from "./pi-run-store.js";
 import type { TaskDatabase } from "../tasks/kanban-board.js";
 import { ensureKanbanBoardSchema } from "../tasks/kanban-board.js";
@@ -713,7 +713,7 @@ describe("PiRunStore — #1395 UI claim/restore/setPending", () => {
     /** Store with an isolated real session root under a fresh tmp dir. */
     function makeSessionStore(): { store: PiRunStore; root: string; cleanup: () => void } {
       const db = createTestDb();
-      const root = mkdtempSync(join(tmpdir(), "pi-sessions-"));
+      const root = realpathSync(mkdtempSync(join(tmpdir(), "pi-sessions-")));
       const store = new PiRunStore({ db, sessionStorageRoot: root });
       return { store, root, cleanup: () => rmSync(root, { recursive: true, force: true }) };
     }
@@ -880,7 +880,7 @@ describe("PiRunStore — #1395 UI claim/restore/setPending", () => {
     /** Store with an isolated real session root under a fresh tmp dir. */
     function makeSessionStore(): { store: PiRunStore; root: string; cleanup: () => void } {
       const db = createTestDb();
-      const root = mkdtempSync(join(tmpdir(), "pi-sessions-"));
+      const root = realpathSync(mkdtempSync(join(tmpdir(), "pi-sessions-")));
       const store = new PiRunStore({ db, sessionStorageRoot: root });
       return { store, root, cleanup: () => rmSync(root, { recursive: true, force: true }) };
     }

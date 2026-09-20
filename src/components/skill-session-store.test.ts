@@ -5,7 +5,7 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { existsSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { SkillSessionStore, scopeKeyOf } from "./skill-session-store.js";
@@ -15,7 +15,7 @@ let home: string;
 let storeFile: string;
 
 beforeEach(() => {
-  home = join(tmpdir(), `abtars-store-test-${Date.now()}-${Math.floor(Math.random() * 1e6)}`);
+  home = join(realpathSync(tmpdir()), `abtars-store-test-${Date.now()}-${Math.floor(Math.random() * 1e6)}`);
   storeFile = join(home, "state", "skill-sessions.json");
   mkdirSync(join(home, "state"), { recursive: true });
 });

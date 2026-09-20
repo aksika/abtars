@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync, chmodSync, statSync } from "node:fs";
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync, chmodSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
@@ -27,7 +27,7 @@ afterEach(() => {
 });
 
 function fixture(): string {
-  const root = mkdtempSync(join(tmpdir(), "pi-installation-"));
+  const root = realpathSync(mkdtempSync(join(tmpdir(), "pi-installation-")));
   roots.push(root);
   return root;
 }

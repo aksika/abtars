@@ -11,7 +11,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { createRequire } from "node:module";
 import { join } from "node:path";
 import { tmpdir, homedir } from "node:os";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { PiRunStore } from "./pi-run-store.js";
 import { PiExecutor, type EndExternalSession } from "./pi-executor.js";
 import type { PiExecutorConfig } from "./config.js";
@@ -156,7 +156,7 @@ interface Harness {
 let harness: Harness;
 
 function makeHarness(sessionRoot?: string): Harness {
-  const root = mkdtempSync(join(tmpdir(), "pi-exec-test-"));
+  const root = realpathSync(mkdtempSync(join(tmpdir(), "pi-exec-test-")));
   const wsPath = join(root, "ws");
   mkdirSync(wsPath, { recursive: true });
   const db = createTestDb();

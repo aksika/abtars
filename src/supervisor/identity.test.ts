@@ -104,8 +104,17 @@ describe("isPidAlive", () => {
 });
 
 describe("validateBridgePid", () => {
+  afterEach(() => {
+    execFileSyncMock.mockReset();
+  });
   it("returns valid for a live process matching identity and needle", () => {
-    const result = validateBridgePid(SELF_PID, SELF_IDENTITY, ["node"]);
+    // The file mocks node:child_process, so install a node-cmdline ps
+    // response; on Linux this mock is unused (the /proc path applies).
+    execFileSyncMock.mockImplementation((_command: string, args: string[]) => {
+      if (args[3] === "lstart=") return "Sat Aug 22 02:00:00 2026\n";
+      return "/opt/homebrew/bin/node /Users/akos/worker.mjs\n";
+    });
+    const result = validateBridgePid(SELF_PID, processStartIdentity(SELF_PID), ["node"]);
     expect(result.status).toBe("valid");
     expect(result.safeToSignal).toBe(true);
     expect(result.safeToAdopt).toBe(true);
@@ -135,12 +144,19 @@ describe("validateBridgePid", () => {
   });
 
   it("returns valid when expectedIdentity is null (trusts lock)", () => {
+    execFileSyncMock.mockImplementation((_command: string, args: string[]) => {
+      if (args[3] === "lstart=") return "Sat Aug 22 02:00:00 2026\n";
+      return "/opt/homebrew/bin/node /Users/akos/worker.mjs\n";
+    });
     const result = validateBridgePid(SELF_PID, null, ["node"]);
     expect(result.status).toBe("valid");
   });
 });
 
 describe("validateBridgeLock", () => {
+  afterEach(() => {
+    execFileSyncMock.mockReset();
+  });
   const needle = ["node"];
 
   it("returns corrupt for null lock", () => {
@@ -175,11 +191,15 @@ describe("validateBridgeLock", () => {
   });
 
   it("returns valid for a complete matching lock", () => {
+    execFileSyncMock.mockImplementation((_command: string, args: string[]) => {
+      if (args[3] === "lstart=") return "Sat Aug 22 02:00:00 2026\n";
+      return "/opt/homebrew/bin/node /Users/akos/worker.mjs\n";
+    });
     const result = validateBridgeLock(
       {
         pid: SELF_PID,
         instanceId: "abc",
-        startIdentity: SELF_IDENTITY,
+        startIdentity: processStartIdentity(SELF_PID),
       },
       needle,
     );

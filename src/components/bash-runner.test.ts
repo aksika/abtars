@@ -38,9 +38,9 @@ describe("runBashCommand", () => {
   it("settles at deadline even when the leader ignores completion (#1716 incident shape)", async () => {
     const start = Date.now();
     const result = await runBashCommand({
-      cmd: "sleep infinity",
+      cmd: "sleep 30",
       bin: "bash",
-      args: ["-c", "sleep infinity"],
+      args: ["-c", "sleep 30"],
       timeoutMs: 300,
       graceMs: FAST_GRACE,
     });
@@ -53,9 +53,9 @@ describe("runBashCommand", () => {
   it("kills the whole process group so pipe-holding descendants do not wedge settlement", async () => {
     const start = Date.now();
     const result = await runBashCommand({
-      cmd: "sleep infinity | cat",
+      cmd: "sleep 30 | cat",
       bin: "bash",
-      args: ["-c", "sleep infinity | cat"],
+      args: ["-c", "sleep 30 | cat"],
       timeoutMs: 300,
       graceMs: FAST_GRACE,
     });
@@ -68,9 +68,9 @@ describe("runBashCommand", () => {
     if (!setsidAvailable()) return;
     const start = Date.now();
     const result = await runBashCommand({
-      cmd: "setsid sleep 30 & sleep infinity",
+      cmd: "setsid sleep 30 & sleep 30",
       bin: "bash",
-      args: ["-c", "setsid sleep 30 & sleep infinity"],
+      args: ["-c", "setsid sleep 30 & sleep 30"],
       timeoutMs: 300,
       graceMs: FAST_GRACE,
     });
@@ -98,9 +98,9 @@ describe("runBashCommand", () => {
   it("aborts a running command on signal", async () => {
     const controller = new AbortController();
     const pending = runBashCommand({
-      cmd: "sleep infinity",
+      cmd: "sleep 30",
       bin: "bash",
-      args: ["-c", "sleep infinity"],
+      args: ["-c", "sleep 30"],
       signal: controller.signal,
       timeoutMs: 60_000,
       graceMs: FAST_GRACE,
@@ -158,9 +158,9 @@ describe("runBashCommand", () => {
   it("never signals the bridge's own process group on containment", async () => {
     const before = process.kill(process.pid, 0);
     await runBashCommand({
-      cmd: "trap '' TERM; sleep infinity",
+      cmd: "trap '' TERM; sleep 30",
       bin: "bash",
-      args: ["-c", "trap '' TERM; sleep infinity"],
+      args: ["-c", "trap '' TERM; sleep 30"],
       timeoutMs: 200,
       graceMs: 150,
     });

@@ -5,7 +5,7 @@
 import { describe, it, expect, vi, beforeAll, afterAll, beforeEach, afterEach } from "vitest";
 import { posix, win32 } from "node:path";
 import { buildSessionDirArgs, buildTrustArgs, isPathWithinRoot, resolveAndValidateWorkspace, validateFixedArgs, validatePiWorkspaceAliases, type PiExecutorConfig, loadPiConfig } from "./config.js";
-import { mkdtempSync, writeFileSync, rmSync, existsSync } from "node:fs";
+import { mkdtempSync, realpathSync, writeFileSync, rmSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir, homedir } from "node:os";
 
@@ -160,7 +160,7 @@ describe("buildTrustArgs", () => {
 // ── Real filesystem containment tests ─────────────────────────────────
 
 describe("resolveAndValidateWorkspace (real filesystem)", () => {
-  const { mkdtempSync, mkdirSync, symlinkSync, rmSync, writeFileSync } = require("node:fs") as typeof import("node:fs");
+  const { mkdtempSync, mkdirSync, realpathSync, symlinkSync, rmSync, writeFileSync } = require("node:fs") as typeof import("node:fs");
   const { join } = require("node:path") as typeof import("node:path");
   const { tmpdir } = require("node:os") as typeof import("node:os");
 
@@ -175,7 +175,7 @@ describe("resolveAndValidateWorkspace (real filesystem)", () => {
   }
 
   it("accepts valid child directory", () => {
-    const root = mkdtempSync(join(tmpdir(), "pi-config-test-"));
+    const root = realpathSync(mkdtempSync(join(tmpdir(), "pi-config-test-")));
     const child = join(root, "subdir");
     mkdirSync(child, { recursive: true });
     try {
@@ -189,7 +189,7 @@ describe("resolveAndValidateWorkspace (real filesystem)", () => {
   });
 
   it("accepts root equality", () => {
-    const root = mkdtempSync(join(tmpdir(), "pi-config-test-"));
+    const root = realpathSync(mkdtempSync(join(tmpdir(), "pi-config-test-")));
     try {
       const config = makeConfig({ test: { path: root, root } });
       const result = resolveAndValidateWorkspace("test", config);
@@ -201,8 +201,8 @@ describe("resolveAndValidateWorkspace (real filesystem)", () => {
   });
 
   it("rejects sibling prefix escape", () => {
-    const root = mkdtempSync(join(tmpdir(), "pi-root-"));
-    const evil = mkdtempSync(join(tmpdir(), "pi-root-evil")); // siblings by prefix
+    const root = realpathSync(mkdtempSync(join(tmpdir(), "pi-root-")));
+    const evil = realpathSync(mkdtempSync(join(tmpdir(), "pi-root-evil"))); // siblings by prefix
     try {
       const config = makeConfig({ test: { path: evil, root } });
       const result = resolveAndValidateWorkspace("test", config);
@@ -214,7 +214,7 @@ describe("resolveAndValidateWorkspace (real filesystem)", () => {
   });
 
   it("rejects a file instead of directory", () => {
-    const root = mkdtempSync(join(tmpdir(), "pi-config-test-"));
+    const root = realpathSync(mkdtempSync(join(tmpdir(), "pi-config-test-")));
     const filePath = join(root, "not-a-dir");
     writeFileSync(filePath, "content");
     try {
@@ -227,7 +227,7 @@ describe("resolveAndValidateWorkspace (real filesystem)", () => {
   });
 
   it("accepts symlink inside root", () => {
-    const root = mkdtempSync(join(tmpdir(), "pi-config-test-"));
+    const root = realpathSync(mkdtempSync(join(tmpdir(), "pi-config-test-")));
     const realDir = join(root, "real");
     const linkDir = join(root, "link");
     mkdirSync(realDir, { recursive: true });
@@ -246,8 +246,8 @@ describe("resolveAndValidateWorkspace (real filesystem)", () => {
   });
 
   it("rejects symlink outside root", () => {
-    const root = mkdtempSync(join(tmpdir(), "pi-config-test-"));
-    const outside = mkdtempSync(join(tmpdir(), "pi-outside-"));
+    const root = realpathSync(mkdtempSync(join(tmpdir(), "pi-config-test-")));
+    const outside = realpathSync(mkdtempSync(join(tmpdir(), "pi-outside-")));
     const linkDir = join(root, "escape");
     try {
       symlinkSync(outside, linkDir);
@@ -267,7 +267,7 @@ describe("resolveAndValidateWorkspace (real filesystem)", () => {
 // ── Loader behavior tests (#1440) ─────────────────────────────────────
 
 describe("loadPiConfig", () => {
-  const tmp = mkdtempSync(join(tmpdir(), "pi-load-config-"));
+  const tmp = realpathSync(mkdtempSync(join(tmpdir(), "pi-load-config-")));
   const configPath = join(tmp, "pi-executor.json");
 
   beforeAll(() => { mockConfigDir = tmp; });
@@ -341,7 +341,7 @@ describe("validatePersistedSession (#1647)", () => {
   let sessionRoot: string;
 
   beforeEach(() => {
-    sessionRoot = mkdtempSync(join(tmpdir(), "pi-session-proof-"));
+    sessionRoot = realpathSync(mkdtempSync(join(tmpdir(), "pi-session-proof-")));
   });
 
   afterEach(() => {

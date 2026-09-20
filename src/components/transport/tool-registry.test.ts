@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -166,7 +166,7 @@ describe("executeToolCall", () => {
   });
 
   it("runs bash inside an explicit task scope without mutating the parent environment (#1502 Task 10)", async () => {
-    const cwd = mkdtempSync(join(tmpdir(), "abtars-task-scope-"));
+    const cwd = realpathSync(mkdtempSync(join(tmpdir(), "abtars-task-scope-")));
     const before = process.env["WORKSPACE"];
     wireRealService(null);
     try {
