@@ -133,6 +133,19 @@ export interface RuntimeRecallInput {
   timeStart?: number;
   timeEnd?: number;
   stages?: string[];
+  /**
+   * #1813 — optional fast-path intent. Forwarded to abmind recall; omitted
+   * means ordinary recall. Turn identity should come from the trusted
+   * execution context, never from model arguments.
+   */
+  fastPath?: {
+    question?: string;
+    answerLanguage?: string;
+    session?: string;
+    turn?: string;
+    delivered?: ReadonlyArray<{ id: number; revision: number }>;
+    releaseScope?: boolean;
+  };
 }
 
 export interface RuntimeRecallHit {
@@ -155,6 +168,61 @@ export interface RuntimeRecallHit {
 export interface RuntimeRecallResult {
   hits: RuntimeRecallHit[];
   context: string;
+  /**
+   * #1813 — validated fast-path decision envelope when abmind returned one.
+   * Absent means ordinary recall. Structural mirror of abmind's
+   * RecallDecisionV1, validated at this boundary because the wire is unknown.
+   */
+  decision?: RuntimeRecallDecision;
+}
+
+/** #1813 — structural mirror of abmind RecallDecisionV1 (validated, not cast). */
+export interface RuntimeRecallDecision {
+  version: 1;
+  outcome: "answer" | "continue" | "already-supplied";
+  answerText?: string;
+  answerLanguage?: string;
+  sourceIds: number[];
+  sourceRevisions: Record<number, number>;
+  selectedRefs: number[];
+  profile: string;
+  questionSet: string;
+}
+
+/**
+ * #1813 — narrow the unknown wire decision to the structural mirror.
+ * Anything malformed is dropped: an unverified verdict must never steer
+ * delivery. Returns undefined for absent input.
+ */
+export function asRecallDecision(raw: unknown): RuntimeRecallDecision | undefined {
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return undefined;
+  const record = raw as Record<string, unknown>;
+  if (record["version"] !== 1) return undefined;
+  const outcome = record["outcome"];
+  if (outcome !== "answer" && outcome !== "continue" && outcome !== "already-supplied") return undefined;
+  if (!Array.isArray(record["sourceIds"]) || !record["sourceIds"].every((id) => typeof id === "number")) return undefined;
+  if (!Array.isArray(record["selectedRefs"]) || !record["selectedRefs"].every((id) => typeof id === "number")) return undefined;
+  const revisions = record["sourceRevisions"];
+  if (typeof revisions !== "object" || revisions === null || Array.isArray(revisions)) return undefined;
+  for (const [key, value] of Object.entries(revisions as Record<string, unknown>)) {
+    if (!Number.isInteger(Number(key)) || typeof value !== "number") return undefined;
+  }
+  if (typeof record["profile"] !== "string" || typeof record["questionSet"] !== "string") return undefined;
+  const answerText = record["answerText"];
+  if (answerText !== undefined && typeof answerText !== "string") return undefined;
+  const answerLanguage = record["answerLanguage"];
+  if (answerLanguage !== undefined && typeof answerLanguage !== "string") return undefined;
+  return {
+    version: 1,
+    outcome,
+    ...(answerText !== undefined ? { answerText } : {}),
+    ...(answerLanguage !== undefined ? { answerLanguage } : {}),
+    sourceIds: record["sourceIds"] as number[],
+    sourceRevisions: revisions as Record<number, number>,
+    selectedRefs: record["selectedRefs"] as number[],
+    profile: record["profile"] as string,
+    questionSet: record["questionSet"] as string,
+  };
 }
 
 export interface SessionContextInput {
@@ -628,6 +696,18 @@ export function createClientRuntime(client: AbmindClientLike): AbtarsMemoryRunti
 
     async recall(input: RuntimeRecallInput): Promise<RuntimeRecallResult> {
       requireClientCapability(capabilities, "recall");
+      const fastPath = input.fastPath !== undefined ? {
+        question: input.fastPath.question ?? "",
+        answerLanguage: input.fastPath.answerLanguage ?? "en",
+        principal: input.userId,
+        session: input.fastPath.session ?? "",
+        turn: input.fastPath.turn ?? "",
+        delivered: (input.fastPath.delivered ?? []).filter((ref) =>
+          typeof ref === "object" && ref !== null &&
+          Number.isInteger((ref as { id?: unknown }).id) &&
+          Number.isInteger((ref as { revision?: unknown }).revision)),
+        ...(input.fastPath.releaseScope === true ? { releaseScope: true } : {}),
+      } : undefined;
       const result = (await pm.recall({
         translated: [input.query],
         original: input.original ?? input.query,
@@ -637,7 +717,8 @@ export function createClientRuntime(client: AbmindClientLike): AbtarsMemoryRunti
         timeStart: input.timeStart,
         timeEnd: input.timeEnd,
         stages: input.stages,
-      })) as { results: Array<Record<string, unknown>> };
+        ...(fastPath !== undefined ? { fastPath } : {}),
+      })) as { results: Array<Record<string, unknown>>; decision?: unknown };
       const hits: RuntimeRecallHit[] = result.results.map((r) => ({
         content: String(r["content"] ?? ""),
         score: Number(r["score"] ?? 0),
@@ -655,7 +736,10 @@ export function createClientRuntime(client: AbmindClientLike): AbtarsMemoryRunti
         semanticRevision: typeof r["semanticRevision"] === "number" ? r["semanticRevision"] : undefined,
       }));
       const context = hits.map(h => `- (score: ${h.score.toFixed(3)}) ${h.content.slice(0, 200)}`).join("\n");
-      return { hits, context };
+      // #1813 — carry the validated decision; malformed envelopes are dropped
+      // by asRecallDecision and recall continues as ordinary.
+      const decision = asRecallDecision(result.decision);
+      return { hits, context, ...(decision !== undefined ? { decision } : {}) };
     },
 
     async assembleSessionContext(input: SessionContextInput): Promise<SessionContextResult> {

@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from "vitest";
+import { describe, expect, it, vi, type Mock } from "vitest";
 import {
   createClientRuntime,
   createDisabledRuntime,
@@ -462,5 +462,55 @@ describe("Disabled and Unavailable runtimes", () => {
     const input = { userId: "u", sessionId: "s", beforeMessageId: 1, maxContext: 8000 };
     await expect(createDisabledRuntime().projectDurableContext(input)).rejects.toThrow("Memory is disabled");
     await expect(createUnavailableRuntime().projectDurableContext(input)).rejects.toThrow("Memory unavailable");
+  });
+});
+
+describe("#1813 recall decision carry", () => {
+  function recallClient(decision: unknown) {
+    const client = mockClient(caps(["private.recall"], { private_read: "true" }));
+    (client.privateMemory.recall as unknown as Mock).mockResolvedValue({
+      results: [{ content: "Deploys run via /deploy prod.", score: 0.9, date: "2026-09-01" }],
+      decision,
+    });
+    return client;
+  }
+
+  const validDecision = {
+    version: 1,
+    outcome: "already-supplied",
+    sourceIds: [7],
+    sourceRevisions: { 7: 0 },
+    selectedRefs: [7],
+    profile: "jev/jev-1.13.0 repeat-v1",
+    questionSet: "repeat-v1",
+  };
+
+  it("carries a validated decision and forwards the fast-path intent", async () => {
+    const client = recallClient(validDecision);
+    const rt = createClientRuntime(client);
+    const res = await rt.recall({
+      query: "deploy",
+      userId: "u1",
+      fastPath: { session: "s1", turn: "t1", delivered: [{ id: 7, revision: 0 }] },
+    });
+    expect(res.decision).toEqual(validDecision);
+    expect(vi.mocked(client.privateMemory.recall)).toHaveBeenCalledWith(expect.objectContaining({
+      fastPath: expect.objectContaining({ principal: "u1", session: "s1", turn: "t1" }),
+    }));
+  });
+
+  it("drops malformed decisions and keeps ordinary recall", async () => {
+    for (const bad of [
+      undefined,
+      null,
+      { version: 2, outcome: "answer" },
+      { version: 1, outcome: "maybe", sourceIds: [], sourceRevisions: {}, selectedRefs: [], profile: "p", questionSet: "q" },
+      { ...validDecision, sourceIds: ["7"] },
+    ]) {
+      const rt = createClientRuntime(recallClient(bad));
+      const res = await rt.recall({ query: "deploy", userId: "u1" });
+      expect(res.decision).toBeUndefined();
+      expect(res.hits).toHaveLength(1);
+    }
   });
 });

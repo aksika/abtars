@@ -16,21 +16,9 @@ import { synthesizeSpeech, type TtsConfig } from "./tts.js";
 import { attemptMemoryMutation } from "./memory-runtime.js";
 import { assistantMessageKey, feedbackKey } from "./memory-operation-key.js";
 
-/** Retry a send operation on transient network errors (fetch failed, timeout, 5xx). */
-async function retrySend<T>(fn: () => Promise<T>, attempts = 3): Promise<T> {
-  for (let i = 0; i < attempts; i++) {
-    try { return await fn(); }
-    catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      const transient = msg.includes("fetch failed") || msg.includes("ETIMEDOUT") || msg.includes("ECONNRESET") || /^5\d\d/.test(msg);
-      if (!transient || i === attempts - 1) throw err;
-      const delay = 1000 * Math.pow(3, i);
-      logWarn("pipeline", `Delivery failed (attempt ${i + 1}/${attempts}), retrying in ${delay}ms: ${msg}`);
-      await new Promise(r => setTimeout(r, delay));
-    }
-  }
-  throw new Error("unreachable");
-}
+/** Retry a send operation on transient network errors — owned by
+ * pipeline/fast-path-answer.ts so the fast-path delivery shares it. */
+import { retrySend } from "./pipeline/fast-path-answer.js";
 
 /** A compaction trigger is eligible only after the assistant row has a
  * durable identity. `attemptMemoryMutation` intentionally swallows write
@@ -388,7 +376,7 @@ export async function handleInboundMessage(
     // the spec; the chokepoint at spin.ts#sendPrompt carries it through to the
     // transport, which fails closed when durable context is required but
     // unavailable.
-    const { prompt: builtPrompt, imageContent, recalledHits, durableContextIntent, currentTurn } = await buildPrompt(msg, text, {
+    const { prompt: builtPrompt, imageContent, recalledHits, recallDecision, durableContextIntent, currentTurn } = await buildPrompt(msg, text, {
       memoryRuntime: deps.memoryRuntime, memoryConfig, sessionManager: deps.sessionManager, conversationBuffer, contextPercent: ctxPct, maxContext: deps.maxContext,
       isAcp: transport.getRuntimeStatus?.().route === "acp",
     }, registry, effectiveSession);
@@ -397,6 +385,51 @@ export async function handleInboundMessage(
       await adapter.sendMessage(channelId, "⛔ Message blocked — suspicious content detected.", { threadId: msg.threadId });
       settle("not_sent");
       return;
+    }
+
+    // #1813 — fast-path answer gate. Only an eligible "answer" verdict skips
+    // model invocation, and only on a Main text turn; everything else falls
+    // through to the ordinary agent path below. Delivery below is Main-owned
+    // (send + assistant record + compaction + metrics + settle), exactly once.
+    const { fastPathAnswerText, deliverFastPathAnswer } = await import("./pipeline/fast-path-answer.js");
+    const fastPathRendered = fastPathAnswerText(recallDecision, {
+      sessionType: sessionType(effectiveSession),
+      skillIsolated: isSkillSession,
+      hasAttachment: imageContent !== undefined,
+      voice: isVoice,
+    });
+    if (fastPathRendered !== null && deps.memoryRuntime) {
+      const fastPathCorrelation: DeliveryCorrelation | undefined =
+        pSession.activeExecutionId
+          ? { sessionId: activeSessionId, executionId: pSession.activeExecutionId, kind: "final_assistant" }
+          : undefined;
+      try {
+        const fast = await deliverFastPathAnswer(fastPathRendered, {
+          adapter,
+          channelId,
+          threadId: msg.threadId,
+          deliveryCorrelation: fastPathCorrelation,
+          recordAssistant: deps.memoryRuntime.state === "ready" ? {
+            runtime: deps.memoryRuntime,
+            platform: msg.platform,
+            userId,
+            sessionId: activeSessionId,
+            guest: registry.byUserId.get(userId)?.role === "guest",
+          } : undefined,
+        });
+        if (fast.delivered) {
+          if (fast.recorded) {
+            scheduleAutomaticCompaction(deps, userId, activeSessionId, durableContextIntent);
+          }
+          effectiveSession.messageCount = (effectiveSession.messageCount ?? 0) + 1;
+          effectiveSession.contextPercent = transport.contextPercent >= 0 ? transport.contextPercent : undefined;
+          logInfo(TAG, `→ [${msg.platform}] Fast-path delivery, transport skipped`);
+          settle("sent");
+          return;
+        }
+      } catch (err) {
+        logAndSwallow(TAG, "fast-path delivery", err);
+      }
     }
 
     let prompt = builtPrompt;

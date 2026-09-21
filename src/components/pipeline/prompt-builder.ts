@@ -36,6 +36,12 @@ export interface BuildPromptResult {
   isSessionStart: boolean;
   imageContent?: { mime: string; base64: string; path: string };
   recalledHits?: Array<{ id: number; contentEn: string }>;
+  /**
+   * #1813 — validated fast-path decision envelope from auto-recall, when
+   * abmind returned one. Absent means ordinary recall; the pipeline treats
+   * absence as no verdict, never as consent to skip the agent.
+   */
+  recallDecision?: import("../memory-runtime.js").RuntimeRecallDecision;
   /** #1529: explicit durable-context intent — never an ambiguous optional cursor. */
   durableContextIntent: DurableContextIntent;
   /** #1335: structured current turn components for Pi cache-stable assembly. */
@@ -194,6 +200,11 @@ export async function buildPrompt(
 
   // --- Active recall (skipped for K — skill-isolated memory boundary) ---
   let recalledHits: Array<{ id: number; contentEn: string }> | undefined;
+  // #1813 — fast-path decision from auto-recall, carried for the pipeline
+  // skip gate. No fastPath intent is attached here (first pull, unverified
+  // question language), so this is present only when a future caller intent
+  // produces one; absence means the ordinary agent path.
+  let recallDecision: BuildPromptResult["recallDecision"];
   if (memoryMode !== "skill-isolated" && getEnv().activeMemory && memoryRuntime?.state === "ready") {
     const userEntry = registry.byUserId.get(userId);
     if (userEntry?.role !== "guest" && (contextPercent < 0 || contextPercent < getEnv().ctxCompactPct)) {
@@ -221,6 +232,7 @@ export async function buildPrompt(
           prompt = `${block}\n\n${prompt}`;
           // eslint-disable-next-line @typescript-eslint/no-explicit-any
           recalledHits = hits.filter((h: any) => h.memoryId != null).map((h: any) => ({ id: h.memoryId as number, contentEn: h.content as string }));
+          recallDecision = recall.decision;
           logDebug(TAG, `Active recall: ${hits.length} hits, ${block.length} chars, ${Math.round(performance.now() - t0)}ms`);
           logTrace(TAG, `recall content: ${block}`);
         }
@@ -253,5 +265,5 @@ export async function buildPrompt(
     volatileContext,
   };
 
-  return { prompt, isSessionStart, imageContent, recalledHits, durableContextIntent, currentTurn };
+  return { prompt, isSessionStart, imageContent, recalledHits, recallDecision, durableContextIntent, currentTurn };
 }
