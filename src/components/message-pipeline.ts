@@ -376,7 +376,7 @@ export async function handleInboundMessage(
     // the spec; the chokepoint at spin.ts#sendPrompt carries it through to the
     // transport, which fails closed when durable context is required but
     // unavailable.
-    const { prompt: builtPrompt, imageContent, recalledHits, recallDecision, durableContextIntent, currentTurn } = await buildPrompt(msg, text, {
+    const { prompt: builtPrompt, imageContent, recalledHits, recallDecision, isSessionStart, durableContextIntent, currentTurn } = await buildPrompt(msg, text, {
       memoryRuntime: deps.memoryRuntime, memoryConfig, sessionManager: deps.sessionManager, conversationBuffer, contextPercent: ctxPct, maxContext: deps.maxContext,
       isAcp: transport.getRuntimeStatus?.().route === "acp",
     }, registry, effectiveSession);
@@ -397,6 +397,8 @@ export async function handleInboundMessage(
       skillIsolated: isSkillSession,
       hasAttachment: imageContent !== undefined,
       voice: isVoice,
+      sessionStart: isSessionStart,
+      delivery: ctx.delivery,
     });
     if (fastPathRendered !== null && deps.memoryRuntime) {
       const fastPathCorrelation: DeliveryCorrelation | undefined =
@@ -404,13 +406,14 @@ export async function handleInboundMessage(
           ? { sessionId: activeSessionId, executionId: pSession.activeExecutionId, kind: "final_assistant" }
           : undefined;
       try {
-        const fast = await deliverFastPathAnswer(fastPathRendered, {
+        const fast = await deliverFastPathAnswer(fastPathRendered.display, {
           adapter,
           channelId,
           threadId: msg.threadId,
           deliveryCorrelation: fastPathCorrelation,
           recordAssistant: deps.memoryRuntime.state === "ready" ? {
             runtime: deps.memoryRuntime,
+            recordText: fastPathRendered.record,
             platform: msg.platform,
             userId,
             sessionId: activeSessionId,

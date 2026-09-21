@@ -19,12 +19,14 @@ const ANSWER: RuntimeRecallDecision = {
   questionSet: "lookup-v1",
 };
 
-const MAIN_TEXT_TURN = { sessionType: "A", skillIsolated: false, hasAttachment: false, voice: false };
+const MAIN_TEXT_TURN = { sessionType: "A", skillIsolated: false, hasAttachment: false, voice: false, sessionStart: false, delivery: "simple" };
 
 describe("#1813 — fastPathAnswerText", () => {
-  it("renders the extract with visible source refs on an eligible turn", () => {
-    expect(fastPathAnswerText(ANSWER, MAIN_TEXT_TURN))
-      .toBe("Production deploys run via /deploy prod.\n\n— memory #3");
+  it("renders the extract with visible source refs on an eligible turn, raw text for memory", () => {
+    expect(fastPathAnswerText(ANSWER, MAIN_TEXT_TURN)).toEqual({
+      display: "Production deploys run via /deploy prod.\n\n— memory #3",
+      record: "Production deploys run via /deploy prod.",
+    });
   });
 
   it("stays closed without a decision or without an answer outcome", () => {
@@ -40,6 +42,8 @@ describe("#1813 — fastPathAnswerText", () => {
     expect(fastPathAnswerText(ANSWER, { ...MAIN_TEXT_TURN, skillIsolated: true })).toBeNull();
     expect(fastPathAnswerText(ANSWER, { ...MAIN_TEXT_TURN, hasAttachment: true })).toBeNull();
     expect(fastPathAnswerText(ANSWER, { ...MAIN_TEXT_TURN, voice: true })).toBeNull();
+    expect(fastPathAnswerText(ANSWER, { ...MAIN_TEXT_TURN, sessionStart: true })).toBeNull();
+    expect(fastPathAnswerText(ANSWER, { ...MAIN_TEXT_TURN, delivery: "streaming" })).toBeNull();
   });
 });
 
@@ -60,6 +64,7 @@ describe("#1813 — deliverFastPathAnswer", () => {
       channelId: "c1",
       recordAssistant: {
         runtime: { recordMessage: recordMessage as never },
+        recordText: "answer text",
         platform: "telegram",
         userId: "u1",
         sessionId: "s1",
@@ -70,6 +75,10 @@ describe("#1813 — deliverFastPathAnswer", () => {
     expect(res).toEqual({ delivered: true, recorded: true });
     expect(sent).toEqual(["answer text"]);
     expect(recordMessage).toHaveBeenCalledTimes(1);
+    expect(recordMessage).toHaveBeenCalledWith(
+      expect.objectContaining({ content: "answer text" }),
+      expect.any(String),
+    );
     expect(onDelivered).toHaveBeenCalledTimes(1);
   });
 
@@ -81,6 +90,7 @@ describe("#1813 — deliverFastPathAnswer", () => {
       channelId: "c1",
       recordAssistant: {
         runtime: { recordMessage: recordMessage as never },
+        recordText: "answer text",
         platform: "telegram",
         userId: "guest-1",
         sessionId: "s1",

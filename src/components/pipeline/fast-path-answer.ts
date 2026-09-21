@@ -36,6 +36,13 @@ export interface FastPathTurnShape {
   skillIsolated: boolean;
   hasAttachment: boolean;
   voice: boolean;
+  /** Session-start turns own greeting/dream-question settlement — never skipped. */
+  sessionStart: boolean;
+  /**
+   * Delivery mode. Only "simple" is eligible: streaming sessions own
+   * incremental machinery the direct send would bypass unverified.
+   */
+  delivery: string;
 }
 
 /**
@@ -43,19 +50,29 @@ export interface FastPathTurnShape {
  * hold; any doubt returns null and the turn takes the ordinary agent path.
  * Deliberately conservative: Main (A) text turns only, no attachments, no
  * voice (TTS path), no skill-isolated sessions.
+ *
+ * Returns display text plus the raw record text separately: the visible
+ * supporting-evidence line is a delivery concern and must never enter durable
+ * memory, where it would pollute future recall indexes.
  */
 export function fastPathAnswerText(
   decision: RuntimeRecallDecision | undefined,
   turn: FastPathTurnShape,
-): string | null {
+): { display: string; record: string } | null {
   if (!decision || decision.outcome !== "answer") return null;
   const text = decision.answerText?.trim() ?? "";
   if (text.length === 0 || decision.sourceIds.length === 0) return null;
   if (turn.sessionType !== "A") return null;
   if (turn.skillIsolated || turn.hasAttachment || turn.voice) return null;
+  if (turn.sessionStart) return null;
+  if (turn.delivery !== "simple") return null;
   // Visible supporting evidence: the extract plus its memory references.
-  // The extract itself is verbatim owner-side; only the ref line is added.
-  return `${text}\n\n— memory #${decision.sourceIds.join(", #")}`;
+  // The extract itself is verbatim owner-side; only the ref line is added,
+  // and only for display.
+  return {
+    display: `${text}\n\n— memory #${decision.sourceIds.join(", #")}`,
+    record: text,
+  };
 }
 
 export interface FastPathDeliveryDeps {
@@ -65,6 +82,8 @@ export interface FastPathDeliveryDeps {
   deliveryCorrelation?: DeliveryCorrelation;
   recordAssistant?: {
     runtime: Pick<AbtarsMemoryRuntime, "recordMessage">;
+    /** Raw extract for durable memory (no display suffix). */
+    recordText: string;
     platform: string;
     userId: string;
     sessionId: string;
@@ -119,7 +138,7 @@ export async function deliverFastPathAnswer(
         family: "assistant",
         operationKey,
         run: () => rec.runtime.recordMessage({
-          role: "assistant", content: rendered, timestamp,
+          role: "assistant", content: rec.recordText, timestamp,
           userId: rec.userId, sessionId: rec.sessionId,
         }, operationKey),
       });
