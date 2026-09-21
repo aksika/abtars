@@ -41,6 +41,7 @@ function makeReadyRuntime(overrides: Partial<AbtarsMemoryRuntime> = {}): AbtarsM
     getSleepStatus: vi.fn(async () => ({ state: "idle" as const })),
     getCoreKnowledge: vi.fn(async () => ""),
     recordFeedback: vi.fn(async () => ({ ok: true })),
+    attribution: vi.fn(async () => null),
     embed: vi.fn(async () => ({ vectors: [], model: "m" })),
     runMaintenance: vi.fn(async () => ({ ok: true, summary: "ok" })),
     instantStore: vi.fn(async () => ({ stored: true as const, memoriesCount: 1, memoryId: 5, semanticRevision: 1 })),

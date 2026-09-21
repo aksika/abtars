@@ -954,6 +954,30 @@ export async function handleInboundMessage(
       }
     }
 
+    // --- #1813: advisory post-response attribution (diagnostics only) ---
+    // Judges the delivered response against the actually supplied memories.
+    // Never writes, never settles, never touches citation feedback: failures
+    // and unsupported runtimes vanish into a debug line.
+    if (recalledHits && recalledHits.length > 0 && userResponse.trim().length > 0
+      && deps.memoryRuntime?.state === "ready" && deps.memoryRuntime.supports("attribution")) {
+      try {
+        const verdict = await deps.memoryRuntime.attribution({
+          userId,
+          response: userResponse,
+          sourceIds: recalledHits.map(h => h.id),
+        });
+        if (verdict) {
+          const used = verdict.sources.filter(s => s.verdict === "used").map(s => s.id);
+          const unknown = verdict.sources.filter(s => s.verdict === "unknown").map(s => s.id);
+          logDebug(TAG, `Attribution (${verdict.profile}): used=[${used.join(",")}] unknown=[${unknown.join(",")}]`);
+        } else {
+          logDebug(TAG, "Attribution unsupported or inactive for this turn");
+        }
+      } catch (err) {
+        logAndSwallow(TAG, "attribution", err);
+      }
+    }
+
     // --- AfterMessage hook ---
     if (hasHooks("AfterMessage")) {
       fireHook("AfterMessage", {

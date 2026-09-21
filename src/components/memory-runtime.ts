@@ -28,6 +28,8 @@ export type MemoryRuntimeCapability =
   | "compaction"
   | "dreamQuestions"
   | "dreamQuestionsNextPending"
+  // #1813 — advisory post-response attribution (private.attribution).
+  | "attribution"
   // #1660: composite local sealed-secret capability (find + resolve on a
   // local route). Absent for signed peers and remote routes.
   | "sealedSecrets";
@@ -288,6 +290,42 @@ export interface FeedbackResult {
   ok: boolean;
 }
 
+/** #1813 — advisory attribution input (final delivered response + supplied ids). */
+export interface AttributionInput {
+  userId: string;
+  response: string;
+  sourceIds: number[];
+  maxClassification?: number;
+}
+
+/** #1813 — structural mirror of abmind AttributionResultV1 (validated, not cast). */
+export interface AttributionResult {
+  sources: Array<{ id: number; verdict: "used" | "not-used" | "unknown" }>;
+  profile: string;
+  questionSet: string;
+}
+
+/**
+ * #1813 — narrow the unknown wire attribution result. Malformed or absent
+ * input yields null: the caller reports unsupported, never a fabricated
+ * unused-memory verdict.
+ */
+export function asAttributionResult(raw: unknown): AttributionResult | null {
+  if (raw === null || raw === undefined) return null;
+  if (typeof raw !== "object" || Array.isArray(raw)) return null;
+  const record = raw as Record<string, unknown>;
+  if (!Array.isArray(record["sources"])) return null;
+  const sources: AttributionResult["sources"] = [];
+  for (const entry of record["sources"] as unknown[]) {
+    if (typeof entry !== "object" || entry === null || Array.isArray(entry)) return null;
+    const { id, verdict } = entry as { id?: unknown; verdict?: unknown };
+    if (typeof id !== "number" || (verdict !== "used" && verdict !== "not-used" && verdict !== "unknown")) return null;
+    sources.push({ id, verdict });
+  }
+  if (typeof record["profile"] !== "string" || typeof record["questionSet"] !== "string") return null;
+  return { sources, profile: record["profile"], questionSet: record["questionSet"] };
+}
+
 export interface MaintenanceInput {
   operation: "integrity" | "fts_rebuild" | "wal_checkpoint";
 }
@@ -541,6 +579,12 @@ export interface AbtarsMemoryRuntime {
   getSleepStatus(): Promise<SleepStatusLike>;
   getCoreKnowledge(input: CoreKnowledgeInput): Promise<CoreKnowledgeResult>;
   recordFeedback(input: FeedbackInput, operationKey: string): Promise<FeedbackResult>;
+  /**
+   * #1813 — advisory post-response attribution. Returns the validated verdict
+   * or null when unsupported/inactive; never throws for ordinary attribution
+   * failures (transport errors still propagate to the caller).
+   */
+  attribution(input: AttributionInput): Promise<AttributionResult | null>;
   embed(input: EmbeddingInput): Promise<EmbeddingResult>;
   runMaintenance(input: MaintenanceInput): Promise<MaintenanceResult>;
   instantStore(input: InstantStoreInput): Promise<InstantStoreResult>;
@@ -599,6 +643,9 @@ function projectCapabilities(client: AbmindClientLike): Set<MemoryRuntimeCapabil
   if (methods.has("private.edit") && features["private_write"] === "true" && revisionContract) result.add("editMemory");
   if (methods.has("private.rebuildFts") && features["private_write"] === "true") result.add("rebuildFts");
   if (methods.has("private.recordFeedback")) result.add("feedback");
+  // #1813 — advisory attribution; mixed-version daemons without the method
+  // simply lack the capability and callers report unsupported.
+  if (methods.has("private.attribution")) result.add("attribution");
   if (methods.has("private.getCoreKnowledge")) result.add("coreKnowledge");
   if (methods.has("private.getRuntimeStatus")) result.add("status");
   if (methods.has("private.projectConversationContext") && features["private_read"] === "true") result.add("durableContext");
@@ -791,6 +838,19 @@ export function createClientRuntime(client: AbmindClientLike): AbtarsMemoryRunti
     async recordFeedback(input: FeedbackInput, operationKey: string): Promise<FeedbackResult> {
       await pm.recordFeedback(input, operationKey);
       return { ok: true };
+    },
+
+    async attribution(input: AttributionInput): Promise<AttributionResult | null> {
+      requireClientCapability(capabilities, "attribution");
+      // Mixed-version daemon without the method: unsupported, never an error.
+      if (typeof pm.attribution !== "function") return null;
+      const raw = await pm.attribution({
+        userId: input.userId,
+        response: input.response,
+        sourceIds: input.sourceIds.filter((id) => Number.isInteger(id)),
+        ...(input.maxClassification !== undefined ? { maxClassification: input.maxClassification } : {}),
+      });
+      return asAttributionResult(raw);
     },
 
     async embed(input: EmbeddingInput): Promise<EmbeddingResult> {
@@ -1159,6 +1219,7 @@ export function createDisabledRuntime(): AbtarsMemoryRuntime {
     getSleepStatus: async () => { unavailable("getSleepStatus"); return { state: "idle" }; },
     getCoreKnowledge: async () => { unavailable("getCoreKnowledge"); return ""; },
     recordFeedback: async () => { unavailable("recordFeedback"); return { ok: false }; },
+    attribution: async () => { unavailable("attribution"); return null; },
     embed: async () => { unavailable("embed"); return { vectors: [], model: "" }; },
     runMaintenance: async () => { unavailable("runMaintenance"); return { ok: false, summary: "Memory disabled" }; },
     instantStore: async () => { unavailable("instantStore"); return { stored: false, memoriesCount: 0, code: "memory_unavailable", message: "Memory is disabled", requestId: "", retryable: false, action: "stop" as const, stage: "pre_dispatch" as const }; },
@@ -1196,6 +1257,7 @@ export function createUnavailableRuntime(): AbtarsMemoryRuntime {
     getSleepStatus: async () => { unavailable("getSleepStatus"); return { state: "idle" }; },
     getCoreKnowledge: async () => { unavailable("getCoreKnowledge"); return ""; },
     recordFeedback: async () => { unavailable("recordFeedback"); return { ok: false }; },
+    attribution: async () => { unavailable("attribution"); return null; },
     embed: async () => { unavailable("embed"); return { vectors: [], model: "" }; },
     runMaintenance: async () => { unavailable("runMaintenance"); return { ok: false, summary: "Memory unavailable" }; },
     instantStore: async () => { unavailable("instantStore"); return { stored: false, memoriesCount: 0, code: "memory_unavailable", message: "Memory unavailable", requestId: "", retryable: false, action: "stop" as const, stage: "pre_dispatch" as const }; },
