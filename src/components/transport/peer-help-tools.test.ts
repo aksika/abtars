@@ -1,9 +1,54 @@
 import { describe, it, expect, beforeEach, vi } from "vitest";
+import type { KanbanCard } from "../tasks/kanban-board.js";
 
-const mockKanbanEnqueue = vi.fn(() => 42);
+const mockKanbanEnqueue = vi.fn((..._args: unknown[]) => 42);
 const mockKanbanUpdate = vi.fn();
 const mockKanbanFail = vi.fn();
-const mockKanbanGetCard = vi.fn(() => undefined);
+// Full-row fixture: kanbanGetCard returns KanbanCard | undefined — a partial
+// row would assert against a shape the database never produces.
+function makeKanbanCard(overrides?: Partial<KanbanCard>): KanbanCard {
+  return {
+    id: 42,
+    title: "help card",
+    source: "peer",
+    source_id: null,
+    assignee: "alpha",
+    priority: "normal",
+    status: "in_progress",
+    type: null,
+    goal: "do something",
+    notes: null,
+    result_summary: null,
+    result_path: null,
+    error: null,
+    delivery_attempts: 0,
+    approval: null,
+    due_at: null,
+    labels: null,
+    parent_id: null,
+    blocked_by: null,
+    created_at: "2026-09-22T00:00:00.000Z",
+    updated_at: "2026-09-22T00:00:00.000Z",
+    completed_at: null,
+    delivered_at: null,
+    max_tokens: null,
+    max_cost: null,
+    tokens_used: null,
+    delivery_mode: "direct",
+    chat_id: null,
+    source_peer: "alpha",
+    delivery_claimed_at: null,
+    delivery_result: null,
+    delivery_receipt: null,
+    delivery_ready: 0,
+    max_agents: null,
+    retry_count: 0,
+    next_retry_at: null,
+    progress: null,
+    ...overrides,
+  };
+}
+const mockKanbanGetCard = vi.fn((..._args: unknown[]): KanbanCard | undefined => undefined);
 const mockAskHelp = vi.fn();
 const mockGetHelpStatus = vi.fn();
 const mockWithdrawHelp = vi.fn();
@@ -294,7 +339,7 @@ describe("peer_ask_help", () => {
     mockAskHelp
       .mockResolvedValueOnce({ version: 1, request_id: "req-hist", decision: "declined", reason_code: "executor_not_ready", proves_non_creation: true })
       .mockResolvedValueOnce({ version: 1, request_id: "req-hist-2", decision: "accepted", contribution_ref: "help_hist" });
-    mockKanbanGetCard.mockReturnValue({ id: 42, notes: JSON.stringify({ peer: "alpha", request_id: "req-hist", outcome: "declined" }) });
+    mockKanbanGetCard.mockReturnValue(makeKanbanCard({ notes: JSON.stringify({ peer: "alpha", request_id: "req-hist", outcome: "declined" }) }));
     await mod.peerAskHelpTool.execute({
       goal: "do something", requires: ["docker"], request_id: "req-hist",
     });

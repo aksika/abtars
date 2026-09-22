@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeEach } from "vitest";
 import { PiCoreContextProjection, DurableContextUnavailableError, shouldEmitProjectionDiagnostic, resetProjectionDiagnosticStateForTest, PROJECTION_DIAGNOSTIC_MIN_INTERVAL_MS } from "./pi-core-context.js";
+import type { PiDurableContextProvider } from "./pi-core-context.js";
 import type { PiExecutionContextSeed, AbtarsCurrentTurnMessage } from "./pi-core-types.js";
 
 function makeSeed(overrides?: Partial<PiExecutionContextSeed>): PiExecutionContextSeed {
@@ -26,7 +27,16 @@ function durableSeed(beforeMessageId = 100): PiExecutionContextSeed {
 
 function makeAgentMessages(withMarker = true): import("./pi-core-types.js").AgentMessage[] {
   const msgs: import("./pi-core-types.js").AgentMessage[] = [
-    { role: "assistant", content: "How can I help?" },
+    {
+      role: "assistant",
+      content: [{ type: "text", text: "How can I help?" }],
+      api: "openai-completions",
+      provider: "test-provider",
+      model: "test-model",
+      usage: { input: 1, output: 2, cacheRead: 0, cacheWrite: 0, totalTokens: 3, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
+      stopReason: "stop",
+      timestamp: 0,
+    },
   ];
   if (withMarker) {
     msgs.push({
@@ -85,7 +95,11 @@ describe("PiCoreContextProjection", () => {
     const result = await projection.transform(makeAgentMessages(false), { hostGeneration: 0 });
     expect(result.contextDegraded).toBe(true);
     expect(result.messages.length).toBe(1);
-    expect(result.messages[0]?.content).toBe("Hello!");
+    // No marker: the fallback synthesizes a user message from the seed's
+    // current-turn content (production fallback(), "No marker" branch).
+    const marker = result.messages[0];
+    expect(marker?.role).toBe("user");
+    expect(marker && marker.role === "user" ? marker.content : undefined).toBe("Hello!");
   });
 
   it("aborts transform when signal is aborted", async () => {
@@ -102,8 +116,8 @@ describe("PiCoreContextProjection", () => {
   it("durable mode projects history through the provider and appends the suffix exactly once", async () => {
     let captured: unknown = null;
     const projection = new PiCoreContextProjection(durableSeed(100), "system");
-    const provider = {
-      async projectContext(input: unknown) {
+    const provider: PiDurableContextProvider = {
+      async projectContext(input) {
         captured = input;
         return { messages: [
           { role: "user", content: "first turn" },
@@ -115,9 +129,13 @@ describe("PiCoreContextProjection", () => {
     expect(captured).toEqual({ userId: "user-1", sessionId: "test_session", beforeMessageId: 100, maxContext: 8000 });
     // 2 durable rows + 1 suffix message (marker onward)
     expect(result.messages.length).toBe(3);
-    expect(result.messages[0]?.content).toBe("first turn");
-    expect((result.messages[1]?.content as Array<{ text: string }>)[0]?.text).toBe("first answer");
-    expect(result.messages.some((m) => m.content === "Hello!")).toBe(true);
+    const first = result.messages[0];
+    expect(first?.role).toBe("user");
+    expect(first && first.role === "user" ? first.content : undefined).toBe("first turn");
+    const second = result.messages[1];
+    expect(second?.role).toBe("assistant");
+    expect(second && second.role === "assistant" ? second.content : undefined).toEqual([{ type: "text", text: "first answer" }]);
+    expect(result.messages.some((m) => m.role === "abtars_current_turn" && m.content === "Hello!")).toBe(true);
     expect(result.contextDegraded).toBe(false);
   });
 
@@ -140,8 +158,10 @@ describe("PiCoreContextProjection", () => {
 
   it("malformed provider output throws a typed durable error", async () => {
     const projection = new PiCoreContextProjection(durableSeed(), "system");
-    const provider = {
-      async projectContext() { return { messages: "nope" }; },
+    const provider: PiDurableContextProvider = {
+      // Deliberately malformed payload (arrives over the provider boundary in
+      // production): JSON.parse keeps the fixture dishonest-free — no cast.
+      async projectContext() { return { messages: JSON.parse('"nope"'), estimatedTokens: 0, sourceMessageCount: 0 }; },
     };
     await expect(projection.transform(makeAgentMessages(true), { hostGeneration: 0, contextProvider: provider }))
       .rejects.toMatchObject({ reason: "malformed_response" });
@@ -150,7 +170,7 @@ describe("PiCoreContextProjection", () => {
   it("cancellation between projection and suffix retains non-provider fallback semantics", async () => {
     const controller = new AbortController();
     const projection = new PiCoreContextProjection(durableSeed(), "system");
-    const provider = {
+    const provider: PiDurableContextProvider = {
       async projectContext() {
         return { messages: [{ role: "user", content: "history" }], estimatedTokens: 4, sourceMessageCount: 1 };
       },

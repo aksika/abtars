@@ -36,7 +36,10 @@ describe("resolveReasoning", () => {
     expect(resolveReasoning({ ...base, thinking: { style: "effort", default: "medium" } })).toEqual({ reasoning: true, level: "medium" });
   });
   it("clamps an unknown effort string to medium", () => {
-    expect(resolveReasoning({ ...base, thinking: { style: "effort", default: "bogus" } })).toEqual({ reasoning: true, level: "medium" });
+    // "bogus" arrives via config JSON, not typed code: mapEffortLevel takes a
+    // plain string, so build the fixture through the JSON boundary it travels.
+    const bogusEffort = JSON.parse('{"style":"effort","default":"bogus"}') as PiAiCandidate["thinking"];
+    expect(resolveReasoning({ ...base, thinking: bogusEffort })).toEqual({ reasoning: true, level: "medium" });
   });
   it("does not enable reasoning for extended-budget style (deferred to bake)", () => {
     expect(resolveReasoning({ ...base, thinking: { style: "extended", default: 4096 } })).toEqual({ reasoning: false, level: undefined });
@@ -138,7 +141,8 @@ describe("buildPiContext", () => {
     const u = ctx.messages[0]!;
     expect(u.role).toBe("user");
     expect(Array.isArray(u.content)).toBe(true);
-    expect((u.content as [{ type: string }])[0]).toEqual({ type: "image", data: "QUJDRA==", mimeType: "image/png" });
+    if (!Array.isArray(u.content)) throw new Error("expected content parts");
+    expect(u.content[0]).toEqual({ type: "image", data: "QUJDRA==", mimeType: "image/png" });
   });
 
   it("maps OpenAI tool schemas to pi Tool shape", () => {

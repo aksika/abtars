@@ -1,4 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
+import type { Model, Api } from "@earendil-works/pi-ai";
 import { createPiStreamFn } from "./pi-stream-fn.js";
 import { FallbackPolicy } from "./fallback-policy.js";
 import { ModelHealthRegistry } from "./model-health-registry.js";
@@ -41,6 +42,23 @@ function makeCandidate(overrides?: Partial<ModelCandidate>): ModelCandidate {
 
 const { createPiAiAssistantStream } = await import("./pi-ai-adapter.js");
 
+// Full Model<Api> literal (same pattern as pi-stream-fn.test.ts makeModel).
+function makeModel(overrides?: Partial<Model<Api>>): Model<Api> {
+  return {
+    id: "test",
+    name: "test",
+    api: "openai-completions" as Api,
+    provider: "test-provider",
+    baseUrl: "https://api.test/v1",
+    reasoning: false,
+    input: ["text"],
+    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+    contextWindow: 128000,
+    maxTokens: 128,
+    ...overrides,
+  };
+}
+
 describe("pi-stream-fn → createPiAiAssistantStream boundary", () => {
   let registry: ModelHealthRegistry;
   let candidates: ModelCandidate[];
@@ -58,7 +76,10 @@ describe("pi-stream-fn → createPiAiAssistantStream boundary", () => {
       policy, executionId: "exec_1",
       providerRequestIdFactory: () => "boundary-test-id",
     });
-    for await (const _ev of streamFn({ id: "test", api: "openai-completions" }, { messages: [] }, {})) { /* consume */ }
+    // Awaited: StreamFn allows async implementations; abtars' is sync and
+    // await is identity there. Keeps the boundary honest about both shapes.
+    const stream = await streamFn(makeModel(), { messages: [] }, {});
+    for await (const _ev of stream) { /* consume */ }
 
     expect(vi.mocked(createPiAiAssistantStream)).toHaveBeenCalledTimes(1);
     const options = vi.mocked(createPiAiAssistantStream).mock.calls[0]?.[3] as SimpleStreamOptions;
@@ -72,7 +93,8 @@ describe("pi-stream-fn → createPiAiAssistantStream boundary", () => {
       policy: anthropicPolicy, executionId: "exec_2",
       providerRequestIdFactory: () => "no-anthropic-id",
     });
-    for await (const _ev of streamFn({ id: "claude", api: "anthropic-messages" }, { messages: [] }, {})) { /* consume */ }
+    const stream2 = await streamFn(makeModel({ id: "claude", api: "anthropic-messages" }), { messages: [] }, {});
+    for await (const _ev of stream2) { /* consume */ }
 
     expect(vi.mocked(createPiAiAssistantStream)).toHaveBeenCalledTimes(1);
     const options = vi.mocked(createPiAiAssistantStream).mock.calls[0]?.[3] as SimpleStreamOptions | undefined;

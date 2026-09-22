@@ -4,9 +4,9 @@ import { ModelHealthRegistry } from "./model-health-registry.js";
 
 function makeCandidates(): ModelCandidate[] {
   return [
-    { model: "kimi", endpoint: "ep1", apiKey: "k1", maxContext: 128000 },
-    { model: "nemotron", endpoint: "ep1", apiKey: "k1", maxContext: 128000 },
-    { model: "gemini-flash", endpoint: "ep2", apiKey: "k2", maxContext: 1000000 },
+    { model: "kimi", provider: "test-provider", endpoint: "ep1", apiKey: "k1", maxContext: 128000, source: "primary" },
+    { model: "nemotron", provider: "test-provider", endpoint: "ep1", apiKey: "k1", maxContext: 128000, source: "primary" },
+    { model: "gemini-flash", provider: "test-provider", endpoint: "ep2", apiKey: "k2", maxContext: 1000000, source: "primary" },
   ];
 }
 
@@ -41,7 +41,7 @@ describe("FallbackPolicy", () => {
   });
 
   it("skips candidate with context too large", () => {
-    const small = [{ model: "small", endpoint: "ep1", apiKey: "k1", maxContext: 1000 }];
+    const small: ModelCandidate[] = [{ model: "small", provider: "test-provider", endpoint: "ep1", apiKey: "k1", maxContext: 1000, source: "primary" }];
     const p = new FallbackPolicy(small, reg);
     expect(p.selectModel(2000)).toBeNull();
   });

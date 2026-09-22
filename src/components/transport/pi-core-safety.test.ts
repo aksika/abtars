@@ -76,7 +76,7 @@ describe("createPiExecutionSafetyController", () => {
   });
 
   it("candidate limit switches when alternate candidate exists", () => {
-    const altCandidates = [
+    const altCandidates: ModelCandidate[] = [
       { model: "model-a", provider: "prov-a", endpoint: "https://a.test/v1", maxContext: 128000, apiKey: "key-a", source: "primary" },
       { model: "model-b", provider: "prov-b", endpoint: "https://b.test/v1", maxContext: 128000, apiKey: "key-b", source: "primary" },
     ];
@@ -86,6 +86,7 @@ describe("createPiExecutionSafetyController", () => {
     ctrl.beginProviderTurn("model-a@https://a.test/v1");
     const result = ctrl.beginProviderTurn("model-a@https://a.test/v1");
     expect(result.decision).toBe("stop");
+    if (result.decision !== "stop") throw new Error("expected stop");
     expect(result.reason).toContain("Candidate round limit");
     expect(altPolicy.rotationExcludedKeys.has("model-a@https://a.test/v1")).toBe(true);
     expect(altPolicy.excludedKeys.has("model-a@https://a.test/v1")).toBe(false);
@@ -93,7 +94,7 @@ describe("createPiExecutionSafetyController", () => {
   });
 
   it("clears temporary rotation exclusions after a full multi-candidate cycle (#1595)", () => {
-    const multi = [
+    const multi: ModelCandidate[] = [
       { model: "model-a", provider: "prov-a", endpoint: "https://a.test/v1", maxContext: 128000, apiKey: "key-a", source: "primary" },
       { model: "model-b", provider: "prov-b", endpoint: "https://b.test/v1", maxContext: 128000, apiKey: "key-b", source: "primary" },
     ];
@@ -131,6 +132,7 @@ describe("createPiExecutionSafetyController", () => {
     // turn 5: prompt-wide limit is the final bound
     const result = ctrl.beginProviderTurn(key);
     expect(result.decision).toBe("stop");
+    if (result.decision !== "stop") throw new Error("expected stop");
     expect(result.reason).toContain("Prompt round limit");
     expect(ctrl.lastTerminalIncident?.type).toBe("prompt_round_limit");
   });
@@ -207,7 +209,7 @@ describe("createPiExecutionSafetyController", () => {
   });
 
   it("candidate limit sets lastTerminalIncident with candidate_round_limit type (multi-candidate)", () => {
-    const multi = [
+    const multi: ModelCandidate[] = [
       { model: "model-a", provider: "prov-a", endpoint: "https://a.test/v1", maxContext: 128000, apiKey: "key-a", source: "primary" },
       { model: "model-b", provider: "prov-b", endpoint: "https://b.test/v1", maxContext: 128000, apiKey: "key-b", source: "primary" },
     ];
@@ -236,12 +238,13 @@ describe("createPiExecutionSafetyController", () => {
     // turn 5: prompt-wide limit is the only bound.
     const result = ctrl.beginProviderTurn(key);
     expect(result.decision).toBe("stop");
+    if (result.decision !== "stop") throw new Error("expected stop");
     expect(result.reason).toContain("Prompt round limit");
     expect(ctrl.lastTerminalIncident?.type).toBe("prompt_round_limit");
   });
 
   it("sole-eligible turns do not pre-charge a later multi-candidate rotation segment (#1728 review)", () => {
-    const multi = [
+    const multi: ModelCandidate[] = [
       { model: "model-a", provider: "prov-a", endpoint: "https://a.test/v1", maxContext: 128000, apiKey: "key-a", source: "primary" },
       { model: "model-b", provider: "prov-b", endpoint: "https://b.test/v1", maxContext: 128000, apiKey: "key-b", source: "primary" },
     ];
@@ -285,18 +288,20 @@ describe("createPiExecutionSafetyController", () => {
     const ctrl = createPiExecutionSafetyController(policy);
     ctrl.recordClassifiedStoreLiteral("secret123");
     const scrubbed = ctrl.scrubClassifiedLiterals([
-      { role: "user", content: "my password is secret123" },
+      { role: "user", content: "my password is secret123", timestamp: 0 },
     ]);
-    expect(scrubbed[0]?.content).toBe("my password is [REDACTED]");
+    const first = scrubbed[0];
+    expect(first && "content" in first ? first.content : undefined).toBe("my password is [REDACTED]");
   });
 
   it("does not scrub short literals", () => {
     const ctrl = createPiExecutionSafetyController(policy);
     ctrl.recordClassifiedStoreLiteral("ab");
     const scrubbed = ctrl.scrubClassifiedLiterals([
-      { role: "user", content: "ab is short" },
+      { role: "user", content: "ab is short", timestamp: 0 },
     ]);
-    expect(scrubbed[0]?.content).toBe("ab is short");
+    const second = scrubbed[0];
+    expect(second && "content" in second ? second.content : undefined).toBe("ab is short");
   });
 
   it("scrubs classified literals inside native Pi content blocks", () => {
@@ -325,7 +330,10 @@ describe("#1728 one-free-corrective accounting", () => {
     policy = new FallbackPolicy([makeCandidate()], makeRegistry());
   });
 
-  function triggerExactRepeat(ctrl: ReturnType<typeof createPiExecutionSafetyController>, tool = "bash", args = '{"cmd":"same"}'): void {
+  function triggerExactRepeat(ctrl: ReturnType<typeof createPiExecutionSafetyController>, tool = "bash", argsJson = '{"cmd":"same"}'): void {
+    // Fixtures are JSON text (the wire shape); parse to the record the
+    // controller contract requires. Repeat detection stringifies either way.
+    const args = JSON.parse(argsJson) as Record<string, unknown>;
     for (let i = 0; i < 3; i++) ctrl.beforeTool(tool, args);
   }
 

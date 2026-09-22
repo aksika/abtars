@@ -38,7 +38,7 @@ describe("#1301/#1480 context-bound relay protection", () => {
 
   it("fails closed for a stale or foreign peer context", async () => {
     const orc = await import("./orc-tools.js");
-    expect(await orc.isActiveCardPeerSourced({ orcContext: peerContext })).toBe(true);
+    expect(await orc.isActiveCardPeerSourced({ userId: "peer", orcContext: peerContext })).toBe(true);
   });
 
   for (const tool of ["peer_session", "peer_ask_help", "peer_doorbell"] as const) {

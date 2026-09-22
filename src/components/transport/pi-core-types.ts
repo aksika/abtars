@@ -68,7 +68,11 @@ export type ModelApi = Model<Api>;
 // ── Pi module contract ────────────────────────────────────────────────────────
 
 export interface PiAgentCoreModule {
-  Agent: new (options?: PiAgentOptions) => PiAgent;
+  // Constructor options are required: Pi's real Agent declares
+  // constructor(options: AgentOptions) with mandatory streamFn, and the host
+  // always passes them. (#1803 Stage 1: the optional form let the contract
+  // test compile a construction the real module rejects.)
+  Agent: new (options: PiAgentOptions) => PiAgent;
 }
 
 // ── #1444/#1446 product messages: owned by ./pi-port.js ──────────────────────

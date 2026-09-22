@@ -66,14 +66,17 @@ function makeDependencies(options?: {
 }): FakeBoundary & { deps: PiRuntimeContractDependencies } {
   const modules = new Map(Object.entries(options?.modules ?? {}));
   const calls: string[] = [];
-  const loadModule = vi.fn(async (_installation: PiInstallation, specifier: PiModuleSpecifier) => {
+  // Promise<any>: the fake serves heterogeneous module shapes per specifier.
+  // any absorbs into the generic <T> target exactly like the real loader's
+  // `mod as T` (pi-installation.ts) — no information the tests assert is lost.
+  const loadModule = vi.fn(async (_installation: PiInstallation, specifier: PiModuleSpecifier): Promise<any> => {
     const key = specifier.subpath ? `${specifier.package}/${specifier.subpath}` : specifier.package;
     calls.push(key);
     const mod = modules.get(key);
     if (mod === undefined) throw new Error(`module not present: ${key}`);
     return mod;
   });
-  const resolveInstallation = vi.fn(() => options?.state ?? { state: "compatible", installation: makeInstallation() });
+  const resolveInstallation = vi.fn((): PiInstallationState => options?.state ?? { state: "compatible", installation: makeInstallation() });
   return {
     state: options?.state ?? { state: "compatible", installation: makeInstallation() },
     modules,
@@ -84,7 +87,7 @@ function makeDependencies(options?: {
   };
 }
 
-function contractDeps(boundary: FakeBoundary): PiRuntimeContractDependencies {
+function contractDeps(boundary: FakeBoundary & { deps: PiRuntimeContractDependencies }): PiRuntimeContractDependencies {
   return boundary.deps;
 }
 
@@ -264,6 +267,8 @@ describe("validatePiRuntimeContract (#1573)", () => {
         provider: "test-provider",
         endpoint: "https://api.test/v1",
         maxContext: 128000,
+        apiKey: "test-key",
+        source: "primary",
         thinking: { style: "effort", default: "xhigh" },
       }],
       healthRegistry: new ModelHealthRegistry(),

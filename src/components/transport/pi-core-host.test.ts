@@ -16,30 +16,84 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 import { PiCoreExecutionHost } from "./pi-core-host.js";
 import { DurableContextUnavailableError } from "./pi-core-context.js";
 import { createCurrentTurnMessage } from "./pi-core-types.js";
-import type { LoadedPiAgentCore, PiAgent, AgentEvent, StreamFn, PiAgentCoreModule } from "./pi-core-types.js";
+import type { LoadedPiAgentCore, PiAgent, AgentEvent, StreamFn, PiAgentCoreModule, ModelApi } from "./pi-core-types.js";
+import type { PiExecutionSafetyController } from "./pi-core-safety.js";
+import type { Model, Api } from "@earendil-works/pi-ai";
 import type { InstructionLease } from "../spin-types.js";
 
+// Full Model<Api> literal: initialState.model requires the whole Pi shape.
+function makeTestModel(overrides?: Partial<Model<Api>>): Model<Api> {
+  return {
+    id: "test-model",
+    name: "test-model",
+    api: "openai-completions" as Api,
+    provider: "test-provider",
+    baseUrl: "https://api.test/v1",
+    reasoning: false,
+    input: ["text"],
+    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+    contextWindow: 4096,
+    maxTokens: 128,
+    ...overrides,
+  };
+}
+
+// Complete safety-controller fake: the two resolver tests only exercise
+// prepareNextTurn, but the interface requires every member — stub the rest
+// with inert values instead of laundering a partial object through never.
+function makeFakeSafety(
+  prepareNextTurn: PiExecutionSafetyController["prepareNextTurn"],
+): PiExecutionSafetyController {
+  return {
+    promptRoundsUsed: 1,
+    maxPromptRounds: 25,
+    activeCandidateKey: "test-key",
+    beforeTool: () => ({ decision: "execute" }),
+    afterTool: () => ({ decision: "execute" }),
+    beginProviderTurn: () => ({ decision: "continue" }),
+    prepareNextTurn,
+    requestPause: () => {},
+    requestStop: (_reason: string) => {},
+    recordClassifiedStoreLiteral: (_literal: string) => {},
+    scrubClassifiedLiterals: (messages) => messages,
+    incident: null,
+    lastTerminalIncident: null,
+    paused: false,
+    stopped: false,
+    correctiveAdmitted: false,
+    terminalSafetyFailure: false,
+  };
+}
+
+// The mock fakes exactly the Agent surface the host touches. A full PiAgent
+// cannot be faked by an object literal (private run state), so the mock is
+// typed as this Pick and crosses into Agent-typed positions only through
+// makeLoadedPiAgentCore's class boundary, mirroring real construction.
+type MockPiAgent = Pick<
+  PiAgent,
+  "subscribe" | "prompt" | "steer" | "followUp" | "clearAllQueues" | "abort" | "waitForIdle"
+>;
+
 function makeMockAgent(): {
-  agent: PiAgent;
+  agent: MockPiAgent;
   emitted: AgentEvent[];
   resolvePrompt: () => void;
   rejectPrompt: (error?: Error) => void;
 } {
   const emitted: AgentEvent[] = [];
   let subs: Array<(e: AgentEvent) => void> = [];
-  let _isRunning = false;
   let promptResolve: (() => void) | null = null;
   let promptReject: ((error: Error) => void) | null = null;
   // #1622: the fake prompt is a genuinely active run until the test resolves
   // or rejects it (or aborts). An immediately-resolving prompt violates Pi's
   // documented contract and would mask the missing-agent_end fallback.
+  // (No isRunning flag: the real Pi Agent has none — idleness is observed
+  // through waitForIdle, which the tests assert on directly.)
   const prompt = vi.fn(() => new Promise<void>((resolve, reject) => {
-    _isRunning = true;
     promptResolve = resolve;
     promptReject = reject;
   }));
-  const agent: PiAgent = {
-    get isRunning() { return _isRunning; },
+  const agent: MockPiAgent = {
     subscribe: vi.fn((l) => { subs.push(l); return () => { subs = subs.filter(s => s !== l); }; }),
     prompt,
     steer: vi.fn((msg) => { emitted.push({ type: "message_start", message: msg } as any); }),
@@ -55,7 +109,7 @@ function makeMockAgent(): {
         reject(new Error("aborted"));
       }
     }),
-    waitForIdle: vi.fn(async () => { _isRunning = false; }),
+    waitForIdle: vi.fn(async () => {}),
   };
   return {
     agent,
@@ -88,7 +142,7 @@ function makeFakeLease(overrides?: Partial<InstructionLease>): InstructionLease 
   };
 }
 
-function makeLoadedPiAgentCore(mockAgent: PiAgent): LoadedPiAgentCore {
+function makeLoadedPiAgentCore(mockAgent: MockPiAgent): LoadedPiAgentCore {
   const FakeAgentClass = class {
     constructor(_opts: any) {
       Object.assign(this, mockAgent);
@@ -112,7 +166,7 @@ describe("PiCoreExecutionHost", () => {
   };
   const defaultOpts = {
     seed: defaultSeed,
-    initialState: { systemPrompt: "You are a helpful assistant.", model: { id: "test-model" } },
+    initialState: { systemPrompt: "You are a helpful assistant.", model: makeTestModel() },
     streamFn: vi.fn() as unknown as StreamFn,
   };
 
@@ -284,7 +338,10 @@ describe("PiCoreExecutionHost", () => {
     const startPromise = host.start(loaded).catch(() => {});
     // Emit while the host is still running (prompt pending) so the event is
     // not swallowed by the settled guard.
-    const event: AgentEvent = { type: "text_delta", contentIndex: 0, delta: "hello" };
+    // agent_start is the minimal real AgentEvent the host forwards untouched
+    // to onEvent. (text_delta is an AssistantMessageEvent — the provider
+    // stream layer — not an agent-loop event; the tests conflated the layers.)
+    const event: AgentEvent = { type: "agent_start" };
     await (host as any).handleEvent(event);
     expect(onEvent).toHaveBeenCalledWith(event);
     resolvePrompt();
@@ -339,7 +396,7 @@ describe("PiCoreExecutionHost", () => {
     resolvePrompt();
     await startPromise;
 
-    const event: AgentEvent = { type: "text_delta", contentIndex: 0, delta: "test" };
+    const event: AgentEvent = { type: "agent_start" };
     await expect((host as any).handleEvent(event)).resolves.not.toThrow();
   });
 
@@ -409,7 +466,7 @@ describe("PiCoreExecutionHost", () => {
     // instructions live in the session queue and markDelivered/markConsumed
     // mutate them in place.
     const lease = makeFakeLease({ sessionId: "session_1" });
-    const sessionRef = { instructionQueue: lease.instructions as never, id: "session_1" };
+    const sessionRef = { instructionQueue: [...lease.instructions], id: "session_1" };
     const host = new PiCoreExecutionHost({
       ...defaultOpts,
       session: sessionRef,
@@ -459,7 +516,7 @@ describe("PiCoreExecutionHost", () => {
   it("steer rejects when another lease is outstanding — no silent acceptance", async () => {
     const { agent } = makeMockAgent();
     const firstLease = makeFakeLease({ sessionId: "session_1", leaseId: "lease_1" });
-    const sessionRef = { instructionQueue: firstLease.instructions as never, id: "session_1" };
+    const sessionRef = { instructionQueue: [...firstLease.instructions], id: "session_1" };
     const host = new PiCoreExecutionHost({
       ...defaultOpts,
       session: sessionRef,
@@ -484,7 +541,7 @@ describe("PiCoreExecutionHost", () => {
   it("settlement fails and rejects every outstanding lease exactly once", async () => {
     const { agent } = makeMockAgent();
     const doomedLease = makeFakeLease({ sessionId: "session_1" });
-    const sessionRef = { instructionQueue: doomedLease.instructions as never, id: "session_1" };
+    const sessionRef = { instructionQueue: [...doomedLease.instructions], id: "session_1" };
     const host = new PiCoreExecutionHost({
       ...defaultOpts,
       session: sessionRef,
@@ -507,7 +564,7 @@ describe("PiCoreExecutionHost", () => {
   it("followUp uses the same per-lease deferred machinery", async () => {
     const { agent } = makeMockAgent();
     const followLease = makeFakeLease({ sessionId: "session_1", kind: "followUp" });
-    const sessionRef = { instructionQueue: followLease.instructions as never, id: "session_1" };
+    const sessionRef = { instructionQueue: [...followLease.instructions], id: "session_1" };
     const host = new PiCoreExecutionHost({
       ...defaultOpts,
       session: sessionRef,
@@ -593,7 +650,7 @@ describe("#1619 host reasoning/context wiring", () => {
   };
   const localOpts = {
     seed: localSeed,
-    initialState: { systemPrompt: "You are a helpful assistant.", model: { id: "test-model" } },
+    initialState: { systemPrompt: "You are a helpful assistant.", model: makeTestModel() },
     streamFn: vi.fn() as unknown as StreamFn,
   };
 
@@ -681,16 +738,11 @@ describe("#1619 host reasoning/context wiring", () => {
 
   it("pairs a safety replacement model with a fresh thinking level via the resolver", async () => {
     const { loaded, captured, resolvePrompt } = makeCapturingCore();
-    const safety = {
-      promptRoundsUsed: 1,
-      maxPromptRounds: 25,
-      incident: null,
-      prepareNextTurn: vi.fn(() => ({ model: { id: "alt-model" } })),
-    };
+    const safety = makeFakeSafety(() => ({ model: makeTestModel({ id: "alt-model" }) }));
     const host = new PiCoreExecutionHost({
       ...localOpts,
-      safety: safety as never,
-      resolveThinkingLevelForModel: (model: { id: string }) => (model.id === "alt-model" ? "high" : "off"),
+      safety,
+      resolveThinkingLevelForModel: (model: ModelApi) => (model.id === "alt-model" ? "high" : "off"),
     });
     const startPromise = host.start(loaded).catch(() => {});
     await new Promise((r) => setTimeout(r, 5));
@@ -703,13 +755,8 @@ describe("#1619 host reasoning/context wiring", () => {
 
   it("rejects a replacement model when no thinking-level resolver is supplied (contract error)", async () => {
     const { loaded, captured, resolvePrompt } = makeCapturingCore();
-    const safety = {
-      promptRoundsUsed: 1,
-      maxPromptRounds: 25,
-      incident: null,
-      prepareNextTurn: vi.fn(() => ({ model: { id: "alt-model" } })),
-    };
-    const host = new PiCoreExecutionHost({ ...localOpts, safety: safety as never });
+    const safety = makeFakeSafety(() => ({ model: makeTestModel({ id: "alt-model" }) }));
+    const host = new PiCoreExecutionHost({ ...localOpts, safety });
     const startPromise = host.start(loaded).catch(() => {});
     await new Promise((r) => setTimeout(r, 5));
     const agentOpts = captured[0] as { prepareNextTurnWithContext?: (ctx: unknown) => Promise<unknown> };

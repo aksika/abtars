@@ -1,4 +1,5 @@
 import { describe, it, expect, vi } from "vitest";
+import type { UserMessage } from "@earendil-works/pi-ai";
 import {
   validatePiAgentCoreModule,
   PiCoreContractError,
@@ -105,7 +106,7 @@ describe("createInstructionMessage", () => {
 
 describe("convertInstructionToLlm", () => {
   it("passes non-instruction messages through unchanged", () => {
-    const msg = { role: "user", content: "hello" };
+    const msg: UserMessage = { role: "user", content: "hello", timestamp: 0 };
     expect(convertInstructionToLlm(msg)).toBe(msg);
   });
 
@@ -137,7 +138,7 @@ describe("createCurrentTurnMessage", () => {
 
 describe("convertCurrentTurnToLlm", () => {
   it("passes non-current-turn messages unchanged", () => {
-    const msg = { role: "user", content: "hello" };
+    const msg: UserMessage = { role: "user", content: "hello", timestamp: 0 };
     expect(convertCurrentTurnToLlm(msg)).toBe(msg);
   });
 

@@ -11,9 +11,11 @@ vi.mock("../completion-buffer.js", () => ({
 const { spawnSessionTool, checkSessionTool, terminateSessionTool, sendToSessionTool, setDelegationDeps, getActiveBackgrounds, consumePendingInstruction } = await import("./delegation-tools.js");
 const { addCompletion } = await import("../completion-buffer.js");
 
+const spawnMock = vi.fn().mockResolvedValue({ taskId: "task-1" });
+const interruptSpawnMock = vi.fn().mockReturnValue(true);
 const runtime = {
-  spawn: vi.fn().mockResolvedValue({ taskId: "task-1" }),
-  interruptSpawn: vi.fn().mockReturnValue(true),
+  spawn: spawnMock,
+  interruptSpawn: interruptSpawnMock,
 } as unknown as SubagentRuntime;
 
 const sessionDispatch = {
@@ -34,8 +36,8 @@ describe("Delegation Tools", () => {
   beforeEach(() => {
     getActiveBackgrounds().clear();
     vi.clearAllMocks();
-    runtime.spawn.mockResolvedValue({ taskId: "task-1" });
-    runtime.interruptSpawn.mockReturnValue(true);
+    spawnMock.mockResolvedValue({ taskId: "task-1" });
+    interruptSpawnMock.mockReturnValue(true);
     sessionDispatch.createSubSession.mockReturnValue({ id: "s1", motherId: "m1" });
     setDelegationDeps(runtime, sessionDispatch);
   });

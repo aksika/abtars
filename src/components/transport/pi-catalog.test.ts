@@ -28,8 +28,21 @@ function fakeModel(over: Partial<Model<Api>> = {}): Model<Api> {
  * pi-catalog uses. The official Models interface has ~13 methods (stream/complete/
  * getProviders etc.) but the catalog only calls getModel/getModels/getProvider/
  * getAuth/refresh. The `as unknown as Models` cast skips implementing the
- * uncovered methods — they are never reached from the production code path. */
-function fakeModels(opts: Partial<Models> = {}): Models {
+ * uncovered methods — they are never reached from the production code path.
+ * `list` is the helper's own inventory (not a Models member) feeding the
+ * default method implementations below. */
+interface FakeModelsOpts {
+  list?: Model<Api>[];
+  getModel?: Models["getModel"];
+  getModels?: Models["getModels"];
+  getProvider?: Models["getProvider"];
+  // Model-form only: pi-catalog calls getAuth(model), never getAuth(providerId).
+  // The auth value is opaque to the catalog (truthiness + rejection only), so
+  // the fake returns unknown rather than a fabricated AuthResult.
+  getAuth?: (model: Model<Api>) => Promise<unknown>;
+  refresh?: Models["refresh"];
+}
+function fakeModels(opts: FakeModelsOpts = {}): Models {
   const list = opts.list ?? [fakeModel()];
   return {
     getModel: opts.getModel ?? ((_p: string, id: string) => list.find(m => m.id === id)),

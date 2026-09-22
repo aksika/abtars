@@ -6,9 +6,12 @@
 // boundary with the unreachable test endpoint — see #1582.
 // Real-Pi integration coverage stays deferred: requires a full Pi installation.
 
+import assert from "node:assert";
 import { describe, it, expect, vi, beforeEach, beforeAll } from "vitest";
 import { clampThinkingLevel } from "@earendil-works/pi-ai";
 import { PiCoreTransport, extractAssistantText } from "./pi-core-transport.js";
+import type { AbtarsPiStreamFnOptions } from "./pi-stream-fn.js";
+import type { StreamFn } from "./pi-core-types.js";
 import { ensurePiThinkingClamp } from "./pi-ai-adapter.js";
 import { PiCoreContextProjection, DurableContextUnavailableError, createDurableContextProvider } from "./pi-core-context.js";
 import { PiCoreContractError, convertCurrentTurnToLlm } from "./pi-core-types.js";
@@ -17,7 +20,18 @@ import type { PiExecutionContextSeed, AbtarsCurrentTurnMessage, AgentMessage } f
 import type { ModelCandidate } from "./model-candidates.js";
 import { ModelHealthRegistry } from "./model-health-registry.js";
 
-const mockCreatePiStreamFn = vi.hoisted(() => vi.fn(() => vi.fn()));
+const mockCreatePiStreamFn = vi.hoisted(() =>
+  vi.fn((..._args: [AbtarsPiStreamFnOptions]): StreamFn => vi.fn() as unknown as StreamFn),
+);
+
+// Assert-narrowed accessor for the recorded factory calls: the tests assert
+// call counts first, and a missing call must fail loudly — never silently
+// produce undefined options through a cast.
+function streamFnCallOptions(index: number): AbtarsPiStreamFnOptions {
+  const call = mockCreatePiStreamFn.mock.calls[index];
+  assert(call, `expected createPiStreamFn call ${index}`);
+  return call[0];
+}
 
 vi.mock("./pi-stream-fn.js", () => ({ createPiStreamFn: mockCreatePiStreamFn }));
 vi.mock("../pi-installation.js", async (importOriginal) => {
@@ -265,8 +279,8 @@ describe("PiCoreTransport", () => {
     await expect(t.sendPrompt("sess_1", "second")).rejects.toThrow(PiCoreContractError);
 
     expect(mockCreatePiStreamFn).toHaveBeenCalledTimes(2);
-    const firstCall = mockCreatePiStreamFn.mock.calls[0]?.[0] as { cacheIdentity?: string };
-    const secondCall = mockCreatePiStreamFn.mock.calls[1]?.[0] as { cacheIdentity?: string };
+    const firstCall = streamFnCallOptions(0);
+    const secondCall = streamFnCallOptions(1);
     expect(firstCall.cacheIdentity).toMatch(/^[0-9a-f]{40}$/);
     expect(secondCall.cacheIdentity).toBe(firstCall.cacheIdentity);
   });
@@ -279,8 +293,8 @@ describe("PiCoreTransport", () => {
     await b.initialize();
     await expect(a.sendPrompt("sess_a", "x")).rejects.toThrow(PiCoreContractError);
     await expect(b.sendPrompt("sess_b", "x")).rejects.toThrow(PiCoreContractError);
-    const idA = (mockCreatePiStreamFn.mock.calls[0]?.[0] as { cacheIdentity?: string }).cacheIdentity;
-    const idB = (mockCreatePiStreamFn.mock.calls[1]?.[0] as { cacheIdentity?: string }).cacheIdentity;
+    const idA = streamFnCallOptions(0).cacheIdentity;
+    const idB = streamFnCallOptions(1).cacheIdentity;
     expect(idA).not.toBe(idB);
   });
 
@@ -300,8 +314,8 @@ describe("PiCoreTransport", () => {
     await sub.initialize();
     await expect(main.sendPrompt("sess_1", "x")).rejects.toThrow(PiCoreContractError);
     await expect(sub.sendPrompt("sess_1", "x")).rejects.toThrow(PiCoreContractError);
-    const mainId = (mockCreatePiStreamFn.mock.calls[0]?.[0] as { cacheIdentity?: string }).cacheIdentity;
-    const subId = (mockCreatePiStreamFn.mock.calls[1]?.[0] as { cacheIdentity?: string }).cacheIdentity;
+    const mainId = streamFnCallOptions(0).cacheIdentity;
+    const subId = streamFnCallOptions(1).cacheIdentity;
     expect(mainId).not.toBe(subId);
   });
 
@@ -321,8 +335,8 @@ describe("PiCoreTransport", () => {
     await b.initialize();
     await expect(a.sendPrompt("sess_1", "x")).rejects.toThrow(PiCoreContractError);
     await expect(b.sendPrompt("sess_1", "x")).rejects.toThrow(PiCoreContractError);
-    const idA = (mockCreatePiStreamFn.mock.calls[0]?.[0] as { cacheIdentity?: string }).cacheIdentity;
-    const idB = (mockCreatePiStreamFn.mock.calls[1]?.[0] as { cacheIdentity?: string }).cacheIdentity;
+    const idA = streamFnCallOptions(0).cacheIdentity;
+    const idB = streamFnCallOptions(1).cacheIdentity;
     expect(idA).toBe(idB);
   });
 
@@ -333,8 +347,8 @@ describe("PiCoreTransport", () => {
     await expect(t.sendPrompt("sess_old", "x")).rejects.toThrow(PiCoreContractError);
     await t.resetSession("sess_old");
     await expect(t.sendPrompt("sess_new", "x")).rejects.toThrow(PiCoreContractError);
-    const idOld = (mockCreatePiStreamFn.mock.calls[0]?.[0] as { cacheIdentity?: string }).cacheIdentity;
-    const idNew = (mockCreatePiStreamFn.mock.calls[1]?.[0] as { cacheIdentity?: string }).cacheIdentity;
+    const idOld = streamFnCallOptions(0).cacheIdentity;
+    const idNew = streamFnCallOptions(1).cacheIdentity;
     expect(idOld).not.toBe(idNew);
   });
 
@@ -408,8 +422,9 @@ describe("PiCoreTransport", () => {
       timestamp: 123,
       images: [{ type: "image", mimeType: "image/png", data: "iVBOR=" }],
     };
-    const m = convertCurrentTurnToLlm(msg) as { content: Array<{ type: string; text?: string; data?: string; mimeType?: string }> };
+    const m = convertCurrentTurnToLlm(msg);
     expect(m.role).toBe("user");
+    if (typeof m.content === "string") throw new Error("expected content parts for an image turn");
     expect(m.content[0]).toMatchObject({ type: "text", text: "Look at this" });
     expect(m.content[1]).toMatchObject({ type: "image", data: "iVBOR=", mimeType: "image/png" });
   });
@@ -526,7 +541,16 @@ function makeProjectionSeed(overrides?: Partial<PiExecutionContextSeed>): PiExec
 
 function makeMarkerMessages(): AgentMessage[] {
   return [
-    { role: "assistant", content: "How can I help?" },
+    {
+      role: "assistant",
+      content: [{ type: "text", text: "How can I help?" }],
+      api: "openai-completions",
+      provider: "test-provider",
+      model: "test-model",
+      usage: { input: 1, output: 2, cacheRead: 0, cacheWrite: 0, totalTokens: 3, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
+      stopReason: "stop",
+      timestamp: 0,
+    },
     {
       role: "abtars_current_turn",
       executionId: "exec_1",
@@ -535,6 +559,12 @@ function makeMarkerMessages(): AgentMessage[] {
       timestamp: Date.now(),
     } as AbtarsCurrentTurnMessage,
   ];
+}
+
+// AgentMessage is a union and not every member carries content — read it
+// through an `in` guard instead of asserting a shape the type never promised.
+function messageContent(msg: AgentMessage | undefined): unknown {
+  return msg && "content" in msg ? msg.content : undefined;
 }
 
 describe("context projection at transport level", () => {
@@ -554,7 +584,7 @@ describe("context projection at transport level", () => {
       },
     });
     expect(capturedInput).toEqual({ userId: "user-1", sessionId: "test_session", beforeMessageId: 0, maxContext: 8000 });
-    expect(result.messages.some((m) => m.content === "prior")).toBe(true);
+    expect(result.messages.some((m) => "content" in m && m.content === "prior")).toBe(true);
   });
 
   it("durable request without a provider throws a typed error — no degraded suffix answer", async () => {
@@ -590,11 +620,11 @@ describe("context projection at transport level", () => {
     expect(result.contextDegraded).toBe(false);
     expect(result.messages).toHaveLength(4); // 3 historical + 1 current-turn marker
     expect(result.messages[0]?.role).toBe("user");
-    expect(result.messages[0]?.content).toBe("first");
+    expect(messageContent(result.messages[0])).toBe("first");
     expect(result.messages[1]?.role).toBe("assistant");
-    expect(result.messages[1]?.content).toEqual([{ type: "text", text: "second" }]);
+    expect(messageContent(result.messages[1])).toEqual([{ type: "text", text: "second" }]);
     expect(result.messages[2]?.role).toBe("user");
-    expect(result.messages[2]?.content).toBe("third");
+    expect(messageContent(result.messages[2])).toBe("third");
   });
 });
 

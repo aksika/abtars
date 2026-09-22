@@ -34,8 +34,9 @@ describe("artifact_attach tool", () => {
 
     const arts = drainArtifacts(42);
     expect(arts).toHaveLength(1);
-    expect(arts![0].name).toBe("hello.txt");
-    expect(Buffer.from(arts![0].content, "base64").toString()).toBe("hello world");
+    if (!arts) throw new Error("expected one queued artifact");
+    expect(arts[0]?.name).toBe("hello.txt");
+    expect(Buffer.from(arts[0]?.content ?? "", "base64").toString()).toBe("hello world");
   });
 
   it("rejects files > 1MB", async () => {

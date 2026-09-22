@@ -2,7 +2,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { ProviderAttemptRunner } from "./provider-attempt-runner.js";
 import type { ProviderAttemptExit, ProviderAttemptFactory, ProviderAttemptPhase } from "./provider-attempt-runner.js";
 import type { ModelCandidate } from "./model-candidates.js";
-import type { AssistantMessageEvent } from "@earendil-works/pi-ai";
+import type { AssistantMessageEvent, AssistantMessage, Context } from "@earendil-works/pi-ai";
 
 function makeCandidate(): ModelCandidate {
   return {
@@ -28,7 +28,23 @@ const model = {
   maxTokens: 128,
 };
 
-const context = { messages: [] as unknown[] };
+const context: Context = { messages: [] };
+
+// Full assistant message: text_delta.partial and done.message require the
+// complete Pi shape. The runner forwards events untouched (inactivity only),
+// so field values are inert — but the shape must be real.
+function makeAssistantMessage(text: string): AssistantMessage {
+  return {
+    role: "assistant",
+    content: [{ type: "text", text }],
+    api: "openai-completions",
+    provider: "test-provider",
+    model: "test-model",
+    usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, totalTokens: 2, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
+    stopReason: "stop",
+    timestamp: 0,
+  };
+}
 
 function makeIteratorStream(events: Array<{ delayMs: number; event?: AssistantMessageEvent; done?: boolean }>) {
   let idx = 0;
@@ -179,9 +195,9 @@ describe("ProviderAttemptRunner", () => {
 
   it("resets inactivity on every event and does not time out on progress", async () => {
     const stream = makeIteratorStream([
-      { delayMs: 5, event: { type: "text_delta", contentIndex: 0, delta: "a" } },
-      { delayMs: 5, event: { type: "text_delta", contentIndex: 0, delta: "b" } },
-      { delayMs: 5, event: { type: "done", reason: "stop", message: { role: "assistant", content: "ab", stopReason: "stop", usage: { input: 1, output: 1 } } } },
+      { delayMs: 5, event: { type: "text_delta", contentIndex: 0, delta: "a", partial: makeAssistantMessage("a") } },
+      { delayMs: 5, event: { type: "text_delta", contentIndex: 0, delta: "b", partial: makeAssistantMessage("ab") } },
+      { delayMs: 5, event: { type: "done", reason: "stop", message: makeAssistantMessage("ab") } },
     ]);
     const factory = vi.fn(async () => stream) as unknown as ProviderAttemptFactory;
 

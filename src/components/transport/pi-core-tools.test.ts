@@ -224,7 +224,10 @@ describe("createPiAgentTools", () => {
 
     for (const [index, translated] of ["one", "two", "three"].entries()) {
       const result = await storeTool!.execute(`call_${index}`, { translated, type: "fact" });
-      expect(result.content[0]?.text).toContain('"retryable":false');
+      const first = result.content[0];
+      expect(first?.type).toBe("text");
+      if (first?.type !== "text") throw new Error("expected text content");
+      expect(first.text).toContain('"retryable":false');
     }
 
     expect(instantStore).not.toHaveBeenCalled();
@@ -236,7 +239,7 @@ describe("createPiAgentTools", () => {
   it.each([
     ["B", "Browse"], ["C", "Code"], ["T", "Task"], ["P", "Peer"], ["S", "System"],
     ["O", "Orc"], ["W", "Worker"], ["H", "Healer"], ["K", "Skill"],
-  ] as const)("hides memory_store from %s sessions while A and D see it", (type) => {
+  ] as const)("hides memory_store from %s sessions while A and D see it", (type, _label) => {
     const ctx = makeContext({
       sandboxPolicy: buildPolicy("owner", { allowedTools: ["memory_store"] }),
       sessionType: type as SessionType,
@@ -313,7 +316,10 @@ describe("createPiAgentTools", () => {
     if (tool) {
       const result = await tool.execute("call_1", { name: "hi" });
       expect(result.details).toEqual({ skipped: true });
-      expect(result.content[0]?.text).toContain("skipped");
+      const skipped = result.content[0];
+      expect(skipped?.type).toBe("text");
+      if (skipped?.type !== "text") throw new Error("expected text content");
+      expect(skipped.text).toContain("skipped");
     }
   });
 

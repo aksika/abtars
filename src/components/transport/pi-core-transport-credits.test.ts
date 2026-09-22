@@ -51,24 +51,42 @@ vi.mock("./pi-core-types.js", async (importOriginal) => {
     }),
   };
 });
-vi.mock("./pi-stream-fn.js", () => ({
-  createPiStreamFn: vi.fn((options: { onTerminalFailure?: (f: unknown) => void }) => {
-    if (terminalFailureMode.fire) {
-      options.onTerminalFailure?.({
-        code: "credits_exhausted",
-        retryable: false,
-        attemptedCandidates: 2,
-        message: "All model candidates are blocked by provider credit exhaustion",
-      });
-    }
-    return vi.fn(() => ({
-      [Symbol.asyncIterator]: async function* () {
-        yield { type: "error", reason: "error", error: { role: "assistant", content: [], stopReason: "error", errorMessage: "All model candidates failed", usage: {} } };
+vi.mock("./pi-stream-fn.js", async () => {
+  // Real stream class: a structural fake cannot satisfy AssistantMessageEventStream
+  // (private run state), and the transport for-awaits + reads result() off it.
+  const { createAssistantMessageEventStream } = await import("@earendil-works/pi-ai");
+  return {
+    createPiStreamFn: vi.fn(
+      (
+        options: import("./pi-stream-fn.js").AbtarsPiStreamFnOptions,
+      ): import("./pi-core-types.js").StreamFn => {
+      if (terminalFailureMode.fire) {
+        options.onTerminalFailure?.({
+          code: "credits_exhausted",
+          retryable: false,
+          attemptedCandidates: 2,
+          message: "All model candidates are blocked by provider credit exhaustion",
+        });
+      }
+      const stream = createAssistantMessageEventStream();
+      const terminal: import("@earendil-works/pi-ai").AssistantMessage = {
+        role: "assistant",
+        content: [],
+        api: "openai-completions",
+        provider: "test-provider",
+        model: "test-model",
+        usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
+        stopReason: "error",
+        errorMessage: "All model candidates failed",
+        timestamp: 0,
+      };
+      stream.push({ type: "error", reason: "error", error: terminal });
+      stream.end(terminal);
+      return () => stream;
       },
-      result: async () => ({ role: "assistant", content: [], stopReason: "error", errorMessage: "All model candidates failed", usage: {} }),
-    }));
-  }),
-}));
+    ),
+  };
+});
 
 // #1573: initialize() gates readiness on the runtime contract probe; unrelated
 // credit tests receive a successful probe.
@@ -81,6 +99,8 @@ import { ProviderExecutionError } from "./provider-failure.js";
 import { ModelHealthRegistry } from "./model-health-registry.js";
 import type { ModelCandidate } from "./model-candidates.js";
 import { createPiStreamFn } from "./pi-stream-fn.js";
+import { createAssistantMessageEventStream } from "@earendil-works/pi-ai";
+import type { AssistantMessage } from "@earendil-works/pi-ai";
 
 function makeTransport(): PiCoreTransport {
   const candidate: ModelCandidate = {
@@ -131,19 +151,28 @@ describe("PiCoreTransport terminal provider failure (#1297)", () => {
   it("throws ProviderExecutionError carrying context_overflow when the stream boundary reports it (#1745)", async () => {
     const transport = makeTransport();
     await transport.initialize();
-    vi.mocked(createPiStreamFn).mockImplementationOnce((options: { onTerminalFailure?: (f: unknown) => void }) => {
+    vi.mocked(createPiStreamFn).mockImplementationOnce((options) => {
       options.onTerminalFailure?.({
         code: "context_overflow",
         retryable: false,
         attemptedCandidates: 2,
         message: "The request exceeds the context window of every configured model",
       });
-      return vi.fn(() => ({
-        [Symbol.asyncIterator]: async function* () {
-          yield { type: "error", reason: "error", error: { role: "assistant", content: [], stopReason: "error", errorMessage: "All model candidates failed", usage: {} } };
-        },
-        result: async () => ({ role: "assistant", content: [], stopReason: "error", errorMessage: "All model candidates failed", usage: {} }),
-      }));
+      const stream = createAssistantMessageEventStream();
+      const terminal: AssistantMessage = {
+        role: "assistant",
+        content: [],
+        api: "openai-completions",
+        provider: "test-provider",
+        model: "test-model",
+        usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
+        stopReason: "error",
+        errorMessage: "All model candidates failed",
+        timestamp: 0,
+      };
+      stream.push({ type: "error", reason: "error", error: terminal });
+      stream.end(terminal);
+      return () => stream;
     });
 
     const err = await transport.sendPrompt("session", "continue").catch((e: unknown) => e);

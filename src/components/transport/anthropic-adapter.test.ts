@@ -10,7 +10,7 @@ describe("anthropic-adapter", () => {
     const req = toAnthropicRequest("claude-sonnet-4", msgs, 4096);
     expect(req.system).toBe("You are helpful");
     expect(req.messages).toHaveLength(1);
-    expect(req.messages[0].role).toBe("user");
+    expect(req.messages[0]?.role).toBe("user");
   });
 
   it("converts role:tool to role:user with tool_result blocks", () => {
@@ -24,9 +24,9 @@ describe("anthropic-adapter", () => {
     expect(toolMsg).toBeDefined();
     expect(toolMsg!.role).toBe("user");
     const block = (toolMsg!.content as Array<Record<string, unknown>>)[0];
-    expect(block.type).toBe("tool_result");
-    expect(block.tool_use_id).toBe("toolu_abc");
-    expect(block.content).toBe("file1.ts\nfile2.ts");
+    expect(block?.type).toBe("tool_result");
+    expect(block?.tool_use_id).toBe("toolu_abc");
+    expect(block?.content).toBe("file1.ts\nfile2.ts");
   });
 
   it("merges consecutive tool results into one user message", () => {
@@ -36,7 +36,7 @@ describe("anthropic-adapter", () => {
     ];
     const req = toAnthropicRequest("claude-sonnet-4", msgs, 4096);
     expect(req.messages).toHaveLength(1);
-    expect((req.messages[0].content as unknown[]).length).toBe(2);
+    expect(req.messages[0]?.content).toHaveLength(2);
   });
 
   it("converts tool schemas to input_schema format", () => {
