@@ -7,12 +7,18 @@
  * every route fallback during transport construction.
  */
 import { describe, it, expect, vi, beforeEach } from "vitest";
+import type { DurableContextProviderHolder } from "./transport/pi-core-context.js";
 
 const mockLoadTransport = vi.hoisted(() => vi.fn());
 const mockGetEnvFallback = vi.hoisted(() => vi.fn());
 const mockResolveAgent = vi.hoisted(() => vi.fn());
 const mockRouteAssignments = vi.hoisted(() => vi.fn());
-const mockAcpTransport = vi.hoisted(() => vi.fn(function AcpTransportMock() {
+const mockAcpTransport = vi.hoisted(() => vi.fn(function AcpTransportMock(
+  this: unknown,
+  _cliPath: string,
+  _workingDir: string,
+  _opts?: { agent?: string; model?: string; cliArgs?: string[] },
+) {
   return { initialize: vi.fn().mockResolvedValue(undefined) };
 }));
 const mockLoadAndValidateConfig = vi.hoisted(() => vi.fn().mockResolvedValue({ transport: { agentCliPath: "/usr/bin/kiro-cli", workingDir: "/tmp/work" } }));
@@ -86,8 +92,10 @@ const INHERITED_MAIN = {
   provider: "main-provider",
   endpoint: "https://main.test/v1",
   maxContext: 128000,
-  apiFormat: "openai" as const,
-  thinking: false,
+  // "chat" maps to openai-completions exactly like the old invalid "openai"
+  // literal did (pickPiApi falls through); thinking omitted — all production
+  // reads are ?. chains, so absent behaves identically to the old `false`.
+  apiFormat: "chat" as const,
 };
 
 function candidatesOf(transport: unknown): Array<{ model: string; source?: string }> {
@@ -110,14 +118,18 @@ describe("createSubagentTransport #1527", () => {
   });
 
   it("passes the late-bound provider holder into the constructed transport", async () => {
-    const holder = { current: null };
+    const holder: DurableContextProviderHolder = { current: null };
     const { transport } = await createSubagentTransport("task", undefined, null, holder);
     expect(transport).toBeInstanceOf(PiCoreTransport);
     const stored = (transport as unknown as { _contextProvider: typeof holder })._contextProvider;
     expect(stored).toBe(holder);
 
-    // Late binding must reach the transport after construction.
-    const provider = { projectContext: vi.fn() };
+    // Late binding must reach the transport after construction. The provider
+    // is never invoked here — only its identity propagates — so it rejects
+    // loudly if anything ever calls it.
+    const provider: NonNullable<DurableContextProviderHolder["current"]> = {
+      projectContext: () => Promise.reject(new Error("holder fake never serves")),
+    };
     holder.current = provider;
     expect(stored.current).toBe(provider);
   });

@@ -62,7 +62,6 @@ describe("reconcileManifest", () => {
     scripts: { include: [], executable: "*.sh" },
     services: { supervised: {} },
     cliWrappers: [],
-    postInstall: [],
   };
 
   it("reports missing dirs in diff mode", () => {

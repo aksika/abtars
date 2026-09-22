@@ -95,7 +95,8 @@ describe("telegram-model-picker (#1320)", () => {
       expect(api.sendMessage).toHaveBeenCalledTimes(1);
       const [, , opts] = api.sendMessage.mock.calls[0]!;
       const buttons = (opts as { reply_markup: { inline_keyboard: unknown[][] } }).reply_markup.inline_keyboard;
-      const labels = buttons.flat().map((b: { text: string }) => b.text);
+      // Telegram inline buttons always carry text (Bot API Button shape).
+      const labels = (buttons.flat() as Array<{ text: string }>).map((b) => b.text);
       expect(labels).toContain("alpha (free)");
       expect(labels).toContain("beta ($1/$2)");
       expect(labels.some((l: string) => l.startsWith("← Back"))).toBe(true);
@@ -115,7 +116,8 @@ describe("telegram-model-picker (#1320)", () => {
       await handleModelPickerCallback("mprov:professor:openrouter", 1, api as never, state, deps);
       const [, , opts] = api.sendMessage.mock.calls[0]!;
       const buttons = (opts as { reply_markup: { inline_keyboard: unknown[][] } }).reply_markup.inline_keyboard;
-      const labels = buttons.flat().map((b: { text: string }) => b.text);
+      // Telegram inline buttons always carry text (Bot API Button shape).
+      const labels = (buttons.flat() as Array<{ text: string }>).map((b) => b.text);
       expect(labels).toContain("vendor/cat-model-5 (★★★★★, $1/$2)");
       expect(labels).toContain("vendor/cat-model-3 (★★★★☆, free)");
       // Stale id absent from pi-ai catalog is filtered out.
@@ -133,7 +135,8 @@ describe("telegram-model-picker (#1320)", () => {
       await handleModelPickerCallback("mprov:professor:codex", 1, api as never, state, deps);
       const [, , opts] = api.sendMessage.mock.calls[0]!;
       const buttons = (opts as { reply_markup: { inline_keyboard: unknown[][] } }).reply_markup.inline_keyboard;
-      const labels = buttons.flat().map((b: { text: string }) => b.text);
+      // Telegram inline buttons always carry text (Bot API Button shape).
+      const labels = (buttons.flat() as Array<{ text: string }>).map((b) => b.text);
       expect(labels).toContain("custom-model (★★★★☆, $1/$2)");
     });
 

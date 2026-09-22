@@ -71,7 +71,7 @@ describe("artifact-store", () => {
       mockSend.mockResolvedValue({});
       const url = await store.upload("/tmp/test.txt", "artifacts/test.txt");
       expect(mockSend).toHaveBeenCalledOnce();
-      const cmd = mockSend.mock.calls[0][0];
+      const cmd = mockSend.mock.calls[0]?.[0];
       expect(cmd).toBeInstanceOf(MockPutObjectCommand);
       expect(cmd.input.Bucket).toBe("test-bucket");
       expect(cmd.input.Key).toBe("artifacts/test.txt");
@@ -88,7 +88,7 @@ describe("artifact-store", () => {
 
       await store.download("artifacts/test.txt", "/tmp/art-test-out.txt");
       expect(mockSend).toHaveBeenCalledOnce();
-      const cmd = mockSend.mock.calls[0][0];
+      const cmd = mockSend.mock.calls[0]?.[0];
       expect(cmd).toBeInstanceOf(MockGetObjectCommand);
       expect(cmd.input.Bucket).toBe("test-bucket");
       expect(cmd.input.Key).toBe("artifacts/test.txt");
@@ -102,7 +102,7 @@ describe("artifact-store", () => {
       mockGetSignedUrl.mockResolvedValue("https://signed.example.com/file?token=abc");
       const url = await store.presign("artifacts/test.txt", 7200);
       expect(mockGetSignedUrl).toHaveBeenCalledOnce();
-      const [, , opts] = mockGetSignedUrl.mock.calls[0];
+      const [, , opts] = mockGetSignedUrl.mock.calls[0] ?? [];
       expect(opts.expiresIn).toBe(7200);
       expect(url).toBe("https://signed.example.com/file?token=abc");
     });
@@ -129,7 +129,7 @@ describe("artifact-store", () => {
       mockSend.mockResolvedValue({});
       await store.remove("artifacts/test.txt");
       expect(mockSend).toHaveBeenCalledOnce();
-      const cmd = mockSend.mock.calls[0][0];
+      const cmd = mockSend.mock.calls[0]?.[0];
       expect(cmd).toBeInstanceOf(MockDeleteObjectCommand);
       expect(cmd.input.Key).toBe("artifacts/test.txt");
     });

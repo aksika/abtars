@@ -29,7 +29,6 @@ function makeCtx(overrides: Record<string, unknown> = {}) {
       },
     },
     ...overrides,
-    reply,
   } as any;
 }
 

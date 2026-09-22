@@ -15,16 +15,24 @@ export function setCodingCommandService(svc: PiCodingSessionService | null): voi
   service = svc;
 }
 
-function getService(_ctx: CommandContext): PiCodingSessionService {
+function getService(): PiCodingSessionService {
   if (!service) throw new Error("Pi coding sessions are not available");
   return service;
 }
 
+/** Narrow context this module reads (reply/userId/chatId/platform only). */
+type CodingCommandContext = Pick<CommandContext, "userId" | "chatId" | "platform" | "reply">;
+
 const CHOOSER_MAX = 5;
 
-export async function handleCoding(text: string, ctx: CommandContext): Promise<boolean> {
+// #1803 Stage 3: narrowed from CommandContext to CodingCommandContext (the
+// four fields this module reads — verified across handleCoding and its three
+// helpers). Full-context callers (command-registry CommandHandler) still
+// satisfy the Pick, and any future field use widens it again. Zero runtime
+// effect.
+export async function handleCoding(text: string, ctx: CodingCommandContext): Promise<boolean> {
   try {
-    const svc = getService(ctx);
+    const svc = getService();
     const args = text.replace(/^\/coding\s*/i, "").trim();
 
     if (!args || args === "resume") {
@@ -92,7 +100,7 @@ export async function handleCoding(text: string, ctx: CommandContext): Promise<b
   }
 }
 
-async function resumeMostRecent(svc: PiCodingSessionService, ctx: CommandContext, explicitId: string): Promise<boolean> {
+async function resumeMostRecent(svc: PiCodingSessionService, ctx: CodingCommandContext, explicitId: string): Promise<boolean> {
   if (explicitId) {
     const rec = svc.getSession(explicitId, ctx.userId);
     if (!rec) { await ctx.reply("Coding session not found."); return true; }
@@ -122,7 +130,7 @@ async function resumeMostRecent(svc: PiCodingSessionService, ctx: CommandContext
   return true;
 }
 
-async function activateSession(svc: PiCodingSessionService, ctx: CommandContext, sessionId: string): Promise<boolean> {
+async function activateSession(svc: PiCodingSessionService, ctx: CodingCommandContext, sessionId: string): Promise<boolean> {
   try {
     return svc.activate(sessionId, ctx.userId);
   } catch {
@@ -130,7 +138,7 @@ async function activateSession(svc: PiCodingSessionService, ctx: CommandContext,
   }
 }
 
-async function deactivateCoding(svc: PiCodingSessionService, ctx: CommandContext, sessionId: string): Promise<boolean> {
+async function deactivateCoding(svc: PiCodingSessionService, ctx: CodingCommandContext, sessionId: string): Promise<boolean> {
   try {
     return await svc.deactivate(sessionId, ctx.userId);
   } catch {

@@ -35,7 +35,7 @@ vi.mock("../spin.js", () => ({
 }));
 
 let TEST_HOME: string;
-let kanban: typeof import("./kanban-board.js");
+let kanban: typeof import("./tasks/kanban-board.js");
 let reconciler: typeof import("./reconciler.js");
 let workerStoreMod: typeof import("./worker-supervision-store.js");
 let reviewStoreMod: typeof import("./project-acceptance/project-review-store.js");
@@ -258,7 +258,7 @@ describe("two-generation lifecycle", () => {
 // ── Drain ───────────────────────────────────────────────────────────────────
 
 describe("symmetric stop and drain", () => {
-  function makeHoldAdapter(): { adapter: import("./swarm-executor-types.js").SwarmExecutorAdapter; release: (obs: unknown) => void; starts: number } {
+  function makeHoldAdapter(): { adapter: import("./swarm-executor-types.js").SwarmExecutorAdapter; release: (obs: unknown) => void; starts: number[] } {
     let release!: (obs: unknown) => void;
     const gate = new Promise<unknown>(resolve => { release = resolve; });
     const starts: number[] = [];

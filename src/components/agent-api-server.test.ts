@@ -244,7 +244,7 @@ describe("AgentApiServer", () => {
     ];
 
     function targetFor(e: ExpectedRoute) {
-      const [pathname] = e.path.split("?");
+      const pathname = e.path.split("?")[0] ?? "";
       return { pathname, query: {} };
     }
 
@@ -316,14 +316,12 @@ describe("AgentApiServer", () => {
       // real stores, fake transport, no Reconciler churn in the test process.
       const { RequesterContributionService } = await import("./peer-help/requester-contribution-service.js");
       const { ContributionStore } = await import("./peer-help/contribution-store.js");
-      const { ProjectReviewStore } = await import("./project-acceptance/project-review-store.js");
       const { requireTaskDatabase } = await import("./tasks/kanban-board.js");
       const taskDb = requireTaskDatabase() as any;
       sends = [];
       const service = new RequesterContributionService({
         taskDb,
         contributionStore: new ContributionStore(taskDb, { kanbanGetCard: () => undefined, kanbanUpdate: () => {}, kanbanComplete: () => {}, kanbanFail: () => {} }),
-        reviewStore: new ProjectReviewStore(taskDb),
         askHelp: async (peer) => {
           sends.push(peer);
           return { version: 1, request_id: "x", decision: "accepted", contribution_ref: `help_${sends.length}` };

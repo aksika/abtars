@@ -4,7 +4,6 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import type { PeerHelpRequestV1, PeerHelpResponseV1 } from "./contract.js";
 import { ContributionStore } from "./contribution-store.js";
-import { ProjectReviewStore } from "../project-acceptance/project-review-store.js";
 import { RequesterContributionService } from "./requester-contribution-service.js";
 
 let db: import("better-sqlite3").Database;
@@ -71,7 +70,6 @@ function makeEnv(): Env {
     kanbanComplete: () => {},
     kanbanFail: () => {},
   });
-  const reviewStore = new ProjectReviewStore(wrapper as any);
   // #1792: Env requires the service, but the service closes over env —
   // construct the shell first, then attach (same pattern as before).
   const env = {
@@ -82,7 +80,6 @@ function makeEnv(): Env {
   env.service = new RequesterContributionService({
     contributionStore,
     taskDb: wrapper as any,
-    reviewStore,
     askHelp: async (peer, request) => {
       env.sends.push({ peer, request });
       if (env.nextError) throw env.nextError;

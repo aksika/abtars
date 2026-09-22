@@ -3,27 +3,29 @@ import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { handleCommand, type CommandContext } from "./commands/index.js";
-import { Spin } from "./spin.js";
-const SessionManager = Spin;
 import { setUserRegistryOverride } from "./user-registry.js";
-import type { CodingMode } from "./coding-mode.js";
+import { createDisabledRuntime } from "./memory-runtime.js";
 import type { IdleSave } from "./idle-save.js";
 import type { ManagedSession } from "./spin-types.js";
 
+const execFileMock = vi.hoisted(() => vi.fn((_cmd: string, _args: string[], _opts: unknown, cb: (err: Error | null, stdout: string) => void) => {
+  cb(null, "{}");
+  return { stderr: { resume: vi.fn() } };
+}));
+
 vi.mock("node:child_process", () => ({
-  execFile: vi.fn((_cmd: string, _args: string[], _opts: unknown, cb: (err: Error | null, stdout: string) => void) => {
-    cb(null, "{}");
-    return { stderr: { resume: vi.fn() } };
-  }),
+  execFile: execFileMock,
 }));
 
 function makeCtx(overrides: Partial<CommandContext> = {}): CommandContext {
+  const replies: string[] = [];
+  const reply = vi.fn(async (text: string): Promise<number> => { replies.push(text); return 1; });
   return {
     sessionKey: "telegram:123",
     chatId: 123,
     userId: "test",
     platform: "telegram",
-    reply: vi.fn().mockResolvedValue(undefined),
+    reply,
     transport: {
       sendPrompt: vi.fn().mockResolvedValue("ok"),
       resetSession: vi.fn().mockResolvedValue(undefined),
@@ -31,13 +33,17 @@ function makeCtx(overrides: Partial<CommandContext> = {}): CommandContext {
       initialize: vi.fn().mockResolvedValue(undefined),
       destroy: vi.fn(),
       isReady: true,
+      transportCommands: [],
+      contextPercent: -1,
+      answerOnly: "",
+      toolCallsSucceeded: 0,
+      intermediateDeliveredText: "",
     },
-    config: { agentTransport: "acp", workingDir: "/tmp", discordA2aEnabled: false },
+    config: { workingDir: "/tmp" },
     startedAt: Date.now(),
-    memory: null,
+    memoryRuntime: createDisabledRuntime(),
     memoryConfig: { memoryEnabled: false, memoryDir: "/tmp" },
     nlmConfig: { enabled: false },
-    codingMode: { has: vi.fn().mockReturnValue(false), start: vi.fn(), stop: vi.fn(), getTransport: vi.fn() } as unknown as CodingMode,
     idleSave: { reset: vi.fn(), stop: vi.fn(), save: vi.fn().mockResolvedValue(undefined) } as unknown as IdleSave,
     sessionManager: { endSession: vi.fn(), getActiveSessionId: () => "telegram:123", getActiveSession: () => ({ id: "telegram:123" }), setRuntime: vi.fn() } as any,
     updateCtxStart: vi.fn(),
@@ -127,11 +133,10 @@ describe("command-handlers", () => {
   });
 
   it("/status does NOT call mcporter (moved to /mcp)", async () => {
-    const { execFile } = await import("node:child_process") as { execFile: ReturnType<typeof vi.fn> };
-    execFile.mockClear();
+    execFileMock.mockClear();
     const ctx = makeCtx();
     await handleCommand("/status", ctx);
-    const mcporterCalls = execFile.mock.calls.filter((c: unknown[]) => c[0] === "mcporter");
+    const mcporterCalls = execFileMock.mock.calls.filter((c: unknown[]) => c[0] === "mcporter");
     expect(mcporterCalls).toHaveLength(0);
   });
 
@@ -285,11 +290,10 @@ describe("command-handlers /task validate", () => {
     writeFileSync(join(taskRoot, "tasks.json"), "[]", "utf-8");
     const enqueueCron = vi.fn();
     const ctx = makeCtx({ enqueueCron });
-    const { execFile } = await import("node:child_process") as { execFile: ReturnType<typeof vi.fn> };
-    execFile.mockClear();
+    execFileMock.mockClear();
     await handleCommand("/task validate", ctx);
     expect(enqueueCron).not.toHaveBeenCalled();
-    const abtarsTaskCalls = execFile.mock.calls.filter((c: unknown[]) => c[0] === "abtars-task");
+    const abtarsTaskCalls = execFileMock.mock.calls.filter((c: unknown[]) => c[0] === "abtars-task");
     expect(abtarsTaskCalls).toHaveLength(0);
   });
 

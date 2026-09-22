@@ -22,6 +22,7 @@ function makeSession(overrides?: Partial<ManagedSession>): ManagedSession {
     toolCallCount: 0,
     log: [],
     shortIndex: 1,
+    showThinking: false,
     busy: true,
     queue: [],
     fullMode: false,

@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync, mkdirSync, writeFileSync, realpathSync } from "nod
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { ShaWorkspaceManager, type ExecFn } from "./sha-workspace-manager.js";
-import { ShaKnownFixRunner, SHA_ALLOWED_EXECUTABLES } from "./sha-known-fix-runner.js";
+import { ShaKnownFixRunner, SHA_ALLOWED_EXECUTABLES, type ExecFn as RunnerExecFn } from "./sha-known-fix-runner.js";
 import type { PiExecutorConfig } from "../pi-executor/config.js";
 
 const savedHome = process.env["ABTARS_HOME"];
@@ -217,7 +217,7 @@ describe("ShaKnownFixRunner (R8)", () => {
   });
 
   it("action exit zero is executed, not fixed — verifier decides", async () => {
-    const exec: ExecFn = async (cmd, args, _opts) => {
+    const exec: RunnerExecFn = async (cmd, args, _opts) => {
       if (cmd === "git" && args[0] === "action") return { stdout: "", stderr: "", code: 0, timedOut: false };
       if (cmd === "git" && args[0] === "verify") return { stdout: "", stderr: "", code: 1, timedOut: false };
       return { stdout: "", stderr: "", code: 0, timedOut: false };
@@ -230,20 +230,20 @@ describe("ShaKnownFixRunner (R8)", () => {
   });
 
   it("only action+verifier both zero records verified", async () => {
-    const exec: ExecFn = async (_cmd, _args, _opts) => ({ stdout: "", stderr: "", code: 0, timedOut: false });
+    const exec: RunnerExecFn = async (_cmd, _args, _opts) => ({ stdout: "", stderr: "", code: 0, timedOut: false });
     const outcome = await new ShaKnownFixRunner(exec).execute({ pattern: "p", action: "run", command: ["git", "a"], verifyCommand: ["git", "v"], cooldownMin: 1, verified: true });
     expect(outcome.state).toBe("known_fix_verified");
   });
 
   it("action failure is failed; timeout is typed", async () => {
-    const exec: ExecFn = async (_cmd, _args, _opts) => ({ stdout: "", stderr: "", code: null, timedOut: true });
+    const exec: RunnerExecFn = async (_cmd, _args, _opts) => ({ stdout: "", stderr: "", code: null, timedOut: true });
     const outcome = await new ShaKnownFixRunner(exec).execute({ pattern: "p", action: "run", command: ["git", "a"], verifyCommand: ["git", "v"], cooldownMin: 1, verified: true });
     expect(outcome.state).toBe("known_fix_failed");
     expect(outcome.action.timedOut).toBe(true);
   });
 
   it("non-allowlisted executables are rejected without running", async () => {
-    const exec: ExecFn = async (_cmd, _args, _opts) => ({ stdout: "", stderr: "", code: 0, timedOut: false });
+    const exec: RunnerExecFn = async (_cmd, _args, _opts) => ({ stdout: "", stderr: "", code: 0, timedOut: false });
     const outcome = await new ShaKnownFixRunner(exec).execute({ pattern: "p", action: "run", command: ["curl", "evil"], verifyCommand: ["git", "v"], cooldownMin: 1, verified: true });
     expect(outcome.state).toBe("known_fix_failed");
     expect(outcome.action.output).toContain("not allowlisted");
@@ -251,7 +251,7 @@ describe("ShaKnownFixRunner (R8)", () => {
   });
 
   it("bounded output capture", async () => {
-    const exec: ExecFn = async (_cmd, _args, _opts) => ({ stdout: "x".repeat(20_000), stderr: "", code: 0, timedOut: false });
+    const exec: RunnerExecFn = async (_cmd, _args, _opts) => ({ stdout: "x".repeat(20_000), stderr: "", code: 0, timedOut: false });
     const outcome = await new ShaKnownFixRunner(exec).execute({ pattern: "p", action: "run", command: ["git", "a"], verifyCommand: ["git", "v"], cooldownMin: 1, verified: true });
     expect(outcome.action.output.length).toBeLessThanOrEqual(4000);
   });

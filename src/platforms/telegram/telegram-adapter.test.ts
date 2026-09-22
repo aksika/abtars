@@ -86,6 +86,11 @@ function mockTransport(): IKiroTransport {
     destroy: vi.fn(),
     transportCommands: [],
     get isReady() { return true; },
+    // Documented "unavailable" values: -1 unknown percent, zero/empty rest.
+    get contextPercent() { return -1; },
+    get answerOnly() { return ""; },
+    get toolCallsSucceeded() { return 0; },
+    get intermediateDeliveredText() { return ""; },
   };
 }
 
@@ -156,17 +161,19 @@ describe("TelegramAdapter", () => {
       id: "1_A_01", userId: "master", platform: "telegram", chatId: 42,
       delivery: "streaming", active: true, status: "ready",
       idleTimeoutMs: 0, lastActiveAt: Date.now(), messageCount: 0, tokenCount: 0, toolCallCount: 0,
-      log: [], shortIndex: 1,
+      log: [], shortIndex: 1, showThinking: false,
       busy: false, queue: [], fullMode: false, pendingStart: false, seen: true,
       compacting: false, ctxWarned: false, compactFailures: 0, primingTerms: [], completions: [],
+      instructionQueue: [], steeringAccepting: false,
     } as ManagedSession);
     vi.spyOn(spinMod.spin, "getActiveSession").mockReturnValue({
       id: "1_A_01", userId: "master", platform: "telegram", chatId: 42,
       delivery: "streaming", active: true, status: "ready",
       idleTimeoutMs: 0, lastActiveAt: Date.now(), messageCount: 0, tokenCount: 0, toolCallCount: 0,
-      log: [], shortIndex: 1,
+      log: [], shortIndex: 1, showThinking: false,
       busy: false, queue: [], fullMode: false, pendingStart: false, seen: true,
       compacting: false, ctxWarned: false, compactFailures: 0, primingTerms: [], completions: [],
+      instructionQueue: [], steeringAccepting: false,
     } as ManagedSession);
   });
 
@@ -182,7 +189,7 @@ describe("TelegramAdapter", () => {
 
   it("authorize checks user ID", () => {
     const allowed: InboundMessage = {
-      platform: "telegram", channelId: "100", sessionKey: "telegram:100",
+      platform: "telegram", channelId: "100", userId: "master",
       senderId: "42", senderName: "Test", text: "hi", timestamp: Date.now(),
       isGroup: false, isVoice: false,
     };
@@ -204,8 +211,10 @@ describe("TelegramAdapter", () => {
     const { getPlatformCommands } = await import("../../components/command-registry.js");
     await adapter.start();
     const expected = getPlatformCommands("telegram").map(c => ({ command: c.name, description: c.description }));
-    expect(capturedApi?.setMyCommands).toHaveBeenCalledWith(expected);
-    const payload = (capturedApi!.setMyCommands.mock.calls[0]![0] as Array<{ command: string }>);
+    const setMyCommands = capturedApi?.setMyCommands;
+    expect(setMyCommands).toHaveBeenCalledWith(expected);
+    if (!setMyCommands) throw new Error("expected setMyCommands mock");
+    const payload = (setMyCommands.mock.calls[0]![0] as Array<{ command: string }>);
     const names = payload.map(c => c.command);
     expect(new Set(names).size).toBe(names.length);
     expect(payload).toContainEqual({ command: "full", description: "Raw output, TTS disabled" });
@@ -220,7 +229,7 @@ describe("TelegramAdapter", () => {
   it("injectMessage creates synthetic update after start", async () => {
     await adapter.start();
     adapter.injectMessage({
-      platform: "telegram", channelId: "100", sessionKey: "telegram:100",
+      platform: "telegram", channelId: "100", userId: "master",
       senderId: "42", senderName: "Test", text: "queued msg",
       timestamp: Date.now(), isGroup: false, isVoice: false,
     });

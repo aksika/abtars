@@ -11,6 +11,8 @@ import {
   MAX_TUI_SESSION_ID_BYTES,
   MAX_TUI_INSTRUCTION_ID_BYTES,
   MAX_TUI_STEER_TEXT_BYTES,
+  type TuiClientFrame,
+  type TuiServerFrame,
 } from "./tui-protocol.js";
 
 describe("encodeFrame", () => {

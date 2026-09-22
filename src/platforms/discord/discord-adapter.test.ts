@@ -6,7 +6,20 @@ import type { IKiroTransport } from "../../components/transport/kiro-transport.j
 
 // Mock discord.js client
 let capturedReactionHandler: Function | null = null;
-let capturedDiscordApi: Record<string, ReturnType<typeof vi.fn>> | null = null;
+// Structural mock of DiscordApi: all Mock methods plus the botUserId data
+// field (null until connect, mirroring the real class — not a Mock).
+interface MockDiscordApi {
+  connect: ReturnType<typeof vi.fn>;
+  disconnect: ReturnType<typeof vi.fn>;
+  sendMessage: ReturnType<typeof vi.fn>;
+  onMessage: ReturnType<typeof vi.fn>;
+  onReaction: ReturnType<typeof vi.fn>;
+  onInteraction: ReturnType<typeof vi.fn>;
+  registerCommands: ReturnType<typeof vi.fn>;
+  sendTyping: ReturnType<typeof vi.fn>;
+  botUserId: string | null;
+}
+let capturedDiscordApi: MockDiscordApi | null = null;
 
 vi.mock("./discord-api.js", () => ({
   DiscordApi: vi.fn(function () {
@@ -66,8 +79,6 @@ function makeConfig(): DiscordAdapterConfig {
     botToken: "test-token",
     appId: "123456789",
     allowedUserIds: new Set(["42"]),
-    a2aEnabled: false,
-    a2aRateLimitMs: 5000,
   };
 }
 
@@ -78,7 +89,13 @@ function mockTransport(): IKiroTransport {
     resetSession: vi.fn().mockResolvedValue(undefined),
     sendInterrupt: vi.fn().mockResolvedValue(undefined),
     destroy: vi.fn(),
+    transportCommands: [],
     get isReady() { return true; },
+    // Documented "unavailable" values: -1 unknown percent, zero/empty rest.
+    get contextPercent() { return -1; },
+    get answerOnly() { return ""; },
+    get toolCallsSucceeded() { return 0; },
+    get intermediateDeliveredText() { return ""; },
   };
 }
 
@@ -96,6 +113,19 @@ function makeDeps(transport: IKiroTransport): DiscordAdapterDeps {
       startedAt: Date.now(),
       sttConfig: null,
       ttsConfig: null,
+      sessionManager: {
+        getActiveSessionId: () => "1_A_01",
+        getActiveSession: () => ({ id: "1_A_01", type: "A", paused: false }),
+        spin: async (spec: any) => {
+          const result = await transport.sendPrompt(
+            spec.sessionId ?? "1_A_01",
+            spec.prompt,
+            spec.imageContent,
+            spec.userId,
+          );
+          return { sessionId: spec.sessionId ?? "1_A_01", result: result ?? "" };
+        },
+      } as any,
       updateCtxStart: vi.fn(),
     } as PipelineDeps,
     transport,
@@ -124,7 +154,7 @@ describe("DiscordAdapter", () => {
     const result = adapter.authorize({
       platform: "discord",
       channelId: "ch1",
-      sessionKey: "discord:ch1",
+      userId: "master",
       senderId: "42",
       senderName: "Test",
       text: "hi",
@@ -177,8 +207,10 @@ describe("DiscordAdapter", () => {
     it("registerCommands payload equals the registry Discord projection", async () => {
       const { getPlatformCommands } = await import("../../components/command-registry.js");
       const expected = getPlatformCommands("discord");
-      expect(capturedDiscordApi?.registerCommands).toHaveBeenCalledWith(expected);
-      const payload = capturedDiscordApi!.registerCommands.mock.calls[0]![0] as Array<{ name: string }>;
+      const registerCommands = capturedDiscordApi?.registerCommands;
+      expect(registerCommands).toHaveBeenCalledWith(expected);
+      if (!registerCommands) throw new Error("expected registerCommands mock");
+      const payload = registerCommands.mock.calls[0]![0] as Array<{ name: string }>;
       const names = payload.map(c => c.name);
       expect(new Set(names).size).toBe(names.length);
       expect(payload.find(c => c.name === "pi")).toBeUndefined();

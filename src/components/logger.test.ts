@@ -81,14 +81,20 @@ describe("logger console/TTY redaction (#1354)", () => {
   });
 
   /** Patch console.log/warn/error directly (vitest spyOn misses module-scope calls). */
+  interface PatchableConsole {
+    log(...args: unknown[]): void;
+    warn(...args: unknown[]): void;
+    error(...args: unknown[]): void;
+  }
   function patchConsole(
     target: "log" | "warn" | "error",
   ): () => { calls: Array<Array<unknown>> } {
     const calls: Array<Array<unknown>> = [];
-    const orig = (console as Record<string, unknown>)[target] as (...args: unknown[]) => void;
-    (console as Record<string, unknown>)[target] = (...args: unknown[]) => { calls.push(args); };
+    const c: PatchableConsole = console;
+    const orig = c[target];
+    c[target] = (...args: unknown[]) => { calls.push(args); };
     return () => {
-      (console as Record<string, unknown>)[target] = orig;
+      c[target] = orig;
       return { calls };
     };
   }

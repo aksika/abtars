@@ -4,29 +4,32 @@
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import type { Mock } from "vitest";
 import { Spin } from "./spin.js";
 import { setUserRegistryOverride, type UserRegistry, type UserEntry } from "./user-registry.js";
 
 function makeUser(userId: string, role: "master" | "user" | "guest", telegram = 100): UserEntry {
-  return { userId, role, telegram } as UserEntry;
+  return { userId, role, maxClass: 3, tools: ["all"], platforms: { telegram } };
 }
 
 function makeRegistry(users: UserEntry[]): UserRegistry {
   return {
     users,
     byUserId: new Map(users.map(u => [u.userId, u])),
-    byTelegramId: new Map(users.map(u => [u.telegram, u])),
+    byPlatformId: new Map(
+      users.flatMap(u => u.platforms.telegram !== undefined ? [[`telegram:${u.platforms.telegram}`, u] as const] : []),
+    ),
   };
 }
 
 describe("Spin coding-session teardown (#1635)", () => {
   let spin: Spin;
-  let teardown: ReturnType<typeof vi.fn>;
+  let teardown: Mock<(sessionId: string) => boolean>;
 
   beforeEach(() => {
     spin = new Spin();
     setUserRegistryOverride(makeRegistry([makeUser("aksika", "master", 111)]));
-    teardown = vi.fn().mockReturnValue(true);
+    teardown = vi.fn((_sessionId: string) => true);
     spin.setCodingSessionTeardown(teardown);
   });
 

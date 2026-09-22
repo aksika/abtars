@@ -376,9 +376,10 @@ describe("migrateSupervisorState", () => {
     writeFileSync(join(home, ".stopped"), "", "utf-8");
     migrateSupervisorState(home);
 
-    const { ok, migrated } = migrateSupervisorState(home);
-    expect(ok).toBe(true);
-    expect(migrated).toBe(false);
+    const migratedResult = migrateSupervisorState(home);
+    expect(migratedResult.ok).toBe(true);
+    if (!migratedResult.ok) throw new Error("expected ok migration");
+    expect(migratedResult.migrated).toBe(false);
 
     const state = readState();
     expect(state.desiredState).toBe("stopped");

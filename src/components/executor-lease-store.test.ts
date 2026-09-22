@@ -33,6 +33,7 @@ beforeEach(async () => {
     expected_artifacts: [],
     verification_commands: [],
     required_capabilities: [],
+    limits: {},
     provenance: { root_card_id: TEST_CARD_ID, card_id: TEST_CARD_ID, authored_by: "test", created_at: new Date().toISOString() },
   }, TEST_CARD_ID);
 

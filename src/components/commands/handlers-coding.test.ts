@@ -4,11 +4,13 @@
 
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { handleCoding, setCodingCommandService } from "./handlers-coding.js";
+import type { CommandContext } from "./types.js";
+import type { Platform } from "../../types/platform.js";
 import type { PiCodingSessionService } from "../pi-executor/pi-coding-session-service.js";
 
-function makeCtx(overrides: Partial<{ userId: string; chatId: number; platform: string }> = {}) {
+function makeCtx(overrides: Partial<{ userId: string; chatId: number; platform: Platform }> = {}) {
   const replies: string[] = [];
-  const ctx = {
+  const ctx: Pick<CommandContext, "userId" | "chatId" | "platform" | "reply"> = {
     userId: overrides.userId ?? "usr-1",
     chatId: overrides.chatId ?? 100,
     platform: overrides.platform ?? "telegram",

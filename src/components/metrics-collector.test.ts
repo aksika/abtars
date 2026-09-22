@@ -66,7 +66,6 @@ describe("metrics-collector", () => {
 
   it("recordCompaction aggregates real passes, persists all events (incl skipped) to JSONL (#1022)", () => {
     const ev = (over: Partial<CompactionMetricEvent>): CompactionMetricEvent => ({
-      timestamp: Date.now(), tokensBefore: 1000, tokensAfter: 200,
       savingsPct: 0.8, model: "cheap", durationMs: 100, level: "completed", ...over,
     });
     recordCompaction(ev({ level: "completed", savingsPct: 0.8 }));

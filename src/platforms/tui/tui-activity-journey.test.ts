@@ -25,7 +25,7 @@ import { TuiSocketAdapter } from "./tui-socket-adapter.js";
 import { createFrameDecoder, encodeFrame, type TuiServerFrame, type TuiClientFrame } from "./tui-protocol.js";
 import { OrcActivityFeed } from "../../components/orc-activity-feed.js";
 import { Spin, type ManagedSession } from "../../components/spin.js";
-import { TuiApp, type TuiPresentationModules } from "../../cli/commands/tui-ui.js";
+import { TuiApp, type TuiPresentationModules, type TuiAppOptions } from "../../cli/commands/tui-ui.js";
 
 // ── Fake Pi seam (public-module surface only) ────────────────────────────
 
@@ -137,13 +137,15 @@ async function attachJourney(socketPath: string): Promise<ClientJourney> {
     for (const f of decoder.push(buf)) frames.push(f);
   });
 
+  // Seam cast (same documented public-module seam as tui-ui.test.ts): the
+  // fakes implement the subset TuiApp touches; any gap fails at runtime below.
   const app = new TuiApp({
     modules: makeModules(),
     terminal: new FakeProcessTerminal(),
     ui: new FakeTUI(),
     editor: new FakeEditor(new FakeTUI(), {}),
     onRenderError: vi.fn(),
-  });
+  } as unknown as TuiAppOptions);
 
   const attach: TuiClientFrame = { t: "attach", mode: { kind: "orc" }, cols: 100, rows: 30 };
   socket.write(encodeFrame(attach));
@@ -159,10 +161,14 @@ async function attachJourney(socketPath: string): Promise<ClientJourney> {
     }
   }, 5);
 
+  // app["_ui"] IS the FakeTUI passed above (TuiApp stores its ui option).
+  const storedUi = app["_ui"];
+  expect(storedUi).toBeInstanceOf(FakeTUI);
+  if (!(storedUi instanceof FakeTUI)) throw new Error("expected fake ui");
   return {
     socket,
     app,
-    ui: app["_ui"] as FakeTUI,
+    ui: storedUi,
     frames,
     close: () => { clearInterval(poller); socket.destroy(); },
   };

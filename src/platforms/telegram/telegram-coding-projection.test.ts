@@ -22,10 +22,12 @@ import {
 
 const _require = createRequire(import.meta.url);
 const sharedPath = join(homedir(), ".local", "lib", "node_modules", "better-sqlite3");
-const Database: typeof import("better-sqlite3") = _require(sharedPath);
+// require() returns any: annotate with the real constructor type instead of
+// the ESM namespace type (which has no construct signatures).
+const DatabaseCtor: new (path: string) => import("better-sqlite3").Database = _require(sharedPath);
 
 function createTestDb(): TaskDatabase {
-  const raw = new Database(":memory:");
+  const raw = new DatabaseCtor(":memory:");
   raw.pragma("journal_mode = WAL");
   return {
     prepare(sql: string) {
@@ -38,6 +40,8 @@ function createTestDb(): TaskDatabase {
     },
     exec(sql: string) { raw.exec(sql); },
     transaction<T>(fn: () => T): T { return raw.transaction(fn)(); },
+    // Mirrors kanban-board.ts: immediate-mode transaction, same call shape.
+    transactionImmediate<T>(fn: () => T): T { return raw.transaction(fn).immediate(); },
   };
 }
 

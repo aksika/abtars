@@ -9,6 +9,7 @@
  */
 
 import { describe, it, expect, vi } from "vitest";
+import type { Mock } from "vitest";
 import { setUserRegistryOverride, type UserRegistry } from "./user-registry.js";
 import { classifyContent } from "./clean-response.js";
 import type { ManagedSession } from "./spin-types.js";
@@ -36,10 +37,11 @@ import { handleInboundMessage, type PipelineDeps, DREAMY_QUESTION_SUFFIX_PREFIX 
 import { BOOT_GREETING_TOKEN, type PlatformAdapter, type InboundMessage, type BootGreetingQuestion, type InternalBootMetadata } from "../types/platform.js";
 import type { IKiroTransport } from "./transport/kiro-transport.js";
 
-function mockTransport(): IKiroTransport {
+function mockTransport(): IKiroTransport & { sendPrompt: Mock<(sessionKey: string, message: string) => Promise<string>> } {
+  const sendPrompt = vi.fn(async (_sessionKey: string, _message: string) => "Hello! How are you today?");
   return {
     initialize: vi.fn().mockResolvedValue(undefined),
-    sendPrompt: vi.fn().mockResolvedValue("Hello! How are you today?"),
+    sendPrompt,
     resetSession: vi.fn().mockResolvedValue(undefined),
     sendInterrupt: vi.fn().mockResolvedValue(undefined),
     destroy: vi.fn(),
@@ -49,7 +51,7 @@ function mockTransport(): IKiroTransport {
     get toolCallsSucceeded() { return 0; },
     get contextPercent() { return -1; },
     get intermediateDeliveredText() { return ""; },
-  } as unknown as IKiroTransport;
+  };
 }
 
 function mockAdapter(overrides: Partial<PlatformAdapter> = {}): PlatformAdapter {
@@ -95,17 +97,27 @@ function makeDeps(opts: {
   memoryRuntime?: Record<string, unknown>;
   settle?: (input: { id: string; userId: string; deliveryKey: string }) => Promise<void>;
   sendMessage?: (channelId: string, text: string, opts?: unknown) => Promise<number | string | undefined>;
-} = {}): PipelineDeps & { _session: ManagedSession; _settle: ReturnType<typeof vi.fn> } {
+} = {}): PipelineDeps & {
+  _session: ManagedSession;
+  _settle: ReturnType<typeof vi.fn>;
+  _adapter: PlatformAdapter;
+  _sendMessage: PlatformAdapter["sendMessage"];
+  _sendPrompt: Mock<(sessionKey: string, message: string) => Promise<string>>;
+  _recordMessage: ReturnType<typeof vi.fn>;
+  _spinReady: Promise<void>;
+} {
   const session: ManagedSession = {
     id: "master_A_01", userId: "master", platform: "telegram", chatId: 100,
     delivery: opts.delivery ?? "simple", active: true, status: "ready",
     idleTimeoutMs: 0, lastActiveAt: Date.now(), messageCount: 0, tokenCount: 0, toolCallCount: 0,
-    log: [], shortIndex: 1,
+    log: [], shortIndex: 1, showThinking: false,
     busy: false, queue: [], fullMode: false, pendingStart: false, seen: true,
     compacting: false, ctxWarned: false, compactFailures: 0, primingTerms: [], completions: [],
+    instructionQueue: [], steeringAccepting: false,
   };
   const transport = mockTransport();
   const settle = vi.fn().mockResolvedValue(undefined);
+  const memoryRuntime = makeMemoryRuntime(opts.memoryRuntime);
   const adapter = mockAdapter(opts.sendMessage ? { sendMessage: opts.sendMessage } : {});
   const spinMod = { spin: null as unknown as import("./spin.js").Spin };
   void import("./spin.js").then(m => {
@@ -137,12 +149,14 @@ function makeDeps(opts: {
       },
     } as any,
     updateCtxStart: vi.fn(),
-    memoryRuntime: makeMemoryRuntime(opts.memoryRuntime),
+    memoryRuntime,
     settleDreamQuestion: opts.settle ?? settle,
     _session: session,
     _settle: settle,
     _adapter: adapter,
     _sendMessage: adapter.sendMessage,
+    _sendPrompt: transport.sendPrompt,
+    _recordMessage: memoryRuntime.recordMessage,
     _spinReady: new Promise<void>((resolve) => {
       const check = (): void => { if (spinMod.spin) resolve(); else setTimeout(check, 1); };
       check();
@@ -181,7 +195,7 @@ describe("#1515 boot-greeting question composition", () => {
     const deps = makeDeps();
     await runBoot(deps);
     // Provider never sees the question or metadata.
-    const prompt = deps.transport.sendPrompt.mock.calls[0]?.[1] as string;
+    const prompt = deps._sendPrompt.mock.calls[0]?.[1] as string;
     expect(prompt).not.toContain(QUESTION.text);
     expect(prompt).not.toContain("Dreamy needs your help");
     expect(prompt).not.toContain("WAKE-UP QUESTION");
@@ -196,7 +210,7 @@ describe("#1515 boot-greeting question composition", () => {
   it("simple delivery records the composed text with a storage-only marker and settles after a durable id", async () => {
     const deps = makeDeps();
     await runBoot(deps);
-    const recordCall = deps.memoryRuntime.recordMessage.mock.calls[0]?.[0] as { content: string };
+    const recordCall = deps._recordMessage.mock.calls[0]?.[0] as { content: string };
     expect(recordCall.content).toContain(`[WAKE-UP QUESTION id=${QUESTION.id}] `);
     expect(recordCall.content).toContain(EXPECTED_SUFFIX);
     // The delivered text itself carries no marker.
@@ -217,10 +231,10 @@ describe("#1515 boot-greeting question composition", () => {
     const settleArg = deps._settle.mock.calls[0]?.[0] as { deliveryKey: string };
     // The settle delivery key IS the branch's assistant operation key (which
     // hashes the final platform message id); identical-key replay is safe.
-    const opKey = deps.memoryRuntime.recordMessage.mock.calls[0]?.[1] as string;
+    const opKey = deps._recordMessage.mock.calls[0]?.[1] as string;
     expect(settleArg.deliveryKey).toBe(opKey);
     expect(opKey.length).toBeGreaterThan(0);
-    const recordCall = deps.memoryRuntime.recordMessage.mock.calls[0]?.[0] as { content: string };
+    const recordCall = deps._recordMessage.mock.calls[0]?.[0] as { content: string };
     expect(recordCall.content).toContain(`[WAKE-UP QUESTION id=${QUESTION.id}] `);
   });
 

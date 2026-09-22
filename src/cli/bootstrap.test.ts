@@ -17,13 +17,13 @@ describe('#1237 bootstrap / __deploy split', () => {
   });
 
   it('__deploy requires --staged (returns 2, runs before any side effect)', async () => {
-    expect(await deployActivationCli(new Map())).toBe(2);
+    expect(await deployActivationCli(new Map<string, string | boolean>())).toBe(2);
   });
 
   it('__deploy ignores unknown flags (forward-compatible contract)', async () => {
     // An old bootstrap may pass flags a newer __deploy does not know, and vice
     // versa. Unknown keys must not satisfy or break the required-arg check.
-    expect(await deployActivationCli(new Map([['futureflag', 'x'], ['another', true]]))).toBe(2);
+    expect(await deployActivationCli(new Map<string, string | boolean>([['futureflag', 'x'], ['another', true]]))).toBe(2);
   });
 
   it('__deploy is dispatchable via the CLI but hidden from help', async () => {

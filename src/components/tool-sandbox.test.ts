@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeEach } from "vitest";
 import { checkTool, checkPath, buildPolicy, ToolLoopGuard } from "./tool-sandbox.js";
+import type { SandboxPolicy } from "./tool-sandbox.js";
 
 describe("checkTool", () => {
   it("allows all tools with wildcard policy", () => {

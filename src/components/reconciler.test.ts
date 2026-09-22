@@ -22,6 +22,7 @@
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import type { KanbanCard } from "./tasks/kanban-board.js";
 
 // ── Mocks ──────────────────────────────────────────────────────────────────────
 
@@ -432,10 +433,7 @@ afterEach(async () => {
   activeTestHandle = null;
 });
 
-function makeCard(overrides: Partial<{
-  id: number; status: string; type: string; title: string; notes: string | null;
-  parent_id: number | null; delivery_attempts: number;
-}> = {}): NonNullable<ReturnType<typeof kanbanGetCardMock>> {
+function makeCard(overrides: Partial<KanbanCard> = {}): NonNullable<ReturnType<typeof kanbanGetCardMock>> {
   return {
     id: 1, status: "queued", type: "W", title: "test card", notes: null,
     parent_id: null, delivery_attempts: 0, source: "agent",

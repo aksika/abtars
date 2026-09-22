@@ -18,7 +18,6 @@ function makeReq(overrides: Partial<{ url: string; method: string; remoteAddress
       listeners.set(ev, [...(listeners.get(ev) ?? []), cb]);
       return req;
     },
-    headers: {},
     removeListener(ev: string, cb: Callback) { void ev; void cb; return req; },
     resume() {},
     _listeners: listeners,
@@ -52,6 +51,10 @@ function emitBody(req: any, body: string): void {
 /** Dispatcher deps that succeed by default and record calls. */
 function makeDeps(overrides: Partial<AgentApiDispatcherDeps> = {}) {
   const calls: string[] = [];
+  // Test-only body channel: tests preset req._body, the fakes below read it.
+  // IncomingMessage never carries it in production.
+  type TestReq = Parameters<AgentApiDispatcherDeps["verifyBodylessPeer"]>[0] & { _body?: string };
+  const bodyOf = (req: TestReq): string => req._body ?? "{}";
   const deps: AgentApiDispatcherDeps & { calls: string[] } = {
     calls,
     verifyBodylessPeer(req, res) {
@@ -60,12 +63,12 @@ function makeDeps(overrides: Partial<AgentApiDispatcherDeps> = {}) {
       if (typeof id !== "string") { res.writeHead(401).end("no peer"); return null; }
       return id;
     },
-    async authenticatePeerBody(req, res, options) {
+    async authenticatePeerBody(req: TestReq, res, options) {
       calls.push(`peerBody:${options.rateLimited ? "rl" : "plain"}`);
       const id = req.headers["x-peer-id"];
       if (typeof id !== "string") { res.writeHead(401).end("no peer"); return null; }
-      emitBody(req, req._body ?? "{}");
-      return { caller: id, rawBody: req._body ?? "{}" };
+      emitBody(req, bodyOf(req));
+      return { caller: id, rawBody: bodyOf(req) };
     },
     requireLoopback(req, res) {
       calls.push("loopback");
@@ -73,11 +76,11 @@ function makeDeps(overrides: Partial<AgentApiDispatcherDeps> = {}) {
       if (!loopback) { res.writeHead(401).end("loopback only"); return false; }
       return true;
     },
-    async readBodyBounded(req, maxBytes) {
+    async readBodyBounded(req: TestReq, maxBytes) {
       calls.push("readBounded");
       void maxBytes;
-      emitBody(req, req._body ?? "{}");
-      return req._body ?? "{}";
+      emitBody(req, bodyOf(req));
+      return bodyOf(req);
     },
     ...overrides,
   };

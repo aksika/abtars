@@ -33,8 +33,10 @@ import {
 import { Spin, type ManagedSession, type SessionType } from "../../components/spin.js";
 import { createSpinSessionRegistry, type SpinSessionRegistry } from "../../components/spin-sessions.js";
 import type { QueuedSessionInstruction } from "../../components/spin-types.js";
+import type { SpinSessionSpec, AwaitedSpinResult } from "../../components/spin-types.js";
 import { classifyContent } from "../../components/clean-response.js";
 import type { InboundMessage } from "../../types/platform.js";
+import type { Mock } from "vitest";
 import { expireInstructions, drainInstructionBatch } from "../../components/session-instruction-queue.js";
 import { setCodingRouteService } from "../../components/pipeline/coding-route.js";
 import { OrcActivityFeed } from "../../components/orc-activity-feed.js";
@@ -56,7 +58,7 @@ interface MockSpinOpts {
   orcBusy?: boolean;
   /** #1533: mark the orc ManagedSession entry as ended (getOrcSession → null). */
   orcEnded?: boolean;
-  spinResult?: { sessionId: string; cardId?: number; result?: string };
+  spinResult?: { sessionId: string; cardId?: number; result: string };
   /** #1336: sessions returned by listAllSessions for cross-platform attach. */
   allSessions?: ManagedSession[];
 }
@@ -98,16 +100,18 @@ function makeMockSpin(opts: MockSpinOpts = {}): { spin: Spin; calls: { getActive
     getSessionByGlobalIndex: vi.fn((index: number) => {
       calls.getSessionByGlobalIndex.push([index]);
       if (opts.switchResult && typeof opts.switchResult !== "string") return opts.switchResult;
-      return allEntries.find(s => s.shortIndex === index) ?? null;
+      // Production treats a miss as falsy either way; Spin's contract is undefined.
+      return allEntries.find(s => s.shortIndex === index) ?? undefined;
     }),
     listAllSessions: vi.fn(() => allEntries),
-    spin: vi.fn(async (spec: unknown) => {
+    spin: vi.fn(async (spec: SpinSessionSpec): Promise<AwaitedSpinResult> => {
       calls.spin.push([spec]);
       // #1651: mirror the production contract — the provider's own string,
       // verbatim (possibly empty), plus the classified outcome. Production
       // spin computes outcome via classifyContent at the single settle point.
+      // result is required (possibly empty) per AwaitedSpinResult.
       const settled = opts.spinResult ?? { sessionId: "1749563282_O_01", cardId: 1, result: "orc-reply" };
-      return { ...settled, outcome: classifyContent(settled.result ?? "") };
+      return { sessionId: settled.sessionId, cardId: settled.cardId, result: settled.result, outcome: classifyContent(settled.result) };
     }),
   };
   return { spin: spin as Spin, calls };
@@ -397,7 +401,10 @@ describe("TuiSocketAdapter — new-attach-wins", () => {
       this: net.Socket, event: string, listener: (...args: unknown[]) => void,
     ) {
       if (event === "data") dataListeners.push({ socket: this, listener: listener as (buf: Buffer) => void });
-      return originalOn.call(this, event, listener);
+      // Forward through the data overload: the overload set's literal matching
+      // cannot see through the string-typed event variable.
+      const dataOn = originalOn as (event: string, listener: (...args: unknown[]) => void) => net.Socket;
+      return dataOn.call(this, event, listener);
     });
 
     try {
@@ -463,7 +470,7 @@ describe("TuiSocketAdapter — new-attach-wins", () => {
 describe("TuiSocketAdapter — attach selector resolution", () => {
   let sockPath: string;
   let mock: ReturnType<typeof makeMockSpin>;
-  let onMessage: ReturnType<typeof vi.fn>;
+  let onMessage: ReturnType<typeof makeRecoveryHandler>;
 
   beforeEach(() => {
     sockPath = tmpSocketPath();
@@ -573,14 +580,14 @@ describe("TuiSocketAdapter — attach selector resolution", () => {
 describe("TuiSocketAdapter — setMessageHandler swap", () => {
   let sockPath: string;
   let mock: ReturnType<typeof makeMockSpin>;
-  let initialHandler: ReturnType<typeof vi.fn>;
-  let swappedHandler: ReturnType<typeof vi.fn>;
+  let initialHandler: Mock<(msg: InboundMessage) => void>;
+  let swappedHandler: Mock<(msg: InboundMessage) => void>;
 
   beforeEach(() => {
     sockPath = tmpSocketPath();
     mock = makeMockSpin();
-    initialHandler = vi.fn();
-    swappedHandler = vi.fn();
+    initialHandler = vi.fn((_msg: InboundMessage) => {});
+    swappedHandler = vi.fn((_msg: InboundMessage) => {});
   });
 
   it("initially routes input through onMessage; after setMessageHandler, routes through the new handler", async () => {
@@ -634,7 +641,7 @@ describe("TuiSocketAdapter — setMessageHandler swap", () => {
 describe("TuiSocketAdapter — orc mode", () => {
   let sockPath: string;
   let mock: ReturnType<typeof makeMockSpin>;
-  let onMessage: ReturnType<typeof vi.fn>;
+  let onMessage: ReturnType<typeof makeRecoveryHandler>;
 
   beforeEach(() => {
     sockPath = tmpSocketPath();
@@ -765,7 +772,7 @@ describe("TuiSocketAdapter — orc mode", () => {
 describe("TuiSocketAdapter — steer mode", () => {
   let sockPath: string;
   let mock: ReturnType<typeof makeMockSpin>;
-  let onMessage: ReturnType<typeof vi.fn>;
+  let onMessage: ReturnType<typeof makeRecoveryHandler>;
 
   beforeEach(() => {
     sockPath = tmpSocketPath();
@@ -1512,7 +1519,7 @@ describe("TuiSocketAdapter — #1399 steer binding", () => {
 describe("TuiSocketAdapter — #1362 steering isolation", () => {
   let sockPath: string;
   let adapter: TuiSocketAdapter;
-  let onMessage: ReturnType<typeof vi.fn>;
+  let onMessage: ReturnType<typeof makeRecoveryHandler>;
 
   beforeEach(() => {
     sockPath = tmpSocketPath();
@@ -1522,18 +1529,19 @@ describe("TuiSocketAdapter — #1362 steering isolation", () => {
   afterEach(() => { if (adapter) adapter.stop(); });
 
   /** Create a minimal ManagedSession for queue operations. */
-  function makeSession(id: string, execId: string): ManagedSession {
+  function makeSession(id: string, execId: string, overrides?: Partial<ManagedSession>): ManagedSession {
     return {
       id, userId: "aksika", platform: "tui", chatId: 0,
       delivery: "simple", active: false, status: "ready",
       idleTimeoutMs: 7200000, lastActiveAt: Date.now(),
       messageCount: 0, tokenCount: 0, toolCallCount: 0,
-      log: [], shortIndex: 1, busy: true, queue: [], fullMode: false,
+      log: [], shortIndex: 1, showThinking: false, busy: true, queue: [], fullMode: false,
       pendingStart: false, seen: false, compacting: false, ctxWarned: false,
       compactFailures: 0, primingTerms: [], completions: [],
       instructionQueue: [] as QueuedSessionInstruction[],
       activeExecutionId: execId, steeringAccepting: true,
-    } as ManagedSession;
+      ...overrides,
+    };
   }
 
   /**
@@ -1553,10 +1561,9 @@ describe("TuiSocketAdapter — #1362 steering isolation", () => {
       return sharedSession;
     }) as any;
     // Fix listAllSessions to return the orc managed entry
-    mock.spin.listAllSessions = vi.fn(() => [{
-      id: "1749563282_O_01", busy: orcBusy, instructionQueue: [],
-      activeExecutionId: execId, steeringAccepting: orcBusy,
-    } as ManagedSession]);
+    mock.spin.listAllSessions = vi.fn(() => [makeSession("1749563282_O_01", execId, {
+      busy: orcBusy, steeringAccepting: orcBusy,
+    })]);
     return { spin: mock.spin, getSession: () => sharedSession! };
   }
 
@@ -1705,7 +1712,10 @@ describe("TuiSocketAdapter — #1362 steering isolation", () => {
       return expiredAcks.length > 0 ? expiredAcks : null;
     }, 1000);
     expect(expiredAcks.length).toBe(1);
-    expect(expiredAcks[0]!.instructionId).toBe(ownedId);
+    const expired = expiredAcks[0];
+    expect(expired?.t).toBe("steer-ack");
+    if (expired?.t !== "steer-ack") throw new Error("expected steer-ack frame");
+    expect(expired.instructionId).toBe(ownedId);
     conn.destroy();
   });
 
@@ -1795,7 +1805,7 @@ describe("TuiSocketAdapter — #1362 steering isolation", () => {
 describe("TuiSocketAdapter — ended pipeline attachment reconciliation (#1533)", () => {
   let sockPath: string;
   let adapter: TuiSocketAdapter;
-  let onMessage: ReturnType<typeof vi.fn>;
+  let onMessage: ReturnType<typeof makeRecoveryHandler>;
   let spin: Spin;
   let registry: SpinSessionRegistry;
 

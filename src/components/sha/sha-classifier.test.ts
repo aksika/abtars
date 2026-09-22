@@ -75,7 +75,7 @@ describe("classifyShaFailure — scheduled guard precedence (R3)", () => {
 
   it("classifies structured routing/adapter outages as external", () => {
     const r = classifyShaFailure(
-      scheduled({ diagnostic: makeTaskFailure("routing", "target_unavailable", "routing", "peer gone", "permanent") }),
+      scheduled({ diagnostic: makeTaskFailure("routing", "target_unavailable", "executing", "peer gone", "permanent") }),
       "full",
       EMPTY_POLICY,
     );
@@ -226,7 +226,8 @@ describe("#1708 validateLogAnomalyEvent", () => {
     expect(validateLogAnomalyEvent("x").ok).toBe(false);
     expect(validateLogAnomalyEvent({}).ok).toBe(false);
     expect(validateLogAnomalyEvent(anomalyEvent({ source: "log" as never })).ok).toBe(false);
-    expect(validateLogAnomalyEvent(anomalyEvent({ schemaVersion: 2 })).ok).toBe(false);
+    // Wrong versions arrive as parsed JSON in production, not typed code.
+    expect(validateLogAnomalyEvent(anomalyEvent(JSON.parse('{"schemaVersion":2}'))).ok).toBe(false);
     expect(validateLogAnomalyEvent(anomalyEvent({ anomalyKind: "rotation" as never })).ok).toBe(false);
   });
 

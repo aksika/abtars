@@ -13,7 +13,7 @@ import type { SttConfig } from "./stt.js";
 
 describe("transcribeAudio — Property 1: STT request shape invariant", () => {
   let capturedFormData: FormData | null = null;
-  let capturedSignal: AbortSignal | undefined;
+  let capturedSignal: AbortSignal | null | undefined;
   const originalFetch = globalThis.fetch;
 
   beforeEach(() => {

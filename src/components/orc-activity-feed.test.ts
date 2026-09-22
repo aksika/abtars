@@ -1,16 +1,19 @@
 import { describe, it, expect, vi } from "vitest";
-import { OrcActivityFeed, type OrcActivityEvent } from "./orc-activity-feed.js";
+import { OrcActivityFeed, type OrcActivityEvent, type UnsequencedOrcActivityEvent } from "./orc-activity-feed.js";
 
 const SID = "1749563282_O_01";
 const EID = `${SID}_1_1712345678000`;
 
-function event(overrides: Partial<OrcActivityEvent> = {}): Omit<OrcActivityEvent, "sequence" | "timestamp"> {
+// Honest publish input: UnsequencedOrcActivityEvent keeps timestamp (the feed
+// defaults it only when missing). No test reads timestamps; 0 is inert.
+function event(overrides: Partial<UnsequencedOrcActivityEvent> = {}): UnsequencedOrcActivityEvent {
   return {
     kind: "execution.started",
     sessionId: SID,
     executionId: EID,
+    timestamp: 0,
     ...overrides,
-  } as any;
+  };
 }
 
 /** Flush pending microtasks (queueMicrotask) */
@@ -26,10 +29,10 @@ describe("OrcActivityFeed", () => {
     feed.publish(event({ kind: "execution.started" }));
     await flush();
     expect(listener).toHaveBeenCalledTimes(1);
-    const e = listener.mock.calls[0][0] as OrcActivityEvent;
-    expect(e.sessionId).toBe(SID);
-    expect(e.executionId).toBe(EID);
-    expect(e.sequence).toBe(1);
+    const e = listener.mock.calls[0]?.[0] as OrcActivityEvent | undefined;
+    expect(e?.sessionId).toBe(SID);
+    expect(e?.executionId).toBe(EID);
+    expect(e?.sequence).toBe(1);
   });
 
   it("does not deliver events for non-matching sessionId", async () => {
@@ -85,7 +88,8 @@ describe("OrcActivityFeed", () => {
     await flush();
 
     expect(listener).toHaveBeenCalledTimes(1);
-    const e = listener.mock.calls[0][0] as OrcActivityEvent;
+    const e = listener.mock.calls[0]?.[0] as OrcActivityEvent | undefined;
+    if (e?.kind !== "card.running") throw new Error("expected coalesced card event");
     expect(e.title).toBe("v2");
   });
 

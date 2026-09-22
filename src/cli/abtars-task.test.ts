@@ -240,10 +240,10 @@ describe("abtars-task", () => {
         process.exit = origExit;
       }
       expect(exitCode).toBe(1);
-      const parsed = JSON.parse(out);
+      const parsed = JSON.parse(out) as { ok: boolean; findings: Array<{ code: string; entryId: string }> };
       expect(parsed.ok).toBe(false);
       expect(parsed.findings.map(f => f.code)).toEqual(["entry_invalid"]);
-      expect(parsed.findings[0].entryId).toBe("bad-entry");
+      expect(parsed.findings[0]?.entryId).toBe("bad-entry");
     });
 
     it("exits 1 when the default file is missing", async () => {

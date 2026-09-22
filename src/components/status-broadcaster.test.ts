@@ -11,6 +11,8 @@ function makeSnapshot(overrides?: Partial<StatusSnapshot>): StatusSnapshot {
   return {
     timestamp: new Date().toISOString(),
     uptimeMs: 1000,
+    version: "test",
+    commit: "test",
     platforms: {
       telegram: { configured: true, running: false },
       discord: { configured: false, running: false },
@@ -20,6 +22,12 @@ function makeSnapshot(overrides?: Partial<StatusSnapshot>): StatusSnapshot {
     memory: { enabled: false, stats: null },
     heartbeat: { running: false, intervalMs: 60000, taskNames: [] },
     cron: [],
+    notebooklm: null,
+    gwsAuth: false,
+    xAuth: false,
+    agentApi: null,
+    model: { name: "test-model", provider: "test-provider", fallbackChain: [] },
+    subsystems: [],
     ...overrides,
   };
 }
@@ -28,7 +36,9 @@ function makeSnapshot(overrides?: Partial<StatusSnapshot>): StatusSnapshot {
 function mockWs(): WebSocket & { sent: string[] } {
   const emitter = new EventEmitter() as WebSocket & { sent: string[] };
   emitter.sent = [];
-  emitter.readyState = WebSocket.OPEN;
+  // readyState is readonly on the WebSocket type but plain mutable state on a
+  // real socket — define it as an own property instead of assigning.
+  Object.defineProperty(emitter, "readyState", { value: WebSocket.OPEN, writable: true });
   emitter.send = vi.fn((data: string) => {
     emitter.sent.push(data);
   }) as any;
@@ -39,7 +49,7 @@ function mockWs(): WebSocket & { sent: string[] } {
 /** Create a mock WebSocket whose send() throws (simulating a broken connection). */
 function brokenWs(): WebSocket {
   const emitter = new EventEmitter() as WebSocket;
-  emitter.readyState = WebSocket.OPEN;
+  Object.defineProperty(emitter, "readyState", { value: WebSocket.OPEN, writable: true });
   emitter.send = vi.fn(() => {
     throw new Error("write EPIPE");
   }) as any;
@@ -387,7 +397,6 @@ describe("buildStatusSnapshot — Property 4: Status snapshot completeness", () 
                   })),
                 }
               : null,
-            chatId: 1,
             notebooklm: false,
             agentApi: null,
           };

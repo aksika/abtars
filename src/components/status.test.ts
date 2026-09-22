@@ -316,24 +316,26 @@ describe("collectDaemon macOS launchd probe labels", () => {
   });
 
   it("macOS user scope probes com.abtars.watchdog", () => {
-    const isMac = true;
-    const scope = "user";
+    const isMac: boolean = true;
+    const scope: string = "user";
     const unit = LINUX_USER_UNIT; // unitName("user") returns "abtars-watchdog"
     const probeUnit = isMac ? (scope === "system" ? macOS_SYSTEM_PROBE : macOS_USER_PROBE) : unit;
     expect(probeUnit).toBe("com.abtars.watchdog");
   });
 
   it("Linux system scope uses unit name unchanged", () => {
-    const isMac = false;
-    const scope = "system";
+    // Widened from literals: documents the production decision table, where
+    // isMac/scope are runtime values, not constants.
+    const isMac: boolean = false;
+    const scope: string = "system";
     const unit = "abtars";
     const probeUnit = isMac ? (scope === "system" ? macOS_SYSTEM_PROBE : macOS_USER_PROBE) : unit;
     expect(probeUnit).toBe("abtars");
   });
 
   it("Linux user scope uses unit name unchanged", () => {
-    const isMac = false;
-    const scope = "user";
+    const isMac: boolean = false;
+    const scope: string = "user";
     const unit = "abtars-watchdog";
     const probeUnit = isMac ? (scope === "system" ? macOS_SYSTEM_PROBE : macOS_USER_PROBE) : unit;
     expect(probeUnit).toBe("abtars-watchdog");

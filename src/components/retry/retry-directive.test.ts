@@ -92,7 +92,9 @@ describe("retry-directive", () => {
       instruction: "Fix it",
       authoredBy: "orc",
     });
-    const errors = validateDirective(directive);
+    // validateDirective consumes untrusted parsed JSON in production —
+    // validate the serialized form, not the typed builder output.
+    const errors = validateDirective(JSON.parse(JSON.stringify(directive)));
     expect(errors).toHaveLength(0);
   });
 
@@ -107,7 +109,7 @@ describe("retry-directive", () => {
       instruction: "Fix validation",
       authoredBy: "orc",
     });
-    const revised = deriveContractRevision(sampleContract, directive);
+    const revised = deriveContractRevision(sampleContract, directive, 1, 2);
     expect(revised.criteria).toHaveLength(2);
     expect(revised.criteria[0]!.description).toBe("Page renders");
     expect(revised.goal).toContain("Build a login page");
@@ -119,7 +121,7 @@ describe("retry-directive", () => {
       instruction: "Fix it",
       authoredBy: "orc",
     });
-    const revised = deriveContractRevision(sampleContract, directive);
+    const revised = deriveContractRevision(sampleContract, directive, 1, 2);
     const bad = { ...revised, criteria: [{ id: "c1", description: "Page renders" }] };
     const errors = validateContractRevision(sampleContract, bad as any);
     expect(errors).toContain("criteria count cannot decrease");
@@ -131,7 +133,7 @@ describe("retry-directive", () => {
       instruction: "Fix it",
       authoredBy: "orc",
     });
-    const revised = deriveContractRevision(sampleContract, directive);
+    const revised = deriveContractRevision(sampleContract, directive, 1, 2);
     const bad = {
       ...revised,
       criteria: [
@@ -149,7 +151,7 @@ describe("retry-directive", () => {
       instruction: "Fix it",
       authoredBy: "orc",
     });
-    const revised = deriveContractRevision(sampleContract, directive);
+    const revised = deriveContractRevision(sampleContract, directive, 1, 2);
     const bad = { ...revised, goal: "Different goal" };
     const errors = validateContractRevision(sampleContract, bad as any);
     expect(errors).toContain("root goal changed");

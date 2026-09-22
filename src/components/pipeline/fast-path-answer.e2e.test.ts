@@ -62,9 +62,10 @@ function makeSession(id: string): ManagedSession {
     id, userId: "master", platform: "telegram", chatId: 100,
     delivery: "simple", active: true, status: "ready",
     idleTimeoutMs: 0, lastActiveAt: Date.now(), messageCount: 0, tokenCount: 0, toolCallCount: 0,
-    log: [], shortIndex: 1,
+    log: [], shortIndex: 1, showThinking: false,
     busy: false, queue: [], fullMode: false, pendingStart: false, seen: true,
     compacting: false, ctxWarned: false, compactFailures: 0, primingTerms: [], completions: [],
+    instructionQueue: [], steeringAccepting: false,
   };
 }
 

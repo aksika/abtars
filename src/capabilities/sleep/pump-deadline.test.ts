@@ -837,6 +837,8 @@ describe("createSleepHandle provider pump terminal settlement (#1517)", () => {
 
       // The ended session is pruned from listAllSessions — look it up by id.
       const session = spin.getSessionById(allocatedId);
+      expect(session).toBeDefined();
+      if (!session) throw new Error("expected quarantined session");
       expect(runtime.session, "exactly one configured-only transport attempt — no fallback").toHaveBeenCalledTimes(1);
       expect(runtime.session.mock.calls[0]![2]).toEqual({ candidatePolicy: "configured-only" });
       expect(session.status, "the exact Dreamy session is quarantined").toBe("ended");

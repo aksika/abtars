@@ -47,7 +47,7 @@ function piInstallationFixture(version: string): { bin: string; packageRoot: str
     ["@earendil-works", "pi-ai"],
     ["@earendil-works", "pi-tui"],
     ["@earendil-works", "pi-agent-core"],
-  ]) {
+  ] as const) {
     const nestedRoot = join(packageRoot, "node_modules", scope, name);
     mkdirSync(nestedRoot, { recursive: true });
     writeFileSync(join(nestedRoot, "package.json"), JSON.stringify({ name: `${scope}/${name}` }));

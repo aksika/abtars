@@ -39,8 +39,7 @@ export interface Violation {
 function liveDefaultMutation(src: string): Violation[] {
   const lines = src.split("\n");
   const out: Violation[] = [];
-  for (let i = 0; i < lines.length; i++) {
-    const line = lines[i];
+  for (const [i, line] of lines.entries()) {
     if (!MUTATION_FNS.test(line)) continue;
     if (!/homedir\(\)/.test(line)) continue;
     if (!MUTABLE_TARGETS.some((t) => line.includes(t))) continue;
@@ -55,20 +54,20 @@ function liveDefaultMutation(src: string): Violation[] {
 function moduleLevelMutableCapture(src: string): Violation[] {
   const lines = src.split("\n");
   const captures: { name: string; line: number }[] = [];
-  for (let i = 0; i < lines.length; i++) {
-    const line = lines[i];
+  for (const [i, line] of lines.entries()) {
     const m = line.match(/^\s*(?:export\s+)?(?:const|let|var)\s+([A-Z_][A-Z0-9_]*)\s*=/);
     if (!m) continue;
+    const name = m[1];
+    if (!name) continue;
     if (!/homedir\(\)/.test(line)) continue;
     if (!MUTABLE_TARGETS.some((t) => line.includes(t))) continue;
     if (GUARD.test(line) || TEMP_OWNER.test(line)) continue;
-    captures.push({ name: m[1], line: i + 1 });
+    captures.push({ name, line: i + 1 });
   }
   const out: Violation[] = [];
   for (const cap of captures) {
     const ref = new RegExp(`\\b${cap.name}\\b`);
-    for (let i = 0; i < lines.length; i++) {
-      const line = lines[i];
+    for (const [i, line] of lines.entries()) {
       if (!MUTATION_FNS.test(line)) continue;
       if (!ref.test(line)) continue;
       const nearby = (lines[i - 1] || "") + "\n" + line + "\n" + (lines[i + 1] || "");
@@ -86,8 +85,7 @@ function moduleLevelMutableCapture(src: string): Violation[] {
 function unsafeRecursiveCleanup(src: string): Violation[] {
   const lines = src.split("\n");
   const out: Violation[] = [];
-  for (let i = 0; i < lines.length; i++) {
-    const line = lines[i];
+  for (const [i, line] of lines.entries()) {
     if (!/rmSync\s*\(/.test(line)) continue;
     if (!/recursive\s*:\s*true/.test(line)) continue;
     const targetsDefault =
@@ -110,8 +108,7 @@ function envSpreadToChildProcess(src: string): Violation[] {
   );
   if (!hasRealCall) return [];
   const out: Violation[] = [];
-  for (let i = 0; i < lines.length; i++) {
-    const line = lines[i];
+  for (const [i, line] of lines.entries()) {
     if (!/\.\.\.process\.env\b/.test(line)) continue;
     const nearby = (lines[i - 1] || "") + "\n" + line + "\n" + (lines[i + 1] || "");
     if (/isolatedChildEnv/.test(nearby)) continue;

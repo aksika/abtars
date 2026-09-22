@@ -78,6 +78,7 @@ function makeWriter(opts: Partial<TuiFrameWriterOptions> = {}): Ctx {
 function activity(cardId: number, title: string, seq: number): TuiServerFrame {
   return {
     t: "activity",
+    sequence: seq,
     event: { kind: "card.running", title, status: "running", cardId, sequence: seq, timestamp: 0, sessionId: "x", executionId: "e" } as any,
   };
 }

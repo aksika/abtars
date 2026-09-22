@@ -9,7 +9,7 @@ const mockMarkUnknown = vi.hoisted(() => vi.fn());
 const mockRecordWithdrawal = vi.hoisted(() => vi.fn());
 const mockGetPublicStatus = vi.hoisted(() => vi.fn());
 const mockRecordContributionEvent = vi.hoisted(() => vi.fn());
-const mockKanbanList = vi.hoisted(() => vi.fn(() => []));
+const mockKanbanList = vi.hoisted(() => vi.fn((): Array<{ id: number; type: string; status: string; notes: string }> => []));
 const mockPiLedgerReserve = vi.hoisted(() => vi.fn());
 const mockRequestReconcile = vi.hoisted(() => vi.fn());
 const mockNerveFire = vi.hoisted(() => vi.fn());

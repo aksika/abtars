@@ -12,7 +12,8 @@ vi.mock("./message-pipeline.js", () => ({
   submitTrustedInternalMessage: submitMock,
 }));
 
-import { MainConversationIngress, composeScheduledAnnouncementText } from "./main-conversation-ingress.js";
+import { MainConversationIngress, composeScheduledAnnouncementText, type MainConversationIngressDeps } from "./main-conversation-ingress.js";
+import type { PipelineDeps } from "./message-pipeline.js";
 
 function makeAdapter() {
   return {
@@ -24,9 +25,12 @@ function makeAdapter() {
   };
 }
 
-function makeDeps(overrides: Record<string, unknown> = {}) {
+function makeDeps(overrides: Partial<MainConversationIngressDeps> = {}): MainConversationIngressDeps {
   return {
-    getPipelineDeps: vi.fn().mockReturnValue({ transport: {} }),
+    // Partial stand-in: these unavailable-boundary tests never read past the
+    // null-check (see announceToMain), so a full PipelineDeps fixture would
+    // assert shapes these paths never touch.
+    getPipelineDeps: vi.fn().mockReturnValue({ transport: {} } as PipelineDeps),
     getAdapter: vi.fn().mockReturnValue(makeAdapter()),
     ...overrides,
   };
@@ -37,9 +41,10 @@ function makeSession(overrides: Partial<ManagedSession> = {}): ManagedSession {
     id: "1_A_01", userId: "master", platform: "telegram", chatId: 42424242,
     delivery: "streaming", active: true, status: "ready",
     idleTimeoutMs: 0, lastActiveAt: Date.now(), messageCount: 0, tokenCount: 0, toolCallCount: 0,
-    log: [], shortIndex: 1,
+    log: [], shortIndex: 1, showThinking: false,
     busy: false, queue: [], fullMode: false, pendingStart: false, seen: true,
     compacting: false, ctxWarned: false, compactFailures: 0, primingTerms: [], completions: [],
+    instructionQueue: [], steeringAccepting: false,
     ...overrides,
   };
 }
@@ -107,7 +112,7 @@ describe("MainConversationIngress.announceToMain", () => {
   });
 
   it("maps every unavailable boundary to not_sent without submitting", async () => {
-    const cases: Array<{ deps: Record<string, unknown>; request?: Record<string, unknown> }> = [
+    const cases: Array<{ deps: MainConversationIngressDeps; request?: Record<string, unknown> }> = [
       { deps: makeDeps({ getPipelineDeps: () => null }) },
       { deps: makeDeps({ getAdapter: () => null }) },
       { deps: makeDeps(), request: makeRequest({ result: "" }) },

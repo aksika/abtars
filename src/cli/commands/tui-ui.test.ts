@@ -153,6 +153,11 @@ function makeHarness(options?: Partial<TuiAppOptions>): Harness {
   const terminal = new FakeProcessTerminal();
   const editor = new FakeEditor(ui, {});
   const renderErrors: Error[] = [];
+  // Seam cast (same category as makeModules): the whole options object is the
+  // faked public-module seam documented at the top of this file. Production
+  // constructs TuiApp with the real pi-tui classes; the fakes implement the
+  // subset TuiApp touches, so the cast cannot hide a missing capability the
+  // tests rely on — any gap fails at runtime below.
   const app = new TuiApp({
     modules,
     terminal,
@@ -160,9 +165,13 @@ function makeHarness(options?: Partial<TuiAppOptions>): Harness {
     editor,
     onRenderError: (err: Error) => { renderErrors.push(err); },
     ...options,
-  });
-  // Find the loader the app constructed (last Loader instance).
-  const loader = app["_busy"] as FakeLoader;
+  } as unknown as TuiAppOptions);
+  // Find the loader the app constructed (last Loader instance): it IS a
+  // FakeLoader at runtime (modules.tui.Loader), narrowed by instanceof.
+  const busy = app["_busy"];
+  expect(busy).toBeInstanceOf(FakeLoader);
+  if (!(busy instanceof FakeLoader)) throw new Error("expected fake loader");
+  const loader = busy;
   return { app, ui, terminal, loader, renderErrors };
 }
 
@@ -553,8 +562,8 @@ describe("TuiApp — lifecycle reset and failure recovery (design §5/§6)", () 
       terminal: new FakeProcessTerminal(),
       ui,
       editor: new FakeEditor(ui, {}),
-      onRenderError: (err) => { renderErrors.push(err); },
-    });
+      onRenderError: (err: Error) => { renderErrors.push(err); },
+    } as unknown as TuiAppOptions);
     app.resetForReady("Main #1", "s1");
     expect(renderErrors.length).toBe(0); // shell build must not construct rows
     app.handleFrame({ t: "message", role: "assistant", markdown: "x" });

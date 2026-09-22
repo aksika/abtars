@@ -12,7 +12,7 @@ vi.mock("./registry.js", () => ({ triggerResetSession: vi.fn() }));
 
 const { handleEffort } = await import("./handlers-transport.js");
 import type { CommandContext } from "./types.js";
-import type { IKiroTransport, ReasoningEffortState } from "../transport/kiro-transport.js";
+import type { IKiroTransport, ReasoningEffortState, ReasoningEffort } from "../transport/kiro-transport.js";
 
 function makeSetEffortTransport(impl: (level: string) => ReasoningEffortState) {
   return {
@@ -96,7 +96,7 @@ describe("handleEffort — attached Pi transport", () => {
 
     it("falls back to the bridge-global transport when the session has none", async () => {
       const globalTransport = {
-        setReasoningEffort: vi.fn((l: string) => ({ requested: l, effective: l })),
+        setReasoningEffort: vi.fn((l: ReasoningEffort): ReasoningEffortState => ({ requested: l, effective: l })),
         getRuntimeStatus: vi.fn(() => ({ reasoning: "off" as const })),
       };
       const { ctx, reply } = makeCtx({ sessionManager: { getSessionById: () => undefined }, global: globalTransport });

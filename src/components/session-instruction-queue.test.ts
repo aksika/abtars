@@ -18,6 +18,7 @@ function makeOrcSession(overrides?: Partial<ManagedSession>): ManagedSession {
     toolCallCount: 0,
     log: [],
     shortIndex: 1,
+    showThinking: false,
     busy: true,
     queue: [],
     fullMode: false,
@@ -95,9 +96,11 @@ describe("session-instruction-queue", () => {
     it("rejects when queue has 20 items with queue_full", () => {
       const session = makeOrcSession();
       for (let i = 0; i < 20; i++) {
+        const text = `item ${i}`;
         session.instructionQueue.push({
           id: `steer_${i}`, sessionId: session.id, executionId: session.activeExecutionId!,
-          source: "tui", text: `item ${i}`, createdAt: Date.now(),
+          kind: "steer", source: "tui", text, bytes: Buffer.byteLength(text, "utf-8"),
+          createdAt: Date.now(), state: "queued",
         });
       }
       const result = queueInstruction(session, { text: "one more", source: "tui" });
@@ -107,9 +110,11 @@ describe("session-instruction-queue", () => {
 
     it("rejects when total bytes exceed 32 KiB", () => {
       const session = makeOrcSession();
+      const big = "x".repeat(31000);
       session.instructionQueue.push({
         id: "steer_big", sessionId: session.id, executionId: session.activeExecutionId!,
-        source: "tui", text: "x".repeat(31000), createdAt: Date.now(),
+        kind: "steer", source: "tui", text: big, bytes: Buffer.byteLength(big, "utf-8"),
+        createdAt: Date.now(), state: "queued",
       });
       const result = queueInstruction(session, { text: "y".repeat(2000), source: "tui" });
       expect(result.ok).toBe(false);

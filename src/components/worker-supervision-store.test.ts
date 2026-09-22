@@ -489,8 +489,12 @@ describe("WorkerSupervisionStore", () => {
         executorMax: 3, projectId, reservedTokens: 0,
       });
       expect(result.kind).toBe("claimed");
-      if (result.kind === "claimed") {
+      // `in` guard: the failure member types kind as plain string, so the
+      // literal comparison alone does not narrow.
+      if (result.kind === "claimed" && "claim" in result) {
         expect(result.claim.attemptId).toBe(attemptId);
+      } else {
+        throw new Error("expected claimed result");
       }
     });
 

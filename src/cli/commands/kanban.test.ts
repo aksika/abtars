@@ -81,8 +81,8 @@ describe("kanban CLI against the HTTPS Agent API (#1621)", () => {
     }) as typeof process.stdout.write);
 
     const originalFetch = globalThis.fetch;
-    const capturedSignals: Array<AbortSignal | undefined> = [];
-    globalThis.fetch = ((input: RequestInfo | URL, init?: RequestInit) => {
+    const capturedSignals: Array<AbortSignal | null | undefined> = [];
+    globalThis.fetch = ((input: string | URL, init?: RequestInit) => {
       capturedSignals.push(init?.signal);
       return originalFetch(input, init);
     }) as typeof fetch;

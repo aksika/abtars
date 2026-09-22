@@ -1,6 +1,10 @@
 /**
  * Smoke test — verifies the core bridge lifecycle works end-to-end.
- * Uses real pipeline + real memory, mock transport + mock adapter.
+ * Uses real pipeline + mock transport + mock adapter. Memory paths are
+ * disabled: the historical `memory` field never wired into PipelineDeps
+ * (which reads `memoryRuntime`), so these tests always ran memoryless.
+ * memoryRuntime: createDisabledRuntime() makes that explicit instead of
+ * relying on an absent field.
  */
 
 /*
@@ -37,8 +41,9 @@ vi.mock("../components/soul-bundle.js", () => ({ buildSoulBundle: () => MOCK_SOU
 
 import { handleInboundMessage, resetAndPrepare, type PipelineDeps } from "../components/message-pipeline.js";
 import type { PlatformAdapter, InboundMessage } from "../types/platform.js";
-import type { IKiroTransport } from "../components/kiro-transport.js";
+import type { IKiroTransport } from "../components/transport/kiro-transport.js";
 import { MemoryManager } from "abmind";
+import { createDisabledRuntime } from "../components/memory-runtime.js";
 import { ConversationBuffer } from "../components/conversation-buffer.js";
 import type { ManagedSession } from "../components/spin-types.js";
 
@@ -63,6 +68,7 @@ function makeTransport(): IKiroTransport & { prompts: string[] } {
     get isReady() { return true; },
     get contextPercent() { return 5; },
     get answerOnly() { return ""; },
+    get toolCallsSucceeded() { return 0; },
     get intermediateDeliveredText() { return ""; },
   };
 }
@@ -98,24 +104,24 @@ function makeManagedSession(overrides: Partial<ManagedSession> = {}): ManagedSes
     id: "test_A_01", userId: "master", platform: "telegram", chatId: 100,
     delivery: "simple", active: true, status: "ready",
     idleTimeoutMs: 0, lastActiveAt: Date.now(), messageCount: 0, tokenCount: 0, toolCallCount: 0,
-    log: [], shortIndex: 1,
+    log: [], shortIndex: 1, showThinking: false,
     busy: false, queue: [], fullMode: false, pendingStart: false, seen: false,
     compacting: false, ctxWarned: false, compactFailures: 0, primingTerms: [], completions: [],
+    instructionQueue: [], steeringAccepting: false,
     ...overrides,
   };
 }
 
-function makeDeps(transport: IKiroTransport, memory: MemoryManager | null, sessionOverrides: Partial<ManagedSession> = {}): PipelineDeps {
+function makeDeps(transport: IKiroTransport, _memory: MemoryManager | null, sessionOverrides: Partial<ManagedSession> = {}): PipelineDeps {
   const session = makeManagedSession(sessionOverrides);
   return {
     transport,
-    codingMode: { has: () => false, getTransport: () => null, start: vi.fn(), stop: vi.fn() } as any,
-    memory,
-    memoryConfig: { memoryEnabled: !!memory, memoryDir: tmpDir },
+    memoryRuntime: createDisabledRuntime(),
+    memoryConfig: { memoryEnabled: false, memoryDir: tmpDir },
     nlmConfig: { enabled: false },
     idleSave: { reset: vi.fn(), save: vi.fn(), getTimers: () => new Map(), clearAll: vi.fn() } as any,
     conversationBuffer: new ConversationBuffer(50),
-    config: { agentTransport: "acp", workingDir: tmpDir },
+    config: { workingDir: tmpDir },
     startedAt: Date.now(),
     sttConfig: null, ttsConfig: null,
     sessionManager: {
@@ -195,13 +201,12 @@ describe("Smoke: bridge lifecycle", () => {
 
     const deps: PipelineDeps = {
       transport,
-      codingMode: { has: () => false, getTransport: () => null, start: vi.fn(), stop: vi.fn() } as any,
-      memory,
-      memoryConfig: { memoryEnabled: !!memory, memoryDir: tmpDir },
+      memoryRuntime: createDisabledRuntime(),
+      memoryConfig: { memoryEnabled: false, memoryDir: tmpDir },
       nlmConfig: { enabled: false },
       idleSave: { reset: vi.fn(), save: vi.fn(), getTimers: () => new Map(), clearAll: vi.fn() } as any,
       conversationBuffer: new ConversationBuffer(50),
-      config: { agentTransport: "acp", workingDir: tmpDir },
+      config: { workingDir: tmpDir },
       startedAt: Date.now(),
       sttConfig: null, ttsConfig: null,
       sessionManager: {

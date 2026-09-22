@@ -3,7 +3,7 @@ import { setUserRegistryOverride, type UserRegistry } from "./user-registry.js";
 import { classifyContent } from "./clean-response.js";
 import type { ManagedSession } from "./spin-types.js";
 import { DurableContextUnavailableError } from "./transport/pi-core-context.js";
-import { ProviderExecutionError } from "./transport/provider-failure.js";
+import { ProviderExecutionError, type ProviderTerminalFailure } from "./transport/provider-failure.js";
 import { SCHEDULED_ANNOUNCEMENT_TOKEN } from "../types/platform.js";
 
 const detectCitationsSpy = vi.fn().mockReturnValue([1]);
@@ -35,7 +35,10 @@ import { Spin } from "./spin.js";
 import { bufferAgentNotice, drainSystemEvents } from "./system-event-buffer.js";
 const SessionManager = Spin;
 
-function mockTransport(): IKiroTransport {
+function mockTransport(): IKiroTransport & { contextPercent: number } {
+  // Mutable percent behind the readonly interface member: tests simulate
+  // pressure/unknown by assignment; production only ever reads it.
+  let percent = 0;
   return {
     initialize: vi.fn().mockResolvedValue(undefined),
     sendPrompt: vi.fn().mockResolvedValue("Hello from Kiro!"),
@@ -44,7 +47,8 @@ function mockTransport(): IKiroTransport {
     destroy: vi.fn(),
     transportCommands: [],
     get isReady() { return true; },
-    contextPercent: 0,
+    get contextPercent() { return percent; },
+    set contextPercent(v: number) { percent = v; },
     answerOnly: "",
     toolCallsSucceeded: 0,
     intermediateDeliveredText: "",
@@ -73,9 +77,10 @@ function mockDeps(transport: IKiroTransport, overrides: Partial<PipelineDeps> = 
     id: "test_A_01", userId: "master", platform: "telegram", chatId: 100,
     delivery: "simple", active: true, status: "ready",
     idleTimeoutMs: 0, lastActiveAt: Date.now(), messageCount: 0, tokenCount: 0, toolCallCount: 0,
-    log: [], shortIndex: 1,
+    log: [], shortIndex: 1, showThinking: false,
     busy: false, queue: [], fullMode: false, pendingStart: false, seen: true,
     compacting: false, ctxWarned: false, compactFailures: 0, primingTerms: [], completions: [],
+    instructionQueue: [], steeringAccepting: false,
   };
   return {
     transport,
@@ -134,7 +139,7 @@ function makeMsg(overrides: Partial<InboundMessage> = {}): InboundMessage {
 }
 
 describe("handleInboundMessage", () => {
-  let transport: IKiroTransport;
+  let transport: ReturnType<typeof mockTransport>;
 
   beforeEach(async () => {
     transport = mockTransport();
@@ -145,9 +150,10 @@ describe("handleInboundMessage", () => {
       id: "test_A_01", userId: "master", platform: "telegram", chatId: 100,
       delivery: "streaming", active: true, status: "ready",
       idleTimeoutMs: 0, lastActiveAt: Date.now(), messageCount: 0, tokenCount: 0, toolCallCount: 0,
-      log: [], shortIndex: 1,
+      log: [], shortIndex: 1, showThinking: false,
       busy: false, queue: [], fullMode: false, pendingStart: false, seen: true,
       compacting: false, ctxWarned: false, compactFailures: 0, primingTerms: [], completions: [],
+      instructionQueue: [], steeringAccepting: false,
     };
     // #1348: Pipeline calls ensureSessionTransport if session.transport is missing.
     // Mock it to wire the describe-block's transport (recreated fresh per test) so
@@ -412,7 +418,7 @@ describe("handleInboundMessage", () => {
   // ── Context-overflow recovery (#1745) ─────────────────────────────────────
 
   it("resets the session on ProviderExecutionError with code context_overflow", async () => {
-    const failure = { code: "context_overflow", retryable: false, attemptedCandidates: 2, message: "The request exceeds the context window of every configured model" };
+    const failure: ProviderTerminalFailure = { code: "context_overflow", retryable: false, attemptedCandidates: 2, message: "The request exceeds the context window of every configured model" };
     transport.sendPrompt = vi.fn().mockRejectedValue(new ProviderExecutionError(failure)) as any;
     const adapter = mockAdapter();
     const deps = mockDeps(transport);
@@ -437,7 +443,7 @@ describe("handleInboundMessage", () => {
   });
 
   it("resets on overflow without notifying for synthetic-prefixed prompts", async () => {
-    const failure = { code: "context_overflow", retryable: false, attemptedCandidates: 1, message: "The request exceeds the context window of every configured model" };
+    const failure: ProviderTerminalFailure = { code: "context_overflow", retryable: false, attemptedCandidates: 1, message: "The request exceeds the context window of every configured model" };
     transport.sendPrompt = vi.fn().mockRejectedValue(new ProviderExecutionError(failure)) as any;
     const adapter = mockAdapter();
     const deps = mockDeps(transport);
@@ -492,9 +498,10 @@ describe("handleInboundMessage", () => {
           id, userId, platform, chatId: 100,
           delivery: "streaming", active: true, status: "ready",
           idleTimeoutMs: 0, lastActiveAt: Date.now(), messageCount: 0, tokenCount: 0, toolCallCount: 0,
-          log: [], shortIndex: 1,
+          log: [], shortIndex: 1, showThinking: false,
           busy: false, queue: [], fullMode: false, pendingStart: false, seen: true,
           compacting: false, ctxWarned: false, compactFailures: 0, primingTerms: [], completions: [],
+      instructionQueue: [], steeringAccepting: false,
         };
         sessions.set(id, s);
       }
@@ -526,7 +533,7 @@ describe("handleInboundMessage", () => {
 });
 
 describe("#1724 submitTrustedInternalMessage — receipt-bearing internal submissions", () => {
-  let transport: IKiroTransport;
+  let transport: ReturnType<typeof mockTransport>;
   let mockSession: ManagedSession;
 
   const SCHEDULED_TEXT = "[SCHEDULED TASK COMPLETED]\nTask: Morning greeting\nCard ID: 12\n\nThe task agent produced the following user-facing result:\nGood morning!\n\nAnnounce this result.";
@@ -551,9 +558,10 @@ describe("#1724 submitTrustedInternalMessage — receipt-bearing internal submis
       id: "test_A_01", userId: "master", platform: "telegram", chatId: 100,
       delivery: "streaming", active: true, status: "ready",
       idleTimeoutMs: 0, lastActiveAt: Date.now(), messageCount: 0, tokenCount: 0, toolCallCount: 0,
-      log: [], shortIndex: 1,
+      log: [], shortIndex: 1, showThinking: false,
       busy: false, queue: [], fullMode: false, pendingStart: false, seen: true,
       compacting: false, ctxWarned: false, compactFailures: 0, primingTerms: [], completions: [],
+      instructionQueue: [], steeringAccepting: false,
     };
     vi.spyOn(spinMod.spin, "ensureSessionTransport").mockImplementation(async (session) => {
       session.transport = transport;
@@ -687,7 +695,7 @@ describe("#1724 submitTrustedInternalMessage — receipt-bearing internal submis
 });
 
 describe("citation detection (#1270)", () => {
-  let transport: IKiroTransport;
+  let transport: ReturnType<typeof mockTransport>;
 
   /** Shared memoryRuntime mock that satisfies AbtarsMemoryRuntime. */
   function mockMemoryRuntime(overrides: Record<string, unknown> = {}) {
@@ -724,26 +732,29 @@ describe("citation detection (#1270)", () => {
       id, userId: "master", platform: "telegram", chatId: 100,
       delivery: "streaming", active: true, status: "ready",
       idleTimeoutMs: 0, lastActiveAt: Date.now(), messageCount: 0, tokenCount: 0, toolCallCount: 0,
-      log: [], shortIndex: 1,
+      log: [], shortIndex: 1, showThinking: false,
       busy: false, queue: [], fullMode: false, pendingStart: false, seen: true,
       compacting: false, ctxWarned: false, compactFailures: 0, primingTerms: [], completions: [],
+      instructionQueue: [], steeringAccepting: false,
     }));
     vi.spyOn(spinMod.spin, "getActiveSession").mockImplementation((_userId, _platform): ManagedSession => ({
       id: "test_A_01", userId: "master", platform: "telegram", chatId: 100,
       delivery: "streaming", active: true, status: "ready",
       idleTimeoutMs: 0, lastActiveAt: Date.now(), messageCount: 0, tokenCount: 0, toolCallCount: 0,
-      log: [], shortIndex: 1,
+      log: [], shortIndex: 1, showThinking: false,
       busy: false, queue: [], fullMode: false, pendingStart: false, seen: true,
       compacting: false, ctxWarned: false, compactFailures: 0, primingTerms: [], completions: [],
+      instructionQueue: [], steeringAccepting: false,
     }));
     vi.spyOn(spinMod.spin, "resolveSession").mockImplementation(
       async (_userId: string, _platform: string, _chatId: number): Promise<ManagedSession> => ({
         id: "test_A_01", userId: "master", platform: "telegram", chatId: 100,
         delivery: "streaming", active: true, status: "ready",
         idleTimeoutMs: 0, lastActiveAt: Date.now(), messageCount: 0, tokenCount: 0, toolCallCount: 0,
-        log: [], shortIndex: 1,
+        log: [], shortIndex: 1, showThinking: false,
         busy: false, queue: [], fullMode: false, pendingStart: false, seen: true,
         compacting: false, ctxWarned: false, compactFailures: 0, primingTerms: [], completions: [],
+      instructionQueue: [], steeringAccepting: false,
       }),
     );
   });
@@ -847,26 +858,29 @@ describe("citation detection (#1270)", () => {
         id, userId: "master", platform: "telegram", chatId: 100,
         delivery: "streaming", active: true, status: "ready",
         idleTimeoutMs: 0, lastActiveAt: Date.now(), messageCount: 0, tokenCount: 0, toolCallCount: 0,
-        log: [], shortIndex: 1,
+        log: [], shortIndex: 1, showThinking: false,
         busy: false, queue: [], fullMode: false, pendingStart: false, seen: true,
         compacting: false, ctxWarned: false, compactFailures: 0, primingTerms: [], completions: [],
+      instructionQueue: [], steeringAccepting: false,
       }));
       vi.spyOn(spinMod.spin, "getActiveSession").mockImplementation((_userId, _platform): ManagedSession => ({
         id: "test_A_01", userId: "master", platform: "telegram", chatId: 100,
         delivery: "streaming", active: true, status: "ready",
         idleTimeoutMs: 0, lastActiveAt: Date.now(), messageCount: 0, tokenCount: 0, toolCallCount: 0,
-        log: [], shortIndex: 1,
+        log: [], shortIndex: 1, showThinking: false,
         busy: false, queue: [], fullMode: false, pendingStart: false, seen: true,
         compacting: false, ctxWarned: false, compactFailures: 0, primingTerms: [], completions: [],
+      instructionQueue: [], steeringAccepting: false,
       }));
       vi.spyOn(spinMod.spin, "resolveSession").mockImplementation(
         async (_userId: string, _platform: string, _chatId: number): Promise<ManagedSession> => ({
           id: "test_A_01", userId: "master", platform: "telegram", chatId: 100,
           delivery: "streaming", active: true, status: "ready",
           idleTimeoutMs: 0, lastActiveAt: Date.now(), messageCount: 0, tokenCount: 0, toolCallCount: 0,
-          log: [], shortIndex: 1,
+          log: [], shortIndex: 1, showThinking: false,
           busy: false, queue: [], fullMode: false, pendingStart: false, seen: true,
           compacting: false, ctxWarned: false, compactFailures: 0, primingTerms: [], completions: [],
+      instructionQueue: [], steeringAccepting: false,
         }),
       );
     });
@@ -917,7 +931,7 @@ describe("citation detection (#1270)", () => {
 });
 
 describe("#1619 incremental block delivery wiring", () => {
-  let transport: IKiroTransport;
+  let transport: ReturnType<typeof mockTransport>;
 
   const MASTER_REG: UserRegistry = {
     users: [{ userId: "master", role: "master", maxClass: 3, tools: ["all"], platforms: { telegram: 100 } }],
@@ -937,6 +951,7 @@ describe("#1619 incremental block delivery wiring", () => {
       showThinking: true, // #1654: wiring evidence tests need the feed enabled
       busy: false, queue: [], fullMode: false, pendingStart: false, seen: true,
       compacting: false, ctxWarned: false, compactFailures: 0, primingTerms: [], completions: [],
+      instructionQueue: [], steeringAccepting: false,
     };
     vi.spyOn(spinMod.spin, "ensureSessionTransport").mockImplementation(async (session) => {
       console.log("ensureSessionTransport: setting transport id=", (transport as any)._id);
@@ -1008,6 +1023,7 @@ describe("#1619 incremental block delivery wiring", () => {
       showThinking: false, // #1654: default-hidden
       busy: false, queue: [], fullMode: false, pendingStart: false, seen: true,
       compacting: false, ctxWarned: false, compactFailures: 0, primingTerms: [], completions: [],
+      instructionQueue: [], steeringAccepting: false,
     });
     vi.spyOn(spinMod.spin, "getSessionById").mockImplementation((id: string): ManagedSession => hiddenSession(id));
     vi.spyOn(spinMod.spin, "getActiveSession").mockImplementation((): ManagedSession => hiddenSession("test_A_01"));
@@ -1058,7 +1074,7 @@ describe("#1619 incremental block delivery wiring", () => {
 });
 
 describe("session-start hydration lifecycle (#1776)", () => {
-  let transport: IKiroTransport;
+  let transport: ReturnType<typeof mockTransport>;
 
   beforeEach(async () => {
     transport = mockTransport();
@@ -1083,9 +1099,10 @@ describe("session-start hydration lifecycle (#1776)", () => {
       id: "test_A_01", userId: "master", platform: "telegram", chatId: 100,
       delivery: "simple", active: true, status: "ready",
       idleTimeoutMs: 0, lastActiveAt: Date.now(), messageCount: 0, tokenCount: 0, toolCallCount: 0,
-      log: [], shortIndex: 1,
+      log: [], shortIndex: 1, showThinking: false,
       busy: false, queue: [], fullMode: false, pendingStart: false, seen: false,
       compacting: false, ctxWarned: false, compactFailures: 0, primingTerms: [], completions: [],
+      instructionQueue: [], steeringAccepting: false,
     };
     vi.spyOn(spinMod.spin, "getActiveSession").mockImplementation((): ManagedSession => session);
     vi.spyOn(spinMod.spin, "getSessionById").mockImplementation((): ManagedSession => session);

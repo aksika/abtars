@@ -6,6 +6,7 @@ import {
   attemptMemoryMutation,
   type MemoryRuntimeCapability,
 } from "./memory-runtime.js";
+import type { AbmindRouteSnapshotV1Like } from "./abmind-route-contract.js";
 
 type AbmindCapabilitiesV1 = { version: number; methods: string[]; domains: string[]; features: Record<string, string> };
 
@@ -187,12 +188,15 @@ describe("createClientRuntime", () => {
     const lostSnapshot = { version: 1 as const, state: "reconnecting" as const, generation: 4, retryEligible: 1, terminalUnknown: 0 };
     const restoredSnapshot = { version: 1 as const, state: "ready" as const, generation: 5, retryEligible: 0, terminalUnknown: 0 };
     let currentCaps: AbmindCapabilitiesV1 | null = caps(ALL_METHODS, { private_read: "true", private_write: "true", private_mutation_contract: "revision-v1" });
-    let listener: ((snapshot: typeof readySnapshot) => void) | null = null;
+    // No-op initial: assignments inside the onRouteChange closure are
+    // invisible to control-flow analysis, which would otherwise fold the
+    // null initializer and reject every call below as `never`.
+    let listener: (snapshot: AbmindRouteSnapshotV1Like) => void = () => {};
     const client = mockClient(currentCaps, {
       routeSnapshot: readySnapshot,
       onRouteChange: (fn: typeof listener) => {
         listener = fn as typeof listener;
-        return () => { listener = null; };
+        return () => {};
       },
     } as never);
     (client as unknown as { capabilities: AbmindCapabilitiesV1 | null }).capabilities = currentCaps;
@@ -203,14 +207,14 @@ describe("createClientRuntime", () => {
 
     // Route loss: capabilities clear, runtime goes unavailable immediately.
     (client as unknown as { capabilities: AbmindCapabilitiesV1 | null }).capabilities = null;
-    listener?.(lostSnapshot);
+    listener(lostSnapshot);
     expect(rt.state).toBe("unavailable");
     expect(rt.supports("recall")).toBe(false);
 
     // Recovery: capabilities re-project only after the route is ready again.
     currentCaps = caps(ALL_METHODS, { private_read: "true", private_write: "true", private_mutation_contract: "revision-v1" });
     (client as unknown as { capabilities: AbmindCapabilitiesV1 | null }).capabilities = currentCaps;
-    listener?.(restoredSnapshot);
+    listener(restoredSnapshot);
     expect(rt.state).toBe("ready");
     expect(rt.supports("recall")).toBe(true);
   });
@@ -258,12 +262,15 @@ describe("createClientRuntime", () => {
     const readySnapshot = { version: 1 as const, state: "ready" as const, generation: 3, retryEligible: 0, terminalUnknown: 0 };
     const lostSnapshot = { version: 1 as const, state: "reconnecting" as const, generation: 4, retryEligible: 1, terminalUnknown: 0 };
     let currentCaps: AbmindCapabilitiesV1 | null = caps(ALL_METHODS, { private_read: "true" });
-    let listener: ((snapshot: typeof readySnapshot) => void) | null = null;
+    // No-op initial: assignments inside the onRouteChange closure are
+    // invisible to control-flow analysis, which would otherwise fold the
+    // null initializer and reject every call below as `never`.
+    let listener: (snapshot: AbmindRouteSnapshotV1Like) => void = () => {};
     const client = mockClient(currentCaps, {
       routeSnapshot: readySnapshot,
       onRouteChange: (fn: typeof listener) => {
         listener = fn as typeof listener;
-        return () => { listener = null; };
+        return () => {};
       },
     } as never);
     (client as unknown as { capabilities: AbmindCapabilitiesV1 | null }).capabilities = currentCaps;
@@ -273,14 +280,14 @@ describe("createClientRuntime", () => {
 
     // Route loss clears capabilities → projection must reject without a call.
     (client as unknown as { capabilities: AbmindCapabilitiesV1 | null }).capabilities = null;
-    listener?.(lostSnapshot);
+    listener(lostSnapshot);
     await expect(rt.projectDurableContext({ userId: "u1", sessionId: "s1", beforeMessageId: 42, maxContext: 8000 }))
       .rejects.toThrow(/capability unavailable/);
 
     // Recovery re-projects capabilities → a new execution may project again.
     currentCaps = caps(ALL_METHODS, { private_read: "true" });
     (client as unknown as { capabilities: AbmindCapabilitiesV1 | null }).capabilities = currentCaps;
-    listener?.({ version: 1 as const, state: "ready" as const, generation: 5, retryEligible: 0, terminalUnknown: 0 });
+    listener({ version: 1 as const, state: "ready" as const, generation: 5, retryEligible: 0, terminalUnknown: 0 });
     const result = await rt.projectDurableContext({ userId: "u1", sessionId: "s1", beforeMessageId: 42, maxContext: 8000 });
     expect(result.messages.length).toBe(1);
   });

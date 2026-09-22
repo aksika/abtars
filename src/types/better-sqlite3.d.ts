@@ -1,7 +1,7 @@
 declare module "better-sqlite3" {
   export   export interface Database {
     prepare(sql: string): Statement;
-    transaction<T extends (...args: unknown[]) => unknown>(fn: T): T;
+    transaction<T extends (...args: unknown[]) => unknown>(fn: T): T & TransactionControls<T>;
     pragma(pragma: string, options?: { simple?: boolean }): unknown;
     exec(sql: string): void;
     close(): void;
@@ -9,6 +9,13 @@ declare module "better-sqlite3" {
     readonly readonly: boolean;
     readonly name: string;
     readonly open: boolean;
+  }
+
+  /** better-sqlite3 transaction control modes (deferred default). */
+  interface TransactionControls<T extends (...args: unknown[]) => unknown> {
+    deferred(): ReturnType<T>;
+    immediate(): ReturnType<T>;
+    exclusive(): ReturnType<T>;
   }
 
   interface Statement {

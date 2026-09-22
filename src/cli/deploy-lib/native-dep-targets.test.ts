@@ -32,9 +32,9 @@ describe("abtars native target contract (#1436)", () => {
   it("abtars OPTIONAL_DEPS targets match contract", async () => {
     const { OPTIONAL_DEPS } = await import("../../utils/lazy-require.js");
     const native = OPTIONAL_DEPS["native"];
-    expect(native.targets).toBeDefined();
+    expect(native?.targets).toBeDefined();
     for (const pkg of NATIVE_TARGET_NAMES) {
-      expect(native.targets[pkg]).toBe(nativeTargetVersion(pkg));
+      expect(native?.targets?.[pkg]).toBe(nativeTargetVersion(pkg));
     }
   });
 });

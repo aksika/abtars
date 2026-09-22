@@ -94,8 +94,7 @@ describe("spin(spec) is the canonical model-call entry point (#1271)", () => {
         .replace(/\/\*[\s\S]*?\*\//g, "")
         .replace(/^\s*\/\/.*$/gm, "");
       const lines = stripped.split("\n");
-      for (let i = 0; i < lines.length; i++) {
-        const line = lines[i];
+      for (const [i, line] of lines.entries()) {
         if (/\.sendPrompt\s*\(/.test(line)) {
           violations.push(`${rel}:${i + 1}: caller-turn .sendPrompt() call must go through spin(spec): ${line.trim()}`);
         }
@@ -156,8 +155,7 @@ describe("spin(spec) is the canonical model-call entry point (#1271)", () => {
         .replace(/^\s*\/\/.*$/gm, "");
       // Type-only imports are erased at runtime and may reference spin-types.
       const lines = stripped.split("\n").filter(line => !/^\s*import\s+type\b/.test(line));
-      for (let i = 0; i < lines.length; i++) {
-        const line = lines[i];
+      for (const [i, line] of lines.entries()) {
         // Direct runtime references to ../spin.js (the concrete session
         // manager); ../spin-types.js and other type modules do not match.
         if (

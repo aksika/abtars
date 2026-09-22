@@ -10,7 +10,12 @@ function mockTransport(): IKiroTransport & { sendKeys: unknown } {
     sendInterrupt: vi.fn().mockResolvedValue(undefined),
     destroy: vi.fn(),
     sendKeys: vi.fn(),
+    transportCommands: [],
     get isReady() { return true; },
+    get contextPercent() { return -1; },
+    get answerOnly() { return ""; },
+    get toolCallsSucceeded() { return 0; },
+    get intermediateDeliveredText() { return ""; },
   };
 }
 

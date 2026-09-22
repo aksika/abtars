@@ -118,12 +118,14 @@ describe("peer-config schema", () => {
     }));
     const { loadPeerConfig } = await freshImport();
     const config = loadPeerConfig();
-    // Legacy fields must not be carried into the typed config
-    expect((config.self as Record<string, unknown>)["gossipSecret"]).toBeUndefined();
-    const molty = config.peers["molty"] as Record<string, unknown>;
-    expect(molty["token"]).toBeUndefined();
-    expect(molty["certPem"]).toBeUndefined();
-    expect(molty["certFingerprint"]).toBeUndefined();
+    // Legacy fields must not be carried into the typed config. `in` checks
+    // the parsed shape without laundering the type through Record.
+    expect("gossipSecret" in config.self).toBe(false);
+    const molty = config.peers["molty"];
+    expect(molty).toBeDefined();
+    expect(molty && "token" in molty).toBe(false);
+    expect(molty && "certPem" in molty).toBe(false);
+    expect(molty && "certFingerprint" in molty).toBe(false);
   });
 
   it("parses optional transport ws-outbound", async () => {

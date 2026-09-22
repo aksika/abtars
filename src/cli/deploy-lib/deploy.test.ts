@@ -93,11 +93,13 @@ interface HealthProbeResult {
 
 function makeHealthMock() {
   const calls: Array<{ home: string; since: number; timeout: number }> = [];
-  const fn = (home: string, since: number, timeout: number) => {
-    calls.push({ home, since, timeout });
+  // Optional timeout/opts mirror the real probe signature (timeoutMs/opts are
+  // optional); the recorded timeout defaults to 0 when the caller omits it.
+  const fn = (home: string, since: number, timeout?: number) => {
+    calls.push({ home, since, timeout: timeout ?? 0 });
     return Promise.resolve({ healthy: true, pid: 12345, heartbeat: Date.now() });
   };
-  return { fn: fn as (home: string, since: number, timeout: number) => Promise<HealthProbeResult>, calls };
+  return { fn, calls };
 }
 
 let tmp: string;
@@ -157,7 +159,7 @@ describe("deployActivation — bootstrap failure (macOS)", () => {
     const bootstrapFn: BootstrapFn = () => ({ ok: false, error: "launchctl: WorkQueue is already bootstrapped" });
     const healthMock = makeHealthMock();
 
-    const code = await deployActivation({ staged, channel: "npm", repoRoot: tmp }, bootstrapFn, healthMock.fn);
+    const code = await deployActivation({ staged, channel: "dev", repoRoot: tmp }, bootstrapFn, healthMock.fn);
 
     expect(code).toBe(1);
     const state = JSON.parse(readFileSync(join(tmp, "deploy.state"), "utf-8")) as Record<string, unknown>;
@@ -171,7 +173,7 @@ describe("deployActivation — bootstrap failure (macOS)", () => {
     const healthMock = makeHealthMock();
     const bootstrapFn: BootstrapFn = () => ({ ok: false, error: "bootstrap failed" });
 
-    await deployActivation({ staged, channel: "npm", repoRoot: tmp }, bootstrapFn, healthMock.fn);
+    await deployActivation({ staged, channel: "dev", repoRoot: tmp }, bootstrapFn, healthMock.fn);
 
     expect(healthMock.calls).toHaveLength(0);
   });
@@ -183,7 +185,7 @@ describe("deployActivation — bootstrap failure (macOS)", () => {
     const bootstrapFn: BootstrapFn = () => ({ ok: true });
     const healthMock = makeHealthMock();
 
-    const code = await deployActivation({ staged, channel: "npm", repoRoot: tmp }, bootstrapFn, healthMock.fn);
+    const code = await deployActivation({ staged, channel: "dev", repoRoot: tmp }, bootstrapFn, healthMock.fn);
 
     expect(code).toBe(1);
     expect(readFileSync(join(releasesTmp, "history.json"), "utf-8")).toBe(corruptHistory);
@@ -203,7 +205,7 @@ describe("deployActivation — bootstrap success + health healthy (macOS)", () =
     const bootstrapFn: BootstrapFn = () => ({ ok: true });
     const healthMock = makeHealthMock();
 
-    const code = await deployActivation({ staged, channel: "npm", repoRoot: tmp }, bootstrapFn, healthMock.fn);
+    const code = await deployActivation({ staged, channel: "dev", repoRoot: tmp }, bootstrapFn, healthMock.fn);
 
     expect(code).toBe(0);
     expect(healthMock.calls).toHaveLength(1);
@@ -224,7 +226,7 @@ describe("deployActivation — health unhealthy (Linux)", () => {
     const unhealthyProbe: (...args: any[]) => Promise<{ healthy: false }> = async () => ({ healthy: false });
     const bootstrapFn: BootstrapFn = () => ({ ok: true });
 
-    const code = await deployActivation({ staged, channel: "npm", repoRoot: tmp }, bootstrapFn, unhealthyProbe, () => ({ ok: true }), () => {});
+    const code = await deployActivation({ staged, channel: "dev", repoRoot: tmp }, bootstrapFn, unhealthyProbe, () => ({ ok: true }), () => {});
 
     expect(code).toBe(0);
     const state = JSON.parse(readFileSync(join(tmp, "deploy.state"), "utf-8")) as Record<string, unknown>;
@@ -238,7 +240,7 @@ describe("deployActivation — in-cgroup watchdog recovery (Linux)", () => {
     const healthMock = makeHealthMock();
 
     const code = await deployActivation(
-      { staged, channel: "npm", repoRoot: tmp },
+      { staged, channel: "dev", repoRoot: tmp },
       undefined,
       healthMock.fn,
       () => {
@@ -258,7 +260,7 @@ describe("deployActivation — in-cgroup watchdog recovery (Linux)", () => {
     const healthMock = makeHealthMock();
 
     const code = await deployActivation(
-      { staged, channel: "npm", repoRoot: tmp },
+      { staged, channel: "dev", repoRoot: tmp },
       undefined,
       healthMock.fn,
       () => ({ ok: false, error: "start watchdog unit: unit failed to start" }),
@@ -327,7 +329,7 @@ describe("deployActivation — #1542 skill dependency preparation", () => {
     const healthMock = makeHealthMock();
     const bootstrapFn: BootstrapFn = () => ({ ok: true });
 
-    const code = await deployActivation({ staged, channel: "npm", repoRoot: tmp }, bootstrapFn, healthMock.fn);
+    const code = await deployActivation({ staged, channel: "dev", repoRoot: tmp }, bootstrapFn, healthMock.fn);
 
     expect(code).toBe(0);
     // Declared exact pin installed under the dependency root.
@@ -346,7 +348,7 @@ describe("deployActivation — #1542 skill dependency preparation", () => {
     const healthMock = makeHealthMock();
     const bootstrapFn: BootstrapFn = () => ({ ok: true });
 
-    const code = await deployActivation({ staged, channel: "npm", repoRoot: tmp }, bootstrapFn, healthMock.fn);
+    const code = await deployActivation({ staged, channel: "dev", repoRoot: tmp }, bootstrapFn, healthMock.fn);
 
     expect(code).toBe(1);
     // No release dir, no history mutation, no repointed symlink, no npm work.
@@ -364,7 +366,7 @@ describe("deployActivation — #1542 skill dependency preparation", () => {
     const healthMock = makeHealthMock();
     const bootstrapFn: BootstrapFn = () => ({ ok: true });
 
-    const code = await deployActivation({ staged, channel: "npm", repoRoot: tmp }, bootstrapFn, healthMock.fn);
+    const code = await deployActivation({ staged, channel: "dev", repoRoot: tmp }, bootstrapFn, healthMock.fn);
 
     expect(code).toBe(1);
     expect(existsSync(join(releasesTmp, "abc1234"))).toBe(false);
@@ -385,7 +387,7 @@ describe("deployActivation — health unhealthy (macOS)", () => {
     const unhealthyProbe: (...args: any[]) => Promise<{ healthy: false }> = async () => ({ healthy: false });
     const bootstrapFn: BootstrapFn = () => ({ ok: true });
 
-    const code = await deployActivation({ staged, channel: "npm", repoRoot: tmp }, bootstrapFn, unhealthyProbe);
+    const code = await deployActivation({ staged, channel: "dev", repoRoot: tmp }, bootstrapFn, unhealthyProbe);
 
     expect(code).toBe(1);
     const state = JSON.parse(readFileSync(join(tmp, "deploy.state"), "utf-8")) as Record<string, unknown>;

@@ -68,7 +68,20 @@ describe("buildTuiRuntimeStatus (#1612)", () => {
 
   it("keeps the transport's last-turn usage when the session has none", () => {
     const status = buildTuiRuntimeStatus(session({
-      transport: { getRuntimeStatus: () => ({ lastTurnUsage: { input: 50, output: 10, cacheRead: 0, cacheWrite: 0 } }) },
+      transport: {
+        initialize: async () => {},
+        sendPrompt: async () => "",
+        resetSession: async () => {},
+        sendInterrupt: async () => {},
+        destroy: () => {},
+        isReady: true,
+        transportCommands: [],
+        contextPercent: -1,
+        answerOnly: "",
+        toolCallsSucceeded: 0,
+        intermediateDeliveredText: "",
+        getRuntimeStatus: () => ({ lastTurnUsage: { input: 50, output: 10, cacheRead: 0, cacheWrite: 0 } }),
+      },
     }) as unknown as ManagedSession, 1);
     expect(status.lastTurnUsage?.input).toBe(50);
   });

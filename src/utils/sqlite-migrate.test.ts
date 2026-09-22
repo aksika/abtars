@@ -11,8 +11,8 @@ function realError(): Error {
   return new Error("database disk image is malformed");
 }
 
-function makeDb(): { exec: ReturnType<typeof vi.fn> } {
-  return { exec: vi.fn() };
+function makeDb(): { exec: import("vitest").Mock<(sql: string) => unknown> } {
+  return { exec: vi.fn((_sql: string): unknown => undefined) };
 }
 
 describe("addColumnIfMissing — migration narrowing", () => {

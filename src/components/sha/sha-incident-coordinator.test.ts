@@ -99,7 +99,7 @@ describe("guarded outcomes perform zero store writes", () => {
     const coordinator = makeCoordinator({ store: throwingStore(), mode: "full" });
     expect(coordinator.admit(agentEvent("s1", { taskKind: "system" })).kind).toBe("ignored");
     expect(coordinator.admit(agentEvent("s2", { diagnostic: makeTaskFailure("execution", "credits_exhausted", "executing", "no credits", "none") })).kind).toBe("ignored");
-    expect(coordinator.admit(agentEvent("s3", { diagnostic: makeTaskFailure("routing", "target_unavailable", "routing", "gone", "permanent") })).kind).toBe("ignored");
+    expect(coordinator.admit(agentEvent("s3", { diagnostic: makeTaskFailure("routing", "target_unavailable", "executing", "gone", "permanent") })).kind).toBe("ignored");
     expect(coordinator.admit(agentEvent("s4", { diagnostic: makeTaskFailure("execution", "model_error", "executing", "", "none") })).kind).toBe("ignored");
     expect(makeCoordinator({ store: throwingStore(), mode: "off" }).admit(agentEvent("s5")).kind).toBe("ignored");
   });

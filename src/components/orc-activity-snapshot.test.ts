@@ -90,7 +90,7 @@ describe("buildOrcActivitySnapshot", () => {
     const s = orcSession({ busy: false, activeRootCardId: rootId });
     const snap = buildOrcActivitySnapshot(s, 2);
     expect(snap.recentDirectChildren.length).toBeGreaterThanOrEqual(1);
-    expect(snap.recentDirectChildren[0].status).toBe("done");
+    expect(snap.recentDirectChildren[0]?.status).toBe("done");
   });
 
   it("never throws on malformed input", () => {

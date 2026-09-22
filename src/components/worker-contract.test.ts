@@ -644,12 +644,13 @@ describe("redactEnvelope", () => {
 });
 
 describe("acceptancePassed (#1656)", () => {
-  const contract: WorkerAcceptanceContractV1 = {
-    ...(validateContract(MINIMAL_CONTRACT).ok ? validateContract(MINIMAL_CONTRACT).contract : (() => { throw new Error("fixture invalid"); })()),
-  };
+  // Call once: two separate validateContract() calls cannot share narrowing.
+  const validated = validateContract(MINIMAL_CONTRACT);
+  if (!validated.ok) throw new Error("fixture invalid");
+  const contract: WorkerAcceptanceContractV1 = { ...validated.contract };
   const passedEnvelope: WorkerResultEnvelopeV1 = {
     ...MINIMAL_ENVELOPE,
-    attempt: { ...MINIMAL_ENVELOPE.attempt, contract_id: contract.id, contract_digest: contract.digest },
+    attempt: { ...(MINIMAL_ENVELOPE.attempt as Record<string, unknown>), contract_id: contract.id, contract_digest: contract.digest },
   } as WorkerResultEnvelopeV1;
 
   it("is true only for an exact completed envelope with every criterion passed once", () => {

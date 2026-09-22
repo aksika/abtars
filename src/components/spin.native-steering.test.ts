@@ -9,6 +9,7 @@
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import type { Mock } from "vitest";
 
 let _nextId = 1;
 const _cards = new Map<number, { id: number; status: string; [key: string]: unknown }>();
@@ -159,9 +160,11 @@ describe("spin() — #1531 native steering pump", () => {
    * steer acks the lease through the real queue ledger (like the host does on
    * instruction message_end).
    */
-  function makeNativeTransport(send: DeferredSend, steerImpl: (content: string, lease: Parameters<NonNullable<IKiroTransport["steer"]>>[1], session: InstructionQueueHolder) => Promise<void>): {
+  /** Shared steer-impl signature: content + lease + session holder. */
+  type SteerImpl = (content: string, lease: Parameters<NonNullable<IKiroTransport["steer"]>>[1], session: InstructionQueueHolder) => Promise<void>;
+  function makeNativeTransport(send: DeferredSend, steerImpl: SteerImpl): {
     transport: IKiroTransport;
-    steer: ReturnType<typeof vi.fn>;
+    steer: Mock<SteerImpl>;
   } {
     const steer = vi.fn(async (content: string, lease: Parameters<NonNullable<IKiroTransport["steer"]>>[1]) => {
       await steerImpl(content, lease, spin.getSessionById(lease.sessionId) ?? { instructionQueue: [] as never });
@@ -173,7 +176,7 @@ describe("spin() — #1531 native steering pump", () => {
   function startNativeTurn(transport: IKiroTransport): { spinPromise: Promise<{ result?: string }>; session: ManagedSession } {
     const session = spin.createSubSession("aksika", "telegram", "D") as ManagedSession;
     session.transport = transport;
-    const spinPromise = spin.spin({ type: "D", sessionId: session.id, prompt: "first turn", await: true, userId: "aksika", platform: "telegram" });
+    const spinPromise = spin.spin({ type: "D", sessionId: session.id, prompt: "first turn", await: true, settlementOwner: "spin", userId: "aksika", platform: "telegram" });
     return { spinPromise, session };
   }
 
@@ -211,7 +214,7 @@ describe("spin() — #1531 native steering pump", () => {
 
   it("serializes native handoffs: a later instruction waits for the preceding lease ack", async () => {
     const send = makeDeferredSend();
-    const ackLeases: Array<(content: string, lease: Parameters<NonNullable<IKiroTransport["steer"]>>[1], session: InstructionQueueHolder) => Promise<void>> = [];
+    const ackLeases: Array<() => Promise<void>> = [];
     const { transport, steer } = makeNativeTransport(send, (content, lease, session) => {
       return new Promise<void>((resolveAck) => {
         ackLeases.push(async () => {
@@ -366,7 +369,7 @@ describe("spin() — #1531 native steering pump", () => {
     });
     const session = spin.createSubSession("aksika", "telegram", "D") as ManagedSession;
     session.transport = transport;
-    const spinPromise = spin.spin({ type: "D", sessionId: session.id, prompt: "first turn", await: true, userId: "aksika", platform: "telegram" });
+    const spinPromise = spin.spin({ type: "D", sessionId: session.id, prompt: "first turn", await: true, settlementOwner: "spin", userId: "aksika", platform: "telegram" });
     await vi.waitFor(() => expect(session.steeringAccepting).toBe(true));
 
     const events: SteerEvent[] = [];

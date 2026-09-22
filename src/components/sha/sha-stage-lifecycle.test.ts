@@ -112,7 +112,7 @@ function completeStageEnvelope(attemptId: string, artifactId: string, digest = "
 
 function markStageDone(cardId: number, envelope: WorkerResultEnvelopeV1): void {
   supervision.insertResult(envelope.attempt.id, envelope);
-  kanbanTransition({ cardId, from: ["queued", "running"], to: "done", actor: "test", reason: "stage complete" });
+  kanbanTransition({ cardId, from: ["queued", "running"], to: "done", actor: "settle_done", reason: "stage complete" });
 }
 
 describe("full-mode stage progression (R5)", () => {
@@ -159,7 +159,7 @@ describe("full-mode stage progression (R5)", () => {
       });
 
       // Root done → accepted (full mode).
-      kanbanTransition({ cardId: root.id, from: ["queued", "running"], to: "done", actor: "test", reason: "review accepted" });
+      kanbanTransition({ cardId: root.id, from: ["queued", "running"], to: "done", actor: "settle_done", reason: "review accepted" });
       await vi.waitFor(() => {
         const i = store.findById(outcome.incidentId)!;
         expect(i.state).toBe("accepted");
@@ -213,7 +213,7 @@ describe("investigation-mode progression", () => {
       const designAttempt = supervision.getLatestAttempt(children[1]?.["id"] as number)!;
       markStageDone(children[1]?.["id"] as number, completeStageEnvelope(designAttempt.id, "sha-design-md"));
       await vi.waitFor(() => expect(store.findById(outcome.incidentId)!.state).toBe("review"));
-      kanbanTransition({ cardId: incident.rootCardId!, from: ["queued", "running"], to: "done", actor: "test", reason: "review" });
+      kanbanTransition({ cardId: incident.rootCardId!, from: ["queued", "running"], to: "done", actor: "settle_done", reason: "review" });
       await vi.waitFor(() => expect(store.findById(outcome.incidentId)!.state).toBe("investigation_complete"));
     } finally {
       disposer();
@@ -231,7 +231,7 @@ describe("failure cascade (R5)", () => {
       const store = new ShaIncidentStore(db);
       const incident = store.findById(outcome.incidentId)!;
       const children = db.prepare("SELECT * FROM kanban_board WHERE parent_id = ? ORDER BY id").all(incident.rootCardId) as Array<Record<string, unknown>>;
-      kanbanTransition({ cardId: children[0]?.["id"] as number, from: ["queued", "running"], to: "failed", actor: "test", reason: "worker crashed" });
+      kanbanTransition({ cardId: children[0]?.["id"] as number, from: ["queued", "running"], to: "failed", actor: "settle_done", reason: "worker crashed" });
       await vi.waitFor(() => {
         const i = store.findById(outcome.incidentId)!;
         expect(i.state).toBe("blocked");
@@ -259,7 +259,7 @@ describe("failure cascade (R5)", () => {
       const store = new ShaIncidentStore(db);
       const incident = store.findById(outcome.incidentId)!;
       const children = db.prepare("SELECT * FROM kanban_board WHERE parent_id = ? ORDER BY id").all(incident.rootCardId) as Array<Record<string, unknown>>;
-      kanbanTransition({ cardId: children[0]?.["id"] as number, from: ["queued", "running"], to: "done", actor: "test", reason: "done but no envelope" });
+      kanbanTransition({ cardId: children[0]?.["id"] as number, from: ["queued", "running"], to: "done", actor: "settle_done", reason: "done but no envelope" });
       await vi.waitFor(() => expect(store.findById(outcome.incidentId)!.state).toBe("blocked"));
       expect(supervision.getContractByCardId(children[1]?.["id"] as number)).toBeUndefined();
     } finally {
@@ -296,7 +296,7 @@ describe("boot recovery (R5)", () => {
     const incident = store.findById(outcome.incidentId)!;
     // Force review state with a done root (crash before the root handler ran).
     db.prepare("UPDATE sha_incidents SET state = 'review', version = version + 1 WHERE id = ?").run(incident.id);
-    kanbanTransition({ cardId: incident.rootCardId!, from: ["queued", "running"], to: "done", actor: "test", reason: "accepted" });
+    kanbanTransition({ cardId: incident.rootCardId!, from: ["queued", "running"], to: "done", actor: "settle_done", reason: "accepted" });
     coordinator.runBootRecovery();
     const i = store.findById(outcome.incidentId)!;
     expect(i.state).toBe("accepted");

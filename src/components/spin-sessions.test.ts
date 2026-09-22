@@ -7,6 +7,15 @@ function makeRegistry(): SpinSessionRegistry {
   return createSpinSessionRegistry({ maxTotalSessions: 12 });
 }
 
+// R5 (same pattern as kanban-board.test.ts): noUncheckedIndexedAccess —
+// narrow before property access. A missing element fails loudly here instead
+// of propagating undefined into the assertions below.
+function first<T>(arr: readonly T[]): T {
+  const v = arr[0];
+  if (v === undefined) throw new Error("expected a non-empty result");
+  return v;
+}
+
 function makeTestRegistry(): SpinSessionRegistry {
   const registry = makeRegistry();
 
@@ -257,7 +266,7 @@ describe("spin-sessions — platform ownership (#1330)", () => {
     );
     const codeSessions = [...registry.listAll()].filter(s => sessionType(s) === "C");
     expect(codeSessions).toHaveLength(1);
-    const codeIdx = codeSessions[0].shortIndex;
+    const codeIdx = first(codeSessions).shortIndex;
 
     const result = registry.end("aksika", "telegram", codeIdx);
     expect(typeof result).not.toBe("string");
@@ -281,7 +290,7 @@ describe("spin-sessions — platform ownership (#1330)", () => {
       { userId: "aksika", platform: "telegram", type: "C", active: false },
     );
     const codeSessions = [...registry.listAll()].filter(s => sessionType(s) === "C");
-    const codeIdx = codeSessions[0].shortIndex;
+    const codeIdx = first(codeSessions).shortIndex;
 
     const beforeActive = activeIds(registry, "aksika", "telegram");
     expect(beforeActive).toHaveLength(1);
@@ -339,7 +348,7 @@ describe("spin-sessions — platform ownership (#1330)", () => {
     const { registry } = buildSessions(
       { userId: "aksika", platform: "telegram", type: "A", active: true },
     );
-    const main = [...registry.listAll()][0];
+    const main = first([...registry.listAll()]);
 
     const result = registry.end("aksika", "telegram", main.shortIndex);
     expect(typeof result).not.toBe("string");
@@ -350,9 +359,9 @@ describe("spin-sessions — platform ownership (#1330)", () => {
     // Replacement created
     const live = [...registry.listAll()].filter(s => s.userId === "aksika" && s.platform === "telegram" && s.status !== "ended");
     expect(live).toHaveLength(1);
-    expect(live[0].id).not.toBe(main.id);
-    expect(sessionType(live[0])).toBe("A");
-    expect(live[0].active).toBe(true);
+    expect(first(live).id).not.toBe(main.id);
+    expect(sessionType(first(live))).toBe("A");
+    expect(first(live).active).toBe(true);
   });
 
   // ── Last inactive Main ended, Code is active ──
@@ -391,7 +400,7 @@ describe("spin-sessions — platform ownership (#1330)", () => {
     const { registry } = buildSessions(
       { userId: "aksika", platform: "telegram", type: "A", active: false },
     );
-    const main = [...registry.listAll()][0];
+    const main = first([...registry.listAll()]);
 
     const result = registry.end("aksika", "telegram", main.shortIndex);
     expect(typeof result).not.toBe("string");
@@ -401,7 +410,7 @@ describe("spin-sessions — platform ownership (#1330)", () => {
 
     const live = [...registry.listAll()].filter(s => s.userId === "aksika" && s.platform === "telegram" && s.status !== "ended");
     expect(live).toHaveLength(1);
-    expect(live[0].active).toBe(true);
+    expect(first(live).active).toBe(true);
   });
 
   // ── Foreign namespace unchanged ──
@@ -435,7 +444,7 @@ describe("spin-sessions — platform ownership (#1330)", () => {
     if (typeof r1 === "string") return;
     const liveAfterFirst = [...registry.listAll()].filter(s => s.userId === "aksika" && s.platform === "telegram" && s.status !== "ended");
     expect(liveAfterFirst).toHaveLength(1);
-    const preReplacementIndex = liveAfterFirst[0].shortIndex;
+    const preReplacementIndex = first(liveAfterFirst).shortIndex;
 
     // End the last active Main (replacement created)
     const activeMain = [...registry.listAll()].find(s => sessionType(s) === "A" && s.status !== "ended")!;
@@ -444,7 +453,7 @@ describe("spin-sessions — platform ownership (#1330)", () => {
     if (typeof r2 === "string") return;
     const live = [...registry.listAll()].filter(s => s.userId === "aksika" && s.platform === "telegram" && s.status !== "ended");
     expect(live).toHaveLength(1);
-    expect(live[0].shortIndex).toBeGreaterThan(preReplacementIndex);
+    expect(first(live).shortIndex).toBeGreaterThan(preReplacementIndex);
   });
 
   // ── Ended log exists exactly once ──
@@ -452,7 +461,7 @@ describe("spin-sessions — platform ownership (#1330)", () => {
     const { registry } = buildSessions(
       { userId: "aksika", platform: "telegram", type: "A", active: true },
     );
-    const main = [...registry.listAll()][0];
+    const main = first([...registry.listAll()]);
     expect(main.log.filter(l => l.includes("ended"))).toHaveLength(0);
 
     registry.end("aksika", "telegram", main.shortIndex);
@@ -530,7 +539,7 @@ describe("spin-sessions — platform ownership (#1330)", () => {
     const { registry } = buildSessions(
       { userId: "aksika", platform: "telegram", type: "A", active: true },
     );
-    const main = [...registry.listAll()][0];
+    const main = first([...registry.listAll()]);
     const result = registry.kill("aksika", "telegram", main.shortIndex);
     expect(typeof result).not.toBe("string");
     if (typeof result === "string") return;
@@ -538,8 +547,8 @@ describe("spin-sessions — platform ownership (#1330)", () => {
     expect(main.status).toBe("ended");
     const live = [...registry.listAll()].filter(s => s.userId === "aksika" && s.platform === "telegram" && s.status !== "ended");
     expect(live).toHaveLength(1);
-    expect(live[0].active).toBe(true);
-    expect(live[0].shortIndex).toBeGreaterThan(main.shortIndex);
+    expect(first(live).active).toBe(true);
+    expect(first(live).shortIndex).toBeGreaterThan(main.shortIndex);
   });
 
   // ── Kill last inactive Main, no active → active replacement ──
@@ -547,7 +556,7 @@ describe("spin-sessions — platform ownership (#1330)", () => {
     const { registry } = buildSessions(
       { userId: "aksika", platform: "telegram", type: "A", active: false },
     );
-    const main = [...registry.listAll()][0];
+    const main = first([...registry.listAll()]);
     const result = registry.kill("aksika", "telegram", main.shortIndex);
     expect(typeof result).not.toBe("string");
     if (typeof result === "string") return;
@@ -555,7 +564,7 @@ describe("spin-sessions — platform ownership (#1330)", () => {
     expect(main.status).toBe("ended");
     const live = [...registry.listAll()].filter(s => s.userId === "aksika" && s.platform === "telegram" && s.status !== "ended");
     expect(live).toHaveLength(1);
-    expect(live[0].active).toBe(true);
+    expect(first(live).active).toBe(true);
   });
 
   // ── Foreign namespace unchanged ──
@@ -589,7 +598,7 @@ describe("spin-sessions — platform ownership (#1330)", () => {
     if (typeof r1 === "string") return;
     const liveAfterFirst = [...registry.listAll()].filter(s => s.userId === "aksika" && s.platform === "telegram" && s.status !== "ended");
     expect(liveAfterFirst).toHaveLength(1);
-    const preReplacementIndex = liveAfterFirst[0].shortIndex;
+    const preReplacementIndex = first(liveAfterFirst).shortIndex;
 
     // Kill the last active Main (replacement created)
     const activeMain = [...registry.listAll()].find(s => sessionType(s) === "A" && s.status !== "ended")!;
@@ -598,7 +607,7 @@ describe("spin-sessions — platform ownership (#1330)", () => {
     if (typeof r2 === "string") return;
     const live = [...registry.listAll()].filter(s => s.userId === "aksika" && s.platform === "telegram" && s.status !== "ended");
     expect(live).toHaveLength(1);
-    expect(live[0].shortIndex).toBeGreaterThan(preReplacementIndex);
+    expect(first(live).shortIndex).toBeGreaterThan(preReplacementIndex);
   });
 
   // ── Killed log exists exactly once ──
@@ -606,7 +615,7 @@ describe("spin-sessions — platform ownership (#1330)", () => {
     const { registry } = buildSessions(
       { userId: "aksika", platform: "telegram", type: "A", active: true },
     );
-    const main = [...registry.listAll()][0];
+    const main = first([...registry.listAll()]);
     expect(main.log.filter(l => l.includes("killed"))).toHaveLength(0);
 
     registry.kill("aksika", "telegram", main.shortIndex);

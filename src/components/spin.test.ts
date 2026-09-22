@@ -215,7 +215,7 @@ describe("Spin — unified session router (#943)", () => {
 
     it("injects synthetic message via the adapter so pipeline delivers response (#1106 regression)", async () => {
       const captured: any[] = [];
-      spin.setGreetingAdapter({ injectMessage: (msg) => captured.push(msg) } as any);
+      spin.setGreetingAdapter({ injectMessage: (msg: unknown) => captured.push(msg) } as any);
       const result = await spin.injectGreeting("adrika", "[SYSTEM] scheduled check-in");
       expect(result).toBe("routed");
       expect(captured).toHaveLength(1);

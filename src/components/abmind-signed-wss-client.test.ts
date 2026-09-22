@@ -442,7 +442,6 @@ describe("AbtarsSignedWssClient", () => {
       await expect(negotiated).resolves.toMatchObject({ message: /closed/i });
     } finally {
       await client.close();
-      sink.closeAllConnections?.();
       await new Promise<void>((resolve) => {
         const timer = setTimeout(resolve, 3_000);
         sink.close(() => { clearTimeout(timer); resolve(); });

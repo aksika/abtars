@@ -25,7 +25,7 @@ describe("SessionOutputFeed", () => {
     const b = vi.fn();
     feed.subscribe({ sessionId: "A" }, a);
     feed.subscribe({ sessionId: "B" }, b);
-    feed.publish({ type: "delta", sessionId: "A", executionId: EID, streamId: "s1", text: "x" });
+    feed.publish({ type: "delta", sessionId: "A", executionId: EID, kind: "text", streamId: "s1", text: "x" });
     expect(a).toHaveBeenCalledTimes(1);
     expect(b).not.toHaveBeenCalled();
   });
@@ -33,7 +33,7 @@ describe("SessionOutputFeed", () => {
   it("no-subscriber publication is a cheap no-op", () => {
     const feed = new SessionOutputFeed();
     // Should not throw and not accumulate anything.
-    expect(() => feed.publish({ type: "delta", sessionId: SID, executionId: EID, streamId: "s1", text: "x" })).not.toThrow();
+    expect(() => feed.publish({ type: "delta", sessionId: SID, executionId: EID, kind: "text", streamId: "s1", text: "x" })).not.toThrow();
     expect(feed.subscriberCount).toBe(0);
   });
 
@@ -41,9 +41,9 @@ describe("SessionOutputFeed", () => {
     const feed = new SessionOutputFeed();
     const l = vi.fn();
     const unsub = feed.subscribe({ sessionId: SID }, l);
-    feed.publish({ type: "delta", sessionId: SID, executionId: EID, streamId: "s1", text: "1" });
+    feed.publish({ type: "delta", sessionId: SID, executionId: EID, kind: "text", streamId: "s1", text: "1" });
     unsub();
-    feed.publish({ type: "delta", sessionId: SID, executionId: EID, streamId: "s1", text: "2" });
+    feed.publish({ type: "delta", sessionId: SID, executionId: EID, kind: "text", streamId: "s1", text: "2" });
     expect(l).toHaveBeenCalledTimes(1);
   });
 
@@ -53,12 +53,12 @@ describe("SessionOutputFeed", () => {
     const b = vi.fn();
     feed.subscribe({ sessionId: "A_01" }, a);
     feed.subscribe({ sessionId: "A_02" }, b);
-    feed.publish({ type: "delta", sessionId: "A_01", executionId: EID, streamId: "s1", text: "a" });
-    feed.publish({ type: "delta", sessionId: "A_02", executionId: EID, streamId: "s2", text: "b" });
+    feed.publish({ type: "delta", sessionId: "A_01", executionId: EID, kind: "text", streamId: "s1", text: "a" });
+    feed.publish({ type: "delta", sessionId: "A_02", executionId: EID, kind: "text", streamId: "s2", text: "b" });
     expect(a).toHaveBeenCalledTimes(1);
-    expect((a.mock.calls[0][0] as any).text).toBe("a");
+    expect((a.mock.calls[0]?.[0] as any).text).toBe("a");
     expect(b).toHaveBeenCalledTimes(1);
-    expect((b.mock.calls[0][0] as any).text).toBe("b");
+    expect((b.mock.calls[0]?.[0] as any).text).toBe("b");
   });
 });
 

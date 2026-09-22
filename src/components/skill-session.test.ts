@@ -36,6 +36,7 @@ function allocateSession(
     messageCount: 0, tokenCount: 0, toolCallCount: 0,
     log: [],
     shortIndex: idx + 1,
+    showThinking: false,
     busy: false, queue: [], fullMode: false, pendingStart: false,
     seen: false, compacting: false, ctxWarned: false, compactFailures: 0,
     primingTerms: [], completions: [],
