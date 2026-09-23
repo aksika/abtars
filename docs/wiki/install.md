@@ -34,9 +34,11 @@ abtars install
 ```
 
 `abtars install` creates config, clones source, builds, deploys the release, and
-starts the bridge. The install ships a pi-stack default model (Muse Spark 1.3
-Free via Zen) on all agents — no provider questions, no API key needed. Install
-pi with `abtars deps install pi` and switch models anytime via `/model`.
+starts the bridge. The install ships a pi-stack default model (GPT-6 Luna
+realtime via OpenRouter) on all agents — no provider questions. Add your
+`OPENROUTER_API_KEY` to `~/.abtars/secret/` afterwards (`doctor` flags it until
+then). Install pi with `abtars deps install pi` and switch models anytime via
+`/model`.
 
 ## Install modes
 

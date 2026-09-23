@@ -95,11 +95,11 @@ const ONBOARD_PROVIDER_CONFIG: Record<ProviderChoice, Record<string, unknown>> =
 /**
  * Shipped pi-stack default (#1827). The wizard no longer asks for provider,
  * model, or API key — the operator installs pi via deps and adjusts the model
- * via /model afterwards. Verified in the pinned pi-ai catalog
- * (opencode → muse-spark-1.3-contributor-free, "Muse Spark 1.3 Free").
+ * via /model afterwards. Realtime (non-batch) variant: batch queueing latency
+ * would hit every user-visible turn, and batch lacks max_completion_tokens.
  */
-const SHIPPED_DEFAULT_PROVIDER: ProviderChoice = 'opencode';
-const SHIPPED_DEFAULT_MODEL = 'muse-spark-1.3-contributor-free';
+const SHIPPED_DEFAULT_PROVIDER: ProviderChoice = 'openrouter';
+const SHIPPED_DEFAULT_MODEL = 'openai/gpt-6-luna';
 
 interface WizardAnswers {
   readonly installMode: "simple" | "daemon";
