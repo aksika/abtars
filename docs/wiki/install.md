@@ -2,7 +2,24 @@
 
 See [Prerequisites](./prerequisites.md) before starting.
 
-## Quick install (4 steps)
+## Quick install
+
+### One-liner (recommended)
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/aksika/abtars/main/scripts/install.sh | sh
+```
+
+Same bootstrap as abmind, but for the bridge: no download step — the script runs
+straight from the pipe, and installs the latest dev commit by default.
+Variants: `| sh -s -- --stable`, `| sh -s -- --alpha`, or `| sh -s -- --dev [DIR]`
+(build a local checkout as-is). When piped, interactive setup reattaches to your
+terminal; without one, pass unattended flags via
+`ABTARS_INSTALL_ARGS='--non-interactive --accept-risk ...'`.
+
+abmind stays separate — install it with its own one-liner when memory is needed.
+
+### Manual install (4 steps)
 
 ```bash
 # 1. Install CLI tools
