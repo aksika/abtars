@@ -57,6 +57,7 @@ export function reconcile(templatesSrc: string, home: string): void {
 
   // --- SEED: user-owned files (create if missing) ---
   let seeded = 0;
+  let seededPiExecutor = false;
   for (const dir of SEED) {
     const src = join(templatesSrc, dir);
     if (!existsSync(src)) continue;
@@ -66,10 +67,14 @@ export function reconcile(templatesSrc: string, home: string): void {
       if (existsSync(dst)) continue;
       mkdirSync(dirname(dst), { recursive: true });
       copyFileSync(f, dst);
+      if (dir === "config" && rel === "pi-executor.json") seededPiExecutor = true;
       seeded++;
     }
   }
   if (seeded > 0) logInfo(TAG, `Seeded ${seeded} missing config/task file(s)`);
+
+  // --- Default pi delegation workspace (#1829) ---
+  ensureDefaultPiWorkspace(home, seededPiExecutor);
 
   // --- Seed sleep-cycle from template if absent (#1321) ---
   seedSleepCycle(templatesSrc, home);
@@ -124,6 +129,47 @@ function walkFiles(dir: string): string[] {
     else results.push(full);
   }
   return results;
+}
+
+/**
+ * Default pi delegation workspace (#1829). Fresh installs get
+ * `<home>/workspace/` plus a `work` alias, enabled by default — boot
+ * degrades cleanly to a warning when the pi binary is absent.
+ *
+ * Existing config files are never touched. Every failure falls back to the
+ * quiet state (dir missing and/or executor disabled), never to the nagging
+ * enabled-without-aliases combination.
+ */
+function ensureDefaultPiWorkspace(home: string, freshSeed: boolean): void {
+  const dir = join(home, "workspace");
+  try {
+    mkdirSync(dir, { recursive: true });
+  } catch {
+    logInfo(TAG, "Could not create default pi workspace dir — leaving executor as seeded");
+    if (freshSeed) disablePiExecutor(home);
+    return;
+  }
+  if (!freshSeed) return;
+  const p = join(home, "config", "pi-executor.json");
+  try {
+    const raw = JSON.parse(readFileSync(p, "utf-8")) as Record<string, unknown>;
+    raw["workspaceAliases"] = { work: { path: dir } };
+    raw["enabled"] = true;
+    writeFileSync(p, JSON.stringify(raw, null, 2) + "\n", "utf-8");
+    logInfo(TAG, `Seeded default pi workspace alias (work → ${dir})`);
+  } catch {
+    disablePiExecutor(home);
+  }
+}
+
+/** Best-effort fallback: executor off, no boot warning. */
+function disablePiExecutor(home: string): void {
+  try {
+    const p = join(home, "config", "pi-executor.json");
+    const raw = JSON.parse(readFileSync(p, "utf-8")) as Record<string, unknown>;
+    raw["enabled"] = false;
+    writeFileSync(p, JSON.stringify(raw, null, 2) + "\n", "utf-8");
+  } catch { /* leave the file as-is */ }
 }
 
 /** Config format migrations (idempotent). */

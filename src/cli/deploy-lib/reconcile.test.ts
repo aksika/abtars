@@ -55,8 +55,21 @@ describe("#1321 reconcile sleep-cycle from template", () => {
   it("seeds pi-executor.json when absent (#1440)", () => {
     seedPiExecutorTemplate();
     reconcile(join(HOME, "templates"), HOME);
-    const seeded = readFileSync(join(HOME, "config", "pi-executor.json"), "utf-8");
-    expect(seeded).toBe(CANONICAL_PI_EXECUTOR);
+    const seeded = JSON.parse(readFileSync(join(HOME, "config", "pi-executor.json"), "utf-8")) as Record<string, unknown>;
+    // #1829: fresh seed gains the default workspace alias, enabled by default.
+    expect(seeded["enabled"]).toBe(true);
+    expect(seeded["workspaceAliases"]).toEqual({ work: { path: join(HOME, "workspace") } });
+    expect(existsSync(join(HOME, "workspace"))).toBe(true);
+  });
+
+  it("creates the default pi workspace dir without touching existing config (#1829)", () => {
+    seedPiExecutorTemplate();
+    mkdirSync(join(HOME, "config"), { recursive: true });
+    const modified = JSON.stringify({ enabled: false, command: "/custom/pi", workspaceAliases: {} });
+    writeFileSync(join(HOME, "config", "pi-executor.json"), modified, "utf-8");
+    reconcile(join(HOME, "templates"), HOME);
+    expect(readFileSync(join(HOME, "config", "pi-executor.json"), "utf-8")).toBe(modified);
+    expect(existsSync(join(HOME, "workspace"))).toBe(true);
   });
 
   it("preserves existing pi-executor.json (#1440)", () => {
