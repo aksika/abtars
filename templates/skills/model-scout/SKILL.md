@@ -64,7 +64,7 @@ python3 {baseDir}/scout-ollama.py
 Each model entry in `models.json` gets:
 - `contextWindow`, `maxOutput` — from API `context_length` and `top_provider.max_completion_tokens`
 - `rank` — 1 (≥500K ctx), 2 (≥200K), 3 (smaller)
-- `cost` — per token, raw OpenRouter pricing (from `pricing.prompt` / `pricing.completion`). Accurate for calculations; picker display converts to $/1M via the `display` field derived in transport-config.ts.
+- `cost` — $/1M tokens, human-readable decimals (from `pricing.prompt` / `pricing.completion` × 1,000,000). Omit for subscription-billed ACP entries (kiro/gemini). Picker display renders the values directly via the `display` field derived in transport-config.ts.
 - `transports` — `["openrouter"]`
 - `status` — `"alive"` or `"dead"` (from liveness test)
 - `providers` — dict of provider_name → `{status, uptime_30m, latency_p50, throughput_p50, quant, max_completion_tokens}`

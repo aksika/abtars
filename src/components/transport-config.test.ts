@@ -624,10 +624,10 @@ describe("cleanDemotedModels", () => {
   });
 });
 
-describe("computeCostDisplay (#1614)", () => {
-  it("renders $/1M with 2 decimals, zero-padded (per-token input)", () => {
-    expect(computeCostDisplay({ input: 0.14 / 1_000_000, output: 0.28 / 1_000_000 })).toEqual({ inputPer1M: "0.14", outputPer1M: "0.28" });
-    expect(computeCostDisplay({ input: 0.4 / 1_000_000, output: 1.2 / 1_000_000 })).toEqual({ inputPer1M: "0.40", outputPer1M: "1.20" });
+describe("computeCostDisplay (#1614, $/1M contract #1830)", () => {
+  it("renders $/1M with 2 decimals, zero-padded", () => {
+    expect(computeCostDisplay({ input: 0.14, output: 0.28 })).toEqual({ inputPer1M: "0.14", outputPer1M: "0.28" });
+    expect(computeCostDisplay({ input: 0.4, output: 1.2 })).toEqual({ inputPer1M: "0.40", outputPer1M: "1.20" });
     expect(computeCostDisplay({ input: 0, output: 0 })).toEqual({ inputPer1M: "0.00", outputPer1M: "0.00" });
   });
 });
@@ -645,7 +645,7 @@ describe("getModelsForProvider — pi-catalog fallback (#1613)", () => {
 
   afterEach(() => _resetForTest());
 
-  it("returns pi models with $/token costs for a pi-mapped provider with no curated entries", () => {
+  it("returns pi models with $/1M costs for a pi-mapped provider with no curated entries", () => {
     _setWarmedForTest(fakePiModels() as never);
     const out = getModelsForProvider("opencode-go", {});
     expect(out.map(m => m.id)).toEqual(["deepseek-v4-flash", "kimi-k3"]); // sorted by input cost
@@ -657,16 +657,16 @@ describe("getModelsForProvider — pi-catalog fallback (#1613)", () => {
       transports: ["opencode-go"],
       status: "alive",
     });
-    // #1614: pi rates are $/1M — synthetic entries normalize to the $/token ModelCost contract.
-    expect(flash.entry.cost.input).toBe(0.14 / 1_000_000);
-    expect(flash.entry.cost.output).toBe(0.28 / 1_000_000);
+    // #1830: pi rates are $/1M and pass through untouched.
+    expect(flash.entry.cost!.input).toBe(0.14);
+    expect(flash.entry.cost!.output).toBe(0.28);
   });
 
   it("leaves curated providers untouched even when pi is warmed", () => {
     _setWarmedForTest(fakePiModels([...piList(), { id: "claude-sonnet-4.6", contextWindow: 1000000, maxTokens: 16384, cost: { input: 3, output: 15 } }]) as never);
     const out = getModelsForProvider("kiro-free", MODELS);
     expect(out.map(m => m.id)).toEqual(["claude-sonnet-4.6"]);
-    expect(out[0]!.entry.cost.input).toBe(3.0); // models.json values untouched
+    expect(out[0]!.entry.cost!.input).toBe(3.0); // models.json values untouched
   });
 
   it("returns empty for an uncurated pi provider whose catalog exceeds the picker cap", () => {

@@ -51,8 +51,8 @@ the secret file (must match exactly, no extension). Raw credential fields
 ## Step 3 — Add models to the abtars catalog
 
 `~/.abtars/config/models.json` is a flat catalog keyed by model id. Each entry
-lists the transports (providers) that can serve it. `cost` is per token
-(`$/1M ÷ 1,000,000`).
+lists the transports (providers) that can serve it. `cost` is $/1M tokens in
+plain decimals. Subscription-billed ACP entries (kiro/gemini) omit `cost`.
 
 ```json
 {
@@ -60,7 +60,7 @@ lists the transports (providers) that can serve it. `cost` is per token
     "contextWindow": 1000000,
     "maxOutput": 384000,
     "rank": 2,
-    "cost": { "input": 1.4e-07, "output": 2.8e-07 },
+    "cost": { "input": 0.14, "output": 0.28 },
     "transports": ["tokenharbor"],
     "status": "alive"
   }

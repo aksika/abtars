@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """scout-add-model.py — Add or update a model in models.json.
 
+Costs are $/1M tokens (#1830).
+
 Usage:
   scout-add-model.py MODEL_ID CTX_WINDOW MAX_OUTPUT RANK INPUT_COST OUTPUT_COST "DESCRIPTION" TRANSPORT [TRANSPORT...]
 
@@ -12,7 +14,7 @@ from pathlib import Path
 from datetime import date
 
 MODELS_PATH = Path.home() / ".abtars" / "config" / "models.json"
-REQUIRED = {"contextWindow", "maxOutput", "rank", "cost", "transports"}
+REQUIRED = {"contextWindow", "maxOutput", "rank", "transports"}
 
 def main():
     if len(sys.argv) < 8:

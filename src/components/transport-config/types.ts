@@ -6,9 +6,9 @@
 import type { HealthPolicyConfig } from "../transport/model-health-registry.js";
 
 export type ModelCost = {
-  /** $/token — accurate, used for arithmetic (sort, usage accounting, pi-catalog copy). */
+  /** $/1M tokens — human-readable, used for arithmetic (sort, usage accounting, pi-catalog copy). */
   input: number;
-  /** $/token — accurate, used for arithmetic. */
+  /** $/1M tokens — human-readable, used for arithmetic. */
   output: number;
   /** Picker-facing, derived from input/output at load time. Never written to models.json. */
   display?: { inputPer1M: string; outputPer1M: string };
@@ -18,7 +18,8 @@ export type ModelEntry = {
   contextWindow: number;
   maxOutput: number;
   rank: number;
-  cost: ModelCost;
+  /** Absent for subscription-billed ACP entries (kiro/gemini) — no per-token price exists. */
+  cost?: ModelCost;
   transports: string[];
   description?: string;
   addedAt?: string;

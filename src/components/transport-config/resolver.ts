@@ -272,7 +272,8 @@ export function getModelsForProvider(providerName: string, models?: ModelCatalog
   const curated = Object.entries(mc)
     .filter(([, entry]) => entry.transports.includes(providerName))
     .map(([id, entry]) => ({ id, entry }))
-    .sort((a, b) => a.entry.rank - b.entry.rank || a.entry.cost.input - b.entry.cost.input);
+    // Costless (subscription) entries sort last — priced models first.
+    .sort((a, b) => a.entry.rank - b.entry.rank || (a.entry.cost?.input ?? Infinity) - (b.entry.cost?.input ?? Infinity));
   // #1613: pi-catalog fallback for pi-mapped providers with no curated models.json
   // entries (e.g. opencode-go). Only when the curated list is empty, the catalog is
   // warmed, and the pi list is small — big uncurated providers stay out of the
@@ -287,8 +288,8 @@ export function getModelsForProvider(providerName: string, models?: ModelCatalog
             contextWindow: m.contextWindow,
             maxOutput: m.maxTokens,
             rank: 3,
-            // pi catalog costs are $/1M tokens; ModelCost is $/token — normalize.
-            cost: { input: m.cost.input / 1_000_000, output: m.cost.output / 1_000_000 },
+            // Both sides are $/1M — no normalization.
+            cost: { input: m.cost.input, output: m.cost.output },
             transports: [providerName],
             status: "alive" as const,
           },
@@ -304,7 +305,8 @@ export function formatRank(rank: number): string {
   return "★".repeat(stars) + "☆".repeat(5 - stars);
 }
 
-export function formatCost(cost: ModelCost): string {
+export function formatCost(cost: ModelCost | undefined): string {
+  if (!cost) return "n/a";
   if (cost.input === 0 && cost.output === 0) return "free";
   const d = cost.display ?? computeCostDisplay(cost);
   const inp = `$${d.inputPer1M}`;

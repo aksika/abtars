@@ -105,14 +105,14 @@ describe('onboard command (non-interactive)', () => {
       telegramToken: '123:secret',
       telegramChatId: '4242',
       defaultProvider: 'openrouter',
-      defaultModel: 'google/gemini-2.5-flash',
+      defaultModel: 'openai/gpt-6-luna',
       force: false,
     });
     expect(code).toBe(0);
     const env = await readFile(join(fakeHome, 'config', '.env'), 'utf-8');
     expect(env).toMatch(/MAIN_CHAT_ID=4242/);
     expect(env).toMatch(/DEFAULT_PROVIDER=openrouter/);
-    expect(env).toMatch(/DEFAULT_MODEL=google\/gemini-2\.5-flash/);
+    expect(env).toMatch(/DEFAULT_MODEL=openai\/gpt-6-luna/);
     expect(env).not.toMatch(/DISCORD_A2A_CHANNEL_ID=/);
     // Secrets go to secret/ dir
     const { readSecret } = await import('../../components/secrets.js');
@@ -181,7 +181,7 @@ describe('onboard command (non-interactive)', () => {
       telegramToken: '999:aa',
       telegramChatId: '1',
       defaultProvider: 'openrouter',
-      defaultModel: 'google/gemini-2.5-flash',
+      defaultModel: 'openai/gpt-6-luna',
       force: true,
     });
     expect(code).toBe(0);
@@ -204,7 +204,7 @@ describe('onboard command (non-interactive)', () => {
       telegramToken: '1:a',
       telegramChatId: '1',
       defaultProvider: 'openrouter',
-      defaultModel: 'google/gemini-2.5-flash',
+      defaultModel: 'openai/gpt-6-luna',
       force: false,
     });
     // Second run without --force refuses (env already has owned keys)
@@ -217,7 +217,7 @@ describe('onboard command (non-interactive)', () => {
       telegramToken: '2:b',
       telegramChatId: '2',
       defaultProvider: 'openrouter',
-      defaultModel: 'minimax/minimax-m2.5:cloud',
+      defaultModel: 'deepseek/deepseek-v4-flash',
       force: false,
     });
     expect(refuseCode).toBe(3);
@@ -232,12 +232,12 @@ describe('onboard command (non-interactive)', () => {
       telegramToken: '2:b',
       telegramChatId: '2',
       defaultProvider: 'openrouter',
-      defaultModel: 'minimax/minimax-m2.5:cloud',
+      defaultModel: 'deepseek/deepseek-v4-flash',
       force: true,
     });
     expect(code).toBe(0);
     const env = await readFile(join(fakeHome, 'config', '.env'), 'utf-8');
-    expect(env).toMatch(/DEFAULT_MODEL=minimax\/minimax-m2\.5:cloud/);
+    expect(env).toMatch(/DEFAULT_MODEL=deepseek\/deepseek-v4-flash/);
     const { readSecret } = await import('../../components/secrets.js');
     expect(readSecret('TELEGRAM_BOT_TOKEN')).toBe('2:b');
   });

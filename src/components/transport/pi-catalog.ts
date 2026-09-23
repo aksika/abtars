@@ -144,9 +144,9 @@ export interface ResolvedModelMeta {
  * caller falls to models.json / defaults. `models` is injectable for tests (defaults to the
  * warmed cache). Never throws.
  *
- * Cost contract (#1614): pi catalog rates are $/1M tokens; the returned `cost` is normalized
- * to $/token (÷1e6) to match abtars's ModelCost contract ("$/token — used for arithmetic").
- * contextWindow/maxOutput pass through untouched.
+ * Cost contract (#1830): pi catalog rates are $/1M tokens and pass through
+ * untouched, matching abtars's ModelCost contract. contextWindow/maxOutput
+ * pass through untouched.
  */
 export function resolveModelMeta(
   modelId: string,
@@ -161,7 +161,7 @@ export function resolveModelMeta(
   return {
     contextWindow: m.contextWindow,
     maxOutput: m.maxTokens,
-    cost: { input: m.cost.input / 1_000_000, output: m.cost.output / 1_000_000 },
+    cost: { input: m.cost.input, output: m.cost.output },
     source: "pi",
   };
 }
@@ -198,8 +198,8 @@ export async function modelsForProvider(providerName: string): Promise<PiPickerM
       // getAuth rejects on credential-store failure / expired OAuth → user must (re)login.
       authStatus = "needs-login";
     }
-    // Cost normalized to $/token (pi rates are $/1M) — #1614.
-    out.push({ id: m.id, contextWindow: m.contextWindow, cost: { input: m.cost.input / 1_000_000, output: m.cost.output / 1_000_000 }, authStatus });
+    // Cost passes through in $/1M — #1830. No normalization.
+    out.push({ id: m.id, contextWindow: m.contextWindow, cost: { input: m.cost.input, output: m.cost.output }, authStatus });
   }
   return out;
 }
@@ -220,10 +220,10 @@ export function modelsForProviderSync(providerName: string): Array<{ id: string;
   if (!models) return null;
   const piProvider = mapProviderName(providerName);
   if (!piProvider) return null;
-  // Cost normalized to $/token (pi rates are $/1M) — #1614. This is the picker/
-  // display boundary: formatCost/computeCostDisplay expect ModelCost's $/token
-  // contract and multiply by 1e6 for display.
-  return models.getModels(piProvider).map(m => ({ id: m.id, cost: { input: m.cost.input / 1_000_000, output: m.cost.output / 1_000_000 }, contextWindow: m.contextWindow }));
+  // Costs pass through in $/1M — #1830. This is the picker/
+  // display boundary: formatCost/computeCostDisplay expect ModelCost's $/1M
+  // contract and render it directly.
+  return models.getModels(piProvider).map(m => ({ id: m.id, cost: { input: m.cost.input, output: m.cost.output }, contextWindow: m.contextWindow }));
 }
 
 /**
@@ -232,8 +232,8 @@ export function modelsForProviderSync(providerName: string): Array<{ id: string;
  * configured candidate's provider is not stored per usage entry). null if not warmed.
  *
  * CONTRACT: rates stay $/1M tokens (raw pi values). The sole consumer (handlers-system.ts
- * /usage costOf) divides by 1_000_000. This is the arithmetic boundary — do NOT convert
- * here; per-token normalization lives in resolveModelMeta / modelsForProvider(Sync) (#1614).
+ * /usage costOf) divides by 1_000_000, as does the models.json path now that
+ * ModelCost is $/1M. This is the arithmetic boundary — do NOT convert here (#1830).
  */
 export function piCostRatesByModel(): Map<string, { input: number; output: number; cacheRead: number; cacheWrite: number }> | null {
   const models = getWarmedModels();

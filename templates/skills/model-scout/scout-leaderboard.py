@@ -100,8 +100,9 @@ for i, m in enumerate(models, 1):
     mid = m["id"]
     ctx = m.get("context_length") or 0
     pricing = m.get("pricing", {})
-    inp = float(pricing.get("prompt", 0) or 0)
-    out = float(pricing.get("completion", 0) or 0)
+    # OpenRouter pricing is $/token; models.json stores $/1M (#1830).
+    inp = float(pricing.get("prompt", 0) or 0) * 1_000_000
+    out = float(pricing.get("completion", 0) or 0) * 1_000_000
     is_free = ":free" in mid
 
     alive_str = ""
