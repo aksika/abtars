@@ -119,7 +119,7 @@ Manage optional CLI npm package groups (native, twitter, pdf, youtube, image, pi
 | Subcommand | Description |
 |------------|-------------|
 | `deps list` | List every group + system binary + install status |
-| `deps install [name\|all]` | Install a group (default: native) |
+| `deps install [name\|all]` | Install a group (default: all) |
 | `deps update [name\|all]` | Refresh an installed group |
 | `deps remove <name>` | Uninstall a group |
 

@@ -333,7 +333,7 @@ describe("abtars deps", () => {
     out.mockRestore();
   });
 
-  it("install with no args defaults to native group", async () => {
+  it("install with no args defaults to all (pi included)", async () => {
     // Pre-create native packages at their exact targets so they appear "ready"
     const versions: Record<string, string> = { "better-sqlite3": "12.11.1", "sqlite-vec": "0.1.9" };
     for (const pkg of ["better-sqlite3", "sqlite-vec"]) {
@@ -356,10 +356,13 @@ describe("abtars deps", () => {
     const { deps } = await import("./deps.js");
     const write = vi.spyOn(process.stdout, "write").mockImplementation(() => true);
     const code = await deps(["install"]);
-    expect(code).toBe(0);
     const output = write.mock.calls.map(c => c[0]).join("");
-    expect(output).toContain("already up to date");
     write.mockRestore();
+    // Bare install must attempt pi (absent here → install attempted, fails
+    // only because the sandbox has no pi on PATH and no npm global bin).
+    expect(output).toContain("→ pi: installing");
+    expect(output).toContain("✗ pi failed");
+    expect(code).toBe(1);
   });
 
   it("list shows target version and observed version", async () => {

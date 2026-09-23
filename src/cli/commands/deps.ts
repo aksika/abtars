@@ -838,7 +838,7 @@ function list(): number {
   }
 
   process.stdout.write(
-    `\nInstall: abtars deps install [name|all]  (default: native)\n` +
+    `\nInstall: abtars deps install [name|all]  (default: all)\n` +
     `Update:  abtars deps update [name|all]   (refresh installed)\n` +
     `Remove:  abtars deps remove <name>\n`,
   );
@@ -850,6 +850,9 @@ function install(names: string[]): number {
   // above-pin installation (e.g. deliberate downgrade to the pinned range).
   const force = names.includes("--force");
   names = names.filter(n => n !== "--force");
+  // Bare `deps install` means everything (native groups, pi, system
+  // binaries) — a bare run must never silently skip pi.
+  if (names.length === 0) names = ["all"];
 
   try {
     validateRequestedDependencyNames(names);

@@ -6,7 +6,7 @@
 
 ```
 abtars deps list             # show every group + system binary + install status
-abtars deps install [name|all]   # install a group (default: native)
+abtars deps install [name|all]   # install a group (default: all)
 abtars deps update [name|all]    # refresh an installed group
 abtars deps remove <name>        # uninstall a group
 ```
