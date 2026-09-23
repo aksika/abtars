@@ -525,17 +525,22 @@ describe("doctor platform probes use effective credentials (#1258)", () => {
     vi.useFakeTimers();
     const { runAllProbes } = await import("./doctor-probes.js");
 
+    // Scope the no-leak assertion to timers this run creates: the fake clock
+    // is process-wide, so an unrelated file sharing the worker could leave a
+    // timer behind. Our own abort timer fires during the advance below and is
+    // cleared in a finally, so our net contribution must be zero.
+    const timersBefore = vi.getTimerCount();
     const abortedRun = runAllProbes();
     await vi.advanceTimersByTimeAsync(15000);
     const abortedResult = await abortedRun;
     expect(platformsProbe(abortedResult).status).toBe("warning");
     expect(platformsProbe(abortedResult).detail).toContain("unreachable");
-    expect(vi.getTimerCount()).toBe(0);
+    expect(vi.getTimerCount()).toBeLessThanOrEqual(timersBefore);
 
     fetchMock.mockResolvedValue(fakeResponse(200));
     const okResult = await runAllProbes();
     expect(platformsProbe(okResult).status).toBe("ok");
-    expect(vi.getTimerCount()).toBe(0);
+    expect(vi.getTimerCount()).toBeLessThanOrEqual(timersBefore);
   });
 
   it("mixes filesystem and reachable outcomes, keeping per-platform detail as the source of truth", async () => {

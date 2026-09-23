@@ -1089,6 +1089,12 @@ describe("PeerWsBroker", () => {
 
     const beforeActivity = broker.getPeerRouteInfo("kp")!.lastActivityAt!;
 
+    // Date.now() has millisecond resolution: with warm module caches the
+    // sign/emit below completes in the same millisecond as the attach above,
+    // so the activity update would compare equal. Wait for the clock to tick
+    // first; the assertion still fails if the push never updates activity.
+    await new Promise(r => setTimeout(r, 15));
+
     const { signWsRequest } = await import("./peer-auth.js");
     const body = JSON.stringify({ event: "test" });
     const auth = signWsRequest(

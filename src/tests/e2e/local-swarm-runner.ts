@@ -264,6 +264,11 @@ async function startTestReconciler(
   const { ReconcileQuarantineStore } = await import("../../components/reconcile-quarantine-store.js");
   const { WorkerSupervisionStore } = await import("../../components/worker-supervision-store.js");
   const { PiExecutorAdapter } = await import("../../components/pi-executor-adapter.js");
+  // #1801: the release wake must reach the generation's pump — wire the live
+  // supervisor exactly like production (phase-reconciler). A no-op default
+  // leaves physical capacity permanently occupied after the first release,
+  // hanging any release-then-claim flow (runner saturation).
+  const { spin } = await import("../../components/spin.js");
 
   // #1792: the coordinator retains only the release/supersede boundary — the
   // runner dispatches all work now, so no start port is injected.
@@ -279,7 +284,8 @@ async function startTestReconciler(
     getQuarantineStore: () => new ReconcileQuarantineStore(),
     projectRunProgress: deps.projectRunProgress ?? (() => {}),
     failureCascade: deps.failureCascade,
-    subscribeCapacityReleased: deps.subscribeCapacityReleased ?? (() => () => {}),
+    subscribeCapacityReleased: deps.subscribeCapacityReleased
+      ?? ((listener) => spin.executionSupervisor.subscribeCapacityReleased(listener)),
   });
   await scheduler.start();
 }
