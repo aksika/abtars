@@ -328,11 +328,14 @@ export async function deployActivation(
     }
     history = parsed;
   } catch (err) {
-    if ((err as NodeJS.ErrnoException).code !== "ENOENT" || !isFirstInstall) {
+    if ((err as NodeJS.ErrnoException).code !== "ENOENT") {
       const message = err instanceof Error ? err.message : String(err);
       process.stderr.write(`x Cannot read release history: ${message.slice(-300)}\n`);
       return 1;
     }
+    // #1828: absent history starts empty. Onboard scaffolds the manifest
+    // before the first update runs, so manifest presence cannot distinguish a
+    // fresh machine from an upgrade. Only corrupt content is fatal.
   }
   const newRef = staged.commit || staged.version;
   history = history.filter(h => h !== newRef);

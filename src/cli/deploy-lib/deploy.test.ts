@@ -191,6 +191,21 @@ describe("deployActivation — bootstrap failure (macOS)", () => {
     expect(readFileSync(join(releasesTmp, "history.json"), "utf-8")).toBe(corruptHistory);
     expect(healthMock.calls).toHaveLength(0);
   });
+
+  it("starts empty history when manifest exists but history.json is absent (#1828)", { timeout: TIMEOUT }, async () => {
+    // Fresh machine via split install/update flow: onboard scaffolds the
+    // manifest before the first update runs, so activation must not treat
+    // absent history as fatal.
+    Object.defineProperty(process, "platform", { value: "darwin", configurable: true, writable: true });
+    rmSync(join(releasesTmp, "history.json"), { force: true });
+    const bootstrapFn: BootstrapFn = () => ({ ok: true });
+    const healthMock = makeHealthMock();
+
+    const code = await deployActivation({ staged, channel: "dev", repoRoot: tmp }, bootstrapFn, healthMock.fn);
+
+    expect(code).toBe(0);
+    expect(JSON.parse(readFileSync(join(releasesTmp, "history.json"), "utf-8"))).toEqual(["abc1234"]);
+  });
 });
 
 describe("deployActivation — bootstrap success + health healthy (macOS)", () => {
