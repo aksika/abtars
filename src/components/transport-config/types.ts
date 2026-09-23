@@ -49,6 +49,11 @@ export type ProviderConfig = {
   cli?: string;
   endpoint?: string;
   apiKeyEnv?: string;
+  /** #1757: Pi-managed auth mode selector for `transport: "api"` on the
+   *  pi-ai route. A mode flag, never a credential value. When set, Pi's
+   *  configured model runtime owns auth/config/refresh; `apiKeyEnv` must be
+   *  absent (ambiguous combinations are rejected at validation). */
+  authSource?: "pi";
   apiFormat?: "chat" | "responses" | "anthropic";
   thinking?:
     | { style: "default" }

@@ -180,6 +180,12 @@ async function defaultCreatePiAiAttempt(
   _options: SimpleStreamOptions,
   signal: AbortSignal,
 ): Promise<ProviderAttemptBundle> {
+  // #1757: Pi-managed candidates dispatch through Pi's configured runtime
+  // (auth resolved by Pi at request time) instead of the abtars-keyed
+  // custom provider below.
+  if (candidate.authSource === "pi") {
+    return createPiManagedAttempt(candidate, model, context, _options, signal);
+  }
   const piCandidate: import("./pi-ai-adapter.js").PiAiCandidate = {
     model: candidate.model,
     endpoint: candidate.endpoint,
@@ -214,6 +220,60 @@ async function defaultCreatePiAiAttempt(
     // #1745: the narrowed module that created this stream carries the overflow
     // predicate — the execution owner classifies terminal messages through it.
     pi: bundle.pi,
+  };
+}
+
+/**
+ * #1757: attempt factory for Pi-managed candidates. Dispatches through Pi's
+ * configured runtime (`streamPiManaged`: request-time auth, no abtars key)
+ * with the adapter-built model's reasoning flag carried over for parity.
+ * A pre-commit terminal carrying a Pi credential-absence message is mapped
+ * to an auth-kind throw so the health path demotes; the runner records the
+ * acquisition/streaming failure through the normal classification.
+ */
+async function createPiManagedAttempt(
+  candidate: ModelCandidate,
+  model: Model<Api>,
+  context: Context,
+  _options: SimpleStreamOptions,
+  signal: AbortSignal,
+): Promise<ProviderAttemptBundle> {
+  const { streamPiManaged, isPiAuthAbsenceMessage, PiManagedAuthError } = await import("./pi-runtime.js");
+  // Never forward an abtars key on this path — Pi resolves auth internally.
+  // Pi-managed candidates carry none, but attempt options are shared shapes.
+  const { apiKey: _dropped, ...runtimeOptions } = _options as SimpleStreamOptions & { apiKey?: string };
+  const stream = await streamPiManaged(candidate.provider, candidate.model, context, { ...runtimeOptions, signal }, model.reasoning);
+  let terminal: AssistantMessage | undefined;
+  let resolveResult: ((message: AssistantMessage) => void) | undefined;
+  const resultPromise = new Promise<AssistantMessage>((resolve) => { resolveResult = resolve; });
+  async function* iterator(): AsyncGenerator<AssistantMessageEvent> {
+    try {
+      for await (const event of stream) {
+        if (event.type === "error") {
+          const message = event.error.errorMessage ?? "";
+          if (isPiAuthAbsenceMessage(message)) {
+            throw new PiManagedAuthError(`Pi-managed request for ${candidate.model} via ${candidate.provider} has no usable Pi auth: ${message}`);
+          }
+        }
+        yield event;
+        if (isTerminal(event)) terminal = terminalResult(event) ?? terminal;
+        if (event.type === "done") { resolveResult?.(event.message); terminal = event.message; }
+        if (event.type === "error") { resolveResult?.(event.error); terminal = event.error; }
+      }
+    } finally {
+      if (!terminal) terminal = assistantMessage(model, [], "error", "Stream ended without terminal event");
+      resolveResult?.(terminal);
+    }
+  }
+  void _dropped;
+  return {
+    stream: {
+      [Symbol.asyncIterator]: () => iterator(),
+      result: () => resultPromise,
+    } as unknown as AssistantMessageEventStream,
+    // No narrowed pi-ai module on this path — status-based classification
+    // stays the floor, and auth-absence is mapped to 401 above.
+    pi: undefined,
   };
 }
 

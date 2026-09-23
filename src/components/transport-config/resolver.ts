@@ -323,6 +323,13 @@ export function formatCost(cost: ModelCost | undefined): string {
  * Contract:
  * - `api` + `apiKeyEnv` declared → env var must be non-empty
  * - `api` + no `apiKeyEnv` → always ok (local ollama-style)
+ * - #1757: `api` + Pi-managed mode (`authSource: "pi"`, never combined with
+ *   `apiKeyEnv` — rejected at load) → ok on shape. Pi login state is
+ *   fundamentally async (`checkAuth`) and cannot be seen here; selection
+ *   points (boot walk, picker switch) run the async `checkPiManagedAuth`
+ *   gate, and dispatch re-checks at request time. A sync "not ready" here
+ *   would make Pi-managed entries unselectable, which is worse than an
+ *   async-gated ok.
  * - `acp` → `provider.cli` must be runnable (`<cli> --version` within 3s)
  * - `tmux` → always ok (out of scope)
  *
@@ -337,6 +344,7 @@ export function validateProviderReady(
   if (provider.transport === "tmux") return { ok: true };
 
   if (provider.transport === "api") {
+    if (provider.authSource === "pi") return { ok: true };
     if (!provider.apiKeyEnv) return { ok: true };
     const key = env.getApiKey(provider.apiKeyEnv);
     if (!key) {

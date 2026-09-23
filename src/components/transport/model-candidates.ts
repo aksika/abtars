@@ -30,6 +30,11 @@ export interface CandidateSpec {
   endpoint: string;
   maxContext: number;
   apiFormat?: ApiFormat;
+  /** #1757: Pi-managed auth mode carried per candidate so fallback rotation
+   *  can never inherit or borrow another candidate's credential path. A
+   *  Pi-managed candidate carries no apiKey; dispatch resolves auth from Pi's
+   *  configured runtime at request time. */
+  authSource?: "pi";
   thinking?: PiAiCandidate["thinking"];
   /** #1770: resolved max output tokens (pi catalog wins, models.json floor).
    *  Threaded from ResolvedAgent at construction; resolveCandidateModel falls
@@ -61,6 +66,23 @@ export function candidateKey(model: string, endpoint: string): string {
 /** Candidate-list identity: provider + model + endpoint (#1418). */
 export function candidateIdentityKey(c: { model: string; provider: string; endpoint: string }): string {
   return `${c.provider}/${c.model}@${c.endpoint}`;
+}
+
+/**
+ * #1757: resolve the auth slice for one candidate from its provider entry.
+ * Pi-managed providers (`authSource: "pi"`) resolve no key here — dispatch
+ * owns auth at request time — and never inherit another candidate's key.
+ * Keyed providers resolve their own `apiKeyEnv`; providers with neither fall
+ * back to the inherited key (historical ollama-style behavior, unchanged).
+ */
+export function resolveCandidateAuth(
+  provider: { apiKeyEnv?: string; authSource?: string },
+  getApiKey: (envName: string) => string | undefined,
+  inheritKey?: string,
+): { apiKey?: string; authSource?: "pi" } {
+  if (provider.authSource === "pi") return { apiKey: undefined, authSource: "pi" };
+  if (provider.apiKeyEnv) return { apiKey: getApiKey(provider.apiKeyEnv) };
+  return { apiKey: inheritKey };
 }
 
 export function deduplicateCandidates(candidates: ModelCandidate[]): CandidateDedupResult {

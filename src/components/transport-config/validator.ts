@@ -29,6 +29,7 @@ export const PROVIDER_ALLOWED_FIELDS = new Set([
   "cli",
   "endpoint",
   "apiKeyEnv",
+  "authSource",
   "apiFormat",
   "thinking",
   "cacheRetention",
@@ -248,6 +249,34 @@ export function validateTransportConfig(input: unknown): TransportValidationResu
           path: `providers.${provName}.apiKeyEnv`,
           message: `Provider "${provName}" apiKeyEnv must be a valid environment-variable name ([A-Z_][A-Z0-9_]*)`,
         });
+      }
+    }
+    // #1757: authSource is a Pi-managed mode selector (pi-ai route, api
+    // transport only). It must be exactly "pi", must not combine with
+    // apiKeyEnv (ambiguous credential ownership), and is meaningless on
+    // non-api transports (ACP/tmux manage their own auth).
+    if (entryRecord.authSource !== undefined && entryRecord.authSource !== null) {
+      if (entryRecord.authSource !== "pi") {
+        issues.push({
+          code: "invalid_provider_field",
+          path: `providers.${provName}.authSource`,
+          message: `Provider "${provName}" authSource must be "pi" — Pi-managed auth is the only supported mode`,
+        });
+      } else {
+        if (entryRecord.apiKeyEnv !== undefined && entryRecord.apiKeyEnv !== null) {
+          issues.push({
+            code: "invalid_provider_field",
+            path: `providers.${provName}.authSource`,
+            message: `Provider "${provName}" combines Pi-managed auth (authSource "pi") with apiKeyEnv — remove apiKeyEnv so Pi owns the credential`,
+          });
+        }
+        if ((entryRecord.transport as string) !== "api") {
+          issues.push({
+            code: "invalid_provider_field",
+            path: `providers.${provName}.authSource`,
+            message: `Provider "${provName}" authSource "pi" requires transport "api" — ACP/tmux providers manage their own auth`,
+          });
+        }
       }
     }
     // #1748: cacheRetention must be one of pi's CacheRetention values. An

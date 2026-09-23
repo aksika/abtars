@@ -17,18 +17,25 @@ export async function runModelHealthCheck(ctx: BootCtx): Promise<void> {
   if (profType === "api") {
     const agents = ["main", "dreamy", "browsie", "cody"] as const;
     const modelToAgents = new Map<string, string[]>();
-    const modelToResolved = new Map<string, { endpoint: string; apiKey: string }>();
+    const modelToResolved = new Map<string, { endpoint: string; apiKey: string; piManaged: boolean }>();
     for (const a of agents) {
       const r = resolveAgent(a, tc);
       if (!r) continue;
       if (!modelToAgents.has(r.model)) {
         modelToAgents.set(r.model, []);
-        modelToResolved.set(r.model, { endpoint: r.provider.endpoint ?? "http://localhost:11434/v1", apiKey: getEnv().getApiKey(r.provider.apiKeyEnv ?? "API_KEY") ?? "" });
+        // #1757: Pi-managed providers own their endpoint and auth — a raw
+        // HTTP probe cannot observe them. They are covered by the async
+        // Pi-auth gate at selection and by /model doctor, not here.
+        modelToResolved.set(r.model, { endpoint: r.provider.endpoint ?? "http://localhost:11434/v1", apiKey: getEnv().getApiKey(r.provider.apiKeyEnv ?? "API_KEY") ?? "", piManaged: r.provider.authSource === "pi" });
       }
       modelToAgents.get(r.model)!.push(a);
     }
     for (const [model, agentNames] of modelToAgents) {
-      const { endpoint, apiKey } = modelToResolved.get(model)!;
+      const { endpoint, apiKey, piManaged } = modelToResolved.get(model)!;
+      if (piManaged) {
+        logInfo("model-health", `✓ ${agentNames[0]}=${model} (Pi-managed — probed via Pi runtime, not HTTP)`);
+        continue;
+      }
       try {
         const res = await fetch(`${endpoint}/chat/completions`, {
           method: "POST",

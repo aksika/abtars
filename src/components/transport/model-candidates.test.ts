@@ -3,6 +3,7 @@ import {
   buildCandidates,
   candidateIdentityKey,
   deduplicateCandidates,
+  resolveCandidateAuth,
   type ModelCandidate,
 } from "./model-candidates.js";
 
@@ -82,5 +83,28 @@ describe("buildCandidates (#1418)", () => {
     const chain = [cand("m3", "p3", "e3"), cand("m1", "p1", "e1") /* dup of configured */];
     const result = buildCandidates({ role: "specialist", configured: specialist, lastSuccessfulMain: lastMain, fallbacks: chain });
     expect(result.map(c => `${c.model}/${c.provider}`)).toEqual(["m1/p1", "m2/p2", "m3/p3"]);
+  });
+});
+
+describe("resolveCandidateAuth (#1757)", () => {
+  const getKey = (name: string) => (name === "SET_KEY" ? "secret-value" : undefined);
+
+  it("Pi-managed providers resolve no key and carry the mode", () => {
+    expect(resolveCandidateAuth({ authSource: "pi" }, getKey, "inherited")).toEqual({ apiKey: undefined, authSource: "pi" });
+  });
+
+  it("Pi-managed providers never inherit another candidate's key", () => {
+    expect(resolveCandidateAuth({ authSource: "pi", apiKeyEnv: undefined }, getKey, "inherited-key")).toEqual({
+      apiKey: undefined,
+      authSource: "pi",
+    });
+  });
+
+  it("keyed providers resolve their own apiKeyEnv", () => {
+    expect(resolveCandidateAuth({ apiKeyEnv: "SET_KEY" }, getKey, "inherited")).toEqual({ apiKey: "secret-value" });
+  });
+
+  it("keyless providers inherit the caller's key (historical behavior)", () => {
+    expect(resolveCandidateAuth({}, getKey, "inherited")).toEqual({ apiKey: "inherited" });
   });
 });

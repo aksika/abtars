@@ -1,5 +1,5 @@
 import type { CandidateSpec, ModelCandidate } from "./transport/model-candidates.js";
-import { buildCandidates } from "./transport/model-candidates.js";
+import { buildCandidates, resolveCandidateAuth } from "./transport/model-candidates.js";
 import { getEnv } from "./env-schema.js";
 /**
  * agent-registry.ts — Centralized agent role configuration.
@@ -97,12 +97,15 @@ export async function createSubagentTransport(role: SubagentRole, registry?: imp
   if (agent.provider.transport === "api") {
     const { PiCoreTransport } = await import("./transport/pi-core-transport.js");
     const apiKey = getEnv().getApiKey(agent.provider.apiKeyEnv ?? "API_KEY");
+    // #1757: Pi-managed mode rides the candidate; no key is resolved here and
+    // fallbacks never inherit across auth modes (see resolveCandidateAuth).
+    const primaryAuth = resolveCandidateAuth(agent.provider, (name) => getEnv().getApiKey(name), apiKey);
 
     const primaryEndpoint = agent.provider.endpoint ?? "http://localhost:11434/v1";
 
     const configured: ModelCandidate = {
       model: agent.model, provider: agent.providerName, endpoint: primaryEndpoint,
-      apiKey, maxContext: agent.contextWindow, apiFormat: agent.provider.apiFormat,
+      apiKey: primaryAuth.apiKey, authSource: primaryAuth.authSource, maxContext: agent.contextWindow, apiFormat: agent.provider.apiFormat,
       // #1770: thread the resolved ceiling (pi catalog wins, models.json floor).
       maxOutput: agent.maxOutput,
       thinking: agent.provider.thinking,
@@ -134,9 +137,14 @@ export async function createSubagentTransport(role: SubagentRole, registry?: imp
       let inheritedCandidate: ModelCandidate | null = null;
       if (inheritedSpec) {
         const inheritedProvider = tc?.providers[inheritedSpec.provider];
+        const inheritedAuth = resolveCandidateAuth(
+          inheritedProvider ?? {},
+          (name) => getEnv().getApiKey(name),
+          primaryAuth.apiKey,
+        );
         inheritedCandidate = {
           model: inheritedSpec.model, provider: inheritedSpec.provider, endpoint: inheritedSpec.endpoint,
-          apiKey: inheritedProvider?.apiKeyEnv ? getEnv().getApiKey(inheritedProvider.apiKeyEnv) : apiKey,
+          apiKey: inheritedAuth.apiKey, authSource: inheritedAuth.authSource,
           maxContext: inheritedSpec.maxContext, apiFormat: inheritedSpec.apiFormat,
           thinking: inheritedSpec.thinking,
           // Prefer the current provider config; an absent current setting is
@@ -151,9 +159,10 @@ export async function createSubagentTransport(role: SubagentRole, registry?: imp
       const ra = tc ? (await import("./transport-config.js")).routeAssignments(tc) : null;
       const fallbackCandidates: ModelCandidate[] = (ra?.fallbacks ?? []).map(fb => {
         const fbProvider = tc!.providers[fb.provider];
+        const fbAuth = resolveCandidateAuth(fbProvider ?? {}, (name) => getEnv().getApiKey(name), primaryAuth.apiKey);
         return {
           model: fb.model, provider: fb.provider, endpoint: fbProvider?.endpoint ?? primaryEndpoint,
-          apiKey: fbProvider?.apiKeyEnv ? getEnv().getApiKey(fbProvider.apiKeyEnv) : apiKey,
+          apiKey: fbAuth.apiKey, authSource: fbAuth.authSource,
           maxContext: mainAgent?.contextWindow ?? agent.contextWindow, apiFormat: fbProvider?.apiFormat,
           thinking: fbProvider?.thinking,
           cacheRetention: fbProvider?.cacheRetention ?? "short", source: "agent_fallback",

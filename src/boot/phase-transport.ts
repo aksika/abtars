@@ -1,5 +1,5 @@
 import type { ModelCandidate } from "../components/transport/model-candidates.js";
-import { buildCandidates } from "../components/transport/model-candidates.js";
+import { buildCandidates, resolveCandidateAuth } from "../components/transport/model-candidates.js";
 import { logAndSwallow } from "../components/log-and-swallow.js";
 import { getEnv } from "../components/env-schema.js";
 /**
@@ -171,14 +171,21 @@ export async function buildTransport(ctx: BootCtx): Promise<PhaseResult> {
       logWarn("main", `${prof!.model}: ${compat.reason} — trying fallbacks`);
     }
     const validation = compat.ok ? validateProviderReady(prof!.providerName, prof!.provider, getEnv()) : null;
-    if (validation?.ok) {
+    // #1757: Pi-managed entries pass sync validation on shape; confirm live
+    // Pi auth here so an unconfigured login never becomes the transport.
+    const { checkPiManagedSelection } = await import("../components/transport/pi-runtime.js");
+    const piGate = validation?.ok ? await checkPiManagedSelection(prof!.providerName, prof!.provider) : null;
+    if (validation?.ok && (!piGate || piGate.ok)) {
       logDebug("main", `Model init OK: ${prof!.model} via ${prof!.providerName}`);
       resolved = prof;
     } else {
       if (!compat.ok) logDebug("main", `${prof!.model}: skipping (incompatible pair)`);
-      else if (validation) logDebug("main", `Model init failed: ${prof!.model} — ${validation.reason}`);
+      else if (piGate && !piGate.ok) logDebug("main", `Model init failed: ${prof!.model} — ${piGate.reason}`);
+      else if (validation && !validation.ok) logDebug("main", `Model init failed: ${prof!.model} — ${validation.reason}`);
       if (!compat.ok) logWarn("main", `${prof!.model}: incompatible with ${prof!.providerName} — trying fallbacks`);
-      else logWarn("main", `${prof!.model}: ${validation!.reason} — trying fallbacks`);
+      else if (piGate && !piGate.ok) logWarn("main", `${prof!.model}: ${piGate.reason} — trying fallbacks`);
+      else if (validation && !validation.ok) logWarn("main", `${prof!.model}: ${validation.reason} — trying fallbacks`);
+      else logWarn("main", `${prof!.model}: selection failed — trying fallbacks`);
       // Walk fallback chain
       for (const fb of prof!.fallbacks) {
         const fbCompat = validateModelProviderPair(fb.model, fb.provider);
@@ -191,6 +198,12 @@ export async function buildTransport(ctx: BootCtx): Promise<PhaseResult> {
         if (!fbResolved) continue;
         const fbVal = validateProviderReady(fbResolved.providerName, fbResolved.provider, getEnv());
         if (fbVal.ok) {
+          const fbGate = await checkPiManagedSelection(fbResolved.providerName, fbResolved.provider);
+          if (!fbGate.ok) {
+            logDebug("main", `Fallback init failed: ${fbResolved.model} — ${fbGate.reason}`);
+            logWarn("main", `${fbResolved.model}: ${fbGate.reason} — trying next`);
+            continue;
+          }
           logDebug("main", `Fallback init OK: ${fbResolved.model} via ${fbResolved.providerName}`);
           resolved = fbResolved;
           break;
@@ -238,15 +251,24 @@ export async function buildTransport(ctx: BootCtx): Promise<PhaseResult> {
     const { ensurePiThinkingClamp } = await import("../components/transport/pi-ai-adapter.js");
     await ensurePiThinkingClamp();
     const apiKey = getEnv().getApiKey(resolved.provider.apiKeyEnv ?? "API_KEY");
+    // #1757: Pi-managed providers resolve no key here; the mode rides the
+    // candidate so dispatch authenticates from Pi's runtime at request time.
+    const mainAuth = resolveCandidateAuth(resolved.provider, (name) => getEnv().getApiKey(name), apiKey);
 
     const fallbackCandidates: ModelCandidate[] = (resolved.fallbacks ?? []).map(fb => {
       const tcWithFb = tc && tcRa ? { ...tc, routes: { ...tc.routes, [tcActiveRoute!]: { agents: { ...tcRa.agents, _fallback: { model: fb.model, provider: fb.provider } }, fallbacks: tcRa.fallbacks } } } : tc;
       const fbResolved = tc ? resolveAgent("_fallback", tcWithFb) : null;
+      const fbAuth = resolveCandidateAuth(
+        fbResolved?.provider ?? {},
+        (name) => getEnv().getApiKey(name),
+        mainAuth.apiKey,
+      );
       return {
         model: fb.model,
         provider: fbResolved?.providerName ?? fb.provider,
         endpoint: fbResolved?.provider.endpoint ?? resolved.provider.endpoint ?? "http://localhost:11434/v1",
-        apiKey: fbResolved?.provider.apiKeyEnv ? getEnv().getApiKey(fbResolved.provider.apiKeyEnv) : apiKey,
+        apiKey: fbAuth.apiKey,
+        authSource: fbAuth.authSource,
         maxContext: fbResolved?.contextWindow ?? resolved.contextWindow,
         // #1770: thread the resolved ceiling (pi catalog wins, models.json
         // floor) so the request carries the model's real limit, not a pin.
@@ -265,7 +287,8 @@ export async function buildTransport(ctx: BootCtx): Promise<PhaseResult> {
         model: resolved.model,
         provider: resolved.providerName,
         endpoint: resolved.provider.endpoint ?? "http://localhost:11434/v1",
-        apiKey,
+        apiKey: mainAuth.apiKey,
+        authSource: mainAuth.authSource,
         maxContext: resolved.contextWindow,
         // #1770: thread the resolved ceiling (pi catalog wins, models.json
         // floor) so the request carries the model's real limit, not a pin.

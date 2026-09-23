@@ -173,6 +173,48 @@ export async function handleModels(text: string, ctx: CommandContext): Promise<b
   // /model doctor — probe all models under current transport
   if (arg === "doctor") {
     if (!prof) { await ctx.reply("❌ No transport configured."); return true; }
+    // #1757: Pi-managed providers own their endpoint and auth — a raw HTTP
+    // probe cannot observe them. Report Pi's live auth state per model
+    // (presence-only) instead.
+    if (prof.provider.authSource === "pi") {
+      const { checkPiManagedAuth, isPiManagedModelKnown } = await import("../transport/pi-runtime.js");
+      const readiness = await checkPiManagedAuth(prof.providerName);
+      await ctx.reply(`🩺 Checking Pi-managed provider ${prof.providerName}...`);
+      const results: string[] = [];
+      const { loadModels } = await import("../transport-config.js");
+      const catalog = loadModels();
+      const models = new Set<string>();
+      const ra = tc ? (await import("../transport-config.js")).routeAssignments(tc) : null;
+      if (ra) {
+        for (const [, agent] of Object.entries(ra.agents)) {
+          if (agent.provider === prof.providerName) models.add(agent.model);
+        }
+        for (const fb of ra.fallbacks ?? []) {
+          if (fb.provider === prof.providerName) models.add(fb.model);
+        }
+      }
+      if (tc!.hailMary?.provider === prof.providerName) models.add(tc!.hailMary.model);
+      for (const model of models) {
+        const known = await isPiManagedModelKnown(prof.providerName, model);
+        if (readiness.ok && known) {
+          results.push(`✓ ${model} — alive (Pi auth ${readiness.state})`);
+          if (catalog[model]) catalog[model]!.status = "alive";
+        } else if (!known) {
+          results.push(`❌ ${model} — unknown to Pi provider ${prof.providerName}`);
+          if (catalog[model]) catalog[model]!.status = "dead" as any;
+        } else {
+          results.push(`❌ ${model} — ${readiness.detail}`);
+          if (catalog[model]) catalog[model]!.status = "dead" as any;
+        }
+        if (catalog[model]) (catalog[model] as any).lastChecked = new Date().toISOString();
+      }
+      const { writeFileSync } = await import("node:fs");
+      const { join } = await import("node:path");
+      const { configDir } = await import("../transport-config.js");
+      writeFileSync(join(configDir(), "models.json"), JSON.stringify(catalog, null, 2) + "\n");
+      await ctx.reply(`🩺 Model Health:\n${results.join("\n")}`);
+      return true;
+    }
     const endpoint = prof.provider.endpoint ?? "http://localhost:11434/v1";
     const apiKey = prof.provider.apiKeyEnv ? (await import("../env-schema.js")).getEnv().getApiKey(prof.provider.apiKeyEnv) : undefined;
 
@@ -329,6 +371,12 @@ export async function handleModels(text: string, ctx: CommandContext): Promise<b
     const { getEnv } = await import("../env-schema.js");
     const validation = validateProviderReady(providerName, provider, getEnv());
     if (!validation.ok) { await ctx.reply(formatValidationError(providerName, validation)); return true; }
+    // #1757: live Pi-auth gate before a global switch to a Pi-managed provider.
+    if (provider.authSource === "pi") {
+      const { checkPiManagedAuth } = await import("../transport/pi-runtime.js");
+      const readiness = await checkPiManagedAuth(providerName);
+      if (!readiness.ok) { await ctx.reply(`❌ ${providerName}: ${readiness.detail}`); return true; }
+    }
     const defaults = loadProviderDefaults(providerName);
     if (defaults?.main) {
       const candidate = JSON.parse(JSON.stringify(tc)) as typeof tc;
@@ -382,7 +430,10 @@ export async function handleModels(text: string, ctx: CommandContext): Promise<b
   const names: Record<string, string> = { main: "Main", dreamy: "Dreamy", browsie: "Browsie", cody: "Cody" };
   for (const a of agents) {
     const r = tc ? resolveAgent(a, tc) : null;
-    let line = `  ${names[a]}: ${r?.model ?? "unknown"} (${r?.providerName ?? "?"}, ${r?.provider.transport ?? "?"})`;
+    // #1757: Pi-managed entries are distinguished from abtars-key and keyless
+    // entries; live auth state is reported by /model doctor (async gate).
+    const piManaged = r?.provider.authSource === "pi" ? ", Pi-managed" : "";
+    let line = `  ${names[a]}: ${r?.model ?? "unknown"} (${r?.providerName ?? "?"}, ${r?.provider.transport ?? "?"}${piManaged})`;
     if (a === "main") {
       const ra = tc ? routeAssignments(tc) : null;
       const fbLines = (ra?.fallbacks ?? []).map((f, i) => {

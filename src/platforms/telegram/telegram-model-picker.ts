@@ -243,6 +243,14 @@ export async function handleModelPickerCallback(
     if (!validModels.some(m => m.id === model)) { await api.sendMessage(chatId, `❌ ${model} is not available on ${providerName}. Pick another.`); return; }
     const validation = validateProviderReady(providerName, providerConfig, getEnv());
     if (!validation.ok) { await api.sendMessage(chatId, formatValidationError(providerName, validation)); return; }
+    // #1757: Pi-managed providers need a live runtime check — the sync shape
+    // validation above cannot see Pi login state. Refuse the switch with
+    // actionable guidance instead of writing a doomed assignment.
+    if (providerConfig.authSource === "pi") {
+      const { checkPiManagedAuth } = await import("../../components/transport/pi-runtime.js");
+      const readiness = await checkPiManagedAuth(providerName);
+      if (!readiness.ok) { await api.sendMessage(chatId, `❌ ${providerName}: ${readiness.detail}`); return; }
+    }
 
     const candidate = JSON.parse(JSON.stringify(tc)) as typeof tc;
     const activeRa = candidate.routes[candidate.activeRoute];
@@ -299,8 +307,15 @@ export async function handleModelPickerCallback(
         try {
           const { FallbackPolicy } = await import("../../components/transport/fallback-policy.js");
           const { ModelHealthRegistry } = await import("../../components/transport/model-health-registry.js");
-          const { buildCandidates } = await import("../../components/transport/model-candidates.js");
-          const apiKey = getEnv().getApiKey(newResolved?.provider.apiKeyEnv ?? "API_KEY");
+          const { buildCandidates, resolveCandidateAuth } = await import("../../components/transport/model-candidates.js");
+          // #1757: shared auth resolution; the legacy API_KEY default is
+          // preserved as the inherit key for keyless providers.
+          const newAuth = resolveCandidateAuth(
+            newResolved!.provider,
+            (name) => getEnv().getApiKey(name),
+            getEnv().getApiKey(newResolved!.provider.apiKeyEnv ?? "API_KEY"),
+          );
+          const apiKey = newAuth.apiKey;
           // #1418: build candidates through the shared builder so each carries its
           // complete identity tuple (provider/endpoint/apiKey/maxContext).
           const route = tc.activeRoute;
@@ -308,13 +323,17 @@ export async function handleModelPickerCallback(
           const fallbackCandidates = (tcRa?.fallbacks ?? []).map(fb => {
             const tcWithFb = tcRa ? { ...tc, routes: { ...tc.routes, [route]: { agents: { ...tcRa.agents, _fb: { model: fb.model, provider: fb.provider } }, fallbacks: tcRa.fallbacks } } } : tc;
             const fbRes = resolveAgent("_fb", tcWithFb);
+            const fbAuth = resolveCandidateAuth(fbRes?.provider ?? {}, (name) => getEnv().getApiKey(name), apiKey);
             return {
               model: fb.model,
               provider: fb.provider,
               endpoint: fbRes?.provider.endpoint ?? newResolved!.provider.endpoint!,
-              apiKey: fbRes?.provider.apiKeyEnv ? getEnv().getApiKey(fbRes.provider.apiKeyEnv) : apiKey,
+              apiKey: fbAuth.apiKey,
+              authSource: fbAuth.authSource,
               maxContext: fbRes?.contextWindow ?? newResolved!.contextWindow,
               cacheRetention: fbRes?.provider.cacheRetention ?? "short",
+              apiFormat: fbRes?.provider.apiFormat,
+              thinking: fbRes?.provider.thinking,
               source: "agent_fallback" as const,
             };
           });
@@ -322,8 +341,11 @@ export async function handleModelPickerCallback(
             role: "main",
             configured: {
               model, provider: providerName, endpoint: newResolved!.provider.endpoint!, apiKey,
+              authSource: newAuth.authSource,
               maxContext: newResolved!.contextWindow,
               cacheRetention: newResolved!.provider.cacheRetention ?? "short",
+              apiFormat: newResolved!.provider.apiFormat,
+              thinking: newResolved!.provider.thinking,
               source: "primary",
             },
             fallbacks: fallbackCandidates,

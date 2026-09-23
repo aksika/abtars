@@ -145,6 +145,46 @@ function checkAgentCore(checks: PiRuntimeCheck[], module: RuntimeModule | null):
   }
 }
 
+/**
+ * #1757: the consumed Pi-managed dispatch/readiness surface on the
+ * coding-agent root. ModelRuntime must be exported with a static create
+ * and the instance methods dispatch (getModel/streamSimple) and readiness
+ * (checkAuth) consume. Shape-only: never construct a runtime or touch
+ * credentials here.
+ */
+function checkModelRuntime(checks: PiRuntimeCheck[], module: RuntimeModule | null): void {
+  const runtime: unknown = module?.ModelRuntime;
+  const isConstructor = typeof runtime === "function";
+  check(
+    checks,
+    "pi-coding-agent",
+    "export:ModelRuntime",
+    isConstructor,
+    module === null ? "module unavailable" : "ModelRuntime is not exported",
+  );
+  const create = isConstructor ? (runtime as { create?: unknown }).create : undefined;
+  check(
+    checks,
+    "pi-coding-agent",
+    "ModelRuntime.create",
+    typeof create === "function",
+    isConstructor ? "ModelRuntime.create is not a function" : undefined,
+  );
+  const rawPrototype = isConstructor ? (runtime as { prototype?: unknown }).prototype : undefined;
+  const prototype = typeof rawPrototype === "object" && rawPrototype !== null
+    ? rawPrototype as Record<string, unknown>
+    : undefined;
+  for (const method of ["getModel", "checkAuth", "streamSimple"] as const) {
+    check(
+      checks,
+      "pi-coding-agent",
+      `ModelRuntime.prototype:${method}`,
+      typeof prototype === "object" && prototype !== null && typeof prototype[method] === "function",
+      prototype === undefined || prototype === null ? "ModelRuntime prototype unavailable" : undefined,
+    );
+  }
+}
+
 function checkExecutable(checks: PiRuntimeCheck[], installation: PiInstallation): void {
   try {
     const output = execFileSync(installation.executable, ["--version"], { encoding: "utf-8", timeout: 10_000 }).trim();
@@ -215,6 +255,7 @@ export async function inspectPiRuntime(expectedVersion?: string): Promise<PiRunt
   checkAgentCore(checks, agentCore);
   checkExports(checks, "pi-tui", tui, REQUIRED_PI_TUI_EXPORTS);
   checkExports(checks, "pi-coding-agent", codingAgent, REQUIRED_PI_CODING_AGENT_EXPORTS);
+  checkModelRuntime(checks, codingAgent);
 
   for (const api of API_FAMILIES) {
     const module = await loadRuntimeModule(
