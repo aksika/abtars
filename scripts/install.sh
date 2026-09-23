@@ -13,7 +13,9 @@
 # no terminal exists). Its only writes are its private temp directory; ALL
 # scaffolding/staging/activation is delegated to the TypeScript installer
 # (`abtars install`, which runs `abtars update` internally for the selected
-# channel). abmind is intentionally separate — install it with its own
+# channel). After a successful install the script ensures the Pi runtime
+# (`abtars deps install pi`) — the bridge cannot wire its pipeline without
+# it. abmind is intentionally separate — install it with its own
 # one-liner when memory is needed.
 #
 # Environment:
@@ -141,9 +143,22 @@ else
     fi
 fi
 
-# ── 4. Verify the public command resolves ─────────────────────────────────
-echo "Verifying installation..."
+# ── 4. Ensure the Pi runtime (hard boot requirement) ──────────────────────
+# The bridge cannot wire its pipeline without pi: a fresh install without it
+# boots mute (polls, never answers). Fail fast here instead of shipping that.
+echo "Ensuring Pi runtime (abtars deps install pi)..."
 BIN="${ABTARS_BINDIR}/abtars"
+if [ ! -f "$BIN" ] && [ ! -L "$BIN" ]; then
+    err "abtars command not found at ${BIN} after install"
+    exit 2
+fi
+if ! ABTARS_HOME="$ABTARS_HOME" ABTARS_RELEASES="$ABTARS_RELEASES" ABTARS_BIN="$ABTARS_BINDIR" "$BIN" deps install pi; then
+    err "abtars deps install pi failed — rerun it manually, then 'abtars update --dev'"
+    exit 2
+fi
+
+# ── 5. Verify the public command resolves ─────────────────────────────────
+echo "Verifying installation..."
 if [ ! -f "$BIN" ] && [ ! -L "$BIN" ]; then
     err "abtars command not found at ${BIN}"
     echo "Ensure the bin dir exists and is on PATH." >&2

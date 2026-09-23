@@ -24,6 +24,8 @@ curl -fsSL https://raw.githubusercontent.com/aksika/abtars/main/scripts/install.
 ```
 
 abmind stays separate — install it with its own one-liner when memory is needed.
+The one-liner also installs the Pi runtime (`abtars deps install pi`) — the
+bridge cannot wire its pipeline without it.
 
 ### Manual alternative
 
