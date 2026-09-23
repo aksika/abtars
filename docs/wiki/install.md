@@ -27,6 +27,21 @@ abmind stays separate — install it with its own one-liner when memory is neede
 The one-liner also installs the Pi runtime (`abtars deps install pi`) — the
 bridge cannot wire its pipeline without it.
 
+### Recommended order
+
+When setting up the full stack, install in this order:
+
+1. **abtars** (this page) — the wizard records your agent name
+2. **pi** (`abtars deps install pi`) — the provider engine
+3. **abmind** ([its install page](/abmind/install)) — memory, last
+
+abmind personalizes its `SOUL.md` with the agent name it can discover when
+it installs. Installing it after abtars means it picks up the name
+automatically (or pass it explicitly with `abmind install --agent-name
+<name>` on a fresh install). Installing it first leaves the default, which
+you then fix by editing the first line of `SOUL.md` by hand (see [Quick
+Start](./quickstart.md)).
+
 ### Manual alternative
 
 ```bash

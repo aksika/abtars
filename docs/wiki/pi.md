@@ -37,17 +37,18 @@ abTARS gains Pi superpowers: Pi's provider engine (pi-ai) becomes an optional L1
 Sub-chapters:
 - [TUI (Terminal Interface)](/abtars/pi-tui) — how to use `abtars tui`
 - [pi-ai Providers](/abtars/pi-providers) — enabling Pi-powered providers
+- [Provider Authentication](/abtars/pi-auth) — API keys, keyless, and Pi-managed auth
 - [Custom Providers (abtars + pi)](/abtars/custom-pi-providers) — add a new API provider end-to-end
 - [Pi Executor](/abtars/pi-executor) — coding delegation via `/pi run`
 
 ## Version policy
 
-abTARS is built and tested against a **pinned Pi minor line** (`0.83.x`). The pin
+abTARS is built and tested against a **pinned Pi minor line** (`0.85.x`). The pin
 lives in `PI_COMPATIBILITY` (`src/config/pi-compatibility.ts`) and is mirrored in
 `package.json` devDependencies — a test fails the build if they diverge.
 
 - `abtars deps install pi` and `abtars deps update pi` install the pinned range
-  (`~0.83.0`) and will **never** move Pi above it. Patch releases (bugfixes)
+  (`~0.85.0`) and will **never** move Pi above it. Patch releases (bugfixes)
   flow in automatically.
 - Pi's own updater (`pi update`) has **no version flag** — it always goes to
   latest. If you run it and Pi moves above the pin, abtars keeps working but
@@ -59,7 +60,7 @@ lives in `PI_COMPATIBILITY` (`src/config/pi-compatibility.ts`) and is mirrored i
 Downgrade to the tested line:
 
 ```
-npm i -g '@earendil-works/pi-coding-agent@~0.83.0'
+npm i -g '@earendil-works/pi-coding-agent@~0.85.0'
 ```
 
 If you deliberately want to keep a newer Pi, re-run with `--force`:
