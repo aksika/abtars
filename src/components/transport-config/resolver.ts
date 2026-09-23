@@ -126,9 +126,13 @@ export function getEnvFallback(): EnvFallback {
 
   const provider: ProviderConfig = { transport };
   if (transport === "api") {
+    // #1827: opencode (Zen free) is the shipped default; openrouter stays for
+    // existing operators, ollama remains the local catch-all.
     provider.endpoint = providerName === "openrouter"
       ? "https://openrouter.ai/api/v1"
-      : "http://localhost:11434/v1";
+      : providerName === "opencode"
+        ? "https://opencode.ai/zen/v1"
+        : "http://localhost:11434/v1";
     if (providerName === "openrouter") provider.apiKeyEnv = "OPENROUTER_API_KEY";
   }
 

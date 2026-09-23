@@ -119,6 +119,34 @@ describe('onboard command (non-interactive)', () => {
     expect(readSecret('TELEGRAM_BOT_TOKEN')).toBe('123:secret');
   });
 
+  it('ships the pi-stack default when no provider/model flags are given (#1827)', async () => {
+    const code = await onboard({
+      nonInteractive: true,
+      acceptRisk: true,
+      instanceName: 'test',
+      userName: 'tester',
+      passphrase: 'pw',
+      telegramToken: '123:secret',
+      telegramChatId: '4242',
+      force: false,
+    });
+    expect(code).toBe(0);
+    const env = await readFile(join(fakeHome, 'config', '.env'), 'utf-8');
+    expect(env).toMatch(/DEFAULT_PROVIDER=opencode/);
+    expect(env).toMatch(/DEFAULT_MODEL=muse-spark-1\.3-contributor-free/);
+    const transport = JSON.parse(await readFile(join(fakeHome, 'config', 'transport.json'), 'utf-8')) as Record<string, unknown>;
+    const result = validateTransportConfig(transport);
+    expect(result.ok).toBe(true);
+    expect(transport.activeRoute).toBe('pi-ai');
+    expect((transport.providers as Record<string, unknown>).opencode).toEqual(
+      expect.objectContaining({ transport: 'api', endpoint: 'https://opencode.ai/zen/v1' }),
+    );
+    const agents = (transport.routes as Record<string, { agents: Record<string, { provider: string; model: string }> }>)['pi-ai']!.agents;
+    for (const role of ['main', 'dreamy', 'browsie', 'cody']) {
+      expect(agents[role]).toMatchObject({ provider: 'opencode', model: 'muse-spark-1.3-contributor-free' });
+    }
+  });
+
   it('writes a valid v3 route for a provider not present in the seed defaults', async () => {
     const code = await onboard({
       nonInteractive: true,

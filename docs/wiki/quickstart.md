@@ -30,7 +30,8 @@ Experienced? Jump straight to [Installation](./install.md) for the full technica
 
 ### Which model?
 
-Any model works. For the best experience:
+The install ships a pi-stack default (Muse Spark 1.3 Free via Zen) — just
+install pi with `abtars deps install pi`. For the best experience beyond that:
 - **128K+ context window** — smaller models lose context fast with tool use
 - **Frontier quality** (GPT-4o, Claude, Gemini Pro) — better at following instructions, harder to manipulate
 - **Local models via ollama** — fully private, no API costs, but weaker on complex tasks

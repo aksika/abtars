@@ -34,8 +34,9 @@ abtars install
 ```
 
 `abtars install` creates config, clones source, builds, deploys the release, and
-starts the bridge. `--api-key` is required for cloud providers
-(OpenRouter/OpenAI/Anthropic); local providers (ollama, kiro, gemini) don't need one.
+starts the bridge. The install ships a pi-stack default model (Muse Spark 1.3
+Free via Zen) on all agents — no provider questions, no API key needed. Install
+pi with `abtars deps install pi` and switch models anytime via `/model`.
 
 ## Install modes
 

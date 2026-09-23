@@ -45,9 +45,9 @@ export interface OnboardOptions {
   readonly localDir?: string;
 }
 
-type ProviderChoice = 'openrouter' | 'anthropic' | 'openai' | 'ollama' | 'kiro' | 'gemini';
+type ProviderChoice = 'openrouter' | 'anthropic' | 'openai' | 'ollama' | 'kiro' | 'gemini' | 'opencode';
 
-const VALID_PROVIDERS: readonly ProviderChoice[] = ['openrouter', 'anthropic', 'openai', 'ollama', 'kiro', 'gemini'];
+const VALID_PROVIDERS: readonly ProviderChoice[] = ['openrouter', 'anthropic', 'openai', 'ollama', 'kiro', 'gemini', 'opencode'];
 
 /** Map onboard choice → transport.json provider name */
 const PROVIDER_TRANSPORT_NAME: Record<ProviderChoice, string> = {
@@ -57,6 +57,7 @@ const PROVIDER_TRANSPORT_NAME: Record<ProviderChoice, string> = {
   ollama: 'ollama',
   kiro: 'kiro',
   gemini: 'gemini',
+  opencode: 'opencode',
 };
 
 
@@ -70,13 +71,14 @@ const PROVIDER_ENDPOINT: Record<string, string> = {
   ollama: 'http://localhost:11434/v1',
 };
 
-const PROVIDER_API_KEY_ENV: Record<ProviderChoice, string> = {
+const PROVIDER_API_KEY_ENV: Partial<Record<ProviderChoice, string>> = {
   openrouter: 'OPENROUTER_API_KEY',
   anthropic: 'ANTHROPIC_API_KEY',
   openai: 'OPENAI_API_KEY',
   ollama: 'OLLAMA_API_KEY',
   kiro: 'KIRO_API_KEY',
   gemini: 'GEMINI_API_KEY',
+  // #1827: opencode (Zen free) needs no key — keyless-first, ollama-style.
 };
 
 /** Minimal provider definitions needed to make a fresh onboarding config valid. */
@@ -87,7 +89,17 @@ const ONBOARD_PROVIDER_CONFIG: Record<ProviderChoice, Record<string, unknown>> =
   ollama: { transport: "api", endpoint: "http://localhost:11434/v1" },
   kiro: { transport: "acp", cli: "kiro-cli" },
   gemini: { transport: "acp", cli: "gemini" },
+  opencode: { transport: "api", endpoint: "https://opencode.ai/zen/v1" },
 };
+
+/**
+ * Shipped pi-stack default (#1827). The wizard no longer asks for provider,
+ * model, or API key — the operator installs pi via deps and adjusts the model
+ * via /model afterwards. Verified in the pinned pi-ai catalog
+ * (opencode → muse-spark-1.3-contributor-free, "Muse Spark 1.3 Free").
+ */
+const SHIPPED_DEFAULT_PROVIDER: ProviderChoice = 'opencode';
+const SHIPPED_DEFAULT_MODEL = 'muse-spark-1.3-contributor-free';
 
 interface WizardAnswers {
   readonly installMode: "simple" | "daemon";
@@ -211,68 +223,12 @@ async function runInteractive(existing: WizardAnswers | null): Promise<WizardAns
   });
   if (isCancel(discordA2aChannel)) { cancel('Cancelled.'); return null; }
 
-  // 9. Provider
-  const defaultProvider = await select<ProviderChoice>({
-    message: "Model's provider (use /model to change later)",
-    options: [
-      { value: 'openrouter', label: 'openrouter — many models via API key' },
-      { value: 'anthropic', label: 'anthropic — Claude API (direct)' },
-      { value: 'openai', label: 'openai — GPT API (direct)' },
-      { value: 'ollama', label: 'ollama — local/cloud Ollama endpoint' },
-      { value: 'kiro', label: 'kiro — Kiro CLI' },
-      { value: 'gemini', label: 'gemini — Gemini CLI' },
-    ],
-    ...(existing?.defaultProvider ? { initialValue: existing.defaultProvider } : {}),
-  });
-  if (isCancel(defaultProvider)) { cancel('Cancelled.'); return null; }
-
-  // 10. Main model — explicit, no hidden default map
-  const defaultModel = await text({
-    message: 'Main model',
-    placeholder: 'e.g. deepseek/deepseek-v4-flash or claude-sonnet-4-5-20250929',
-    initialValue: existing?.defaultModel ?? '',
-    validate: (v) => v?.trim() ? undefined : 'Model is required — enter an explicit model identifier',
-  });
-  if (isCancel(defaultModel)) { cancel('Cancelled.'); return null; }
-  const modelStr = String(defaultModel ?? '').trim();
-  if (!modelStr) { cancel('Model is required.'); return null; }
-
-  // 11. API key — required + validated for OpenRouter, optional for others
-  const apiKeyEnv = PROVIDER_API_KEY_ENV[defaultProvider];
-  let providerApiKey = existing?.providerApiKey ?? '';
-  if (defaultProvider === 'openrouter') {
-    const endpoint = PROVIDER_ENDPOINT[defaultProvider] ?? '';
-    let validated = false;
-    while (!validated) {
-      const v = await text({
-        message: `${apiKeyEnv} (required)`,
-        placeholder: 'sk-or-v1-...',
-        initialValue: providerApiKey || existing?.providerApiKey,
-        validate: (val) => val?.trim() ? undefined : 'API key required for OpenRouter',
-      });
-      if (isCancel(v)) { cancel('Cancelled.'); return null; }
-      providerApiKey = String(v ?? '').trim();
-      process.stdout.write('  Validating key...');
-      const result = await checkModelAvailability(endpoint, providerApiKey, modelStr);
-      if (result.ok) {
-        process.stdout.write(` ✓ valid\n`);
-        validated = true;
-      } else {
-        process.stdout.write(` ✗ ${result.message}\n`);
-        const retry = await confirm({ message: 'Try a different key?', initialValue: true });
-        if (isCancel(retry)) { cancel('Cancelled.'); return null; }
-        if (!retry) { validated = true; }
-      }
-    }
-  } else {
-    const v = await text({
-      message: `${apiKeyEnv} (${noteEmpty})`,
-      placeholder: 'leave blank for local providers',
-      initialValue: existing?.providerApiKey,
-    });
-    if (isCancel(v)) { cancel('Cancelled.'); return null; }
-    providerApiKey = String(v ?? '').trim() || existing?.providerApiKey || '';
-  }
+  // 9-11. Provider / model / API key (#1827): no longer asked. The install
+  // ships the pi-stack default below; the operator installs pi via
+  // `abtars deps install pi` and adjusts the model via /model afterwards.
+  const defaultProvider: ProviderChoice = SHIPPED_DEFAULT_PROVIDER;
+  const modelStr = SHIPPED_DEFAULT_MODEL;
+  const providerApiKey = '';
 
   // Summary — #1354: credentials are presence-only, never values or fragments.
   const presence = (s: string): string => (s ? "(set)" : "(not set)");
@@ -285,9 +241,8 @@ async function runInteractive(existing: WizardAnswers | null): Promise<WizardAns
     `  Telegram chat ID:    ${String(telegramChatId ?? '') || '(skipped)'}`,
     `  Telegram token:      ${presence(String(telegramToken ?? ''))}`,
     `  Discord bot token:   ${presence(String(discordBotToken ?? ''))}`,
-    `  Provider:            ${defaultProvider}`,
-    `  Main model:          ${modelStr}`,
-    `  ${apiKeyEnv}:        ${presence(providerApiKey)}`,
+    `  Provider:            ${defaultProvider} (shipped pi-stack default)`,
+    `  Main model:          ${modelStr} (change later via /model)`,
     '',
   ];
   process.stdout.write(lines.join('\n'));
@@ -375,10 +330,16 @@ function validateNonInteractive(opts: OnboardOptions): WizardAnswers | string {
   if (!opts.telegramChatId) return '--telegram-chat-id is required in non-interactive mode';
   if (!opts.userName) return '--user-name is required in non-interactive mode';
   if (!opts.passphrase) return '--passphrase is required in non-interactive mode';
-  const defaultProvider = opts.defaultProvider?.trim();
-  const defaultModel = opts.defaultModel?.trim();
-  if (!defaultProvider) return '--default-provider is required in non-interactive mode';
-  if (!defaultModel) return '--default-model is required in non-interactive mode';
+  // #1827: provider/model ship as the pi-stack default; explicit flags still
+  // override when present (blank explicit values are rejected).
+  if (opts.defaultProvider !== undefined && !opts.defaultProvider.trim()) {
+    return '--default-provider must not be blank';
+  }
+  if (opts.defaultModel !== undefined && !opts.defaultModel.trim()) {
+    return '--default-model must not be blank';
+  }
+  const defaultProvider = (opts.defaultProvider?.trim() || SHIPPED_DEFAULT_PROVIDER) as ProviderChoice;
+  const defaultModel = opts.defaultModel?.trim() || SHIPPED_DEFAULT_MODEL;
   const provider = defaultProvider as ProviderChoice;
   if (!VALID_PROVIDERS.includes(provider)) {
     return `--default-provider must be one of: ${VALID_PROVIDERS.join(', ')}`;
