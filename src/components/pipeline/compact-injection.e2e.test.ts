@@ -176,7 +176,7 @@ describe("#1813 — compact injection lifecycle", () => {
     await handleInboundMessage(makeMsg("How do I deploy?"), adapter, deps);
 
     expect(transport.sendPrompt).toHaveBeenCalledTimes(1);
-    const prompt = String(transport.sendPrompt.mock.calls[0]?.[1] ?? "");
+    const prompt = String(vi.mocked(transport.sendPrompt).mock.calls[0]?.[1] ?? "");
     expect(prompt).toContain(CONSTRAINT);
     expect(prompt).not.toContain("aaaa");
     // Attribution sees the injected row only.
@@ -195,7 +195,7 @@ describe("#1813 — compact injection lifecycle", () => {
     await handleInboundMessage(makeMsg("How do I deploy?"), adapter, deps);
 
     expect(transport.sendPrompt).toHaveBeenCalledTimes(1);
-    const prompt = String(transport.sendPrompt.mock.calls[0]?.[1] ?? "");
+    const prompt = String(vi.mocked(transport.sendPrompt).mock.calls[0]?.[1] ?? "");
     expect(prompt).toContain(CONSTRAINT);
     expect(prompt).toContain("aaaa");
   });

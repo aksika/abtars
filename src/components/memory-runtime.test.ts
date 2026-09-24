@@ -591,4 +591,49 @@ describe("#1813 selection carry and compact context", () => {
     expect(tightRes.context).toContain("Deploys run");
     expect(tightRes.context).not.toContain("Weekly summary");
   });
+
+  it("emits id-less rows in recall rank order, not appended after the selection", async () => {
+    const rt = createClientRuntime(recallClient([
+      { id: 1, content: "Deploys run via /deploy prod.", score: 0.9, date: "2026-09-01" },
+      { content: "Weekly summary: two deploys.", score: 0.8, date: "2026-09-02" },
+      { id: 2, content: "Rollbacks use /rollback prod.", score: 0.7, date: "2026-09-03" },
+    ], {
+      version: 1, refs: [{ id: 1, revision: 1 }, { id: 2, revision: 1 }], budgetBytes: 2000, truncated: false,
+    }));
+    const res = await rt.recall({ query: "deploy", userId: "u1" });
+    const lines = res.context.split("\n");
+    expect(lines.map((l) => l.replace(/^- \(score: [\d.]+\) /, ""))).toEqual([
+      "Deploys run via /deploy prod.",
+      "Weekly summary: two deploys.",
+      "Rollbacks use /rollback prod.",
+    ]);
+  });
+
+  it("skips a single over-budget id-less row so a smaller later one still fits", async () => {
+    const rt = createClientRuntime(recallClient([
+      { id: 1, content: "Deploys run via /deploy prod.", score: 0.9, date: "2026-09-01" },
+      { content: `Long weekly digest ${"x".repeat(200)}`, score: 0.8, date: "2026-09-02" },
+      { content: "Short note.", score: 0.7, date: "2026-09-03" },
+    ], {
+      version: 1, refs: [{ id: 1, revision: 1 }], budgetBytes: 80, truncated: true,
+    }));
+    const res = await rt.recall({ query: "deploy", userId: "u1" });
+    expect(res.context).toContain("Deploys run");
+    expect(res.context).not.toContain("Long weekly digest");
+    expect(res.context).toContain("Short note.");
+  });
+
+  it("treats a non-finite or non-positive budget as malformed", async () => {
+    for (const budgetBytes of [Number.NaN, Number.POSITIVE_INFINITY, 0, -2000]) {
+      const rt = createClientRuntime(recallClient([
+        ...results,
+        { content: "Weekly summary: two deploys.", score: 0.5, date: "2026-09-03" },
+      ], { version: 1, refs: [{ id: 1, revision: 1 }], budgetBytes, truncated: false }));
+      const res = await rt.recall({ query: "deploy", userId: "u1" });
+      expect(res.selection).toBeUndefined();
+      expect(res.context).toContain("Deploys run");
+      expect(res.context).toContain("Rollbacks");
+      expect(res.context).toContain("Weekly summary");
+    }
+  });
 });

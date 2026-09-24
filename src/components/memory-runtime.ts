@@ -213,11 +213,16 @@ export function asRecallSelection(raw: unknown): RuntimeRecallSelection | undefi
     const ref = entry as { id?: unknown; revision?: unknown };
     if (!Number.isInteger(ref.id) || !Number.isInteger(ref.revision)) return undefined;
   }
-  if (typeof record["budgetBytes"] !== "number" || typeof record["truncated"] !== "boolean") return undefined;
+  // A non-finite or non-positive budget would silently disable the bound that
+  // this selection exists to carry (NaN comparisons are always false), so it
+  // is malformed rather than permissive.
+  const budgetBytes = record["budgetBytes"];
+  if (typeof budgetBytes !== "number" || !Number.isFinite(budgetBytes) || budgetBytes <= 0) return undefined;
+  if (typeof record["truncated"] !== "boolean") return undefined;
   return {
     version: 1,
     refs: (refs as Array<{ id: number; revision: number }>).map((r) => ({ id: r.id, revision: r.revision })),
-    budgetBytes: record["budgetBytes"],
+    budgetBytes,
     truncated: record["truncated"],
   };
 }
@@ -236,27 +241,24 @@ export function selectInjectedHits<T extends { memoryId?: number; content: strin
   selection: RuntimeRecallSelection | undefined,
 ): T[] {
   if (selection === undefined || selection.refs.length === 0) return hits;
-  const byId = new Map<number, T>();
-  const idless: T[] = [];
-  for (const hit of hits) {
-    if (typeof hit.memoryId === "number") byId.set(hit.memoryId, hit);
-    else idless.push(hit);
-  }
-  const selected: T[] = [];
-  for (const ref of selection.refs) {
-    const hit = byId.get(ref.id);
-    if (hit !== undefined) selected.push(hit);
-  }
+  const refIds = new Set<number>(selection.refs.map((ref) => ref.id));
+  const selected = hits.filter((hit) => typeof hit.memoryId === "number" && refIds.has(hit.memoryId));
   if (selected.length === 0) return hits;
-  let used = 0;
+  // Selected rows are already bounded owner-side. Id-less rows (consolidation
+  // files, entity graph) carry no ref, so they fill whatever budget remains —
+  // charged against the whole selection, never overshooting it. One pass keeps
+  // the recall rank order, so a high-ranked file excerpt is emitted in place
+  // rather than after the selected rows, and an over-budget row is skipped
+  // (not a stop) so a smaller later row still fits, mirroring the engine rule.
+  let used = selected.reduce((sum, hit) => sum + Buffer.byteLength(hit.content, "utf8"), 0);
   const out: T[] = [];
-  for (const hit of selected) {
-    used += Buffer.byteLength(hit.content, "utf8");
-    out.push(hit);
-  }
-  for (const hit of idless) {
+  for (const hit of hits) {
+    if (typeof hit.memoryId === "number") {
+      if (refIds.has(hit.memoryId)) out.push(hit);
+      continue;
+    }
     const size = Buffer.byteLength(hit.content, "utf8");
-    if (used + size > selection.budgetBytes) break;
+    if (used + size > selection.budgetBytes) continue;
     out.push(hit);
     used += size;
   }
