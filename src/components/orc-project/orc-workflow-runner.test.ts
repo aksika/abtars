@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeAll, afterAll, beforeEach } from "vitest";
-import { mkdirSync, rmSync, existsSync } from "node:fs";
+import { mkdirSync, rmSync, existsSync, realpathSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { vi } from "vitest";
@@ -1422,5 +1422,49 @@ describe("host report constraint (#1795)", () => {
     expect(seen.length).toBe(1);
     expect(seen[0]?.purpose).toBe("initial");
     expect(seen[0]?.requiredOutputs).toContain(ref);
+  });
+});
+
+describe("deterministic project workspace (#1844)", () => {
+  beforeEach(() => {
+    ({ runner, store } = makeRunner());
+    for (const t of ["workflow_ingress", "workflow_deliveries", "workflow_commands", "workflow_budgets", "workflow_node_deps", "workflow_nodes", "workflow_plan_revisions", "workflow_operations", "workflow_runs"]) {
+      store.db.exec(`DELETE FROM ${t}`);
+    }
+  });
+
+  // The binding is canonical (realpath); the tmpdir itself may be symlinked.
+  const expectedDir = (cid: number): string => join(realpathSync(TEST_HOME), "workspace", "projects", String(cid));
+
+  function supervisionOf(card: number): { workspace_cwd: string | null } {
+    return new ProjectReviewStore(store.db)
+      .getSupervision(card) as unknown as { workspace_cwd: string | null };
+  }
+
+  it("ensures workspace/projects/<cardId>, idempotently and immutably", () => {
+    const card = seedCard(store);
+    const first = RunnerMod.ensureProjectWorkspace(store.db, card);
+    expect(first).toBe(expectedDir(card));
+    expect(existsSync(first)).toBe(true);
+    expect(supervisionOf(card).workspace_cwd).toBe(first);
+    expect(RunnerMod.ensureProjectWorkspace(store.db, card)).toBe(first);
+  });
+
+  it("keeps a pre-existing binding instead of re-pointing it", () => {
+    const card = seedCard(store);
+    const reviewStore = new ProjectReviewStore(store.db);
+    reviewStore.ensureAwaitingContract(card);
+    expect(reviewStore.bindWorkspace(card, "/tmp/ws/scheduled-task")).toEqual({ ok: true });
+    expect(RunnerMod.ensureProjectWorkspace(store.db, card)).toBe("/tmp/ws/scheduled-task");
+    expect(supervisionOf(card).workspace_cwd).toBe("/tmp/ws/scheduled-task");
+  });
+
+  it("admitSupervised without cwd binds every root kind deterministically", () => {
+    for (const source of ["agent", "cli", "sha"]) {
+      const card = seedCard(store);
+      const admitted = runner.admitSupervised({ rootCardId: card, source });
+      expect(admitted.kind).not.toBe("conflict");
+      expect(supervisionOf(card).workspace_cwd).toBe(expectedDir(card));
+    }
   });
 });

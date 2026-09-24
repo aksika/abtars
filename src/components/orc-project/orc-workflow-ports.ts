@@ -82,7 +82,10 @@ function planPrompt(input: {
     "Never emit a bare workspace alias (for example default) as a capability — only the listed vocabulary is accepted; an alias proposal is rejected through the correction path, never silently rewritten.",
     "Labels unique. Dependencies must reference declared labels. No cycles.",
     "Every requiredOutput must be declared in some node's outputs.",
-    "All outputs must be workspace-relative paths (e.g. out/report.md) — never absolute paths, never ~, never /home or /tmp prefixes. Absolute outputs are rejected.",
+    // #1844: a text answer is a named deliverable, not an invented file path —
+    // prompt guidance only, never a validation rejection (a plan declaring a
+    // file and producing one stays correct, merely heavier than needed).
+    "Outputs are either file paths or named text deliverables: when the node must write a file, declare a workspace-relative path (e.g. out/report.md); when the deliverable IS the worker's text answer, declare a short bare name with no path separator and no file extension (e.g. answer) — the text reply itself is the evidence. Never absolute paths, never ~, never /home or /tmp prefixes. Absolute outputs are rejected.",
     "Include an explicit synthesis node when the requested output needs assembled writing.",
     ...(input.workspace !== null ? [
       `Workspace root: ${input.workspace}`,
@@ -108,6 +111,12 @@ function reviewPrompt(brief: ReviewBrief): string {
     "Rules: accept only if every acceptance condition is met by the ACTUAL output revision below.",
     "changes_required defects must each link an exact criterion id and describe the concrete defect.",
     "You may read the artifact files listed; do not invent evidence you did not read.",
+    // #1844: a text deliverable has no file — its deliverable text below IS
+    // the candidate output for those nodes. Judge its content against the
+    // acceptance conditions; a changes_required defect against a text
+    // deliverable links the exact criterion id and describes the content defect.
+    "For nodes with envelope-observed (text) deliverables there is no file to read: the deliverable text below is the candidate output — judge its content, not its existence.",
+    `Deliverable text by node: ${JSON.stringify(brief.deliverableTextByNode)}`,
     `Request: ${brief.request.title}`,
     // AstraMaster-8: the reviewer was never shown the goal or the criterion
     // ids, yet valid criticism requires exact ids — include both.

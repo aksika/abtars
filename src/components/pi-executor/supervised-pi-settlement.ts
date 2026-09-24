@@ -122,7 +122,9 @@ export class SupervisedPiSettlement {
         : undefined;
       if (preRow) {
         try {
-          evaluation = evaluateWorkerEvidence(JSON.parse(preRow.contract_json) as WorkerAcceptanceContractV1, input.canonicalPath);
+          // #1844: the Pi result summary is the settled worker text for
+          // envelope-observed (report/logical) deliverables.
+          evaluation = evaluateWorkerEvidence(JSON.parse(preRow.contract_json) as WorkerAcceptanceContractV1, input.canonicalPath, input.metadata.resultSummary);
         } catch (err) {
           logWarn(TAG, `evidence evaluation failed for ${input.runId}: ${err instanceof Error ? err.message : String(err)}`);
         }

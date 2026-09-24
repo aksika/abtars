@@ -6,6 +6,7 @@ import { tmpdir } from "node:os";
 let db: import("better-sqlite3").Database;
 let dbPath: string;
 let TEST_HOME: string;
+let savedAbtarsHome: string | undefined;
 
 function createKanbanTable(db: import("better-sqlite3").Database): void {
   db.exec(`
@@ -54,6 +55,10 @@ beforeEach(async () => {
   const Database = resolveNativeDep("better-sqlite3");
   TEST_HOME = join(tmpdir(), `help-store-test-${Date.now()}-${Math.random().toString(36).slice(2)}`);
   mkdirSync(TEST_HOME, { recursive: true });
+  // #1844: admission binds a deterministic project workspace under
+  // abtarsHome() — isolate it so tests never mkdir into the real home.
+  savedAbtarsHome = process.env["ABTARS_HOME"];
+  process.env["ABTARS_HOME"] = TEST_HOME;
   dbPath = join(TEST_HOME, "test.db");
   db = new Database(dbPath);
   db.pragma("journal_mode = WAL");
@@ -62,6 +67,8 @@ beforeEach(async () => {
 
 afterEach(() => {
   db.close();
+  if (savedAbtarsHome === undefined) delete process.env["ABTARS_HOME"];
+  else process.env["ABTARS_HOME"] = savedAbtarsHome;
   try { rmSync(TEST_HOME, { recursive: true, force: true }); } catch {}
 });
 

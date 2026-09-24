@@ -4,21 +4,29 @@
  *
  * One boundary owns verification-command execution, artifact observation, and
  * criterion derivation for BOTH executors (Spin and supervised Pi). It is
- * executor-neutral and provider-free: it receives only the exact contract and
- * the canonical verification root.
+ * executor-neutral and provider-free: it receives only the exact contract,
+ * the canonical verification root, and the settled worker text.
+ *
+ * Artifact kinds split two ways (#1844): `file`/`directory` are
+ * filesystem-observed against the canonical workspace; `report`/`logical`
+ * are envelope-observed from the settled worker text and never touch the
+ * filesystem — a text deliverable passes on non-empty bounded deliverable
+ * text with or without a workspace, and fails naming the missing
+ * deliverable. The text ref is never resolved as a path, so a text
+ * deliverable cannot reference anything outside the workspace.
  *
  * Workspace containment is component-aware and symlink-safe via the shared
  * `isPathWithinRoot` utility. A missing in-workspace target reports
  * `not found`; an existing target or parent symlink escaping the canonical
  * workspace reports `path escapes workspace`. A missing/unreadable workspace
- * fails the affected checks/artifacts/criteria with bounded evidence and
- * NEVER causes process-cwd verification.
+ * fails the affected checks/file-artifacts/criteria with bounded evidence
+ * and NEVER causes process-cwd verification.
  */
 import { existsSync, statSync, readFileSync, realpathSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { resolve, dirname } from "node:path";
 import { isPathWithinRoot } from "./workspace-paths.js";
-import { MAX_CHECK_OUTPUT_LENGTH } from "./worker-contract.js";
+import { MAX_CHECK_OUTPUT_LENGTH, MAX_WORKER_REPORT_LENGTH } from "./worker-contract.js";
 import type { WorkerAcceptanceContractV1, VerificationObservation, ArtifactObservation, CriterionStatus } from "./worker-contract.js";
 
 const MAX_CHECK_STDIO_EXCERPT = MAX_CHECK_OUTPUT_LENGTH;
@@ -105,14 +113,17 @@ export function resolveWorkspaceMember(
 }
 
 /**
- * Evaluate one contract against the verification root. When the workspace is
- * missing/unreadable every check and artifact fails with bounded evidence and
- * every criterion is derived from those failed observations — no command is
- * spawned and `process.cwd()` is never used.
+ * Evaluate one contract against the verification root and the settled worker
+ * text. When the workspace is missing/unreadable every check and file
+ * artifact fails with bounded evidence and every criterion is derived from
+ * those failed observations — no command is spawned and `process.cwd()` is
+ * never used. Report/logical artifacts are observed from the worker text
+ * instead and are independent of the workspace.
  */
 export function evaluateWorkerEvidence(
   contract: WorkerAcceptanceContractV1,
   workspaceCwd: string | undefined,
+  workerText?: string,
 ): WorkerEvidenceEvaluation {
   let root: string | undefined;
   if (workspaceCwd && workspaceCwd.length > 0) {
@@ -121,7 +132,7 @@ export function evaluateWorkerEvidence(
   }
 
   const checks = runChecks(contract, root);
-  const artifacts = observeArtifacts(contract, root);
+  const artifacts = observeArtifacts(contract, root, workerText);
   const criteria = deriveCriteria(contract, checks, artifacts);
   return { checks, artifacts, criteria };
 }
@@ -211,8 +222,28 @@ function runChecks(contract: WorkerAcceptanceContractV1, workspaceRoot: string |
   });
 }
 
-function observeArtifacts(contract: WorkerAcceptanceContractV1, workspaceRoot: string | undefined): ArtifactObservation[] {
+function observeArtifacts(contract: WorkerAcceptanceContractV1, workspaceRoot: string | undefined, workerText?: string): ArtifactObservation[] {
   return contract.expected_artifacts.map(a => {
+    // #1844: report/logical are envelope-observed, never filesystem-observed.
+    // Existence evidence is non-empty bounded deliverable text in the settled
+    // worker result — the same existence question a file answers with stat.
+    // Empty text fails naming the deliverable (never "workspace unavailable"),
+    // and the ref is never resolved as a path, so text can neither escape the
+    // workspace nor demand one.
+    if (a.kind === "report" || a.kind === "logical") {
+      const text = (workerText ?? "").trim().slice(0, MAX_WORKER_REPORT_LENGTH);
+      if (text.length > 0) {
+        return {
+          artifact_id: a.id,
+          exists: true,
+          kind: a.kind,
+          ref: a.ref,
+          size: text.length,
+          digest: `sha256-${createHash("sha256").update(text, "utf-8").digest("hex").slice(0, 16)}`,
+        };
+      }
+      return { artifact_id: a.id, exists: false, kind: a.kind, ref: a.ref, error: `missing deliverable text for "${a.ref}"` };
+    }
     if (workspaceRoot === undefined) {
       return { artifact_id: a.id, exists: false, kind: a.kind, ref: a.ref, error: "workspace unavailable" };
     }

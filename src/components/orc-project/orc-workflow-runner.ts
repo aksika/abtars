@@ -29,7 +29,8 @@ import {
   type WorkflowRunState,
 } from "./orc-workflow-store.js";
 import { mkdirSync, realpathSync } from "node:fs";
-import { isAbsolute, normalize, relative, resolve } from "node:path";
+import { isAbsolute, join, normalize, relative, resolve } from "node:path";
+import { abtarsHome } from "../../paths.js";
 import type { TaskDatabase } from "../tasks/kanban-board.js";
 import { parseReportContractSnapshot } from "../tasks/task-state-store.js";
 import { isPathWithinRoot } from "../workspace-paths.js";
@@ -97,6 +98,12 @@ export interface ReviewBrief {
   failures: Array<{ nodeId: string; outcome: string | null }>;
   evidenceIds: string[];
   budgets: Record<string, { allowed: number; consumed: number }>;
+  /**
+   * #1844: bounded settled worker text by node for envelope-observed (text)
+   * deliverables. A text deliverable has no file for the reviewer to read —
+   * this text IS the candidate output for those nodes.
+   */
+  deliverableTextByNode: Record<string, string>;
 }
 
 export type ReviewVerdict =
@@ -153,6 +160,43 @@ export class CapacityBusy extends Error {
     super(message);
     this.name = "CapacityBusy";
   }
+}
+
+/**
+ * #1844: ensure the deterministic supervised-project workspace for a root:
+ * `~/.abtars/workspace/projects/<cardId>`. Runner-owned (this module is a
+ * RUNNER_FILE under scripts/check-orc-authority.mjs): the binding transition
+ * stays with admission, and dispatch-time healing calls this rather than
+ * touching the phase mutators from delegate modules.
+ *
+ * The `projects/` subtree stays separate from the task-id-keyed directories
+ * directly under `workspace/` (#1846 sweeps orphaned project directories by
+ * card id and must never see scheduled task workspaces). Roots admitted
+ * before every root bound a workspace (peer, cli, sha, interactive) heal
+ * here instead of failing closed at dispatch: the path derives from the root
+ * card id alone, so admission and dispatch-time healing compute the same
+ * value and the ensure is idempotent against the binding's own immutability.
+ * An already-bound root keeps its value — the binding is never re-pointed,
+ * and a concurrent binder winning the race yields its value rather than an
+ * error.
+ */
+export function ensureProjectWorkspace(db: TaskDatabase, projectCardId: number): string {
+  const reviewStore = new ProjectReviewStore(db);
+  reviewStore.ensureAwaitingContract(projectCardId);
+  const current = reviewStore.getSupervision(projectCardId)?.workspace_cwd ?? null;
+  if (typeof current === "string" && current.length > 0) return current;
+  // Through abtarsHome() (not a new paths export) so the existing
+  // paths-mock surface in tests keeps working.
+  const dir = join(abtarsHome(), "workspace", "projects", String(projectCardId));
+  mkdirSync(dir, { recursive: true });
+  const canonical = realpathSync(dir);
+  const bound = reviewStore.bindWorkspace(projectCardId, canonical);
+  if (!bound.ok) {
+    const winner = reviewStore.getSupervision(projectCardId)?.workspace_cwd ?? null;
+    if (typeof winner === "string" && winner.length > 0) return winner;
+    throw new Error(`project workspace bind failed (${bound.reason}) for project ${projectCardId}`);
+  }
+  return canonical;
 }
 
 /** Parse a DB timestamp as UTC millis; SQLite 'YYYY-MM-DD HH:MM:SS' has no
@@ -450,7 +494,45 @@ export class WorkflowRunner {
         .map((n) => ({ nodeId: n.nodeId, outcome: n.outcome })),
       evidenceIds: [...new Set(nodes.map((n) => n.attemptId).filter((a): a is string => a !== null))],
       budgets: this.store.readBudgets(runId) as Record<string, { allowed: number; consumed: number }>,
+      deliverableTextByNode: this.deliverableTextByNode(nodes),
     };
+  }
+
+  /**
+   * #1844: bounded settled worker text per node for envelope-observed (text)
+   * deliverables, read from the stored result envelopes. Only nodes whose
+   * envelope carries an existing report/logical artifact contribute text —
+   * file nodes are judged from their files, as before. The envelope
+   * summaries are already bounded at settlement; this caps defensively for
+   * hand-authored rows. Best effort only: a missing/unreadable envelope is
+   * not a brief failure.
+   */
+  private deliverableTextByNode(
+    nodes: Array<{ nodeId: string; attemptId: string | null }>,
+  ): Record<string, string> {
+    const byNode: Record<string, string> = {};
+    for (const n of nodes) {
+      if (!n.attemptId) continue;
+      try {
+        const row = this.store.db
+          .prepare(`SELECT envelope_json FROM worker_results WHERE attempt_id = ?`)
+          .get(n.attemptId) as { envelope_json: string } | undefined;
+        if (!row) continue;
+        const envelope = JSON.parse(row.envelope_json) as {
+          worker_report?: { summary?: unknown };
+          artifacts?: Array<{ kind?: unknown; exists?: unknown }>;
+        };
+        const observed = (envelope.artifacts ?? []).some(
+          (a) => (a.kind === "report" || a.kind === "logical") && a.exists === true,
+        );
+        if (!observed) continue;
+        const summary = typeof envelope?.worker_report?.summary === "string" ? envelope.worker_report.summary : "";
+        if (summary.trim().length > 0) byNode[n.nodeId] = summary.slice(0, 2000);
+      } catch {
+        // No deliverable text for this node — the reviewer judges the rest.
+      }
+    }
+    return byNode;
   }
   private requiredOutputsOf(runId: string): string[] {
     try {
@@ -1434,6 +1516,10 @@ export class WorkflowRunner {
         if (typeof current === "string" && current !== canonical) {
           throw new Error("scheduled project admission failed: workspace mismatch — the bound project workspace is immutable and cannot be re-pointed");
         }
+      } else {
+        // #1844: heal a legacy root admitted before every root bound a
+        // workspace. Deterministic by card id — never a conflicting value.
+        ensureProjectWorkspace(this.store.db, input.rootCardId);
       }
       this.ensureInitialPlanning(admitted.run.runId);
       return { kind: "duplicate", runId: admitted.run.runId, rootKind };
@@ -1453,6 +1539,11 @@ export class WorkflowRunner {
       if (!bound.ok) {
         throw new Error(`workflow runner: workspace bind failed (${bound.reason}): the bound workspace is immutable`);
       }
+    } else {
+      // #1844: every supervised root binds a workspace at admission —
+      // scheduled roots already pass one, peer/cli/sha/interactive roots heal
+      // to their deterministic project directory here.
+      ensureProjectWorkspace(this.store.db, input.rootCardId);
     }
     // Initial planning job (bounded model invocation via the planner backend),
     // queued atomically with its op record: a crash between admission commit

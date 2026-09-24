@@ -101,3 +101,16 @@ describe("SpinWorkerAdapter.cancel (#1778)", () => {
     }, "operator")).toMatchObject({ kind: "not_found" });
   });
 });
+
+/*
+ * TEST DEFICIENCY (2026-09-24):
+ * Missing: start() dispatch-heal coverage — an unbound supervised root healing
+ * to its deterministic project workspace inside SpinWorkerAdapter.start (#1844).
+ * Reason deferred: start() needs a seeded kanban root + attempt + contract plus
+ * a stubbed spin.dispatch boundary; the heal semantics themselves are covered
+ * by ensureProjectWorkspace unit tests and the admitSupervised journey in
+ * orc-text-acceptance.test.ts, and the adapter path is a thin ensure+re-read.
+ * Future verification: seed a W child with an unbound root, stub spin.dispatch
+ * to capture executionScope, and assert start returns started with the
+ * projects/<cardId> cwd.
+ */

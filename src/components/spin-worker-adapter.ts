@@ -64,20 +64,34 @@ export class SpinWorkerAdapter implements SwarmExecutorAdapter {
       }
 
       // #1656: resolve the root project scope and thread it into the Worker
-      // dispatch. A scheduled root missing its durable binding fails closed
-      // before any model turn begins; non-scheduled roots keep their existing
-      // explicitly supplied/session workspace behavior.
+      // dispatch. #1844: every supervised root has a bound workspace — a root
+      // admitted before that invariant heals here to its deterministic
+      // project directory (the same value admission would have bound), so
+      // legacy rows never fail closed at dispatch. Only a heal failure itself
+      // fails the start.
       const supStore = new WorkerSupervisionStore();
       const attempt = supStore.getAttempt(claim.attemptId);
       const rootCardId = attempt?.root_project_card_id ?? card.parent_id;
       let executionScope: ToolExecutionScope | undefined;
       if (rootCardId !== undefined && rootCardId !== null) {
-        const rootCard = await import("./tasks/kanban-board.js").then(m => m.kanbanGetCard(rootCardId));
-        const isScheduledRoot = rootCard?.source === "task" && rootCard.source_id != null && rootCard.source_id.length > 0;
-        const scope = new ProjectReviewStore().getWorkspaceScope(rootCardId);
-        if (isScheduledRoot && !scope) {
+        const scopeStore = new ProjectReviewStore();
+        let scope = scopeStore.getWorkspaceScope(rootCardId);
+        if (!scope) {
+          try {
+            // #1844: runner-owned heal (see orc-workflow-runner.ts) — the
+            // binding transition stays in the runner module; delegates never
+            // touch the phase mutators directly.
+            const { ensureProjectWorkspace } = await import("./orc-project/orc-workflow-runner.js");
+            ensureProjectWorkspace(scopeStore.db, rootCardId);
+          } catch (err) {
+            this.executions.remove(executionRef);
+            return { kind: "start_failed", reason: `project workspace unavailable: ${err instanceof Error ? err.message : String(err)}`, retryable: false };
+          }
+          scope = scopeStore.getWorkspaceScope(rootCardId);
+        }
+        if (!scope) {
           this.executions.remove(executionRef);
-          return { kind: "start_failed", reason: "scheduled project workspace not bound", retryable: false };
+          return { kind: "start_failed", reason: "project workspace not bound", retryable: false };
         }
         executionScope = scope;
       }
