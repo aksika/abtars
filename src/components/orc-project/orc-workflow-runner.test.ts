@@ -1460,9 +1460,15 @@ describe("deterministic project workspace (#1844)", () => {
   });
 
   it("admitSupervised without cwd binds every root kind deterministically", () => {
-    for (const source of ["agent", "cli", "sha"]) {
+    const roots: Array<{ source: string; sourcePeer?: string; sourceId?: string }> = [
+      { source: "agent" },
+      { source: "cli" },
+      { source: "sha" },
+      { source: "peer", sourcePeer: "molty", sourceId: "req-1844" },
+    ];
+    for (const root of roots) {
       const card = seedCard(store);
-      const admitted = runner.admitSupervised({ rootCardId: card, source });
+      const admitted = runner.admitSupervised({ rootCardId: card, ...root });
       expect(admitted.kind).not.toBe("conflict");
       expect(supervisionOf(card).workspace_cwd).toBe(expectedDir(card));
     }

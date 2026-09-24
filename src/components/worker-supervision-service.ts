@@ -424,9 +424,11 @@ export class WorkerSupervisionService {
     // #1656: one shared evaluator owns command execution, artifact
     // observation, and criterion derivation. No explicit workspace yields
     // failed bounded evidence — never process.cwd() verification.
-    // #1844: the settled worker text is the existence evidence for
-    // report/logical deliverables, observed by the same shared evaluator.
-    const evaluation = evaluateWorkerEvidence(contract, workingDir, workerResult);
+    // #1844: the settled worker report is the existence evidence for
+    // report/logical deliverables — the same bounded text the envelope records
+    // and the reviewer judges. Raw result scaffolding (empty tags) never
+    // counts as deliverable text.
+    const evaluation = evaluateWorkerEvidence(contract, workingDir, workerReport.summary);
     const checks = evaluation.checks;
     const artifacts = evaluation.artifacts;
     const criteria = evaluation.criteria;

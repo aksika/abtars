@@ -1243,6 +1243,16 @@ export class WorkflowStore {
     if (missing.length > 0) parts.push(`missing [${[...missing].sort().join(",")}]`);
     if (duplicate.length > 0) parts.push(`duplicate [${[...new Set(duplicate)].sort().join(",")}]`);
     if (notPassed.length > 0) parts.push(`not-passed [${[...new Set(notPassed)].sort().join(",")}]`);
+    // #1844: name the missing required deliverables so an empty-text or
+    // never-written-file failure identifies what was promised, instead of
+    // reading like the old unactionable `not-passed` signature.
+    const missingArtifacts = contract.expected_artifacts
+      .filter((ea) => ea.required)
+      .filter((ea) => envelope.artifacts.some((a) => a.artifact_id === ea.id && !a.exists))
+      .map((ea) => ea.ref);
+    if (missingArtifacts.length > 0) {
+      parts.push(`missing-artifacts [${[...new Set(missingArtifacts)].sort().join(",")}]`);
+    }
     if (parts.length === 0) parts.push("criteria not all passed");
     return `criterion-set mismatch: ${parts.join("; ")}`;
   }

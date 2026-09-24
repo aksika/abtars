@@ -1,12 +1,18 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { mkdirSync, rmSync, existsSync } from "node:fs";
+import { mkdirSync, rmSync, existsSync, realpathSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
+import type { WorkerAcceptanceContractV1 } from "./worker-contract.js";
 
-// The adapter module pulls the Spin singleton; cancel() never touches it
-// (the supervisor is injected), so stub the module boundary.
+// The adapter module pulls the Spin singleton. cancel() never touches it (the
+// supervisor is injected); start() reaches the chokepoint, so dispatch is
+// stubbed with a capture — the model boundary is the only thing replaced.
+const spinSpy = vi.hoisted(() => ({ dispatches: [] as Array<{ executionScope?: { cwd?: string } }> }));
 vi.mock("./spin.js", () => ({
-  spin: { getRunningCount: () => 0 },
+  spin: {
+    getRunningCount: () => 0,
+    dispatch: (spec: { executionScope?: { cwd?: string } }) => { spinSpy.dispatches.push(spec); },
+  },
 }));
 
 let TEST_HOME: string;
@@ -102,15 +108,52 @@ describe("SpinWorkerAdapter.cancel (#1778)", () => {
   });
 });
 
-/*
- * TEST DEFICIENCY (2026-09-24):
- * Missing: start() dispatch-heal coverage — an unbound supervised root healing
- * to its deterministic project workspace inside SpinWorkerAdapter.start (#1844).
- * Reason deferred: start() needs a seeded kanban root + attempt + contract plus
- * a stubbed spin.dispatch boundary; the heal semantics themselves are covered
- * by ensureProjectWorkspace unit tests and the admitSupervised journey in
- * orc-text-acceptance.test.ts, and the adapter path is a thin ensure+re-read.
- * Future verification: seed a W child with an unbound root, stub spin.dispatch
- * to capture executionScope, and assert start returns started with the
- * projects/<cardId> cwd.
- */
+describe("SpinWorkerAdapter.start dispatch heal (#1844)", () => {
+  it("heals an unbound supervised root and threads its deterministic workspace", async () => {
+    const { WorkerSupervisionStore } = await import("./worker-supervision-store.js");
+    const { ProjectReviewStore } = await import("./project-acceptance/project-review-store.js");
+    const { createExecutionSupervisor } = await import("./execution-control.js");
+    const { SpinWorkerAdapter } = await import("./spin-worker-adapter.js");
+    const store = new WorkerSupervisionStore();
+    const now = new Date().toISOString();
+    const rootId = 904;
+    const workerId = 905;
+    store.db.prepare(
+      `INSERT INTO kanban_board (id, title, source, type, status, parent_id) VALUES (?, 'heal root', 'agent', 'O', 'running', NULL), (?, 'heal worker', 'agent', 'W', 'queued', ?)`,
+    ).run(rootId, workerId, rootId);
+    // Legacy shape: admitted, unbound supervision row.
+    new ProjectReviewStore(store.db).ensureAwaitingContract(rootId);
+    const contract: WorkerAcceptanceContractV1 = {
+      schema_version: 1,
+      id: "c_heal_001",
+      digest: "d".repeat(64),
+      goal: "answer in text",
+      criteria: [{ id: "c1", description: "answer delivered" }],
+      expected_artifacts: [{ id: "a1", kind: "logical", ref: "answer", required: true, criterion_ids: ["c1"] }],
+      verification_commands: [],
+      required_capabilities: [],
+      limits: {},
+      provenance: { root_card_id: rootId, card_id: workerId, authored_by: "test", created_at: now },
+    };
+    store.insertContract(contract, workerId);
+    store.insertAttempt({
+      id: "a_heal_001", card_id: workerId, contract_id: "c_heal_001", ordinal: 1,
+      executor_kind: "agent", executor_id: "spin-local", status: "pending",
+      started_at: now, root_project_card_id: rootId, root_project_generation: 1,
+    });
+
+    spinSpy.dispatches.length = 0;
+    const executions = createExecutionSupervisor({ maxConcurrent: {} });
+    const adapter = new SpinWorkerAdapter(undefined, executions);
+    const result = await adapter.start({
+      attemptId: "a_heal_001", cardId: workerId, contractId: "c_heal_001",
+      executorKind: "agent" as const, executorId: "spin-local",
+      generation: 1, claimedAt: now,
+    });
+    expect(result.kind).toBe("started");
+    const bound = new ProjectReviewStore(store.db).getSupervision(rootId)?.workspace_cwd;
+    expect(bound).toBe(join(realpathSync(TEST_HOME), "workspace", "projects", String(rootId)));
+    expect(existsSync(bound as string)).toBe(true);
+    expect(spinSpy.dispatches[0]?.executionScope?.cwd).toBe(bound);
+  });
+});

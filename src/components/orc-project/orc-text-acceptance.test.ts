@@ -197,6 +197,9 @@ describe("supervised text acceptance (#1844)", () => {
     expect(nodeStatus(store, runId, workNode)).toBe("failed");
     const outcome = nodeOutcome(store, runId, workNode);
     expect(outcome).toMatch(/not-passed/);
+    // The failure names the missing deliverable rather than the old
+    // unactionable signature or `workspace unavailable`.
+    expect(outcome).toMatch(/missing-artifacts \[answer\]/);
     expect(outcome).not.toMatch(/workspace unavailable/);
     const envelope = settled.envelope!;
     expect(envelope.artifacts[0]).toMatchObject({ exists: false });
