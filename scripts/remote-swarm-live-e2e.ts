@@ -313,7 +313,16 @@ interface CmuxCommandPortOptions {
   cmuxBin?: string;
 }
 
-const CMUX_CAPTURE_LINES = 2000;
+// Capture window in lines. The pane on a persistent shared surface grows
+// without bound across polls and runs; a fixed tail window keeps every
+// capture constant-size so output can never outgrow the exec buffer and
+// silently starve marker detection (#1624 run A: 270KB pane exceeded the
+// buffer and every capture failed into a 120s mystery timeout).
+const CMUX_CAPTURE_LINES = 200;
+
+// Consecutive capture failures before failing fast with the underlying
+// error instead of burning the whole deadline on a dead channel.
+const CMUX_CAPTURE_FAIL_FAST_AFTER = 3;
 
 interface CmuxTarget {
   workspaceRef: string;
@@ -419,12 +428,12 @@ export class CmuxCommandPort implements CommandPort {
     }
   }
 
-  private async capture(target: CmuxTarget, timeoutMs: number): Promise<string> {
+  private async capture(target: CmuxTarget, timeoutMs: number): Promise<{ pane: string; error: string | null }> {
     const result = await this.cmux(
       ["capture-pane", "--workspace", target.workspaceRef, "--surface", target.surfaceRef, "--lines", String(CMUX_CAPTURE_LINES)],
       timeoutMs,
     );
-    return result.ok ? result.output : "";
+    return result.ok ? { pane: result.output, error: null } : { pane: "", error: result.output };
   }
 
   async run(argv: CommandArg[], opts: { timeoutMs: number; cwd?: string }): Promise<PortResult> {
@@ -465,9 +474,19 @@ export class CmuxCommandPort implements CommandPort {
     }
 
     let pane = "";
+    let captureFailures = 0;
     while (Date.now() < deadline) {
       await new Promise((r) => setTimeout(r, this.pollMs));
-      pane = await this.capture(target, 10_000);
+      const captured = await this.capture(target, 10_000);
+      if (captured.error !== null) {
+        captureFailures += 1;
+        if (captureFailures >= CMUX_CAPTURE_FAIL_FAST_AFTER) {
+          return { ok: false, exitCode: null, stdout: "", stderr: `cmux capture-pane failed repeatedly: ${captured.error.slice(0, 200)}`, timedOut: false };
+        }
+        continue;
+      }
+      captureFailures = 0;
+      pane = captured.pane;
       const beginIndex = pane.lastIndexOf(begin);
       if (beginIndex >= 0) {
         const afterBegin = pane.slice(beginIndex + begin.length);
@@ -481,7 +500,7 @@ export class CmuxCommandPort implements CommandPort {
 
     await this.cmux(["send-key", "--workspace", target.workspaceRef, "--surface", target.surfaceRef, "ctrl+c"], 10_000);
     await new Promise((r) => setTimeout(r, 1_000));
-    const finalPane = await this.capture(target, 10_000);
+    const finalPane = (await this.capture(target, 10_000)).pane;
     const beginIndex = finalPane.lastIndexOf(begin);
     const tail = beginIndex >= 0 ? finalPane.slice(beginIndex + begin.length) : finalPane;
     return { ok: false, exitCode: null, stdout: tail.slice(-MAX_PORT_OUTPUT_BYTES), stderr: `cmux command timed out after ${opts.timeoutMs}ms`, timedOut: true };

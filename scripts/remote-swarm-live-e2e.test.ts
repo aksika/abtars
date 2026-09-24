@@ -801,6 +801,37 @@ describe("cmux command port", () => {
     expect(firstResult.ok).toBe(true);
   });
 
+  it("captures a bounded tail window and fails fast on a dead channel", async () => {
+    const root = tmpdirFixture();
+    const fake = join(root, "fake-cmux-dead.sh");
+    const captured = join(root, "captured-args.txt");
+    const lines = [
+      "#!/usr/bin/env bash",
+      'DIR="$(cd "$(dirname "$0")" && pwd)"',
+      'TREE="$DIR/cmux-tree.json"',
+      'if [ "$1" = "tree" ]; then',
+      '  cat "$TREE"',
+      'elif [ "$1" = "send" ]; then',
+      "  exit 0",
+      "elif [ \"$1\" = \"capture-pane\" ]; then",
+      `  echo "$*" >> "${captured}"`,
+      "  exit 1",
+      "fi",
+    ];
+    writeFileSync(fake, lines.join("\n") + "\n");
+    chmodSync(fake, 0o755);
+    writeFakeCmux(root);
+    const port = new CmuxCommandPort({ workspace: "rs-cmux", pollMs: 20, cmuxBin: fake });
+    const started = Date.now();
+    const result = await port.run([{ text: "echo", quote: false }, { text: "x", quote: false }], { timeoutMs: 60_000 });
+    expect(Date.now() - started).toBeLessThan(10_000);
+    expect(result.ok).toBe(false);
+    expect(result.timedOut).toBe(false);
+    expect(result.stderr).toContain("capture-pane failed repeatedly");
+    const args = readFileSync(captured, "utf-8").split("\n")[0] ?? "";
+    expect(args).toContain("--lines 200");
+  });
+
   it("fails closed on unknown workspace", async () => {
     const root = tmpdirFixture();
     const cmuxBin = writeFakeCmux(root);
@@ -1002,6 +1033,42 @@ describe("real probe (node type-stripped) against fixture state", () => {
       expect(snap.processFacts[0]?.observedPidPresent).toBe(true);
       expect(JSON.stringify(snap)).not.toContain("peer-r");
       expect(JSON.stringify(snap)).not.toContain("/ws");
+    }
+  });
+
+  it("snapshots empty projections when the lazy origin tables are absent", () => {
+    // Fresh hosts never initialize the remote-pi origin store, so those two
+    // tables do not exist; absence must read as empty, not probe failure.
+    const db = new DatabaseSync(join(home, "kanban", "kanban.db"));
+    const runId = "rs-probe-noorigin";
+    const requestId = `swarm-${runId}-f1-accepted`;
+    db.exec(`
+      CREATE TABLE kanban_board (id INTEGER PRIMARY KEY AUTOINCREMENT, title TEXT, source TEXT, source_id TEXT, priority TEXT, status TEXT, type TEXT, goal TEXT, notes TEXT, parent_id INTEGER, delivery_mode TEXT, delivery_result TEXT, result_summary TEXT, source_peer TEXT, created_at TEXT, updated_at TEXT);
+      CREATE TABLE peer_contributions (peer TEXT, request_id TEXT, request_hash TEXT, contribution_ref TEXT, project_card_id INTEGER, proxy_card_id INTEGER, root_criteria_json TEXT, state TEXT, last_sequence INTEGER, terminal_event_id TEXT, terminal_digest TEXT, projection_json TEXT, created_at TEXT, updated_at TEXT, PRIMARY KEY (peer, request_id));
+      CREATE TABLE peer_contribution_events (peer TEXT, event_id TEXT, request_id TEXT, contribution_ref TEXT, sequence INTEGER, payload_digest TEXT, projection_json TEXT, created_at TEXT, PRIMARY KEY (peer, event_id));
+      CREATE TABLE peer_help_requests (origin_peer TEXT, request_id TEXT, request_hash TEXT, state TEXT, contribution_ref TEXT UNIQUE, local_card_id INTEGER, local_run_id TEXT, response_json TEXT, withdrawn_at TEXT, PRIMARY KEY (origin_peer, request_id));
+      CREATE TABLE project_supervision (project_card_id INTEGER PRIMARY KEY, contract_id TEXT UNIQUE, state TEXT, invalid_contract_proposals INTEGER, generation INTEGER, review_round INTEGER, repair_round INTEGER, active_review_case_id TEXT, accepted_decision_id TEXT, blocked_reason TEXT, updated_at TEXT);
+      CREATE TABLE project_review_cases (id TEXT PRIMARY KEY, project_card_id INTEGER, generation INTEGER, round INTEGER, snapshot_digest TEXT, case_json TEXT, status TEXT, created_at TEXT, superseded_at TEXT);
+      CREATE TABLE project_review_decisions (id TEXT PRIMARY KEY, review_case_id TEXT UNIQUE, decision_json TEXT, decision_digest TEXT, created_at TEXT);
+      CREATE TABLE project_acceptance_outbox (id TEXT PRIMARY KEY, project_card_id INTEGER UNIQUE, peer TEXT, payload_json TEXT, attempts INTEGER, last_error TEXT, created_at TEXT, updated_at TEXT, sent_at TEXT);
+      CREATE TABLE pi_runs (id TEXT PRIMARY KEY, card_id INTEGER UNIQUE, status TEXT, execution_generation INTEGER, origin_request_id TEXT, workspace_alias TEXT, resume_capability TEXT, generation_intent TEXT, observed_pid INTEGER, pi_session_file TEXT);
+      CREATE TABLE remote_pi_events (run_id TEXT, remote_card_id INTEGER, sequence INTEGER, kind TEXT, generation INTEGER, event_id TEXT UNIQUE, content_sha256 TEXT, origin_peer TEXT, origin_request_id TEXT, projection_json TEXT, occurred_at TEXT, created_at TEXT, acknowledged_at TEXT, PRIMARY KEY (run_id, sequence));
+      CREATE TABLE remote_pi_commands (origin_peer TEXT, command_id TEXT, run_id TEXT, payload_hash TEXT, state TEXT, response_json TEXT, created_at TEXT, updated_at TEXT, PRIMARY KEY (origin_peer, command_id));
+      CREATE TABLE pi_api_requests (client_id TEXT, operation TEXT, request_id TEXT, request_hash TEXT, state TEXT, response_json TEXT, created_at TEXT, updated_at TEXT, PRIMARY KEY (client_id, operation, request_id));
+      CREATE TABLE pi_workspace_claims (canonical_path TEXT PRIMARY KEY, run_id TEXT, execution_generation INTEGER, owner_kind TEXT, acquired_at TEXT, UNIQUE (run_id, execution_generation));
+      CREATE TABLE worker_attempts (id TEXT PRIMARY KEY, card_id INTEGER, contract_id TEXT, ordinal INTEGER, executor_kind TEXT, executor_id TEXT, generation INTEGER, lifecycle TEXT, status TEXT, remote_task_id TEXT, claimed_at TEXT, started_at TEXT, settled_at TEXT, hard_deadline_at TEXT, cancel_reason TEXT, source_attempt_id TEXT, retry_directive_id TEXT, earliest_claim_at TEXT, UNIQUE (card_id, ordinal));
+    `);
+    db.close();
+
+    const command = JSON.stringify({ version: 1, role: "receiver", runId, command: "snapshot", requestIds: [requestId], marker: runMarker(runId) });
+    const result = runProbe(["--home", home, "--role", "receiver", "--run-id", runId, "--command", "snapshot", "--json", Buffer.from(command).toString("base64url")]);
+    expect(result.status).toBe(0);
+    const { result: parsed } = parseProbeOutput(result.stdout);
+    const validation = validateNodeResult(parsed, "receiver", runId);
+    expect(validation.ok).toBe(true);
+    if (validation.ok && validation.value.kind === "snapshot") {
+      expect(validation.value.value.piOriginProjections).toHaveLength(0);
+      expect(validation.value.value.piOriginEvents).toHaveLength(0);
     }
   });
 

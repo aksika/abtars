@@ -356,6 +356,18 @@ function inPlaceholders(values: string[]): string {
   return values.map(() => "?").join(",");
 }
 
+/**
+ * Optional-subsystem reads (#1624 run A). The remote-pi origin tables are
+ * created lazily on first use, so a host that never touched remote-Pi
+ * delivery has no table at all. Absence means "no projections/events" —
+ * never probe failure. Scoped to exactly these two tables so a missing core
+ * table still fails loudly.
+ */
+function isMissingOriginTable(err: unknown): boolean {
+  const message = err instanceof Error ? err.message : String(err);
+  return /^no such table: remote_pi_origin_(projections|events)/.test(message);
+}
+
 async function snapshot(args: ParsedArgs): Promise<RemoteSwarmSnapshotV1> {
   const home = args.home;
   const db = await openReadonlyDb(join(home, "kanban", "kanban.db"));
@@ -738,11 +750,16 @@ async function snapshot(args: ParsedArgs): Promise<RemoteSwarmSnapshotV1> {
         where.push(`run_id IN (${inPlaceholders(runIdList)})`);
         params.push(...runIdList);
       }
-      const originRows = db.prepare(
-        `SELECT run_id, origin_request_id, latest_sequence, acknowledged_sequence, latest_generation, latest_status,
-                pending_input_json, result_summary, error_summary, resume_capability
-         FROM remote_pi_origin_projections WHERE ${where.join(" OR ")} LIMIT ?`,
-      ).all(...params, bounds.rows) as Array<Record<string, unknown>>;
+      let originRows: Array<Record<string, unknown>> = [];
+      try {
+        originRows = db.prepare(
+          `SELECT run_id, origin_request_id, latest_sequence, acknowledged_sequence, latest_generation, latest_status,
+                  pending_input_json, result_summary, error_summary, resume_capability
+           FROM remote_pi_origin_projections WHERE ${where.join(" OR ")} LIMIT ?`,
+        ).all(...params, bounds.rows) as Array<Record<string, unknown>>;
+      } catch (err) {
+        if (!isMissingOriginTable(err)) throw err;
+      }
       const originRunIds: string[] = [];
       for (const row of originRows) {
         const runId = stringOf(row.run_id, bounds.id) ?? "";
@@ -762,9 +779,14 @@ async function snapshot(args: ParsedArgs): Promise<RemoteSwarmSnapshotV1> {
       }
       const uniqueOriginRunIds = Array.from(new Set([...originRunIds, ...piRunIdList])).slice(0, 32);
       if (uniqueOriginRunIds.length > 0) {
-        const rows = db.prepare(
-          `SELECT run_id, sequence, event_id FROM remote_pi_origin_events WHERE run_id IN (${inPlaceholders(uniqueOriginRunIds)}) LIMIT ?`,
-        ).all(...uniqueOriginRunIds, bounds.rows) as Array<Record<string, unknown>>;
+        let rows: Array<Record<string, unknown>> = [];
+        try {
+          rows = db.prepare(
+            `SELECT run_id, sequence, event_id FROM remote_pi_origin_events WHERE run_id IN (${inPlaceholders(uniqueOriginRunIds)}) LIMIT ?`,
+          ).all(...uniqueOriginRunIds, bounds.rows) as Array<Record<string, unknown>>;
+        } catch (err) {
+          if (!isMissingOriginTable(err)) throw err;
+        }
         for (const row of rows) {
           piOriginEvents.push({
             runId: stringOf(row.run_id, bounds.id) ?? "",
