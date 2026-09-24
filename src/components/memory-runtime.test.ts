@@ -571,4 +571,24 @@ describe("#1813 selection carry and compact context", () => {
     expect(res.context).toContain("Deploys run");
     expect(res.context).toContain("Rollbacks");
   });
+
+  it("keeps id-less rows while the budget covers them, drops them after", async () => {
+    const withIdless = [
+      ...results,
+      { content: "Weekly summary: two deploys.", score: 0.5, date: "2026-09-03" },
+    ];
+    const roomy = createClientRuntime(recallClient(withIdless, {
+      version: 1, refs: [{ id: 1, revision: 1 }], budgetBytes: 2000, truncated: false,
+    }));
+    const roomyRes = await roomy.recall({ query: "deploy", userId: "u1" });
+    expect(roomyRes.context).toContain("Deploys run");
+    expect(roomyRes.context).toContain("Weekly summary");
+
+    const tight = createClientRuntime(recallClient(withIdless, {
+      version: 1, refs: [{ id: 1, revision: 1 }], budgetBytes: 30, truncated: true,
+    }));
+    const tightRes = await tight.recall({ query: "deploy", userId: "u1" });
+    expect(tightRes.context).toContain("Deploys run");
+    expect(tightRes.context).not.toContain("Weekly summary");
+  });
 });

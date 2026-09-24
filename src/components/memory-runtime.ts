@@ -226,22 +226,41 @@ export function asRecallSelection(raw: unknown): RuntimeRecallSelection | undefi
  * #1813 — rows to inject: the verified selection when present and resolvable
  * within this result set, otherwise the full set (ordinary rendering). Rank
  * order is preserved; selection can only bound, never substitute rows.
+ * Id-less rows (S6 consolidation files, S8 entity paths) can never be refs,
+ * so they ride along after the selected rows in rank order while the same
+ * budget covers them — a resolved selection must not silently lose the
+ * consolidation/entity evidence that ordinary rendering includes.
  */
-export function selectInjectedHits<T extends { memoryId?: number }>(
+export function selectInjectedHits<T extends { memoryId?: number; content: string }>(
   hits: T[],
   selection: RuntimeRecallSelection | undefined,
 ): T[] {
   if (selection === undefined || selection.refs.length === 0) return hits;
   const byId = new Map<number, T>();
+  const idless: T[] = [];
   for (const hit of hits) {
     if (typeof hit.memoryId === "number") byId.set(hit.memoryId, hit);
+    else idless.push(hit);
   }
   const selected: T[] = [];
   for (const ref of selection.refs) {
     const hit = byId.get(ref.id);
     if (hit !== undefined) selected.push(hit);
   }
-  return selected.length > 0 ? selected : hits;
+  if (selected.length === 0) return hits;
+  let used = 0;
+  const out: T[] = [];
+  for (const hit of selected) {
+    used += Buffer.byteLength(hit.content, "utf8");
+    out.push(hit);
+  }
+  for (const hit of idless) {
+    const size = Buffer.byteLength(hit.content, "utf8");
+    if (used + size > selection.budgetBytes) break;
+    out.push(hit);
+    used += size;
+  }
+  return out;
 }
 
 /** #1813 — structural mirror of abmind RecallDecisionV1 (validated, not cast). */
