@@ -1,4 +1,4 @@
-import { appendFileSync, mkdirSync } from "node:fs";
+import { appendFileSync, mkdirSync, readdirSync, statSync, unlinkSync } from "node:fs";
 import { join } from "node:path";
 import { abtarsHome } from "../paths.js";
 
@@ -39,9 +39,26 @@ export function isLogLevel(minLevel: LogLevel): boolean {
 // ── Buffered file writer ────────────────────────────────────────────────────
 let buffer: string[] = [];
 let flushTimer: ReturnType<typeof setTimeout> | null = null;
+let pruned = false;
+
+// #1837 — prune bridge-*.log files older than 5 days on first write (mirrors
+// abmind). Never touches the active file; failures are silently ignored.
+function pruneOldLogs(): void {
+  if (pruned) return;
+  pruned = true;
+  try {
+    const cutoff = Date.now() - 5 * 86400000;
+    for (const f of readdirSync(LOG_DIR)) {
+      if (!f.startsWith("bridge-") || !f.endsWith(".log")) continue;
+      const fp = join(LOG_DIR, f);
+      try { if (statSync(fp).mtimeMs < cutoff) unlinkSync(fp); } catch { /* best effort */ }
+    }
+  } catch { /* log dir may not exist yet */ }
+}
 
 function writeToFile(line: string): void {
   if (!fileLogging) return;
+  pruneOldLogs();
   buffer.push(redactSecrets(line));
   if (buffer.length >= 200) flush();
   else if (!flushTimer) {

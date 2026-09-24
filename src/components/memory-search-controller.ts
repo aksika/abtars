@@ -5,7 +5,7 @@
  */
 
 import type { AbtarsMemoryRuntime, RuntimeRecallHit } from "./memory-runtime.js";
-import { logWarn } from "./logger.js";
+import { logDebug, logWarn, redactSecrets } from "./logger.js";
 import type { MemorySearchResponse, WebSearchResult } from "./dashboard/dashboard-config.js";
 
 // ── Types ───────────────────────────────────────────────────────────────────
@@ -53,6 +53,7 @@ export class MemorySearchController {
     const stages = stagesRaw ? stagesRaw.split(",").map(s => s.trim()).filter(Boolean) : undefined;
 
     try {
+      const t0 = Date.now();
       const result = await this.deps.memoryRuntime.recall({
         query: translated.join(" "),
         original: params.get("original")?.trim() || keywordsRaw,
@@ -62,6 +63,8 @@ export class MemorySearchController {
         timeEnd: parseNumber(params.get("timeEnd")),
         stages,
       });
+      // #1837 — dashboard search summary.
+      logDebug(TAG, `search: user=${userId} keywords=${translated.length} stages=[${stages?.join(",") ?? "all"}] → ${result.hits.length} hits (${Date.now() - t0}ms) query="${redactSecrets(translated.join(" ")).slice(0, 60)}"`);
 
       const response: MemorySearchResponse = {
         results: result.hits.map(hitToWebResult),

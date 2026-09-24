@@ -392,6 +392,10 @@ export async function handleInboundMessage(
     // through to the ordinary agent path below. Delivery below is Main-owned
     // (send + assistant record + compaction + metrics + settle), exactly once.
     const { fastPathAnswerText, deliverFastPathAnswer } = await import("./pipeline/fast-path-answer.js");
+    // #1837 — decision outcome at DEBUG whether or not the gate opens.
+    if (recallDecision) {
+      logDebug(TAG, `fast-path decision: outcome=${recallDecision.outcome} profile=${recallDecision.profile} set=${recallDecision.questionSet} sources=[${recallDecision.sourceIds.join(",")}]`);
+    }
     const fastPathRendered = fastPathAnswerText(recallDecision, {
       sessionType: sessionType(effectiveSession),
       skillIsolated: isSkillSession,

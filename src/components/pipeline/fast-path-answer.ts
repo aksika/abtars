@@ -8,7 +8,7 @@
  * streaming machinery, citation feedback, or watchdog/heartbeat behavior.
  */
 
-import { logInfo, logDebug, logWarn } from "../logger.js";
+import { logInfo, logDebug, logTrace, logWarn } from "../logger.js";
 import { logAndSwallow } from "../log-and-swallow.js";
 import { attemptMemoryMutation } from "../memory-runtime.js";
 import { assistantMessageKey } from "../memory-operation-key.js";
@@ -59,13 +59,21 @@ export function fastPathAnswerText(
   decision: RuntimeRecallDecision | undefined,
   turn: FastPathTurnShape,
 ): { display: string; record: string } | null {
-  if (!decision || decision.outcome !== "answer") return null;
+  // #1837 — TRACE the first failing gate so bypass-rate optimization can see
+  // why turns fall through to the ordinary agent path.
+  const reject = (reason: string): null => {
+    logTrace("fastpath", `gate rejected (${reason}) decision=${decision?.outcome ?? "none"}`);
+    return null;
+  };
+  if (!decision || decision.outcome !== "answer") return reject(`outcome=${decision?.outcome ?? "none"}`);
   const text = decision.answerText?.trim() ?? "";
-  if (text.length === 0 || decision.sourceIds.length === 0) return null;
-  if (turn.sessionType !== "A") return null;
-  if (turn.skillIsolated || turn.hasAttachment || turn.voice) return null;
-  if (turn.sessionStart) return null;
-  if (turn.delivery !== "simple") return null;
+  if (text.length === 0 || decision.sourceIds.length === 0) return reject("empty-answer");
+  if (turn.sessionType !== "A") return reject(`sessionType=${turn.sessionType}`);
+  if (turn.skillIsolated || turn.hasAttachment || turn.voice) {
+    return reject(`skillIsolated=${turn.skillIsolated} attachment=${turn.hasAttachment} voice=${turn.voice}`);
+  }
+  if (turn.sessionStart) return reject("session-start");
+  if (turn.delivery !== "simple") return reject(`delivery=${turn.delivery}`);
   // Visible supporting evidence: the extract plus its memory references.
   // The extract itself is verbatim owner-side; only the ref line is added,
   // and only for display.

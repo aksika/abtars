@@ -7,7 +7,7 @@ import { randomUUID } from "node:crypto";
 import { appendFileSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
-import { logWarn, redactSecrets } from "../logger.js";
+import { logDebug, logWarn, redactSecrets } from "../logger.js";
 import { logAndSwallow } from "../log-and-swallow.js";
 import { checkTool, checkPath, auditDeny, type SandboxPolicy } from "../tool-sandbox.js";
 import { getMasterUserId } from "../master-user.js";
@@ -528,6 +528,8 @@ const memoryRecallTool: ToolDefinition = {
         limit: parseInt(stringValue(args["limit"] ?? "10"), 10),
         maxClassification,
       });
+      // #1837 — tool-path recall summary (the runtime boundary logs detail).
+      logDebug(TAG, `memory_recall: user=${userId} limit=${stringValue(args["limit"] ?? "10")} maxClass=${maxClassification} query="${redactSecrets(stringValue(args["query"])).slice(0, 60)}"`);
       import("../metrics-collector.js").then(({ recordLatency }) => recordLatency("recall", Date.now() - t0)).catch(err => logAndSwallow(TAG, "record recall latency", err));
       return JSON.stringify(result);
     } catch (err) {

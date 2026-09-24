@@ -7,7 +7,7 @@ import type {
   SleepStatusLike,
 } from "./abmind-client-contract.js";
 
-import { logWarn, redactSecrets } from "./logger.js";
+import { logDebug, logTrace, logWarn, isLogLevel, redactSecrets } from "./logger.js";
 import { estimateTokensFromChars } from "./transport/token-budget.js";
 import type { MemoryMutationFamily } from "./memory-operation-key.js";
 
@@ -743,6 +743,8 @@ export function createClientRuntime(client: AbmindClientLike): AbtarsMemoryRunti
 
     async recall(input: RuntimeRecallInput): Promise<RuntimeRecallResult> {
       requireClientCapability(capabilities, "recall");
+      const t0 = Date.now();
+      logDebug("memory-runtime", `recall: query="${redactSecrets(input.query).slice(0, 60)}" user=${input.userId} limit=${input.limit ?? 10} maxClass=${input.maxClassification ?? "?"} stages=[${input.stages?.join(",") ?? "all"}] fastPath=${input.fastPath ? "yes" : "no"}`);
       const fastPath = input.fastPath !== undefined ? {
         question: input.fastPath.question ?? "",
         answerLanguage: input.fastPath.answerLanguage ?? "en",
@@ -786,6 +788,13 @@ export function createClientRuntime(client: AbmindClientLike): AbtarsMemoryRunti
       // #1813 — carry the validated decision; malformed envelopes are dropped
       // by asRecallDecision and recall continues as ordinary.
       const decision = asRecallDecision(result.decision);
+      const ms = Date.now() - t0;
+      logDebug("memory-runtime", `recall: ${hits.length} hits in ${ms}ms decision=${decision?.outcome ?? "none"} top=${hits.slice(0, 3).map((h) => `${h.memoryId ?? "?"}:${h.score.toFixed(3)}`).join(",")}`);
+      if (isLogLevel("trace")) {
+        for (const h of hits.slice(0, 10)) {
+          logTrace("memory-runtime", `hit id=${h.memoryId ?? "?"} score=${h.score.toFixed(3)} source=${h.source ?? "?"} text="${redactSecrets(h.content).slice(0, 120)}"`);
+        }
+      }
       return { hits, context, ...(decision !== undefined ? { decision } : {}) };
     },
 
