@@ -1,9 +1,18 @@
-import { describe, it, expect, vi } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import { HeartbeatSystem } from "../components/heartbeat-system.js";
 import {
   normalizeInstallType,
   decideStandbyResumeAction,
   createStandbyResumeHandler,
+  type InstallType,
 } from "./phase-heartbeat.js";
+
+// Standby detection thresholds differ on WSL; pin isWsl false so the seam
+// tests below exercise the same 3x-interval path production Mac/Linux runs.
+vi.mock("../components/platform-detect.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../components/platform-detect.js")>();
+  return { ...actual, isWsl: () => false };
+});
 
 describe("normalizeInstallType", () => {
   it("defaults missing input to server", () => {
@@ -76,5 +85,51 @@ describe("createStandbyResumeHandler wiring", () => {
       expect(exit).not.toHaveBeenCalled();
       expect(writeReason).not.toHaveBeenCalled();
     }
+  });
+});
+
+describe("standby resume through HeartbeatSystem (seam wiring)", () => {
+  beforeEach(() => { vi.useFakeTimers({ now: 0 }); });
+  afterEach(() => { vi.useRealTimers(); });
+
+  // Drives a real heartbeat through one normal tick and one simulated
+  // suspend: the interval timer fires only once after the clock jump, so
+  // the recorded task executions prove whether the standby tick ran tasks.
+  async function runStandbyTick(ctx: { installMode: string; installType: InstallType; supervised: boolean }) {
+    const exit = vi.fn();
+    const writeReason = vi.fn();
+    const task = vi.fn().mockResolvedValue({ state: "idle" as const });
+    const hb = new HeartbeatSystem({
+      enabled: true,
+      intervalMs: 5000,
+      bridgeLockPath: "/tmp/test.lock",
+      onStandbyResume: createStandbyResumeHandler({ ...ctx, classify: () => "full", exit, writeReason }),
+    });
+    hb.registerTask({ name: "probe", execute: task });
+    hb.start();
+    await vi.advanceTimersByTimeAsync(5000 + 10);
+    const taskCallsBeforeSuspend = task.mock.calls.length;
+    vi.setSystemTime(60_000);
+    await vi.advanceTimersByTimeAsync(5000 + 10);
+    hb.stop();
+    return { exit, writeReason, task, taskCallsBeforeSuspend };
+  }
+
+  it("notebook resume keeps the bridge alive and skips the standby tick", async () => {
+    const { exit, writeReason, task, taskCallsBeforeSuspend } = await runStandbyTick({
+      installMode: "daemon", installType: "notebook", supervised: true,
+    });
+    expect(exit).not.toHaveBeenCalled();
+    expect(writeReason).not.toHaveBeenCalled();
+    expect(task.mock.calls.length).toBe(taskCallsBeforeSuspend);
+  });
+
+  it("daemon+server+supervisor resume exits for a supervised restart", async () => {
+    const { exit, writeReason, task, taskCallsBeforeSuspend } = await runStandbyTick({
+      installMode: "daemon", installType: "server", supervised: true,
+    });
+    expect(writeReason).toHaveBeenCalledWith("resume after 1min suspend");
+    expect(exit).toHaveBeenCalledWith(0);
+    expect(task.mock.calls.length).toBe(taskCallsBeforeSuspend);
   });
 });
