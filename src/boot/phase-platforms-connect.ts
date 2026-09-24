@@ -11,6 +11,21 @@
 import { logInfo, logWarn, logError, logTrace } from "../components/logger.js";
 import type { BootCtx, PhaseResult } from "./context.js";
 import type { InboundMessage } from "../types/platform.js";
+import type { PipelineDeps } from "../components/message-pipeline.js";
+
+/**
+ * #1831: per-channel notice throttle — one brain-unavailable notice per chat
+ * per unwired episode. Lives on BootCtx next to the recovery queue so
+ * drainRecoveryQueue can reset it when wiring completes.
+ */
+export type RecoveryNoticeThrottle = Set<string>;
+
+export function recoveryNoticeKey(msg: InboundMessage): string {
+  return `${msg.platform}:${msg.channelId}`;
+}
+
+/** #1831: short brain-unavailable notice naming /status. */
+export const RECOVERY_QUEUED_NOTICE = "⚠️ Brain unavailable — message queued. Check /status for boot state.";
 
 /**
  * Minimal recovery handler — works without transport/memory/pipeline.
@@ -23,6 +38,17 @@ import type { InboundMessage } from "../types/platform.js";
  */
 export function createRecoveryHandler(ctx: BootCtx) {
   const messageQueue: Array<{ msg: InboundMessage; adapter: any }> = [];
+  // #1831: one brain-unavailable notice per chat per unwired episode.
+  const noticedChannels: RecoveryNoticeThrottle = new Set();
+
+  async function notifyQueuedOnce(msg: InboundMessage, adapter: any): Promise<void> {
+    // #1831: first queued message per chat per episode carries the notice;
+    // later messages queue silently to avoid group and retry spam.
+    const key = recoveryNoticeKey(msg);
+    if (noticedChannels.has(key)) return;
+    noticedChannels.add(key);
+    await adapter.sendMessage(msg.channelId, RECOVERY_QUEUED_NOTICE);
+  }
 
   async function handle(msg: InboundMessage, adapter: any): Promise<void> {
     // #1468: emergency fast path first — claimed controls and owner turns
@@ -37,10 +63,15 @@ export function createRecoveryHandler(ctx: BootCtx) {
     }
 
     const text = msg.text?.trim() ?? "";
+    // #1831: one structured error log per unwired inbound — routing ids and
+    // phase state only, never message content.
+    const kind = text.startsWith("/") ? "command" : "normal";
+    logError("recovery", `Unwired inbound platform=${msg.platform} channel=${msg.channelId} sender=${msg.senderId} msg=${msg.messageId ?? "n/a"} kind=${kind} transport=${ctx.phaseHealth.get("transport")?.status ?? "unknown"} pipelineDeps=${ctx.phaseHealth.get("pipelineDeps")?.status ?? "unknown"}`);
     if (!text.startsWith("/")) {
       // Not a command — queue for later (busyGuard will handle once pipeline wires)
       messageQueue.push({ msg, adapter });
       logTrace("boot", `recovery-handler: queued non-command message from ${msg.userId}`);
+      await notifyQueuedOnce(msg, adapter);
       return;
     }
 
@@ -85,13 +116,14 @@ export function createRecoveryHandler(ctx: BootCtx) {
         return;
       }
       default:
-        // Unknown command — queue it
+        // Unknown command — queue it with the same one-notice-per-episode rule
         messageQueue.push({ msg, adapter });
+        await notifyQueuedOnce(msg, adapter);
         return;
     }
   }
 
-  return { handle, messageQueue };
+  return { handle, messageQueue, noticedChannels };
 }
 
 export async function phasePlatformsConnect(ctx: BootCtx): Promise<PhaseResult> {
@@ -106,16 +138,20 @@ export async function phasePlatformsConnect(ctx: BootCtx): Promise<PhaseResult> 
   const recovery = createRecoveryHandler(ctx);
   // Store recovery queue on ctx for phasePipelineDeps to drain
   (ctx as any)._recoveryQueue = recovery.messageQueue;
+  // #1831: per-chat notice throttle — drainRecoveryQueue resets it on wiring
+  (ctx as any)._recoveryNoticeThrottle = recovery.noticedChannels;
 
   // --- Telegram service ---
   registry.register("telegram", {
     configured: Boolean(config.telegram.botToken && config.telegram.allowedUserIds.size > 0),
     async create() {
       const { TelegramAdapter } = await import("../platforms/telegram/telegram-adapter.js");
-      // Construct with a placeholder deps — setMessageHandler() will replace later
+      // Construct with placeholder deps — setMessageHandler() replaces the
+      // whole object on wiring. The degraded route marks this deps object as
+      // unwired (#1831); pipeline is an empty placeholder, never called.
       const adapter = new TelegramAdapter(
         { botToken: config.telegram.botToken, allowedUserIds: config.telegram.allowedUserIds, pollTimeoutS: config.telegram.pollTimeoutS },
-        { pipeline: { handleInbound: (msg: any) => recovery.handle(msg, adapter) } as any, conversationBuffer: ctx.conversationBuffer, transport: null as any, memoryRuntime: ctx.memoryRuntime, sessionManager: ctx.sessionManager, actionGate: ctx.actionGate },
+        { pipeline: {} as unknown as PipelineDeps, conversationBuffer: ctx.conversationBuffer, transport: null as any, memoryRuntime: ctx.memoryRuntime, sessionManager: ctx.sessionManager, actionGate: ctx.actionGate, degraded: { handle: (msg, adapter) => recovery.handle(msg, adapter) } },
       );
       ctx.telegramAdapter = adapter;
       platformAdapters.set("telegram", adapter);
@@ -149,9 +185,12 @@ export async function phasePlatformsConnect(ctx: BootCtx): Promise<PhaseResult> 
         throw new Error("DISCORD_APP_ID missing or invalid — Discord disabled");
       }
       const { DiscordAdapter } = await import("../platforms/discord/discord-adapter.js");
+      // Placeholder deps — setMessageHandler() replaces the whole object on
+      // wiring. The degraded route marks this deps object as unwired (#1831);
+      // pipeline is an empty placeholder, never called.
       const adapter = new DiscordAdapter(
         { botToken: config.discord.botToken!, appId: config.discord.appId!, allowedUserIds: config.discord.allowedUserIds! },
-        { pipeline: { handleInbound: (msg: any) => recovery.handle(msg, adapter) } as any, transport: null as any, memoryRuntime: ctx.memoryRuntime, conversationBuffer: ctx.conversationBuffer },
+        { pipeline: {} as unknown as PipelineDeps, transport: null as any, memoryRuntime: ctx.memoryRuntime, conversationBuffer: ctx.conversationBuffer, degraded: { handle: (msg, adapter) => recovery.handle(msg, adapter) } },
       );
       ctx.discordAdapter = adapter;
       platformAdapters.set("discord", adapter);

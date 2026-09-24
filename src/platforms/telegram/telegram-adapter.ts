@@ -19,7 +19,7 @@ import { emojiToScore } from "../../utils/emoji-score.js";
 import { logInfo, logWarn, logError, logDebug } from "../../components/logger.js";
 import { logAndSwallow } from "../../components/log-and-swallow.js";
 import { handleInboundMessage, resetAndPrepare, type PipelineDeps } from "../../components/message-pipeline.js";
-import type { PlatformAdapter, PlatformCapabilities, InboundMessage, SendOpts } from "../../types/platform.js";
+import type { PlatformAdapter, PlatformCapabilities, InboundMessage, SendOpts, DegradedInboundRoute } from "../../types/platform.js";
 import type { TelegramUpdate } from "../../types/index.js";
 import type { ConversationBuffer } from "../../components/conversation-buffer.js";
 import type { IKiroTransport } from "../../components/transport/kiro-transport.js";
@@ -43,6 +43,12 @@ export interface TelegramAdapterDeps {
   memoryRuntime: AbtarsMemoryRuntime;
   sessionManager: { getActiveSessionId(userId: string, platform: string): string };
   actionGate?: { handleCallback(data: string): boolean } | null;
+  /**
+   * #1831: degraded-mode route, present only while the full pipeline is
+   * unwired. Its presence means "unwired" — route inbound to it, never to
+   * the placeholder pipeline and never a silent return. Removed by wiring.
+   */
+  degraded?: DegradedInboundRoute;
 }
 
 export class TelegramAdapter implements PlatformAdapter {
@@ -181,7 +187,15 @@ export class TelegramAdapter implements PlatformAdapter {
         logWarn(TAG, `Unauthorized synthetic message from ${msg.senderId}`);
         return;
       }
-      if (!this.deps.pipeline) return;
+      // #1831: a synthetic message while unwired takes the degraded route,
+      // never the full pipeline with placeholder deps.
+      const degraded = this.deps.degraded;
+      if (degraded) {
+        void degraded.handle(msg, this).catch((err) => {
+          logError(TAG, `Degraded synthetic dispatch error: ${err instanceof Error ? err.message : String(err)}`);
+        });
+        return;
+      }
       handleInboundMessage(msg, this, this.deps.pipeline).catch(err => {
         logError(TAG, `Synthetic message handling failed: ${err instanceof Error ? err.message : String(err)}`);
       });
@@ -428,14 +442,26 @@ export class TelegramAdapter implements PlatformAdapter {
 
     // #512: commands bypass the sequential await — execute immediately even if agent is mid-stream
     if (text.startsWith("/") && !text.startsWith("//")) {
-      if (!this.deps.pipeline?.sessionManager) return; // pipeline not wired yet
+      // #1831: while unwired, route to the degraded handler — never drop silently.
+      const degraded = this.deps.degraded;
+      if (degraded) {
+        degraded.handle(inbound, this).catch((err) => {
+          logError(TAG, `Degraded command dispatch error: ${err instanceof Error ? err.message : String(err)}`);
+        });
+        return;
+      }
       handleInboundMessage(inbound, this, this.deps.pipeline).catch((err) => {
         logError(TAG, `Command dispatch error: ${err instanceof Error ? err.message : String(err)}`);
       });
       return;
     }
 
-    if (!this.deps.pipeline?.sessionManager) return; // pipeline not wired yet
+    // #1831: while unwired, route to the degraded handler — never drop silently.
+    const degraded = this.deps.degraded;
+    if (degraded) {
+      await degraded.handle(inbound, this);
+      return;
+    }
     await handleInboundMessage(inbound, this, this.deps.pipeline);
   }
 

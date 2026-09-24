@@ -95,6 +95,18 @@ export interface InboundMessage {
   internal?: InternalBootMetadata | InternalScheduledAnnouncementMetadata;
 }
 
+/**
+ * #1831: degraded-mode inbound route. Boot installs it on platform adapters
+ * while the full message pipeline is unwired (transport init failed, so
+ * phase-pipeline-deps never ran); `setMessageHandler` wiring replaces the
+ * whole deps object with one that has no degraded route. Presence of the
+ * route therefore means "unwired" — adapters route every inbound path to it
+ * instead of calling the pipeline or returning silently.
+ */
+export interface DegradedInboundRoute {
+  handle(msg: InboundMessage, adapter: PlatformAdapter): Promise<void>;
+}
+
 /** What a platform adapter can do — pipeline checks these. */
 export interface PlatformCapabilities {
   voice: boolean;

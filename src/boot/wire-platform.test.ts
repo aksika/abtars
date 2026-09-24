@@ -242,6 +242,18 @@ describe("drainRecoveryQueue (#1306)", () => {
     expect(handleInboundMessage).toHaveBeenCalledTimes(2);
     expect(queue).toHaveLength(0);
   });
+
+  it("resets the per-chat notice throttle so a later episode notifies again (#1831)", async () => {
+    const ctx = createBootCtx();
+    ctx.pipelineDeps = makeMockPipelineDeps();
+    const throttle = new Set<string>(["telegram:42"]);
+    (ctx as unknown as { _recoveryNoticeThrottle: Set<string> })._recoveryNoticeThrottle = throttle;
+
+    const { drainRecoveryQueue } = await import("./wire-platform.js");
+    await drainRecoveryQueue(ctx);
+
+    expect(throttle.size).toBe(0);
+  });
 });
 
 // ── #1706: captured runtime reference upgrades in place ────────────────────

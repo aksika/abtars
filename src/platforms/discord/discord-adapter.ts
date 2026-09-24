@@ -18,7 +18,7 @@ import { logInfo, logWarn, logDebug } from "../../components/logger.js";
 import { logAndSwallow } from "../../components/log-and-swallow.js";
 import { getEnv } from "../../components/env-schema.js";
 import { handleInboundMessage, type PipelineDeps } from "../../components/message-pipeline.js";
-import type { PlatformAdapter, PlatformCapabilities, InboundMessage, SendOpts } from "../../types/platform.js";
+import type { PlatformAdapter, PlatformCapabilities, InboundMessage, SendOpts, DegradedInboundRoute } from "../../types/platform.js";
 import type { DiscordInboundMessage } from "../../types/index.js";
 import type { IKiroTransport } from "../../components/transport/kiro-transport.js";
 import type { AbtarsMemoryRuntime } from "../../components/memory-runtime.js";
@@ -39,6 +39,12 @@ export interface DiscordAdapterDeps {
   transport: IKiroTransport;
   memoryRuntime: AbtarsMemoryRuntime;
   conversationBuffer: ConversationBuffer;
+  /**
+   * #1831: degraded-mode route, present only while the full pipeline is
+   * unwired. Its presence means "unwired" — route inbound to it, never to
+   * the placeholder pipeline. Removed by wiring.
+   */
+  degraded?: DegradedInboundRoute;
 }
 
 export class DiscordAdapter implements PlatformAdapter {
@@ -134,6 +140,12 @@ export class DiscordAdapter implements PlatformAdapter {
       isVoice: false,
     };
 
+    // #1831: while unwired, route to the degraded handler — never the placeholder pipeline.
+    const degraded = this.deps.degraded;
+    if (degraded) {
+      await degraded.handle(msg, interactionAdapter);
+      return;
+    }
     await handleInboundMessage(msg, interactionAdapter, this.deps.pipeline);
   }
 
@@ -194,6 +206,12 @@ export class DiscordAdapter implements PlatformAdapter {
           isGroup: !!interaction.guildId,
           isVoice: false,
         };
+        // #1831: while unwired, route to the degraded handler — never the placeholder pipeline.
+        const degraded = this.deps.degraded;
+        if (degraded) {
+          await degraded.handle(msg, this);
+          return;
+        }
         await handleInboundMessage(msg, this, this.deps.pipeline);
       });
     });
@@ -245,6 +263,15 @@ export class DiscordAdapter implements PlatformAdapter {
 
   injectMessage(msg: InboundMessage): void {
     // Discord doesn't support synthetic injection the same way.
+    // #1831: while unwired, replay takes the degraded route, never the
+    // full pipeline with placeholder deps.
+    const degraded = this.deps.degraded;
+    if (degraded) {
+      void degraded.handle(msg, this).catch((err) => {
+        logWarn(TAG, `Degraded replay failed: ${err instanceof Error ? err.message : String(err)}`);
+      });
+      return;
+    }
     // For sleep replay, we call handleInboundMessage directly.
     handleInboundMessage(msg, this, this.deps.pipeline).catch((err) => {
       logWarn(TAG, `Failed to replay queued message: ${err instanceof Error ? err.message : String(err)}`);
@@ -350,10 +377,22 @@ export class DiscordAdapter implements PlatformAdapter {
 
     // #512: commands bypass sequential await
     if (text.startsWith("/") && !text.startsWith("//")) {
+      // #1831: while unwired, route to the degraded handler — never the placeholder pipeline.
+      const degraded = this.deps.degraded;
+      if (degraded) {
+        degraded.handle(inbound, this).catch(err => logAndSwallow(TAG, "degraded handleInboundMessage command", err));
+        return;
+      }
       handleInboundMessage(inbound, this, this.deps.pipeline).catch(err => logAndSwallow(TAG, "handleInboundMessage command", err));
       return;
     }
 
+    // #1831: while unwired, route to the degraded handler — never the placeholder pipeline.
+    const degraded = this.deps.degraded;
+    if (degraded) {
+      await degraded.handle(inbound, this);
+      return;
+    }
     this._startTypingLoop(message.channelId);
     await handleInboundMessage(inbound, this, this.deps.pipeline);
     this._stopTypingLoop(message.channelId);

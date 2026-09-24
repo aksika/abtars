@@ -89,6 +89,9 @@ export async function wireTui(ctx: BootCtx): Promise<void> {
 
 /** Drain messages queued by the recovery handler while the pipeline was down. */
 export async function drainRecoveryQueue(ctx: BootCtx): Promise<void> {
+  // #1831: wiring completed — the unwired episode is over, so reset the
+  // per-chat notice throttle and let a later episode notify again.
+  (ctx as unknown as { _recoveryNoticeThrottle?: { clear(): void } })._recoveryNoticeThrottle?.clear();
   const queue = (ctx as unknown as { _recoveryQueue?: Array<{ msg: unknown; adapter: unknown }> })._recoveryQueue;
   if (!queue?.length || !ctx.pipelineDeps) return;
 

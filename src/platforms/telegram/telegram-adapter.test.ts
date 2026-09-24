@@ -521,4 +521,124 @@ describe("TelegramAdapter", () => {
       expect(sentTexts().some((t) => t.includes("Transport rebuilt"))).toBe(true);
     });
   });
+
+  describe("unwired pipeline degraded route (#1831)", () => {
+    let recovery: {
+      handle: (msg: InboundMessage, adapter: any) => Promise<void>;
+      messageQueue: Array<{ msg: InboundMessage; adapter: any }>;
+      noticedChannels: Set<string>;
+    };
+    let unwired: TelegramAdapter;
+
+    function dmUpdate(text: string, messageId: number) {
+      return {
+        update_id: messageId,
+        message: {
+          message_id: messageId,
+          chat: { id: 42, type: "private" },
+          from: { id: 42, first_name: "Test" },
+          text,
+          date: Math.floor(Date.now() / 1000),
+        },
+      };
+    }
+
+    function unwiredSentTexts(): string[] {
+      const api = capturedApi as unknown as { sendMessage: ReturnType<typeof vi.fn> };
+      return api.sendMessage.mock.calls.map((c) => String(c[1]));
+    }
+
+    beforeEach(async () => {
+      const { createBootCtx } = await import("../../boot/context.js");
+      const { createRecoveryHandler } = await import("../../boot/phase-platforms-connect.js");
+      const ctx = createBootCtx();
+      ctx.phaseHealth.set("transport", { status: "failed", error: "test fixture" });
+      ctx.phaseHealth.set("pipelineDeps", { status: "skipped", error: "no transport" });
+      recovery = createRecoveryHandler(ctx);
+      unwired = new TelegramAdapter(makeConfig(), {
+        ...deps,
+        pipeline: {} as PipelineDeps,
+        degraded: { handle: (msg, adapter) => recovery.handle(msg, adapter) },
+      });
+      await unwired.start();
+    });
+
+    it("routes a normal DM to the degraded route with notice + queue, never the pipeline", async () => {
+      await (TelegramPollerMock as any)._handler(dmUpdate("hello bot", 901));
+
+      expect(unwiredSentTexts().some((t) => t.includes("/status"))).toBe(true);
+      expect(recovery.messageQueue).toHaveLength(1);
+      expect(recovery.messageQueue[0]!.msg.text).toBe("hello bot");
+      expect(transport.sendPrompt).not.toHaveBeenCalled();
+    });
+
+    it("throttles the notice to one per chat per episode", async () => {
+      await (TelegramPollerMock as any)._handler(dmUpdate("first", 902));
+      await (TelegramPollerMock as any)._handler(dmUpdate("second", 903));
+
+      expect(recovery.messageQueue).toHaveLength(2);
+      expect(unwiredSentTexts().filter((t) => t.includes("/status"))).toHaveLength(1);
+      expect(transport.sendPrompt).not.toHaveBeenCalled();
+    });
+
+    it("answers /status on the command fast path", async () => {
+      await (TelegramPollerMock as any)._handler(dmUpdate("/status", 904));
+
+      expect(unwiredSentTexts().some((t) => t.includes("Boot status"))).toBe(true);
+      expect(recovery.messageQueue).toHaveLength(0);
+      expect(transport.sendPrompt).not.toHaveBeenCalled();
+    });
+
+    it("treats an addressed group message like a DM non-command", async () => {
+      await (TelegramPollerMock as any)._handler({
+        update_id: 907,
+        message: {
+          message_id: 907,
+          chat: { id: -100, type: "supergroup" },
+          from: { id: 42, first_name: "Test" },
+          text: "@testbot hello group",
+          date: Math.floor(Date.now() / 1000),
+        },
+      });
+
+      expect(recovery.messageQueue).toHaveLength(1);
+      expect(unwiredSentTexts().filter((t) => t.includes("/status"))).toHaveLength(1);
+      expect(transport.sendPrompt).not.toHaveBeenCalled();
+    });
+
+    it("routes an internal synthetic message to the degraded route while unwired", async () => {
+      const internal = { kind: "boot_greeting" } as InternalBootMetadata;
+      Object.defineProperty(internal, BOOT_GREETING_TOKEN, { value: true, enumerable: false });
+      unwired.injectMessage({
+        platform: "telegram", channelId: "42", senderId: "42", senderName: "Test",
+        userId: "master", text: "[SESSION START] hello",
+        timestamp: Date.now(), isGroup: false, isVoice: false, internal,
+      });
+
+      expect(recovery.messageQueue).toHaveLength(1);
+      expect(transport.sendPrompt).not.toHaveBeenCalled();
+    });
+
+    it("emits one content-free error log per unwired inbound", async () => {
+      const logMod = await import("../../components/logger.js");
+      const errorSpy = vi.spyOn(logMod, "logError").mockImplementation(() => {});
+
+      await (TelegramPollerMock as any)._handler(dmUpdate("hello bot", 905));
+
+      expect(errorSpy).toHaveBeenCalledTimes(1);
+      const logged = errorSpy.mock.calls.map((c) => String(c[1])).join("\n");
+      expect(logged).toContain("telegram");
+      expect(logged).not.toContain("hello bot");
+      errorSpy.mockRestore();
+    });
+
+    it("wiring drops the degraded route and restores the pipeline", async () => {
+      unwired.setMessageHandler(deps);
+
+      await (TelegramPollerMock as any)._handler(dmUpdate("hello again", 906));
+
+      expect(transport.sendPrompt).toHaveBeenCalled();
+      expect(recovery.messageQueue).toHaveLength(0);
+    });
+  });
 });
