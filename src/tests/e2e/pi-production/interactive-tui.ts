@@ -37,18 +37,66 @@ function visibleText(value: string): string {
     .replace(/\r/g, "");
 }
 
-function scriptArgs(command: string): string[] {
-  // util-linux (Linux) and BSD (macOS) have different command placement.
+export function scriptArgs(command: string): string[] {
+  // util-linux (Linux) runs the command via sh -c; BSD (macOS) execs argv
+  // directly, so route through /bin/sh explicitly — a bare shell string (or
+  // builtin like :) can never execute otherwise (#1842).
   return process.platform === "darwin"
-    ? ["-q", "/dev/null", command]
+    ? ["-q", "/dev/null", "/bin/sh", "-c", command]
     : ["-qfec", command, "/dev/null"];
 }
 
+/**
+ * macOS stdin pump for BSD `script` (#1842). Node child pipes are libuv
+ * socketpairs and `script` fatals on tcgetattr(EOPNOTSUPP) for them; a real
+ * pipe() is ENOTTY-tolerated, but Node cannot make one (and macOS rejects
+ * fifos with EOPNOTSUPP too). The pump creates a real pipe, spawns script
+ * on its read end, and forwards our socket stdin into it. Exit code and
+ * SIGTERM propagate to/from the wrapped command. Python indentation below
+ * is significant — keep flush-left.
+ */
+const STDIN_PUMP = `
+import os, signal, subprocess, sys, threading
+r, w = os.pipe()
+p = subprocess.Popen(sys.argv[1:], stdin=r)
+os.close(r)
+def pump():
+    try:
+        while True:
+            data = os.read(0, 65536)
+            if not data:
+                break
+            view = memoryview(data)
+            while view:
+                view = view[os.write(w, view):]
+    except OSError:
+        pass
+threading.Thread(target=pump, daemon=True).start()
+def on_term(signum, frame):
+    try:
+        p.terminate()
+    except OSError:
+        pass
+signal.signal(signal.SIGTERM, on_term)
+rc = p.wait()
+sys.exit(rc if rc >= 0 else 128 - rc)
+`;
+
+export function smokeLauncher(): { execPath: string; prefixArgs: string[] } {
+  // darwin: python pump (socket stdin -> real pipe) around script — "script"
+  // is argv[0] of the wrapped command (sys.argv[1] for the pump program).
+  // Linux: script directly, pipes suffice there.
+  return process.platform === "darwin"
+    ? { execPath: "python3", prefixArgs: ["-c", STDIN_PUMP, "script"] }
+    : { execPath: "script", prefixArgs: [] };
+}
+
 export async function runInteractiveTuiSmoke(opts: InteractiveTuiSmokeOptions): Promise<void> {
+  const launcher = smokeLauncher();
   try {
-    // BSD `script` has no `--version`; exercise the platform-specific command
-    // shape so the prerequisite check works on both macOS and Linux.
-    execFileSync("script", scriptArgs(":"), { stdio: "ignore", timeout: 5_000 });
+    // Exercise the production launch shape so the prerequisite check covers
+    // python3, script, and the shell wrapper together.
+    execFileSync(launcher.execPath, [...launcher.prefixArgs, ...scriptArgs(":")], { stdio: "ignore", timeout: 10_000 });
   } catch {
     throw new Error("interactive TUI smoke requires the `script` pseudo-terminal utility");
   }
@@ -60,8 +108,8 @@ export async function runInteractiveTuiSmoke(opts: InteractiveTuiSmokeOptions): 
     "tui --new A",
   ].join(" ");
   const child = new SpawnedChild({
-    execPath: "script",
-    args: scriptArgs(command),
+    execPath: launcher.execPath,
+    args: [...launcher.prefixArgs, ...scriptArgs(command)],
     cwd: opts.abtarsRoot,
     env: {
       ...opts.config.bridgeEnv,
