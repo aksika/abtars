@@ -302,6 +302,192 @@ export class TmuxCommandPort implements CommandPort {
   }
 }
 
+// ── cmux command port ────────────────────────────────────────────────────
+
+interface CmuxCommandPortOptions {
+  /** Workspace title (stable human name); resolved to a live ref on every run. */
+  workspace: string;
+  /** Optional surface ref-or-title hint; otherwise the single terminal surface is used. */
+  surface?: string;
+  pollMs?: number;
+  cmuxBin?: string;
+}
+
+const CMUX_CAPTURE_LINES = 2000;
+
+interface CmuxTarget {
+  workspaceRef: string;
+  surfaceRef: string;
+}
+
+/**
+ * cmux-over-SSH port for Mac requester hosts. Resolves the configured
+ * workspace title to live refs via `cmux tree --all --json` on every run
+ * (refs can shift between calls), then sends ONE command line and polls
+ * `capture-pane` for unique begin/end markers — the same marker protocol
+ * as TmuxCommandPort. Never opens workspaces or surfaces; fails closed when
+ * the workspace is missing or the surface is ambiguous. Cancellation sends
+ * ctrl+c and captures the final bounded pane.
+ */
+export class CmuxCommandPort implements CommandPort {
+  private readonly workspace: string;
+  private readonly surfaceHint: string | undefined;
+  private readonly pollMs: number;
+  private readonly cmuxBin: string;
+  private inFlight = false;
+
+  constructor(opts: CmuxCommandPortOptions) {
+    this.workspace = opts.workspace;
+    this.surfaceHint = opts.surface;
+    this.pollMs = opts.pollMs ?? 2500;
+    this.cmuxBin = opts.cmuxBin ?? "cmux";
+  }
+
+  private async cmux(args: string[], timeoutMs: number): Promise<{ ok: boolean; output: string }> {
+    try {
+      const output = await new Promise<string>((resolve, reject) => {
+        execFile(this.cmuxBin, args, { encoding: "utf-8", timeout: timeoutMs, maxBuffer: MAX_PORT_OUTPUT_BYTES + 4096 }, (err, stdout) => {
+          if (err) reject(err);
+          else resolve(stdout);
+        });
+      });
+      return { ok: true, output };
+    } catch (err) {
+      return { ok: false, output: err instanceof Error ? err.message : String(err) };
+    }
+  }
+
+  private parseTree(doc: unknown): CmuxTarget | { error: string } {
+    if (typeof doc !== "object" || doc === null) return { error: "cmux tree returned non-object JSON" };
+    const windows = (doc as { windows?: unknown }).windows;
+    if (!Array.isArray(windows)) return { error: "cmux tree JSON has no windows array" };
+    let first: { ref: string; surfaces: Array<{ ref: string; title: string; type: string }> } | null = null;
+    let count = 0;
+    for (const w of windows) {
+      if (typeof w !== "object" || w === null) continue;
+      const workspaces = (w as { workspaces?: unknown }).workspaces;
+      if (!Array.isArray(workspaces)) continue;
+      for (const ws of workspaces) {
+        if (typeof ws !== "object" || ws === null) continue;
+        const rec = ws as { ref?: unknown; title?: unknown; panes?: unknown };
+        if (rec.title !== this.workspace || typeof rec.ref !== "string") continue;
+        count += 1;
+        if (first !== null) continue;
+        const surfaces: Array<{ ref: string; title: string; type: string }> = [];
+        if (Array.isArray(rec.panes)) {
+          for (const pane of rec.panes) {
+            if (typeof pane !== "object" || pane === null) continue;
+            const listed = (pane as { surfaces?: unknown }).surfaces;
+            if (!Array.isArray(listed)) continue;
+            for (const s of listed) {
+              if (typeof s !== "object" || s === null) continue;
+              const sr = s as { ref?: unknown; title?: unknown; type?: unknown };
+              if (typeof sr.ref !== "string") continue;
+              surfaces.push({
+                ref: sr.ref,
+                title: typeof sr.title === "string" ? sr.title : "",
+                type: typeof sr.type === "string" ? sr.type : "",
+              });
+            }
+          }
+        }
+        first = { ref: rec.ref, surfaces };
+      }
+    }
+    if (first === null) return { error: `cmux workspace not found: ${JSON.stringify(this.workspace)}` };
+    if (count > 1) return { error: `cmux workspace title is ambiguous (${count} matches): ${JSON.stringify(this.workspace)}` };
+    const terminals = first.surfaces.filter((s) => s.type === "terminal");
+    if (this.surfaceHint !== undefined) {
+      const hinted = terminals.find((s) => s.ref === this.surfaceHint || s.title === this.surfaceHint);
+      if (hinted === undefined) return { error: `cmux surface hint matches nothing in workspace ${JSON.stringify(this.workspace)}` };
+      return { workspaceRef: first.ref, surfaceRef: hinted.ref };
+    }
+    const [only] = terminals;
+    if (terminals.length !== 1 || only === undefined) {
+      return { error: `cmux workspace ${JSON.stringify(this.workspace)} has ${terminals.length} terminal surfaces; pass an explicit surface hint` };
+    }
+    return { workspaceRef: first.ref, surfaceRef: only.ref };
+  }
+
+  private async resolveTarget(timeoutMs: number): Promise<CmuxTarget | { error: string }> {
+    const tree = await this.cmux(["tree", "--all", "--json"], timeoutMs);
+    if (!tree.ok) return { error: `cmux tree failed: ${tree.output.slice(0, 200)}` };
+    try {
+      return this.parseTree(JSON.parse(tree.output) as unknown);
+    } catch (err) {
+      return { error: `cmux tree returned invalid JSON: ${err instanceof Error ? err.message : String(err)}` };
+    }
+  }
+
+  private async capture(target: CmuxTarget, timeoutMs: number): Promise<string> {
+    const result = await this.cmux(
+      ["capture-pane", "--workspace", target.workspaceRef, "--surface", target.surfaceRef, "--lines", String(CMUX_CAPTURE_LINES)],
+      timeoutMs,
+    );
+    return result.ok ? result.output : "";
+  }
+
+  async run(argv: CommandArg[], opts: { timeoutMs: number; cwd?: string }): Promise<PortResult> {
+    if (this.inFlight) {
+      return { ok: false, exitCode: null, stdout: "", stderr: "another cmux command is still in flight", timedOut: false };
+    }
+    this.inFlight = true;
+    try {
+      return await this.execute(argv, opts);
+    } finally {
+      this.inFlight = false;
+    }
+  }
+
+  private async execute(argv: CommandArg[], opts: { timeoutMs: number; cwd?: string }): Promise<PortResult> {
+    const target = await this.resolveTarget(10_000);
+    if ("error" in target) {
+      return { ok: false, exitCode: null, stdout: "", stderr: target.error, timedOut: false };
+    }
+    const tokens = buildTmuxTokens(argv);
+    const nonce = randomUUID().slice(0, 8);
+    const begin = `RSM_BEGIN_${nonce}`;
+    const end = `RSM_END_${nonce}`;
+    const commandLine = [
+      `echo ${begin}`,
+      `cd ${quoteArg(opts.cwd ?? ".")}`,
+      tokens.join(" "),
+      `echo ${end}`,
+    ].join(" ; ");
+
+    const deadline = Date.now() + opts.timeoutMs;
+    const sendResult = await this.cmux(
+      ["send", "--workspace", target.workspaceRef, "--surface", target.surfaceRef, `${commandLine}\n`],
+      Math.max(5_000, Math.min(opts.timeoutMs, 30_000)),
+    );
+    if (!sendResult.ok) {
+      return { ok: false, exitCode: null, stdout: "", stderr: `cmux send failed for workspace ${JSON.stringify(this.workspace)}`, timedOut: false };
+    }
+
+    let pane = "";
+    while (Date.now() < deadline) {
+      await new Promise((r) => setTimeout(r, this.pollMs));
+      pane = await this.capture(target, 10_000);
+      const beginIndex = pane.lastIndexOf(begin);
+      if (beginIndex >= 0) {
+        const afterBegin = pane.slice(beginIndex + begin.length);
+        const endIndex = afterBegin.lastIndexOf(end);
+        if (endIndex >= 0) {
+          const body = afterBegin.slice(0, endIndex).trim();
+          return { ok: true, exitCode: 0, stdout: body, stderr: "", timedOut: false };
+        }
+      }
+    }
+
+    await this.cmux(["send-key", "--workspace", target.workspaceRef, "--surface", target.surfaceRef, "ctrl+c"], 10_000);
+    await new Promise((r) => setTimeout(r, 1_000));
+    const finalPane = await this.capture(target, 10_000);
+    const beginIndex = finalPane.lastIndexOf(begin);
+    const tail = beginIndex >= 0 ? finalPane.slice(beginIndex + begin.length) : finalPane;
+    return { ok: false, exitCode: null, stdout: tail.slice(-MAX_PORT_OUTPUT_BYTES), stderr: `cmux command timed out after ${opts.timeoutMs}ms`, timedOut: true };
+  }
+}
+
 // ── Probe client ─────────────────────────────────────────────────────────────
 
 export function parseProbeOutput(stdout: string): { result: unknown; events: unknown[] } {
@@ -1863,7 +2049,12 @@ async function main(): Promise<void> {
   }
 
   const requesterPort = new LocalCommandPort();
-  const receiverPort = new TmuxCommandPort({ session: profile.receiver.exec.kind === "tmux" ? profile.receiver.exec.session : "remote" });
+  const receiverExec = profile.receiver.exec;
+  const receiverPort = receiverExec.kind === "cmux"
+    ? new CmuxCommandPort({ workspace: receiverExec.workspace, surface: receiverExec.surface })
+    : receiverExec.kind === "tmux"
+      ? new TmuxCommandPort({ session: receiverExec.session })
+      : (() => { throw new Error("receiver exec must be tmux or cmux for a two-node run"); })();
   const delegate = createHttpDelegatePort(profile, receiverPort);
   const orcCall = profile.tui?.socketPath ? new TuiOrcClient({ socketPath: profile.tui.socketPath }) : null;
   if (args.profile === "full" && orcCall === null) {

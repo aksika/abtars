@@ -94,6 +94,7 @@ export type LiveNodeProfileV1 = {
 } & (
   | { exec: { kind: "local" } }
   | { exec: { kind: "tmux"; session: string } }
+  | { exec: { kind: "cmux"; workspace: string; surface?: string } }
 );
 
 export interface RemoteSwarmNodeCommandV1 {
@@ -654,7 +655,9 @@ function validateNodeProfile(raw: unknown, field: string): ValidationResult<Live
   if (!execObj.ok) return fail(`${field}.exec must be an object`);
   const kind = expectString(execObj.value.kind, `${field}.exec.kind`, { min: 1, max: 16 });
   if (!kind.ok) return kind;
-  if (kind.value !== "local" && kind.value !== "tmux") return fail(`${field}.exec.kind must be local or tmux`);
+  if (kind.value !== "local" && kind.value !== "tmux" && kind.value !== "cmux") {
+    return fail(`${field}.exec.kind must be local, tmux, or cmux`);
+  }
   const base: { role: RemoteSwarmRole; workdir: string; abtarsHome: string; cli?: string; node?: string; agentApiPort?: number } = {
     role: role.value as RemoteSwarmRole,
     workdir: workdir.value,
@@ -692,6 +695,28 @@ function validateNodeProfile(raw: unknown, field: string): ValidationResult<Live
       agentApiPort: base.agentApiPort,
     };
     return { ok: true, value: tmuxNode };
+  }
+  if (kind.value === "cmux") {
+    const workspace = expectString(execObj.value.workspace, `${field}.exec.workspace`, { min: 1, max: 128 });
+    if (!workspace.ok) return workspace;
+    let surface: string | undefined;
+    if (execObj.value.surface !== undefined) {
+      const hint = expectString(execObj.value.surface, `${field}.exec.surface`, { min: 1, max: 128 });
+      if (!hint.ok) return hint;
+      surface = hint.value;
+    }
+    const cmuxNode: LiveNodeProfileV1 = {
+      role: base.role,
+      workdir: base.workdir,
+      abtarsHome: base.abtarsHome,
+      exec: surface === undefined
+        ? { kind: "cmux", workspace: workspace.value }
+        : { kind: "cmux", workspace: workspace.value, surface },
+      cli: base.cli,
+      node: base.node,
+      agentApiPort: base.agentApiPort,
+    };
+    return { ok: true, value: cmuxNode };
   }
   const localNode: LiveNodeProfileV1 = {
     role: base.role,

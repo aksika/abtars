@@ -36,6 +36,7 @@ import {
   quoteArg,
   LocalCommandPort,
   TmuxCommandPort,
+  CmuxCommandPort,
   TuiOrcClient,
   parseProbeOutput,
   ProbeClient,
@@ -343,6 +344,42 @@ function writeFakeTmux(root: string): string {
   return fake;
 }
 
+function writeFakeCmux(root: string, treeJson?: string): string {
+  const fake = join(root, "fake-cmux.sh");
+  const tree = treeJson ?? JSON.stringify({
+    windows: [{
+      ref: "window:1",
+      workspaces: [{
+        ref: "workspace:9",
+        title: "rs-cmux",
+        panes: [{ ref: "pane:1", surfaces: [{ ref: "surface:7", title: "rs-cmux-term", type: "terminal" }] }],
+      }],
+    }],
+  });
+  writeFileSync(join(root, "cmux-tree.json"), tree + "\n");
+  const lines = [
+    "#!/usr/bin/env bash",
+    "set -u",
+    'DIR="$(cd "$(dirname "$0")" && pwd)"',
+    'STATE="${FAKE_CMUX_STATE:-$DIR/cmux-state.txt}"',
+    'TREE="${FAKE_CMUX_TREE:-$DIR/cmux-tree.json}"',
+    'OP="$1"',
+    'if [ "$OP" = "tree" ]; then',
+    '  cat "$TREE"',
+    'elif [ "$OP" = "send" ]; then',
+    '  text="$6"',
+    '  { echo "LINE:$text"; sh -c "$text" 2>&1; } >> "$STATE"',
+    'elif [ "$OP" = "capture-pane" ]; then',
+    '  if [ -f "$STATE" ]; then cat "$STATE"; fi',
+    'elif [ "$OP" = "send-key" ]; then',
+    '  echo "KEY:$*" >> "$STATE"',
+    "fi",
+  ];
+  writeFileSync(fake, lines.join("\n") + "\n");
+  chmodSync(fake, 0o755);
+  return fake;
+}
+
 function makeFakePorts(root: string, runId: string): { requesterPort: CommandPort; receiverPort: CommandPort; fakeNodeDir: string; tmuxState: string; tmuxBin: string; fakeNode: string } {
   const fakeNodeDir = join(root, "fixtures");
   mkdirSync(fakeNodeDir, { recursive: true });
@@ -430,6 +467,44 @@ describe("contracts: profile validation", () => {
     expect(validateProfile(badAlias).ok).toBe(false);
     const badSession = { ...profile, receiver: { ...profile.receiver, exec: { kind: "tmux", session: "a b" } } };
     expect(validateProfile(badSession).ok).toBe(false);
+  });
+
+  it("accepts cmux receiver exec and rejects bad cmux fields", () => {
+    const { profile } = makeProfile();
+    const cmux = {
+      ...profile,
+      receiver: { ...profile.receiver, exec: { kind: "cmux", workspace: "ssh mac-remote" } },
+    };
+    const accepted = validateProfile(cmux);
+    expect(accepted.ok).toBe(true);
+    if (accepted.ok && accepted.value.receiver.exec.kind === "cmux") {
+      expect(accepted.value.receiver.exec.workspace).toBe("ssh mac-remote");
+    }
+    const hinted = {
+      ...profile,
+      receiver: { ...profile.receiver, exec: { kind: "cmux", workspace: "ssh mac-remote", surface: "surface:32" } },
+    };
+    expect(validateProfile(hinted).ok).toBe(true);
+    const emptyWorkspace = {
+      ...profile,
+      receiver: { ...profile.receiver, exec: { kind: "cmux", workspace: "" } },
+    };
+    expect(validateProfile(emptyWorkspace).ok).toBe(false);
+    const missingWorkspace = {
+      ...profile,
+      receiver: { ...profile.receiver, exec: { kind: "cmux" } },
+    };
+    expect(validateProfile(missingWorkspace).ok).toBe(false);
+    const badSurface = {
+      ...profile,
+      receiver: { ...profile.receiver, exec: { kind: "cmux", workspace: "ssh mac-remote", surface: "" } },
+    };
+    expect(validateProfile(badSurface).ok).toBe(false);
+    const badKind = {
+      ...profile,
+      receiver: { ...profile.receiver, exec: { kind: "smoke" } },
+    };
+    expect(validateProfile(badKind).ok).toBe(false);
   });
 });
 
@@ -656,6 +731,115 @@ describe("tmux command port", () => {
     const runId = "rs-prefix";
     const preflight = preflightFixture("requester", runId, { build: { manifestPresent: true, commit: "689da60", branch: null, version: "0.4.1-alpha.0-689da60", source: "dev", matchesExpected: true } });
     expect(validateNodeResult({ kind: "preflight", value: preflight }, "requester", runId).ok).toBe(true);
+  });
+});
+
+describe("cmux command port", () => {
+  it("runs a command through a fake cmux and extracts the marker body", async () => {
+    const root = tmpdirFixture();
+    const cmuxBin = writeFakeCmux(root);
+    const port = new CmuxCommandPort({ workspace: "rs-cmux", pollMs: 30, cmuxBin });
+    const result = await port.run([
+      { text: "echo", quote: false },
+      { text: "hello-from-cmux", quote: false },
+    ], { timeoutMs: 10_000, cwd: root });
+    expect(result.ok).toBe(true);
+    expect(result.stdout).toContain("hello-from-cmux");
+  });
+
+  it("does not shell-inject quoted content", async () => {
+    const root = tmpdirFixture();
+    const cmuxBin = writeFakeCmux(root);
+    const marker = `pwned-${randomUUID()}`;
+    const port = new CmuxCommandPort({ workspace: "rs-cmux", pollMs: 30, cmuxBin });
+    const result = await port.run([
+      { text: `'; touch ${join(tmpdir(), marker)}; echo '`, quote: true },
+      { text: "echo", quote: false },
+    ], { timeoutMs: 10_000, cwd: root });
+    expect(result.ok).toBe(true);
+    expect(existsSync(join(tmpdir(), marker))).toBe(false);
+    expect(result.stdout).toMatch(/not found|No such file/i);
+  });
+
+  it("times out when the marker never completes and sends ctrl+c", async () => {
+    const root = tmpdirFixture();
+    const fake = join(root, "fake-cmux-silent.sh");
+    const lines = [
+      "#!/usr/bin/env bash",
+      "set -u",
+      'DIR="$(cd "$(dirname "$0")" && pwd)"',
+      'STATE="$DIR/cmux-state.txt"',
+      'TREE="$DIR/cmux-tree.json"',
+      'if [ "$1" = "tree" ]; then',
+      '  cat "$TREE"',
+      'elif [ "$1" = "send" ]; then',
+      '  echo "SENT" >> "$STATE"',
+      'elif [ "$1" = "send-key" ]; then',
+      '  echo "KEY:$*" >> "$STATE"',
+      "fi",
+    ];
+    writeFileSync(fake, lines.join("\n") + "\n");
+    chmodSync(fake, 0o755);
+    writeFakeCmux(root);
+    const port = new CmuxCommandPort({ workspace: "rs-cmux", pollMs: 20, cmuxBin: fake });
+    const result = await port.run([{ text: "sleep", quote: false }, { text: "5", quote: false }], { timeoutMs: 500 });
+    expect(result.timedOut).toBe(true);
+    expect(result.ok).toBe(false);
+    expect(readFileSync(join(root, "cmux-state.txt"), "utf-8")).toContain("KEY:send-key");
+  });
+
+  it("rejects an overlapping command", async () => {
+    const root = tmpdirFixture();
+    const cmuxBin = writeFakeCmux(root);
+    const port = new CmuxCommandPort({ workspace: "rs-cmux", pollMs: 50, cmuxBin });
+    const first = port.run([{ text: "sleep", quote: false }, { text: "1", quote: false }], { timeoutMs: 60_000 });
+    await new Promise((r) => setTimeout(r, 150));
+    const second = await port.run([{ text: "echo", quote: false }, { text: "x", quote: false }], { timeoutMs: 1_000 });
+    expect(second.ok).toBe(false);
+    expect(second.stderr).toContain("in flight");
+    const firstResult = await first;
+    expect(firstResult.ok).toBe(true);
+  });
+
+  it("fails closed on unknown workspace", async () => {
+    const root = tmpdirFixture();
+    const cmuxBin = writeFakeCmux(root);
+    const port = new CmuxCommandPort({ workspace: "no-such-workspace", pollMs: 30, cmuxBin });
+    const result = await port.run([{ text: "echo", quote: false }, { text: "x", quote: false }], { timeoutMs: 5_000 });
+    expect(result.ok).toBe(false);
+    expect(result.stderr).toContain("not found");
+  });
+
+  it("fails closed on ambiguous surface without a hint and selects by hint", async () => {
+    const root = tmpdirFixture();
+    const tree = JSON.stringify({
+      windows: [{
+        ref: "window:1",
+        workspaces: [{
+          ref: "workspace:9",
+          title: "rs-cmux",
+          panes: [{ ref: "pane:1", surfaces: [
+            { ref: "surface:7", title: "alpha", type: "terminal" },
+            { ref: "surface:8", title: "beta", type: "terminal" },
+          ] }],
+        }],
+      }],
+    });
+    const cmuxBin = writeFakeCmux(root, tree);
+    const ambiguous = new CmuxCommandPort({ workspace: "rs-cmux", pollMs: 30, cmuxBin });
+    const ambiguousResult = await ambiguous.run(
+      [{ text: "echo", quote: false }, { text: "x", quote: false }],
+      { timeoutMs: 5_000 },
+    );
+    expect(ambiguousResult.ok).toBe(false);
+    expect(ambiguousResult.stderr).toContain("explicit surface hint");
+    const hinted = new CmuxCommandPort({ workspace: "rs-cmux", surface: "surface:8", pollMs: 30, cmuxBin });
+    const hintedResult = await hinted.run([
+      { text: "echo", quote: false },
+      { text: "hello-hinted", quote: false },
+    ], { timeoutMs: 10_000, cwd: root });
+    expect(hintedResult.ok).toBe(true);
+    expect(hintedResult.stdout).toContain("hello-hinted");
   });
 });
 
