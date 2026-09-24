@@ -246,6 +246,7 @@ describe("drainRecoveryQueue (#1306)", () => {
   it("resets the per-chat notice throttle so a later episode notifies again (#1831)", async () => {
     const ctx = createBootCtx();
     ctx.pipelineDeps = makeMockPipelineDeps();
+    ctx.transport = makeMockTransport();
     const throttle = new Set<string>(["telegram:42"]);
     (ctx as unknown as { _recoveryNoticeThrottle: Set<string> })._recoveryNoticeThrottle = throttle;
 
@@ -253,6 +254,22 @@ describe("drainRecoveryQueue (#1306)", () => {
     await drainRecoveryQueue(ctx);
 
     expect(throttle.size).toBe(0);
+  });
+
+  it("keeps the notice throttle while the adapters are still unwired (#1831)", async () => {
+    // A drain during a transport-rebuild gap: wireTelegram/wireDiscord both
+    // no-op without ctx.transport, so the unwired episode is not over and the
+    // chat must not be notified a second time.
+    const ctx = createBootCtx();
+    ctx.pipelineDeps = makeMockPipelineDeps();
+    ctx.transport = null;
+    const throttle = new Set<string>(["telegram:42"]);
+    (ctx as unknown as { _recoveryNoticeThrottle: Set<string> })._recoveryNoticeThrottle = throttle;
+
+    const { drainRecoveryQueue } = await import("./wire-platform.js");
+    await drainRecoveryQueue(ctx);
+
+    expect([...throttle]).toEqual(["telegram:42"]);
   });
 });
 

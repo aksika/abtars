@@ -640,5 +640,28 @@ describe("TelegramAdapter", () => {
       expect(transport.sendPrompt).toHaveBeenCalled();
       expect(recovery.messageQueue).toHaveLength(0);
     });
+
+    it("a failed notice send neither rejects the inbound nor silences the episode", async () => {
+      // The message is already queued when the notice goes out, so a platform
+      // send failure must not surface as an inbound rejection, and the chat
+      // must still get a notice on its next message in the same episode.
+      const api = capturedApi as unknown as { sendMessage: ReturnType<typeof vi.fn> };
+      api.sendMessage.mockRejectedValueOnce(new Error("telegram 502"));
+
+      await expect((TelegramPollerMock as any)._handler(dmUpdate("first", 908))).resolves.not.toThrow();
+      expect(recovery.noticedChannels.has("telegram:42")).toBe(false);
+
+      // Retry: the notice is attempted again and this time succeeds.
+      await (TelegramPollerMock as any)._handler(dmUpdate("second", 909));
+      expect(recovery.noticedChannels.has("telegram:42")).toBe(true);
+      const attemptsAfterSuccess = unwiredSentTexts().filter((t) => t.includes("/status")).length;
+      expect(attemptsAfterSuccess).toBe(2);
+
+      // Throttled from here on, and nothing was lost.
+      await (TelegramPollerMock as any)._handler(dmUpdate("third", 910));
+      expect(unwiredSentTexts().filter((t) => t.includes("/status"))).toHaveLength(2);
+      expect(recovery.messageQueue).toHaveLength(3);
+      expect(transport.sendPrompt).not.toHaveBeenCalled();
+    });
   });
 });

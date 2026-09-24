@@ -46,11 +46,26 @@ export function createRecoveryHandler(ctx: BootCtx) {
     // later messages queue silently to avoid group and retry spam.
     const key = recoveryNoticeKey(msg);
     if (noticedChannels.has(key)) return;
-    noticedChannels.add(key);
-    await adapter.sendMessage(msg.channelId, RECOVERY_QUEUED_NOTICE);
+    try {
+      await adapter.sendMessage(msg.channelId, RECOVERY_QUEUED_NOTICE);
+      // Consume the throttle only after the notice actually went out, so a
+      // platform send failure does not silence the whole episode.
+      noticedChannels.add(key);
+    } catch (err) {
+      // The message is already queued and will drain on wiring; a failed
+      // notice must not reject the inbound path.
+      logError("recovery", `Queued-notice send failed: ${err instanceof Error ? err.message : String(err)}`);
+    }
   }
 
   async function handle(msg: InboundMessage, adapter: any): Promise<void> {
+    const text = msg.text?.trim() ?? "";
+    // #1831: one structured error log per unwired inbound — routing ids and
+    // phase state only, never message content. Logged before the emergency
+    // fast path so an emergency-served turn is still recorded as unwired.
+    const kind = text.startsWith("/") ? "command" : "normal";
+    logError("recovery", `Unwired inbound platform=${msg.platform} channel=${msg.channelId} sender=${msg.senderId} msg=${msg.messageId ?? "n/a"} kind=${kind} transport=${ctx.phaseHealth.get("transport")?.status ?? "unknown"} pipelineDeps=${ctx.phaseHealth.get("pipelineDeps")?.status ?? "unknown"}`);
+
     // #1468: emergency fast path first — claimed controls and owner turns
     // never queue behind the recovery handler.
     if (ctx.emergencyExecution) {
@@ -62,11 +77,6 @@ export function createRecoveryHandler(ctx: BootCtx) {
       }
     }
 
-    const text = msg.text?.trim() ?? "";
-    // #1831: one structured error log per unwired inbound — routing ids and
-    // phase state only, never message content.
-    const kind = text.startsWith("/") ? "command" : "normal";
-    logError("recovery", `Unwired inbound platform=${msg.platform} channel=${msg.channelId} sender=${msg.senderId} msg=${msg.messageId ?? "n/a"} kind=${kind} transport=${ctx.phaseHealth.get("transport")?.status ?? "unknown"} pipelineDeps=${ctx.phaseHealth.get("pipelineDeps")?.status ?? "unknown"}`);
     if (!text.startsWith("/")) {
       // Not a command — queue for later (busyGuard will handle once pipeline wires)
       messageQueue.push({ msg, adapter });
