@@ -176,6 +176,72 @@ export interface RuntimeRecallResult {
    * RecallDecisionV1, validated at this boundary because the wire is unknown.
    */
   decision?: RuntimeRecallDecision;
+  /**
+   * #1813 — deterministic bounded injection selection from abmind. Present on
+   * ordinary recall too (no fast-path flag, profile, or backend needed).
+   * Validated at this boundary; malformed selection is dropped.
+   */
+  selection?: RuntimeRecallSelection;
+}
+
+/** #1813 — structural mirror of abmind RecallSelectionV1 (validated, not cast). */
+export interface RuntimeRecallSelectionRef {
+  id: number;
+  revision: number;
+}
+
+export interface RuntimeRecallSelection {
+  version: 1;
+  refs: RuntimeRecallSelectionRef[];
+  budgetBytes: number;
+  truncated: boolean;
+}
+
+/**
+ * #1813 — narrow the unknown wire selection to the structural mirror.
+ * Anything malformed is dropped: an unverified selection must never bound
+ * what the agent receives. Returns undefined for absent input.
+ */
+export function asRecallSelection(raw: unknown): RuntimeRecallSelection | undefined {
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return undefined;
+  const record = raw as Record<string, unknown>;
+  if (record["version"] !== 1) return undefined;
+  const refs = record["refs"];
+  if (!Array.isArray(refs)) return undefined;
+  for (const entry of refs) {
+    if (typeof entry !== "object" || entry === null) return undefined;
+    const ref = entry as { id?: unknown; revision?: unknown };
+    if (!Number.isInteger(ref.id) || !Number.isInteger(ref.revision)) return undefined;
+  }
+  if (typeof record["budgetBytes"] !== "number" || typeof record["truncated"] !== "boolean") return undefined;
+  return {
+    version: 1,
+    refs: (refs as Array<{ id: number; revision: number }>).map((r) => ({ id: r.id, revision: r.revision })),
+    budgetBytes: record["budgetBytes"],
+    truncated: record["truncated"],
+  };
+}
+
+/**
+ * #1813 — rows to inject: the verified selection when present and resolvable
+ * within this result set, otherwise the full set (ordinary rendering). Rank
+ * order is preserved; selection can only bound, never substitute rows.
+ */
+export function selectInjectedHits<T extends { memoryId?: number }>(
+  hits: T[],
+  selection: RuntimeRecallSelection | undefined,
+): T[] {
+  if (selection === undefined || selection.refs.length === 0) return hits;
+  const byId = new Map<number, T>();
+  for (const hit of hits) {
+    if (typeof hit.memoryId === "number") byId.set(hit.memoryId, hit);
+  }
+  const selected: T[] = [];
+  for (const ref of selection.refs) {
+    const hit = byId.get(ref.id);
+    if (hit !== undefined) selected.push(hit);
+  }
+  return selected.length > 0 ? selected : hits;
 }
 
 /** #1813 — structural mirror of abmind RecallDecisionV1 (validated, not cast). */
@@ -767,7 +833,7 @@ export function createClientRuntime(client: AbmindClientLike): AbtarsMemoryRunti
         timeEnd: input.timeEnd,
         stages: input.stages,
         ...(fastPath !== undefined ? { fastPath } : {}),
-      })) as { results: Array<Record<string, unknown>>; decision?: unknown };
+      })) as { results: Array<Record<string, unknown>>; decision?: unknown; selection?: unknown };
       const hits: RuntimeRecallHit[] = result.results.map((r) => ({
         content: String(r["content"] ?? ""),
         score: Number(r["score"] ?? 0),
@@ -784,18 +850,20 @@ export function createClientRuntime(client: AbmindClientLike): AbtarsMemoryRunti
         createdAt: typeof r["createdAt"] === "number" ? r["createdAt"] : undefined,
         semanticRevision: typeof r["semanticRevision"] === "number" ? r["semanticRevision"] : undefined,
       }));
-      const context = hits.map(h => `- (score: ${h.score.toFixed(3)}) ${h.content.slice(0, 200)}`).join("\n");
+      const compact = selectInjectedHits(hits, asRecallSelection(result.selection));
+      const context = compact.map(h => `- (score: ${h.score.toFixed(3)}) ${h.content.slice(0, 200)}`).join("\n");
       // #1813 — carry the validated decision; malformed envelopes are dropped
       // by asRecallDecision and recall continues as ordinary.
       const decision = asRecallDecision(result.decision);
+      const selection = asRecallSelection(result.selection);
       const ms = Date.now() - t0;
-      logDebug("memory-runtime", `recall: ${hits.length} hits in ${ms}ms decision=${decision?.outcome ?? "none"} top=${hits.slice(0, 3).map((h) => `${h.memoryId ?? "?"}:${h.score.toFixed(3)}`).join(",")}`);
+      logDebug("memory-runtime", `recall: ${hits.length} hits (${compact.length} injected) in ${ms}ms decision=${decision?.outcome ?? "none"} selection=${selection ? `${selection.refs.length} refs${selection.truncated ? " truncated" : ""}` : "none"} top=${hits.slice(0, 3).map((h) => `${h.memoryId ?? "?"}:${h.score.toFixed(3)}`).join(",")}`);
       if (isLogLevel("trace")) {
         for (const h of hits.slice(0, 10)) {
           logTrace("memory-runtime", `hit id=${h.memoryId ?? "?"} score=${h.score.toFixed(3)} source=${h.source ?? "?"} text="${redactSecrets(h.content).slice(0, 120)}"`);
         }
       }
-      return { hits, context, ...(decision !== undefined ? { decision } : {}) };
+      return { hits, context, ...(decision !== undefined ? { decision } : {}), ...(selection !== undefined ? { selection } : {}) };
     },
 
     async assembleSessionContext(input: SessionContextInput): Promise<SessionContextResult> {

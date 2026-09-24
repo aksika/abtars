@@ -46,6 +46,104 @@ describe("buildPrompt", () => {
   });
 });
 
+// ── #1813 compact injection ───────────────────────────────────────────────────
+
+describe("#1813 — compact evidence injection", () => {
+  const LONG_A = `Production deploys go through the pipeline. ${"a".repeat(1600)}`;
+  const LONG_B = `Rollbacks restore the previous release. ${"b".repeat(1600)}`;
+  const CONSTRAINT = "Ask the operator before deploying changes to the production database.";
+
+  function recallRuntime(recall: ReturnType<typeof vi.fn>) {
+    return {
+      state: "ready",
+      capabilities: new Set(["durableContext"]),
+      recordMessage: vi.fn().mockResolvedValue({ id: 1 }),
+      recall,
+      assembleSessionContext: vi.fn().mockResolvedValue({ coreKnowledge: "", recall: "", wakeUp: "" }),
+    } as never;
+  }
+
+  function hits() {
+    return [
+      { content: LONG_A, score: 1.3, date: "", memoryId: 1 },
+      { content: LONG_B, score: 1.2, date: "", memoryId: 2 },
+      { content: CONSTRAINT, score: 1.1, date: "", memoryId: 3 },
+    ];
+  }
+
+  function memoryBlock(prompt: string): string {
+    const match = prompt.match(/\[MEMORY CONTEXT[^\]]*\][\s\S]*?\[\/MEMORY CONTEXT\]/);
+    if (!match) throw new Error(`no memory block in prompt: ${prompt.slice(0, 200)}`);
+    return match[0];
+  }
+
+  it("injects the bounded selection and reduces payload while keeping the constraint", async () => {
+    const fullRecall = vi.fn().mockResolvedValue({ hits: hits(), context: "" });
+    const full = await buildPrompt(
+      { userId: "master", channelId: "1", platform: "telegram", isGroup: false } as never,
+      "how do I deploy",
+      baseDeps(recallRuntime(fullRecall)),
+      masterRegistry(),
+    );
+
+    const compactRecall = vi.fn().mockResolvedValue({
+      hits: hits(),
+      context: "",
+      selection: {
+        version: 1,
+        refs: [{ id: 3, revision: 1 }],
+        budgetBytes: 2000,
+        truncated: true,
+      },
+    });
+    const compact = await buildPrompt(
+      { userId: "master", channelId: "1", platform: "telegram", isGroup: false } as never,
+      "how do I deploy",
+      baseDeps(recallRuntime(compactRecall)),
+      masterRegistry(),
+    );
+
+    const fullBlock = memoryBlock(full.prompt);
+    const compactBlock = memoryBlock(compact.prompt);
+    expect(compactBlock).toContain(CONSTRAINT);
+    expect(compactBlock).not.toContain("aaaa");
+    expect(compactBlock.length).toBeLessThan(fullBlock.length);
+    // Only injected rows feed post-response attribution.
+    expect(compact.recalledHits).toEqual([{ id: 3, contentEn: CONSTRAINT }]);
+    expect(full.recalledHits?.length).toBe(3);
+  });
+
+  it("falls back to every filtered hit when selection is absent", async () => {
+    const recall = vi.fn().mockResolvedValue({ hits: hits(), context: "" });
+    const result = await buildPrompt(
+      { userId: "master", channelId: "1", platform: "telegram", isGroup: false } as never,
+      "how do I deploy",
+      baseDeps(recallRuntime(recall)),
+      masterRegistry(),
+    );
+    const block = memoryBlock(result.prompt);
+    expect(block).toContain(CONSTRAINT);
+    expect(block).toContain("aaaa");
+    expect(result.recalledHits?.length).toBe(3);
+  });
+
+  it("falls back when selection refs resolve to none of the delivered hits", async () => {
+    const recall = vi.fn().mockResolvedValue({
+      hits: hits(),
+      context: "",
+      selection: { version: 1, refs: [{ id: 99, revision: 1 }], budgetBytes: 2000, truncated: false },
+    });
+    const result = await buildPrompt(
+      { userId: "master", channelId: "1", platform: "telegram", isGroup: false } as never,
+      "how do I deploy",
+      baseDeps(recallRuntime(recall)),
+      masterRegistry(),
+    );
+    expect(memoryBlock(result.prompt)).toContain("aaaa");
+    expect(result.recalledHits?.length).toBe(3);
+  });
+});
+
 describe("buildPrompt durable-context classification (#1529)", () => {
   it("maps a numeric record ID to durable intent with that exact cursor", async () => {
     const recordMessage = vi.fn().mockResolvedValue({ id: 42 });

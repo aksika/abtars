@@ -11,7 +11,7 @@ import { interceptLargeMessage } from "../message-interceptor.js";
 import { abmind } from "../../utils/abmind-lazy.js";
 import { getEnv } from "../env-schema.js";
 import type { AbtarsMemoryRuntime, MemoryWritePhase } from "../memory-runtime.js";
-import { attemptMemoryMutation } from "../memory-runtime.js";
+import { attemptMemoryMutation, selectInjectedHits } from "../memory-runtime.js";
 import { inboundExecutionKey, inboundMessageKey } from "../memory-operation-key.js";
 import type { ConversationBuffer } from "../conversation-buffer.js";
 import { isTrustedScheduledAnnouncement, type InboundMessage } from "../../types/platform.js";
@@ -223,17 +223,22 @@ export async function buildPrompt(
           return true;
         });
         if (hits.length > 0) {
+          // #1813 — inject abmind's deterministic bounded selection when
+          // present and resolvable; otherwise the full filtered set (ordinary
+          // rendering). Selection bounds, never substitutes; the rank order
+          // comes from abmind's final ordering.
+          const inject = selectInjectedHits(hits, recall.selection);
           // eslint-disable-next-line @typescript-eslint/no-explicit-any
-          const lines = hits.map((h: any) => abmind()?.renderMemory({
+          const lines = inject.map((h: any) => abmind()?.renderMemory({
             content_en: h.content,
           }) ?? h.content);
           const block = `[MEMORY CONTEXT — auto-recalled, do not repeat verbatim]\n${lines.join("\n")}\n[/MEMORY CONTEXT]`;
           volatileContext.push({ kind: "recall", content: block });
           prompt = `${block}\n\n${prompt}`;
           // eslint-disable-next-line @typescript-eslint/no-explicit-any
-          recalledHits = hits.filter((h: any) => h.memoryId != null).map((h: any) => ({ id: h.memoryId as number, contentEn: h.content as string }));
+          recalledHits = inject.filter((h: any) => h.memoryId != null).map((h: any) => ({ id: h.memoryId as number, contentEn: h.content as string }));
           recallDecision = recall.decision;
-          logDebug(TAG, `Active recall: ${hits.length} hits, ${block.length} chars, ${Math.round(performance.now() - t0)}ms`);
+          logDebug(TAG, `Active recall: ${inject.length}/${hits.length} hits injected (selection ${recall.selection ? "on" : "off"}), ${block.length} chars, ${Math.round(performance.now() - t0)}ms`);
           logTrace(TAG, `recall content: ${block}`);
         }
       } catch (err) {

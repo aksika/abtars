@@ -521,3 +521,54 @@ describe("#1813 recall decision carry", () => {
     }
   });
 });
+
+describe("#1813 selection carry and compact context", () => {
+  function recallClient(results: Array<Record<string, unknown>>, selection: unknown) {
+    const client = mockClient(caps(["private.recall"], { private_read: "true" }));
+    (client.privateMemory.recall as unknown as Mock).mockResolvedValue({ results, selection });
+    return client;
+  }
+
+  const results = [
+    { id: 1, content: "Deploys run via /deploy prod.", score: 0.9, date: "2026-09-01" },
+    { id: 2, content: "Rollbacks use /rollback prod.", score: 0.8, date: "2026-09-02" },
+  ];
+
+  it("carries a validated selection and compacts the context to it", async () => {
+    const rt = createClientRuntime(recallClient(results, {
+      version: 1, refs: [{ id: 2, revision: 4 }], budgetBytes: 2000, truncated: true,
+    }));
+    const res = await rt.recall({ query: "deploy", userId: "u1" });
+    expect(res.selection).toEqual({
+      version: 1, refs: [{ id: 2, revision: 4 }], budgetBytes: 2000, truncated: true,
+    });
+    expect(res.hits).toHaveLength(2);
+    expect(res.context).toContain("Rollbacks");
+    expect(res.context).not.toContain("Deploys run");
+  });
+
+  it("drops malformed selections and renders every hit", async () => {
+    for (const bad of [
+      { version: 2, refs: [], budgetBytes: 2000, truncated: false },
+      { version: 1, refs: [{ id: "2", revision: 1 }], budgetBytes: 2000, truncated: false },
+      { version: 1, refs: [{ id: 2 }], budgetBytes: 2000, truncated: false },
+      { version: 1, refs: [], budgetBytes: "2000", truncated: false },
+      { version: 1, refs: [], budgetBytes: 2000, truncated: "no" },
+    ]) {
+      const rt = createClientRuntime(recallClient(results, bad));
+      const res = await rt.recall({ query: "deploy", userId: "u1" });
+      expect(res.selection).toBeUndefined();
+      expect(res.context).toContain("Deploys run");
+      expect(res.context).toContain("Rollbacks");
+    }
+  });
+
+  it("falls back to every hit when the selection is unresolvable", async () => {
+    const rt = createClientRuntime(recallClient(results, {
+      version: 1, refs: [{ id: 99, revision: 1 }], budgetBytes: 2000, truncated: false,
+    }));
+    const res = await rt.recall({ query: "deploy", userId: "u1" });
+    expect(res.context).toContain("Deploys run");
+    expect(res.context).toContain("Rollbacks");
+  });
+});
