@@ -44,6 +44,27 @@ export const FIXTURE_PROVIDER = "fixture";
 export const FIXTURE_API_KEY_ENV = "PI_FIXTURE_API_KEY";
 export const MASTER_USER_ID = "e2e-user-a";
 
+/**
+ * Fixture unix-socket link name and length ceiling (#1841 follow-up). The
+ * bridge connects through `<configDir>/<name>`, which must fit the macOS
+ * 104-char sun_path limit under ~50-char $TMPDIRs — the previous
+ * 20-char name put local-unix lanes at ~113 chars (connect EINVAL,
+ * misreported as a negotiation failure).
+ */
+export const FIXTURE_SOCKET_LINK_NAME = "fx.sock";
+export const FIXTURE_SOCKET_LINK_LIMIT = 100;
+
+export function fixtureSocketLinkPath(configDir: string): string {
+  const p = join(configDir, FIXTURE_SOCKET_LINK_NAME);
+  if (p.length > FIXTURE_SOCKET_LINK_LIMIT) {
+    throw new Error(
+      `Fixture abmind socket link exceeds ${FIXTURE_SOCKET_LINK_LIMIT} chars (${p.length}): ${p} — ` +
+      `shorten TMPDIR or the fixture prefix (macOS sun_path limit 104)`,
+    );
+  }
+  return p;
+}
+
 export interface BridgeConfigResult {
   abtarsHome: string;
   workspaceDir: string;
@@ -143,13 +164,13 @@ export function buildBridgeConfig(
     // The production resolver requires the socket path to resolve inside the
     // config directory; the daemon socket lives in the controller fixture, so
     // a symlink keeps the endpoint config isolated and contained.
-    const link = join(configDir, "fixture-abmind.sock");
+    const link = fixtureSocketLinkPath(configDir);
     rmSync(link, { force: true });
     symlinkSync(descriptor.connection.socketPath, link);
     writeRestricted(join(configDir, "abmind.json"), JSON.stringify({
       version: 1,
       mode: "local",
-      socketPath: "fixture-abmind.sock",
+      socketPath: FIXTURE_SOCKET_LINK_NAME,
     }, null, 2));
   } else {
     const keyTarget = join(configDir, "abtars-user-a.pem");

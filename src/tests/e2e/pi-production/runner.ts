@@ -196,7 +196,9 @@ async function runLane(
   writer: ResultWriter,
   runId: string,
 ): Promise<PiLaneResult> {
-  const runRoot = mkdtempSync(join(tmpdir(), `pi-prod-${lane}-`));
+  // Compact leaf: every socket path under runRoot must fit the macOS
+  // 104-char sun_path limit with ~50-char $TMPDIRs (#1841 follow-up).
+  const runRoot = mkdtempSync(join(tmpdir(), `pp-${lane === "local-unix" ? "l" : "w"}-`));
   chmodSync(runRoot, 0o700);
   const logDir = join(runRoot, "logs");
   mkdirSync(logDir, { recursive: true });
