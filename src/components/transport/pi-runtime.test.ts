@@ -163,6 +163,7 @@ describe("streamPiManaged (#1757)", () => {
     }));
     await streamPiManaged("openrouter", "m", { messages: [] }, undefined, false);
     const [model] = seen[0] as Array<Record<string, unknown>>;
+    if (model === undefined) throw new Error("expected dispatched model arg");
     expect(model["reasoning"]).toBe(false);
     expect(model["baseUrl"]).toBe("https://pi.example/v1");
   });
@@ -180,6 +181,7 @@ describe("streamPiManaged (#1757)", () => {
       { sessionId: "cache-session-1" } as never,
     );
     const [, , options] = seen[0] as Array<Record<string, unknown>>;
+    if (options === undefined) throw new Error("expected dispatched options arg");
     const merged = await (options["transformHeaders"] as (h: Record<string, string>) => Promise<Record<string, string>>)({});
     expect(merged["x-opencode-session"]).toBe("cache-session-1");
     expect(merged).not.toHaveProperty("apiKey");
