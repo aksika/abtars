@@ -16,7 +16,7 @@ import { dirname, join, resolve, sep } from "node:path";
 import { abmindHome, abtarsHome } from "../paths.js";
 import { logAndSwallow } from "./log-and-swallow.js";
 import { classifyCommand, isRootScopeAllow } from "./guardrails.js";
-import { execScopeAllows, resolveA2ACapabilities, scopeAllows } from "./a2a-guardrails.js";
+import { execScopeAllows, resolveA2ACapabilities, scopeAllows, toolScopeAllows } from "./a2a-guardrails.js";
 import { getEnv } from "./env-schema.js";
 import type { ActionGate, ToolAuthorizationMode } from "./action-gate.js";
 import type { CheckResult, SandboxPolicy } from "./tool-sandbox.js";
@@ -54,7 +54,7 @@ export function resolveSecurityMode(): ResolvedSecurityMode {
 // ── One audit writer ────────────────────────────────────────────────────────
 
 export interface AuthorizationAuditEntry {
-  readonly surface: "bash" | "path";
+  readonly surface: "bash" | "path" | "tool";
   readonly outcome: "allow" | "block" | "approved" | "denied";
   /** Which rule applied: mode, classifier tier, root-scope, rule id, action-gate path, ... */
   readonly source: string;
@@ -286,6 +286,28 @@ export async function authorizeBashCommand(cmd: string, context: BashAuthorizati
   const pattern = outcome.by === "rule" ? outcome.pattern : undefined;
   writeAuthorizationAudit({ surface: "bash", outcome: "denied", source: outcome.by, detail: cmd, ...(pattern !== undefined ? { pattern } : {}) });
   return { decision: "block", by: "approval", reason: "Command requires authorization. Master denied or timed out." };
+}
+
+// ── Tool decision ───────────────────────────────────────────────────────────
+
+/**
+ * #1854: may this peer-originated execution call this tool? Enforced at the
+ * dispatch boundary as well as at schema presentation, so a tool that was
+ * never offered is still refused if it is called anyway. Returns allowed for
+ * owner origins, which keep their session policy unchanged.
+ */
+export function authorizeA2ATool(toolName: string, origin: AuthorizationOrigin | undefined): CheckResult {
+  if (!isA2AOrigin(origin)) return { allowed: true };
+  const caps = resolveA2ACapabilities(origin!.sourcePeer);
+  if (toolScopeAllows(caps, toolName)) return { allowed: true };
+  writeAuthorizationAudit({
+    surface: "tool",
+    outcome: "block",
+    source: "a2a-whitelist",
+    detail: toolName,
+    pattern: `peer=${caps.peer ?? "unresolved"} trust=${caps.trust}`,
+  });
+  return { allowed: false, reason: `Tool '${toolName}' is not available to peer '${caps.peer ?? "unknown"}'` };
 }
 
 // ── Path decision ───────────────────────────────────────────────────────────

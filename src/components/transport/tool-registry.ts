@@ -10,7 +10,7 @@ import { homedir } from "node:os";
 import { logDebug, logWarn, redactSecrets } from "../logger.js";
 import { logAndSwallow } from "../log-and-swallow.js";
 import { checkTool, auditDeny, type SandboxPolicy } from "../tool-sandbox.js";
-import { authorizePath, resolveAuthorizationOrigin } from "../authorization.js";
+import { authorizeA2ATool, authorizePath, resolveAuthorizationOrigin } from "../authorization.js";
 import { getMasterUserId } from "../master-user.js";
 import { isDefinitivePreDispatchFailure } from "../memory-runtime.js";
 import { runBashCommand } from "../bash-runner.js";
@@ -1025,11 +1025,19 @@ export async function executeToolCall(name: string, args: Record<string, unknown
 
   // Sandbox enforcement
   if (context?.sandboxPolicy) {
+    const origin = resolveAuthorizationOrigin({ workOrigin: context.workOrigin, userId: context.userId });
     const toolCheck = checkTool(name, context.sandboxPolicy);
     if (!toolCheck.allowed) {
       const available = ALL_TOOLS.filter(t => checkTool(t.name, context.sandboxPolicy!).allowed).map(t => t.name);
       auditDeny(name, undefined, "session", toolCheck.reason!);
       return JSON.stringify({ error: `Tool '${name}' not available in this session`, available_tools: available, reason: "peer_sandbox" });
+    }
+    // #1854: the peer's own tool surface from peers.json allowedTools, applied
+    // after the session policy so an existing deny keeps its reason code. This
+    // only refuses what the session would otherwise have allowed.
+    const a2aToolCheck = authorizeA2ATool(name, origin);
+    if (!a2aToolCheck.allowed) {
+      return JSON.stringify({ error: a2aToolCheck.reason, reason: "a2a_guardrails" });
     }
     const filePath = stringValue(args["path"] ?? args["file_path"]);
     if (filePath) {
@@ -1041,7 +1049,7 @@ export async function executeToolCall(name: string, args: Record<string, unknown
         mode,
         context.sandboxPolicy,
         // #1854: peer-originated reads/writes are bounded by the A2A whitelist.
-        resolveAuthorizationOrigin({ workOrigin: context.workOrigin, userId: context.userId }),
+        origin,
       );
       if (!pathCheck.allowed) {
         return JSON.stringify({ error: pathCheck.reason, reason: "peer_sandbox" });

@@ -6,7 +6,9 @@
       "port": 7100,
       "verifyKey": "<peer-b Ed25519 public key (base64 SPKI DER)>",
       "trust": 1,
-      "maxClass": 1
+      "maxClass": 1,
+      "_allowedTools": "#1854: tools this peer may call, e.g. [\"file_read\",\"web_fetch\"] or [\"*\"]. Omitted means none. Requires trust >= 1; execute_bash additionally requires a non-empty X scope in a2a-guardrails.json. Read/write/execute PATHS are global and live only in a2a-guardrails.json, not here.",
+      "allowedTools": []
     }
   },
   "maxHops": 12,

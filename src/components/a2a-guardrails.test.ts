@@ -235,3 +235,60 @@ describe("enforcement through the authorization owner", () => {
       .toEqual({ kind: "owner", sourcePeer: null });
   });
 });
+
+describe("peers.json allowedTools", () => {
+  it("grants no tools when the entry omits allowedTools", async () => {
+    writePeers({ molty: { host: "h", port: 1, verifyKey: "k", trust: 2 } });
+    const { a2aSandboxPolicy } = await load();
+    const policy = a2aSandboxPolicy("molty");
+    expect(policy.allowedTools).toEqual([]);
+    expect(policy.canExecuteBash).toBe(false);
+  });
+
+  it("grants exactly the listed tools", async () => {
+    writePeers({ molty: { host: "h", port: 1, verifyKey: "k", trust: 2, allowedTools: ["file_read", "web_fetch"] } });
+    const { a2aSandboxPolicy, resolveA2ACapabilities, toolScopeAllows } = await load();
+    expect(a2aSandboxPolicy("molty").allowedTools).toEqual(["file_read", "web_fetch"]);
+    const caps = resolveA2ACapabilities("molty");
+    expect(toolScopeAllows(caps, "file_read")).toBe(true);
+    expect(toolScopeAllows(caps, "execute_bash")).toBe(false);
+  });
+
+  it("honors a wildcard tool list", async () => {
+    writePeers({ molty: { host: "h", port: 1, verifyKey: "k", trust: 2, allowedTools: ["*"] } });
+    const { a2aSandboxPolicy } = await load();
+    const policy = a2aSandboxPolicy("molty");
+    expect(policy.allowedTools).toEqual(["*"]);
+    expect(policy.canExecuteBash).toBe(true);
+  });
+
+  it("refuses bash when the X scope is empty even if the tool is listed", async () => {
+    writeWhitelist({ R: [join(home, "workspace", "projects")], W: [], X: [] });
+    writePeers({ molty: { host: "h", port: 1, verifyKey: "k", trust: 2, allowedTools: ["execute_bash"] } });
+    const { a2aSandboxPolicy } = await load();
+    expect(a2aSandboxPolicy("molty").canExecuteBash).toBe(false);
+  });
+
+  it("grants no tools below trust 1 regardless of the entry", async () => {
+    writePeers({ molty: { host: "h", port: 1, verifyKey: "k", trust: 0, allowedTools: ["*"] } });
+    const { a2aSandboxPolicy } = await load();
+    expect(a2aSandboxPolicy("molty").allowedTools).toEqual([]);
+  });
+
+  it("refuses an unlisted tool at the dispatch boundary", async () => {
+    writePeers({ molty: { host: "h", port: 1, verifyKey: "k", trust: 2, allowedTools: ["file_read"] } });
+    const { authorizeA2ATool } = await import("./authorization.js");
+    const origin = { kind: "peer" as const, sourcePeer: "molty" };
+    expect(authorizeA2ATool("file_read", origin).allowed).toBe(true);
+    expect(authorizeA2ATool("execute_bash", origin).allowed).toBe(false);
+    // Owner executions are untouched by the peer tool list.
+    expect(authorizeA2ATool("execute_bash", { kind: "owner", sourcePeer: null }).allowed).toBe(true);
+    expect(authorizeA2ATool("execute_bash", undefined).allowed).toBe(true);
+  });
+
+  it("refuses every tool for an unknown peer", async () => {
+    writePeers({});
+    const { authorizeA2ATool } = await import("./authorization.js");
+    expect(authorizeA2ATool("file_read", { kind: "peer", sourcePeer: "ghost" }).allowed).toBe(false);
+  });
+});

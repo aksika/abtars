@@ -10,6 +10,7 @@
 import type { PlatformAdapter, PlatformCapabilities, InboundMessage, SendOpts } from "../../types/platform.js";
 import { logInfo, logDebug } from "../../components/logger.js";
 import { buildPolicy } from "../../components/tool-sandbox.js";
+import { a2aSandboxPolicy } from "../../components/a2a-guardrails.js";
 
 const TAG = "a2a-adapter";
 
@@ -89,9 +90,10 @@ export class AgentApiAdapter implements PlatformAdapter {
         // owner history or personal memory can hydrate this turn.
         userId: `peer:${peerId}`,
         platform: "a2a",
-        // Deny-all execution policy, enforced at schema presentation AND
-        // tool dispatch via the shared Spin → transport boundary.
-        tools: buildPolicy("peer"),
+        // #1854: the peer's own surface — allowedTools from peers.json, paths
+        // from the global A2A guardrails, bash only with an X scope. An entry
+        // without allowedTools still yields deny-all, the previous behavior.
+        tools: buildPolicy("peer", a2aSandboxPolicy(peerId)),
         timeoutMs,
         deadlineAt: turn.deadlineAt,
         settlementOwner: "spin",
