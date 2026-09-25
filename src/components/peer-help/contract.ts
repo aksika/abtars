@@ -371,19 +371,6 @@ export function parseContributionEvent(raw: unknown): { ok: true; value: PeerCon
   return { ok: true, value: r as unknown as PeerContributionEventV1 };
 }
 
-export function canonicalContributionHash(
-  request: PeerHelpRequestV1,
-  projectCardId: number | null,
-  rootCriteria: readonly string[],
-): string {
-  const { createHash } = require("node:crypto");
-  return createHash("sha256").update(JSON.stringify({
-    request_hash: canonicalRequestHash(request),
-    project_card_id: projectCardId,
-    root_criteria: [...rootCriteria].sort(),
-  })).digest("hex");
-}
-
 export function contributionEventDigest(event: PeerContributionEventV1): string {
   const { createHash } = require("node:crypto");
   return createHash("sha256").update(JSON.stringify({

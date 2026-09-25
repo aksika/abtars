@@ -6,7 +6,7 @@
  * database transaction; durable reservation always commits before transport.
  */
 import type { PeerHelpRequestV1, PeerHelpResponseV1 } from "./contract.js";
-import { canonicalContributionHash } from "./contract.js";
+import { canonicalRequestHash } from "./contract.js";
 import { ContributionStore, type ContributionState } from "./contribution-store.js";
 import { getPeerTransport } from "../peer-transport/index.js";
 import { requireTaskDatabase, kanbanGetCard, kanbanUpdate, kanbanFail } from "../tasks/kanban-board.js";
@@ -135,7 +135,10 @@ export class RequesterContributionService {
       title = `[help:${input.peer}] ${input.request.goal.slice(0, 80)}`;
     }
 
-    const requestHash = canonicalContributionHash(input.request, projectCardId, rootCriteria);
+    // #1853: the ledger's request_hash is the canonical hash of the request
+    // alone — the same function the receiver stores — so both nodes can agree
+    // on it. Never bind local card/criteria here; the receiver cannot reproduce them.
+    const requestHash = canonicalRequestHash(input.request);
     const priority = (input.request.priority ?? "MEDIUM").toUpperCase();
 
     const reserve = this.contributionStore.reserveProxy({
@@ -345,7 +348,7 @@ export class RequesterContributionService {
       ).run(
         peer,
         request.request_id,
-        canonicalContributionHash(request, rootId, []),
+        canonicalRequestHash(request),
         `help_${randomUUID().replace(/-/g, "").slice(0, 16)}`,
         rootId,
         proxyCardId,

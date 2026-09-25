@@ -3,6 +3,7 @@ import { mkdirSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import type { PeerHelpRequestV1, PeerHelpResponseV1 } from "./contract.js";
+import { canonicalRequestHash } from "./contract.js";
 import { ContributionStore } from "./contribution-store.js";
 import { RequesterContributionService } from "./requester-contribution-service.js";
 
@@ -164,6 +165,37 @@ describe("RequesterContributionService", () => {
     expect(result.proxyCardId).toBe(proxy.id);
     expect(result.decision).toBe("accepted");
     expect(result.contributionRef).toBe("help_abc");
+  });
+
+  it("ledger stores the canonical request hash so the receiver can agree on it (#1853)", async () => {
+    const env = makeEnv();
+    env.nextResponse = { version: 1, request_id: "req_1", decision: "accepted", contribution_ref: "help_agree" };
+    await env.service.delegate({
+      peer: "molty",
+      request: makeRequest(),
+      binding: { kind: "create_cli_project", title: "delegate x", goal: "g" },
+    });
+
+    expect(env.sends).toHaveLength(1);
+    const sent = env.sends[0]!.request;
+    const ledger = db.prepare("SELECT request_hash FROM peer_contributions WHERE peer = 'molty'").get() as any;
+    // The stored value must be a pure function of the request — the receiver
+    // stores canonicalRequestHash too, and the live gate cross-checks equality.
+    // Binding the local root card or criteria here made agreement unsatisfiable.
+    expect(ledger.request_hash).toBe(canonicalRequestHash(sent));
+
+    // Same request replays without conflict; different content still conflicts.
+    const replay = await env.service.delegate({
+      peer: "molty",
+      request: makeRequest(),
+      binding: { kind: "create_cli_project", title: "delegate x", goal: "g" },
+    });
+    expect(replay.decision).toBe("accepted");
+    await expect(env.service.delegate({
+      peer: "molty",
+      request: makeRequest({ goal: "DIFFERENT GOAL" }),
+      binding: { kind: "create_cli_project", title: "delegate x", goal: "g" },
+    })).rejects.toThrow(/conflicts/);
   });
 
   it("accepted response adopts the receiver contribution reference", async () => {
