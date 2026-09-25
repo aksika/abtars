@@ -58,6 +58,9 @@ export interface PromptRequestContext {
   sandboxPolicy?: import("../tool-sandbox.js").SandboxPolicy;
   /** #1480: Orc invocation context for durable project ownership fencing. */
   orcContext?: import("../orc-project/orc-project-contracts.js").OrcInvocationContextV2;
+  /** #1850: trusted worker origin descriptor for relay containment, resolved
+   *  at dispatch for card-backed worker turns; absent elsewhere. */
+  workOrigin?: import("./tool-registry.js").WorkOrigin;
   /** #1680: host-owned one-shot turn control for the bound Orc turn. The Pi
    *  transport stops the active turn when its durable intent completes; other
    *  transports carry it unchanged so the same signal reaches every adapter. */

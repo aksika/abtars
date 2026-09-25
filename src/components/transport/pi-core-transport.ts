@@ -505,6 +505,8 @@ export class PiCoreTransport implements IKiroTransport {
         },
         executionScope: context?.executionScope,
         orcContext: context?.orcContext,
+        // #1850: trusted worker origin for relay containment.
+        workOrigin: context?.workOrigin,
         sessionType: context?.sessionType,
         memoryToolDeps: this._memoryToolDeps,
         // #1629: trusted per-execution tool authorization mode.

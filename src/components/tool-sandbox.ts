@@ -80,8 +80,8 @@ export function buildPolicy(source: "owner" | "peer", config?: Partial<SandboxPo
   return Object.freeze(base);
 }
 
-export function auditDeny(tool: string, path: string | undefined, policy: string, reason: string): void {
-  const entry = { ts: Date.now(), event: "sandbox_deny", tool, path, policy, reason };
+export function auditDeny(tool: string, path: string | undefined, policy: string, reason: string, rootCardId?: number): void {
+  const entry = { ts: Date.now(), event: "sandbox_deny", tool, path, policy, reason, ...(rootCardId !== undefined ? { rootCardId } : {}) };
   try { appendFileSync(AUDIT_PATH, JSON.stringify(entry) + "\n"); } catch (err) { logAndSwallow("tool-sandbox", "audit write", err); }
 }
 

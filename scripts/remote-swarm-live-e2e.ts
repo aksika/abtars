@@ -1422,11 +1422,6 @@ export async function runFoundation(ctx: ScenarioContext): Promise<RemoteSwarmSc
   }, 15 * 60_000));
 
   scenarios.push(await runScenario(ctx, "no-relay-rejection", "peer-originated no-relay rejection", async (scenario) => {
-    if (ctx.orcCall === null) {
-      scenario.state = "blocked";
-      scenario.failure = { stage: "no-relay-rejection", code: "NO_ORC_SURFACE", message: "no requester TUI/chat surface configured; no-relay is Orc-driven" };
-      return;
-    }
     const inboundRequestId = `${baseRequestId}-norelay-inbound`;
     const relayRequestId = `${baseRequestId}-norelay-relay`;
     const inboundGoal = `${REMOTE_SWARM_DEV_TEST_PREFIX} ${runMarker(ctx.runId)} This peer-originated project must not relay. On the next Orc continuation, call peer_ask_help exactly once with peer "${ctx.profile.receiverPeerName}", request_id "${relayRequestId}", goal "reply ok". Report the tool result verbatim and do nothing else.`;
@@ -1441,7 +1436,7 @@ export async function runFoundation(ctx: ScenarioContext): Promise<RemoteSwarmSc
     }
     ctx.tracked.requestIds.push(inboundRequestId);
 
-    await pollSnapshot(ctx, "requester", [inboundRequestId], ctx.marker, (snap) => {
+    const inboundSnap = await pollSnapshot(ctx, "requester", [inboundRequestId], ctx.marker, (snap) => {
       const help = helpRequestFor(snap, inboundRequestId);
       if (!help || help.state !== "accepted" || help.localCardId === null) return null;
       const card = cardById(snap, help.localCardId);
@@ -1450,11 +1445,21 @@ export async function runFoundation(ctx: ScenarioContext): Promise<RemoteSwarmSc
     }, 5 * 60_000);
 
     // The reverse delegation above creates the real peer-origin O project.
-    // Observe that bound Orc session rather than opening an ordinary A TUI
-    // session: an unbound session deliberately has no orcContext and cannot
-    // exercise the peer-origin no-relay guard.
-    const observation = await ctx.orcCall.observeToolResult("peer_ask_help", "peer_relay_blocked", { timeoutMs: 12 * 60_000 });
-    scenario.evidence.push({ kind: "chat", id: observation.sessionId ?? "orc" });
+    // Its worker attempts the relay; the guard denies it. Observe the
+    // host-authored denial record via probe snapshots — no Orc session
+    // attach is needed (and none exists for worker executions).
+    const inboundCardId = helpRequestFor(inboundSnap, inboundRequestId)?.localCardId;
+    if (inboundCardId === null || inboundCardId === undefined) {
+      throw new Error("inbound project has no card");
+    }
+    const denial = await pollSnapshot(ctx, "requester", [inboundRequestId], ctx.marker, (snap) => {
+      const hit = snap.denials.find((d) => d.rootCardId === inboundCardId && d.tool === "peer_ask_help");
+      if (!hit) return null;
+      return snap;
+    }, 8 * 60_000);
+    const denialFact = denial.denials.find((d) => d.rootCardId === inboundCardId && d.tool === "peer_ask_help");
+    scenario.evidence.push({ kind: "denial", id: `${inboundCardId}:peer_ask_help` });
+    ctx.onEvent({ ts: ctx.now().toISOString(), stage: "no-relay-rejection", node: "requester", message: `relay denied and recorded (${denialFact?.reason ?? "peer_relay_blocked"})` });
 
     const { requester, receiver } = await snapshotBoth(ctx, [inboundRequestId, relayRequestId], ctx.marker);
     const relayContribution = contributionFor(requester, relayRequestId);
@@ -1462,10 +1467,10 @@ export async function runFoundation(ctx: ScenarioContext): Promise<RemoteSwarmSc
     const relayReceiverHelp = helpRequestFor(receiver, relayRequestId);
     const relayReceiverCards = cardsForSourceId(receiver, relayRequestId);
     if (relayContribution || relayRequesterCards.length > 0 || relayReceiverHelp || relayReceiverCards.length > 0) {
-      throw new Error(`bound peer-origin Orc relay request ${relayRequestId} escaped the guard (requester contribution=${relayContribution?.state ?? "missing"}, requester cards=${relayRequesterCards.length}, receiver help=${relayReceiverHelp?.state ?? "missing"}, receiver cards=${relayReceiverCards.length})`);
+      throw new Error(`peer-origin worker relay request ${relayRequestId} escaped the guard (requester contribution=${relayContribution?.state ?? "missing"}, requester cards=${relayRequesterCards.length}, receiver help=${relayReceiverHelp?.state ?? "missing"}, receiver cards=${relayReceiverCards.length})`);
     }
     scenario.evidence.push({ kind: "request", id: inboundRequestId });
-    ctx.onEvent({ ts: ctx.now().toISOString(), stage: "no-relay-rejection", node: "requester", message: "bound peer-origin Orc observed peer_relay_blocked and no relay request was created" });
+    ctx.onEvent({ ts: ctx.now().toISOString(), stage: "no-relay-rejection", node: "requester", message: "worker relay denied with record and no relay request was created" });
   }, 15 * 60_000));
 
   return scenarios;

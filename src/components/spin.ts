@@ -949,6 +949,9 @@ export class Spin {
         // never a mutable session field that a successor could have replaced.
         executionId: capturedExecutionId,
         orcContext: boundOrcContext ?? session.orcContext,
+        // #1850: trusted worker origin for relay containment, resolved at
+        // dispatch for card-backed worker turns; absent elsewhere.
+        workOrigin: spec.workOrigin,
         // #1680: the host-owned turn control and the policy-derived prompt
         // bound reach every transport through the shared context.
         orcTurnControl: boundOrcTurnControl ?? session.orcTurnControl,
@@ -1171,6 +1174,9 @@ export class Spin {
                 // captured values are used, never a successor's session state.
                 executionId: capturedExecutionId,
                 orcContext: boundOrcContext ?? session.orcContext,
+                // #1850: steering continuations belong to the same execution
+                // and inherit its trusted worker origin.
+                workOrigin: spec.workOrigin,
                 orcTurnControl: boundOrcTurnControl ?? session.orcTurnControl,
                 maxPromptRounds: boundMaxPromptRounds ?? session.orcMaxPromptRounds,
                 // #1629: steering continuations belong to the same execution
@@ -1969,6 +1975,8 @@ export class Spin {
       executionControl: request.executionControl,
       settlementOwner: request.settlementOwner,
       executionScope: request.executionScope,
+      // #1850: trusted worker origin for relay containment.
+      workOrigin: request.workOrigin,
       deadlineAt: request.deadlineAt,
       deliveryReady: request.deliveryReady,
     }), request.type, cardId);

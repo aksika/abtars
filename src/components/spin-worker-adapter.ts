@@ -101,6 +101,30 @@ export class SpinWorkerAdapter implements SwarmExecutorAdapter {
 
       this._emitter().emitAlive(claim.attemptId, claim.generation, claim.executorId);
 
+      // #1850: resolve the durable root origin for the relay guard at
+      // dispatch, next to the workspace scope above. An unresolvable origin
+      // resolves unknown (never undefined) so the guard denies relay
+      // fail-closed; dispatch itself still proceeds.
+      const originRootId = attempt?.root_project_card_id ?? card.parent_id ?? claim.cardId;
+      let workOrigin: import("./transport/tool-registry.js").WorkOrigin;
+      try {
+        const { resolveWorkOrigin } = await import("./transport/orc-tools.js");
+        const { kanbanGetCard } = await import("./tasks/kanban-board.js");
+        const { WorkflowStore } = await import("./orc-project/orc-workflow-store.js");
+        const workflowStore = new WorkflowStore(supStore.db);
+        workOrigin = resolveWorkOrigin(originRootId, {
+          getCardSource: (id) => {
+            const row = kanbanGetCard(id);
+            if (!row) return undefined;
+            return { source: row.source ?? null, sourcePeer: row.source_peer ?? null };
+          },
+          getRunKind: (id) => workflowStore.findLatestRunByCard(id)?.rootKind ?? null,
+        });
+      } catch (err) {
+        workOrigin = { rootCardId: originRootId, rootKind: "unknown", sourcePeer: null };
+        logWarn(TAG, `Worker ${claim.cardId}: origin resolution failed, relay denies fail-closed: ${err instanceof Error ? err.message : String(err)}`);
+      }
+
       spin.dispatch({
         type: "W",
         goal: contract.goal,
@@ -113,6 +137,7 @@ export class SpinWorkerAdapter implements SwarmExecutorAdapter {
         settlementOwner: "spin",
         deadlineAt: claim.hardDeadlineAt ? new Date(claim.hardDeadlineAt).getTime() : undefined,
         executionScope,
+        workOrigin,
       });
     } catch (err) {
       this.executions.remove(executionRef);

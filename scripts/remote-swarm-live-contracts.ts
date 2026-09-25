@@ -347,6 +347,17 @@ export interface RemoteSwarmProcessFactV1 {
   generationIntent: string | null;
 }
 
+/**
+ * #1850: host-authored relay-denial facts, correlated by root card id so the
+ * driver can tie a denial to its run without trusting model text.
+ */
+export interface RemoteSwarmDenialFactV1 {
+  rootCardId: number;
+  tool: string;
+  reason: string;
+  at: string;
+}
+
 export interface RemoteSwarmSnapshotV1 {
   version: 1;
   role: RemoteSwarmRole;
@@ -370,6 +381,7 @@ export interface RemoteSwarmSnapshotV1 {
   workspaceClaims: RemoteSwarmClaimFactV1[];
   workerAttempts: RemoteSwarmWorkerAttemptFactV1[];
   processFacts: RemoteSwarmProcessFactV1[];
+  denials: RemoteSwarmDenialFactV1[];
 }
 
 export interface RemoteSwarmPiControlResultV1 {
@@ -979,7 +991,7 @@ function validateSnapshot(raw: Record<string, unknown>): RemoteSwarmSnapshotV1 {
     "at", "requestIds", "cards", "contributions", "contributionEvents", "helpRequests",
     "supervisions", "reviewCases", "reviewDecisions", "acceptanceOutbox", "piRuns",
     "piEvents", "piOriginProjections", "piOriginEvents", "piCommands", "piApiRequests",
-    "workspaceClaims", "workerAttempts", "processFacts",
+    "workspaceClaims", "workerAttempts", "processFacts", "denials",
   ];
   for (const key of required) {
     if (!(key in raw)) throw new Error(`snapshot missing ${key}`);
@@ -1008,6 +1020,7 @@ function validateSnapshot(raw: Record<string, unknown>): RemoteSwarmSnapshotV1 {
     workspaceClaims: CONTRACT_BOUNDS.rows,
     workerAttempts: CONTRACT_BOUNDS.rows,
     processFacts: CONTRACT_BOUNDS.rows,
+    denials: CONTRACT_BOUNDS.rows,
   };
   for (const [key, max] of Object.entries(arrayBounds)) {
     const arr = raw[key];

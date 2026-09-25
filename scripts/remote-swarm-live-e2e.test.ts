@@ -134,6 +134,7 @@ function emptySnapshot(role: "requester" | "receiver", runId: string, requestIds
     supervisions: [], reviewCases: [], reviewDecisions: [], acceptanceOutbox: [],
     piRuns: [], piEvents: [], piOriginProjections: [], piOriginEvents: [],
     piCommands: [], piApiRequests: [], workspaceClaims: [], workerAttempts: [], processFacts: [],
+    denials: [],
   };
 }
 
@@ -203,6 +204,11 @@ function snapshotFixture(role: "requester" | "receiver", runId: string, rows: Fi
         markerPresent: true, notesRequestId: rows.inboundRequestId, notesContributionRef: null,
         notesOutcome: null, notesRemoteRunId: null, notesHelpDecision: "accepted",
       });
+      base.denials = [{
+        rootCardId: 404, tool: "peer_ask_help",
+        reason: "Tool 'peer_ask_help' is unavailable for peer-originated work (peer_relay_blocked)",
+        at: "2026-08-15T00:00:00.000Z",
+      }];
     }
     if (rows.piRun) {
       base.piOriginProjections = [{
@@ -1174,9 +1180,10 @@ describe("controller foundation profile", () => {
   it("fails the accepted journey when exactly-once counts are violated", async () => {
     const runId = `rs-dupe-${Date.now()}`;
     const acceptedRequestId = `swarm-${runId}-f1-accepted`;
+    const inboundRequestId = `swarm-${runId}-f1-norelay-inbound`;
     const { requesterPort, receiverPort, fakeNodeDir, fakeNode } = makeFakePorts(root, runId);
     const { profile } = profileWithFakeNode(root, fakeNode);
-    writeSnapshotFixture(fakeNodeDir, "requester", runId, { requestIds: [acceptedRequestId] });
+    writeSnapshotFixture(fakeNodeDir, "requester", runId, { requestIds: [acceptedRequestId], inboundRequestId });
     writeSnapshotFixture(fakeNodeDir, "receiver", runId, { requestIds: [acceptedRequestId], receiverCards: 2 });
     const delegate = makeStatefulDelegate("help_abcd1234", 303, 202);
     const deps = buildDeps({ runId, profile, requesterPort, receiverPort, delegate });
@@ -1201,21 +1208,21 @@ describe("controller foundation profile", () => {
     expect(result.failure?.message).toContain("do not match");
   });
 
-  it("blocks declined/no-relay when no Orc surface is configured", async () => {
+  it("blocks declined without an Orc surface while no-relay runs on snapshots alone", async () => {
     const runId = `rs-no-orc-${Date.now()}`;
     const acceptedRequestId = `swarm-${runId}-f1-accepted`;
+    const inboundRequestId = `swarm-${runId}-f1-norelay-inbound`;
     const { requesterPort, receiverPort, fakeNodeDir, fakeNode } = makeFakePorts(root, runId);
     const { profile } = profileWithFakeNode(root, fakeNode);
-    writeSnapshotFixture(fakeNodeDir, "requester", runId, { requestIds: [acceptedRequestId] });
+    writeSnapshotFixture(fakeNodeDir, "requester", runId, { requestIds: [acceptedRequestId], inboundRequestId });
     writeSnapshotFixture(fakeNodeDir, "receiver", runId, { requestIds: [acceptedRequestId] });
     const delegate = makeStatefulDelegate("help_abcd1234", 303, 202);
     const deps = buildDeps({ runId, profile, requesterPort, receiverPort, delegate });
     const result = await runRemoteSwarmLiveE2E(deps);
-    expect(result.state).toBe("blocked");
     const declined = result.scenarios.find((s) => s.id === "declined-admission");
     const noRelay = result.scenarios.find((s) => s.id === "no-relay-rejection");
     expect(declined?.state).toBe("blocked");
-    expect(noRelay?.state).toBe("blocked");
+    expect(noRelay?.state).toBe("passed");
     expect(result.scenarios.filter((s) => s.id === "accepted-journey")[0]?.state).toBe("passed");
   });
 });
@@ -1252,9 +1259,10 @@ describe("cleanup", () => {
     try {
       const runId = `rs-clean-${Date.now()}`;
       const acceptedRequestId = `swarm-${runId}-f1-accepted`;
+      const inboundRequestId = `swarm-${runId}-f1-norelay-inbound`;
       const { requesterPort, receiverPort, fakeNodeDir, fakeNode } = makeFakePorts(root, runId);
       const { profile } = profileWithFakeNode(root, fakeNode);
-      writeSnapshotFixture(fakeNodeDir, "requester", runId, { requestIds: [acceptedRequestId], piRun: { runId: "pi_run_x", status: "running" } });
+      writeSnapshotFixture(fakeNodeDir, "requester", runId, { requestIds: [acceptedRequestId], inboundRequestId, piRun: { runId: "pi_run_x", status: "running" } });
       writeSnapshotFixture(fakeNodeDir, "receiver", runId, { requestIds: [acceptedRequestId], piRun: { runId: "pi_run_x", status: "running" } });
       const delegate = makeStatefulDelegate("help_abcd1234", 303, 202);
       const deps = {
@@ -1286,9 +1294,10 @@ describe("cleanup", () => {
     try {
       const runId = `rs-clean-ok-${Date.now()}`;
       const acceptedRequestId = `swarm-${runId}-f1-accepted`;
+      const inboundRequestId = `swarm-${runId}-f1-norelay-inbound`;
       const { requesterPort, receiverPort, fakeNodeDir, fakeNode } = makeFakePorts(root, runId);
       const { profile } = profileWithFakeNode(root, fakeNode);
-      writeSnapshotFixture(fakeNodeDir, "requester", runId, { requestIds: [acceptedRequestId], piRun: { runId: "pi_run_ok", status: "cancelled" } });
+      writeSnapshotFixture(fakeNodeDir, "requester", runId, { requestIds: [acceptedRequestId], inboundRequestId, piRun: { runId: "pi_run_ok", status: "cancelled" } });
       writeSnapshotFixture(fakeNodeDir, "receiver", runId, { requestIds: [acceptedRequestId], piRun: { runId: "pi_run_ok", status: "cancelled" } });
       const delegate = makeStatefulDelegate("help_abcd1234", 303, 202);
       const deps = {

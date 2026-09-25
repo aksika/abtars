@@ -397,8 +397,11 @@ function getContributionStore(): ContributionStore {
   return _contributionDb;
 }
 
-async function getActiveOrcProjectId(toolContext?: { orcContext?: { projectCardId: number } }): Promise<number | null> {
-  return toolContext?.orcContext?.projectCardId ?? null;
+/** #1850: exported for the relay-containment regression test. */
+export async function getActiveOrcProjectId(toolContext?: { orcContext?: { projectCardId: number }; workOrigin?: { rootCardId: number } }): Promise<number | null> {
+  // #1850: worker-originated contributions link through the dispatch-resolved
+  // root when no Orc turn context exists (supervised W workers never bind one).
+  return toolContext?.orcContext?.projectCardId ?? toolContext?.workOrigin?.rootCardId ?? null;
 }
 
 export function getPeerHelpTools(): ToolDefinition[] {

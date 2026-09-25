@@ -12,7 +12,7 @@
  */
 
 import { parseArgs } from "node:util";
-import { readFileSync, existsSync, readdirSync, statSync } from "node:fs";
+import { readFileSync, existsSync, readdirSync, statSync, openSync, readSync, closeSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
 import { createHash, createPrivateKey, createPublicKey, randomBytes, sign as cryptoSign } from "node:crypto";
@@ -354,6 +354,57 @@ function numberOrNull(value: unknown): number | null {
 
 function inPlaceholders(values: string[]): string {
   return values.map(() => "?").join(",");
+}
+
+/**
+ * Bounded relay-denial facts for #1850. Reads the tail of the host audit
+ * log (sandbox_deny entries written by the execution boundary) and returns
+ * entries for the snapshot's own cards only — absence means no denial was
+ * recorded, never probe failure. A missing/unreadable log reads as empty.
+ */
+const RELAY_DENIAL_TOOLS = new Set(["peer_ask_help", "peer_session", "peer_doorbell"]);
+const AUDIT_TAIL_BYTES = 131072;
+const MAX_DENIAL_FACTS = 20;
+
+function readDenialFacts(home: string, cardIds: Set<number>): RemoteSwarmSnapshotV1["denials"] {
+  const out: RemoteSwarmSnapshotV1["denials"] = [];
+  if (cardIds.size === 0) return out;
+  let text = "";
+  try {
+    const path = join(home, "logs", "audit.jsonl");
+    const size = statSync(path).size;
+    const fd = openSync(path, "r");
+    try {
+      const start = Math.max(0, size - AUDIT_TAIL_BYTES);
+      const buf = Buffer.alloc(Math.min(size, AUDIT_TAIL_BYTES));
+      readSync(fd, buf, 0, buf.length, start);
+      text = buf.toString("utf-8");
+    } finally {
+      closeSync(fd);
+    }
+  } catch {
+    return out;
+  }
+  for (const line of text.split("\n")) {
+    if (out.length >= MAX_DENIAL_FACTS) break;
+    if (!line.includes("sandbox_deny")) continue;
+    let rec: Record<string, unknown>;
+    try {
+      rec = JSON.parse(line) as Record<string, unknown>;
+    } catch {
+      continue;
+    }
+    if (rec["event"] !== "sandbox_deny") continue;
+    if (typeof rec["tool"] !== "string" || !RELAY_DENIAL_TOOLS.has(rec["tool"])) continue;
+    if (typeof rec["rootCardId"] !== "number" || !cardIds.has(rec["rootCardId"])) continue;
+    out.push({
+      rootCardId: rec["rootCardId"],
+      tool: rec["tool"],
+      reason: typeof rec["reason"] === "string" ? rec["reason"].slice(0, 200) : "",
+      at: typeof rec["ts"] === "number" ? new Date(rec["ts"]).toISOString().slice(0, 64) : "",
+    });
+  }
+  return out;
 }
 
 /**
@@ -837,6 +888,9 @@ async function snapshot(args: ParsedArgs): Promise<RemoteSwarmSnapshotV1> {
       workspaceClaims,
       workerAttempts,
       processFacts,
+      // #1850: relay-denial facts for this snapshot's own cards (empty when
+      // no denial was recorded — absence is a valid observation).
+      denials: readDenialFacts(home, new Set(cardFacts.map((c) => c.id))),
     };
   } finally {
     db.close();

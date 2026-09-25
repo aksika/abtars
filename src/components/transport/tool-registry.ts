@@ -97,6 +97,25 @@ export interface ToolExecutionContext {
    *  whose durable intent postcondition is satisfied requests completion
    *  through this control; the transport stops the turn when it wins. */
   orcTurnControl?: import("../orc-project/orc-project-contracts.js").OrcTurnControl;
+  /** #1850: trusted worker origin descriptor (resolved once at dispatch
+   *  from host-owned durable state, never from model input — same treatment
+   *  as sessionType and authorizationMode). Present on card-backed worker
+   *  turns; absent on owner chats, TUI, and composition turns, which keep
+   *  legacy behavior. A present-but-unresolvable origin fails closed at the
+   *  relay guard. */
+  workOrigin?: WorkOrigin;
+}
+
+/**
+ * #1850: which root project a card-backed worker execution belongs to and
+ * whether that root is peer-originated. Resolved at dispatch from
+ * `kanban_board.source`/`source_peer` plus the workflow run kind; both
+ * facts are host-owned and durable.
+ */
+export interface WorkOrigin {
+  readonly rootCardId: number;
+  readonly rootKind: "scheduled" | "interactive" | "peer" | "unknown";
+  readonly sourcePeer: string | null;
 }
 
 export type ToolDefinition = {
@@ -116,6 +135,11 @@ export interface ToolAvailabilityContext {
    *  policy decides the allowed tool surface at both schema presentation and
    *  execution time; a missing intent kind fails closed. */
   readonly orcContext?: OrcInvocationContextV2;
+  /** #1850: trusted worker origin for relay containment. A present
+   *  peer/unresolvable origin hides the relay tools here (schema
+   *  presentation filters silently; the execution boundary records the
+   *  denial). Absent on non-worker turns, which are unaffected. */
+  readonly workOrigin?: WorkOrigin;
 }
 
 /**
@@ -141,6 +165,20 @@ export function checkToolAvailability(toolName: string, context: ToolAvailabilit
     return {
       allowed: false,
       reason: "Tool 'send_document' is unavailable during unattended or unverified scheduled execution; delivery is owned by scheduled settlement",
+    };
+  }
+  // #1850: relay containment for card-backed worker turns. Peer-originated
+  // (or unresolvable-origin) workers are not offered the relay tools at all;
+  // the execution boundary records the denial when one is attempted anyway.
+  // Owner roots and contexts without a worker origin are unaffected.
+  if (
+    (toolName === "peer_ask_help" || toolName === "peer_session" || toolName === "peer_doorbell")
+    && context.workOrigin !== undefined
+    && (context.workOrigin.rootKind === "peer" || context.workOrigin.rootKind === "unknown")
+  ) {
+    return {
+      allowed: false,
+      reason: `Tool '${toolName}' is unavailable for peer-originated work (peer_relay_blocked)`,
     };
   }
   const bound = context.orcContext;
@@ -961,11 +999,15 @@ export async function executeToolCall(name: string, args: Record<string, unknown
   // never touch delivery claims, delivery_ready, card status, or settlement.
   const availability = checkToolAvailability(name, context ?? {});
   if (!availability.allowed) {
-    auditDeny(name, undefined, context?.authorizationMode ?? "unknown", availability.reason!);
+    auditDeny(name, undefined, context?.authorizationMode ?? "unknown", availability.reason!, context?.workOrigin?.rootCardId);
     // #1680: an Orc intent-surface denial is distinct from the scheduled
     // delivery denial — the stable reason lets tests and operators tell a
     // forged/stale project-bound call from an unattended delivery.
-    const reason = availability.reason?.includes("no intent kind") === true
+    // #1850: a relay denial keeps the established peer_relay_blocked refusal
+    // string so observers see the same verdict whichever layer denies.
+    const reason = availability.reason?.includes("peer_relay_blocked") === true
+      ? "peer_relay_blocked"
+      : availability.reason?.includes("no intent kind") === true
       || availability.reason?.includes("intent surface") === true
       ? "orc_intent_surface"
       : availability.reason?.startsWith("Orc invocation context") === true

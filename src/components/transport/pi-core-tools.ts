@@ -44,6 +44,8 @@ export interface PiCoreToolContext {
   executionScope?: ToolExecutionScope;
   /** #1480: Orc invocation context for durable project ownership fencing. */
   orcContext?: import("../orc-project/orc-project-contracts.js").OrcInvocationContextV2;
+  /** #1850: trusted worker origin descriptor for relay containment. */
+  workOrigin?: import("./tool-registry.js").WorkOrigin;
   /** #1552: trusted session type supplied by Spin; absent types fail closed. */
   sessionType?: import("../spin-types.js").SessionType;
   /** #1552: late-bound memory-tool dependencies (runtime + quota). */
@@ -157,6 +159,8 @@ function definitionToAgentTool(descriptor: PortToolDescriptor, context: PiCoreTo
           sandboxPolicy: context.sandboxPolicy,
           executionScope: context.executionScope,
           orcContext: context.orcContext,
+          // #1850: trusted worker origin for relay containment.
+          workOrigin: context.workOrigin,
           sessionType: context.sessionType,
           memoryToolDeps: context.memoryToolDeps,
           authorizationMode: context.authorizationMode,

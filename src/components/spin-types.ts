@@ -248,6 +248,9 @@ export interface SpinRequest {
   orcContext?: import("./orc-project/orc-project-contracts.js").OrcInvocationContextV2;
   /** #1680: host-owned one-shot turn control of the bound Orc turn. */
   orcTurnControl?: import("./orc-project/orc-project-contracts.js").OrcTurnControl;
+  /** #1850: trusted worker origin descriptor for relay containment, resolved
+   *  at dispatch for card-backed worker turns; absent elsewhere. */
+  workOrigin?: import("./transport/tool-registry.js").WorkOrigin;
   /** #1680: policy-derived prompt-round bound of the bound Orc turn. */
   orcMaxPromptRounds?: number;
   /** #1644: immutable project authority for supervised child creation — bound
@@ -344,6 +347,9 @@ export interface SpinSessionSpec {
   orcContext?: import("./orc-project/orc-project-contracts.js").OrcInvocationContextV2;
   /** #1680: host-owned one-shot turn control of the bound Orc turn. */
   orcTurnControl?: import("./orc-project/orc-project-contracts.js").OrcTurnControl;
+  /** #1850: trusted worker origin descriptor for relay containment, resolved
+   *  at dispatch for card-backed worker turns; absent elsewhere. */
+  workOrigin?: import("./transport/tool-registry.js").WorkOrigin;
   /** #1680: policy-derived prompt-round bound of the bound Orc turn. */
   orcMaxPromptRounds?: number;
 
