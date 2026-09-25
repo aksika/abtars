@@ -394,7 +394,10 @@ export function canonicalRequestHash(request: PeerHelpRequestV1): string {
     version: request.version,
     request_id: request.request_id,
     goal: request.goal,
-    required_capabilities: [...request.required_capabilities].sort(),
+    // #1853: the receiver canonicalizes capabilities in parseHelpRequest before
+    // hashing; canonicalize identically here or the two nodes disagree about
+    // the identity of the same wire request.
+    required_capabilities: normalizeCapabilities(request.required_capabilities).sort(),
   };
   if (request.context) normal.context = request.context;
   if (request.priority) normal.priority = request.priority;

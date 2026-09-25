@@ -292,6 +292,21 @@ describe("canonicalRequestHash", () => {
     });
     expect(h1).not.toBe(h2);
   });
+
+  it("agrees with the receiver's parsed form for non-canonical capability spellings (#1853)", () => {
+    const sent = {
+      version: 1 as const, request_id: "req_parity", created_at: "2026-07-17T12:00:00Z",
+      expires_at: "2026-07-17T12:05:00Z", goal: "do x",
+      required_capabilities: [" GPU ", "docker", "docker"],
+    };
+    const parsed = parseHelpRequest(sent);
+    expect(parsed.ok).toBe(true);
+    if (!parsed.ok) return;
+    // The requester hashes the request it sends; the receiver hashes the request
+    // parseHelpRequest returns. Both nodes store that value and the live gate
+    // cross-checks equality, so this must hold for unnormalized input too.
+    expect(canonicalRequestHash(sent)).toBe(canonicalRequestHash(parsed.value));
+  });
 });
 
 describe("generateContributionRef", () => {
