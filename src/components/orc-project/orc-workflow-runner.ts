@@ -11,6 +11,7 @@
  * in Task 5 to avoid a dual controller during construction.
  */
 import { createHash, randomUUID } from "node:crypto";
+import { logWarn } from "../logger.js";
 import {
   WorkflowStore,
   COMMAND_CLAIM_LEASE_MIN,
@@ -206,6 +207,44 @@ function dbTimeMillis(value: unknown): number {
   if (typeof value !== "string") return NaN;
   const iso = value.includes("T") ? value : `${value.replace(" ", "T")}Z`;
   return Date.parse(iso);
+}
+
+/**
+ * #1849: parse a host-review node outcome into its verdict. Returns undefined
+ * for missing, malformed, or unknown verdicts — the caller treats that as
+ * not-ready (redrive later), never as acceptance.
+ */
+function parseHostReviewVerdict(outcome: string | undefined): ReviewVerdict | undefined {
+  if (!outcome) return undefined;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(outcome) as unknown;
+  } catch {
+    return undefined;
+  }
+  if (typeof parsed !== "object" || parsed === null) return undefined;
+  const verdict = (parsed as { verdict?: unknown }).verdict;
+  if (verdict === "accept") return { verdict: "accept" };
+  if (verdict === "changes_required") {
+    const raw = parsed as { defects?: unknown };
+    const defects = Array.isArray(raw.defects)
+      ? raw.defects
+          .filter((d): d is { criterion: string; detail: string } =>
+            typeof d === "object" && d !== null
+            && typeof (d as { criterion?: unknown }).criterion === "string"
+            && typeof (d as { detail?: unknown }).detail === "string")
+          .map((d) => ({ criterion: d.criterion, detail: d.detail }))
+      : [];
+    return { verdict: "changes_required", defects };
+  }
+  if (verdict === "cannot_assess") {
+    const raw = parsed as { reason?: unknown };
+    return {
+      verdict: "cannot_assess",
+      reason: typeof raw.reason === "string" ? raw.reason.slice(0, 2000) : "no reason recorded",
+    };
+  }
+  return undefined;
 }
 
 /** Lease heartbeat fresh iff its next evaluation lies in the future. */
@@ -1403,6 +1442,13 @@ export class WorkflowRunner {
     reviewStore.ensureAwaitingContract(run.rootCardId);
     const sup = reviewStore.getSupervision(run.rootCardId);
     if (!sup) throw new Error(`workflow runner: supervision missing for card ${run.rootCardId}`);
+    // #1849: peer roots settle through the acceptance settlement (review
+    // decision plus outbox row) so terminal peer delivery fires. All other
+    // roots keep the projection path below verbatim.
+    const rootCard = kanbanGetCard(run.rootCardId);
+    if (rootCard?.source === "peer") {
+      return this.settlePeerTerminal(run, sup);
+    }
     const target = run.state === "succeeded" ? "accepted" : "blocked";
     if (sup.state !== target) {
       const extra: Record<string, string | number | null> =
@@ -1447,6 +1493,150 @@ export class WorkflowRunner {
         projectGeneration: sup.generation, scheduledRunId: run.scheduledRunId ?? undefined,
       });
     }
+    return true;
+  }
+
+  /**
+   * #1849: terminal settlement for peer roots. Routes the terminal commit
+   * through `settleAcceptance`/`settleBlocked` (review decision plus outbox
+   * row in one transaction) instead of moving supervision/card states
+   * directly — the direct moves are what left peer delivery unwired, with
+   * `settleAcceptance`/`settleBlocked` having zero production callers.
+   *
+   * Converged (or legacy-stranded) terminal supervision returns true without
+   * touching anything: settlement is atomic, so terminal-with-records is the
+   * only state this path produces, and pre-fix stranded rows are left as
+   * test residue rather than throwing on every redrive. A redrive that finds
+   * terminal state without records logs once for visibility.
+   */
+  private settlePeerTerminal(
+    run: WorkflowRunRow,
+    sup: { project_card_id: number; generation: number; review_round: number; state: string },
+  ): boolean {
+    const reviewStore = new ProjectReviewStore(this.store.db);
+    if (sup.state === "accepted" || sup.state === "blocked") {
+      const decided = (sup as { accepted_decision_id?: string | null }).accepted_decision_id;
+      if (typeof decided !== "string" || decided.length === 0) {
+        logWarn("workflow-runner", `peer root ${run.rootCardId} terminal without decision records; leaving stranded test residue`);
+      }
+      return true;
+    }
+    const revision = this.store.currentRevision(run.runId);
+    const authority = {
+      projectCardId: run.rootCardId,
+      projectGeneration: sup.generation,
+      scheduledRunId: run.scheduledRunId ?? undefined,
+    };
+    if (run.state !== "succeeded") {
+      // Failed/cancelled runs settle blocked without waiting for a review
+      // verdict that may never come — the run's own failure is the evidence.
+      // The review case still records the terminal decision for the sender.
+      const round = sup.review_round ?? 0;
+      const existing = reviewStore.getCasesForProject(run.rootCardId)
+        .find((c) => c.generation === sup.generation && c.round === round);
+      const snapshot = {
+        source: "host-review",
+        nodeId: `n${revision}_host_review`,
+        verdict: "run_failed",
+        judgedRevision: revision,
+        runState: run.state,
+      };
+      const snapshotDigest = createHash("sha256").update(JSON.stringify(snapshot), "utf-8").digest("hex");
+      const reviewCaseId = existing?.id
+        ?? reviewStore.insertReviewCase(run.rootCardId, sup.generation, round, snapshot, snapshotDigest).id;
+      const failureReason = run.failureReason ?? run.failureCode ?? run.state;
+      reviewStore.settleBlocked(
+        run.rootCardId,
+        reviewCaseId,
+        {
+          action: "blocked",
+          verdict: "run_failed",
+          blocker: {
+            blocker_class: "run_failed",
+            affected_criterion_ids: [],
+            what_was_attempted: boundText(failureReason, 1000),
+          },
+        },
+        "run_failed",
+        {
+          kind: "failed",
+          summary: this.resultSummary(run),
+          failureReason,
+        },
+        undefined,
+        authority,
+      );
+      kanbanSetProjectDeliveryReady(run.rootCardId, {
+        projectGeneration: sup.generation, scheduledRunId: run.scheduledRunId ?? undefined,
+      });
+      return true;
+    }
+    const reviewNode = this.store.listNodes(run.runId, revision)
+      .find((n) => n["node_id"] === `n${revision}_host_review`);
+    const verdict = parseHostReviewVerdict(
+      typeof reviewNode?.["outcome"] === "string" ? reviewNode["outcome"] : undefined,
+    );
+    // A succeeded run without a review verdict is a broken invariant (every
+    // revision appends a mandatory review node): fail loudly so recovery and
+    // operators see it instead of recording a baseless acceptance.
+    if (!verdict) {
+      throw new Error(`workflow runner: succeeded peer run ${run.runId} has no host-review verdict`);
+    }
+    const round = sup.review_round ?? 0;
+    const existing = reviewStore.getCasesForProject(run.rootCardId)
+      .find((c) => c.generation === sup.generation && c.round === round);
+    const snapshot = {
+      source: "host-review",
+      nodeId: `n${revision}_host_review`,
+      verdict: verdict.verdict,
+      judgedRevision: revision,
+      runState: run.state,
+    };
+    const snapshotDigest = createHash("sha256").update(JSON.stringify(snapshot), "utf-8").digest("hex");
+    const reviewCaseId = existing?.id
+      ?? reviewStore.insertReviewCase(run.rootCardId, sup.generation, round, snapshot, snapshotDigest).id;
+    if (verdict.verdict === "accept") {
+      reviewStore.settleAcceptance(
+        run.rootCardId,
+        reviewCaseId,
+        { action: "accept", verdict: "accept", judgedRevision: revision, nodeId: `n${revision}_host_review` },
+        this.resultSummary(run),
+        { kind: "completed", summary: this.resultSummary(run) },
+        undefined,
+        authority,
+      );
+    } else {
+      const defects = verdict.verdict === "changes_required"
+        ? verdict.defects.map((d) => d.criterion).filter((c): c is string => typeof c === "string")
+        : [];
+      const blockerClass = verdict.verdict === "changes_required"
+        ? "host_review_changes_required"
+        : "host_review_cannot_assess";
+      reviewStore.settleBlocked(
+        run.rootCardId,
+        reviewCaseId,
+        {
+          action: "blocked",
+          verdict: verdict.verdict,
+          blocker: {
+            blocker_class: blockerClass,
+            affected_criterion_ids: defects,
+            what_was_attempted: boundText(run.failureReason ?? run.failureCode ?? run.state, 1000),
+          },
+        },
+        blockerClass,
+        {
+          kind: "failed",
+          summary: this.resultSummary(run),
+          failureReason: run.failureReason ?? run.failureCode ?? run.state,
+        },
+        undefined,
+        authority,
+      );
+    }
+    kanbanSetProjectDeliveryReady(run.rootCardId, {
+      projectGeneration: sup.generation, scheduledRunId: run.scheduledRunId ?? undefined,
+    });
     return true;
   }
 

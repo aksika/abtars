@@ -1474,3 +1474,190 @@ describe("deterministic project workspace (#1844)", () => {
     }
   });
 });
+
+describe("peer terminal settlement (#1849)", () => {
+  beforeEach(() => {
+    ({ runner, store } = makeRunner());
+    for (const t of ["workflow_ingress", "workflow_deliveries", "workflow_commands", "workflow_budgets", "workflow_node_deps", "workflow_nodes", "workflow_plan_revisions", "workflow_operations", "workflow_runs"]) {
+      store.db.exec(`DELETE FROM ${t}`);
+    }
+    // Tables owned by other stores (same pattern as Task 2 above): the
+    // terminal identity lookup needs accepted help rows.
+    store.db.exec(`
+      CREATE TABLE IF NOT EXISTS peer_help_requests (
+        origin_peer TEXT NOT NULL,
+        request_id TEXT NOT NULL,
+        request_hash TEXT NOT NULL,
+        state TEXT NOT NULL,
+        contribution_ref TEXT,
+        local_card_id INTEGER,
+        local_run_id TEXT,
+        response_json TEXT,
+        withdrawn_at TEXT,
+        PRIMARY KEY (origin_peer, request_id)
+      );
+    `);
+    // The settlement path touches worker_attempts columns that the minimal
+    // Task-2 fixture lacks when it runs first: ensure the production shape
+    // regardless of creation order.
+    store.db.exec(`
+      CREATE TABLE IF NOT EXISTS worker_attempts (
+        id TEXT PRIMARY KEY, card_id INTEGER NOT NULL, contract_id TEXT NOT NULL,
+        ordinal INTEGER NOT NULL, executor_kind TEXT NOT NULL, executor_id TEXT NOT NULL,
+        status TEXT NOT NULL, started_at TEXT NOT NULL,
+        lifecycle TEXT NOT NULL DEFAULT 'pending',
+        root_project_card_id INTEGER, root_project_generation INTEGER,
+        cancel_reason TEXT
+      );
+    `);
+    for (const col of [
+      "generation INTEGER DEFAULT 1", "remote_task_id INTEGER", "claimed_at TEXT",
+      "settled_at TEXT", "hard_deadline_at TEXT", "source_attempt_id TEXT",
+      "retry_directive_id TEXT", "earliest_claim_at TEXT",
+    ]) {
+      try {
+        store.db.exec(`ALTER TABLE worker_attempts ADD COLUMN ${col}`);
+      } catch {
+        // Column already present (creation order dependent) — continue.
+      }
+    }
+  });
+
+  function seedPeerCard(): number {
+    const id = cardSeq++;
+    store.db.prepare(
+      `INSERT INTO kanban_board (id, title, source, source_peer, type, status) VALUES (?, ?, 'peer', 'molty', 'O', 'running')`,
+    ).run(id, `wf-peer-${id}`);
+    store.db.prepare(
+      `INSERT INTO peer_help_requests (origin_peer, request_id, request_hash, state, contribution_ref, local_card_id) VALUES ('molty', ?, 'h', 'accepted', ?, ?)`,
+    ).run(`swarm-req-${id}`, `help_${id}`, id);
+    return id;
+  }
+
+  function admitPeer(card: number) {
+    copSeq++;
+    return runner.admit({
+      rootKind: "peer", rootCardId: card, clientOperationId: `cop-peer-${copSeq}`,
+    }).run;
+  }
+
+  function driveToReviewAccept(runId: string): string {
+    const acc = runner.acceptPlan(runId, twoLane());
+    const { port } = fakePort();
+    runner.drain(10, port);
+    const [a, b, s] = acc.nodeIds as [string, string, string];
+    runner.attemptSucceeded(runId, a, "att-a", "{}");
+    runner.attemptSucceeded(runId, b, "att-b", "{}");
+    runner.drain(10, port);
+    runner.attemptSucceeded(runId, s, "att-c", "{}");
+    runner.drain(10, port);
+    const review = store.listNodes(runId, store.currentRevision(runId))
+      .find((n) => n["kind"] === "review")?.["node_id"] as string;
+    expect(review).toBeTruthy();
+    expect(runner.submitVerdict(runId, review, { verdict: "accept" })).toBe("accepted");
+    const sender = {
+      name: "test-sender",
+      send: (_doc: { runId: string; nodeId: string; obligation: string; idempotenceKey: string }) => "receipt-test",
+    };
+    expect(runner.executeDelivery(runId, review, sender)).toBe("acknowledged");
+    return review;
+  }
+
+  function outboxRows(cardId: number): Array<Record<string, unknown>> {
+    return store.db.prepare(`SELECT * FROM project_acceptance_outbox WHERE project_card_id = ?`).all(cardId) as Array<Record<string, unknown>>;
+  }
+
+  function caseRows(cardId: number): Array<Record<string, unknown>> {
+    return store.db.prepare(`SELECT * FROM project_review_cases WHERE project_card_id = ?`).all(cardId) as Array<Record<string, unknown>>;
+  }
+
+  function decisionRows(caseId: string): Array<Record<string, unknown>> {
+    return store.db.prepare(`SELECT * FROM project_review_decisions WHERE review_case_id = ?`).all(caseId) as Array<Record<string, unknown>>;
+  }
+
+  function cardStatus(cardId: number): string | null {
+    const row = store.db.prepare(`SELECT status FROM kanban_board WHERE id = ?`).get(cardId) as { status?: string } | undefined;
+    return row?.status ?? null;
+  }
+
+  it("succeeded peer root records decision and outbox, settles terminal", () => {
+    const card = seedPeerCard();
+    const run = admitPeer(card);
+    driveToReviewAccept(run.runId);
+    expect(store.getRun(run.runId)?.state).toBe("succeeded");
+    expect(runner.projectTerminalProjections(run.runId)).toBe(true);
+    const cases = caseRows(card);
+    expect(cases).toHaveLength(1);
+    expect(cases[0]?.["status"]).toBe("accepted");
+    const decisions = decisionRows(cases[0]?.["id"] as string);
+    expect(decisions).toHaveLength(1);
+    const outbox = outboxRows(card);
+    expect(outbox).toHaveLength(1);
+    expect(outbox[0]?.["sent_at"]).toBeNull();
+    expect(cardStatus(card)).toBe("done");
+    const sup = new ProjectReviewStore(store.db).getSupervision(card);
+    expect(sup?.state).toBe("accepted");
+    expect(sup?.accepted_decision_id).toBe(decisions[0]?.["id"]);
+  });
+
+  it("redrive adds nothing", () => {
+    const card = seedPeerCard();
+    const run = admitPeer(card);
+    driveToReviewAccept(run.runId);
+    expect(runner.projectTerminalProjections(run.runId)).toBe(true);
+    expect(runner.projectTerminalProjections(run.runId)).toBe(true);
+    expect(caseRows(card)).toHaveLength(1);
+    expect(outboxRows(card)).toHaveLength(1);
+  });
+
+  it("failed peer root records a failed event and outbox row", () => {
+    const card = seedPeerCard();
+    const run = admitPeer(card);
+    const acc = runner.acceptPlan(run.runId, twoLane());
+    const { port } = fakePort();
+    runner.drain(10, port);
+    runner.attemptSucceeded(run.runId, acc.nodeIds[1] as string, "att-b", "{}");
+    runner.attemptFailed(run.runId, acc.nodeIds[0] as string, "att-a1", "flaky", true);
+    runner.drain(10, port);
+    runner.attemptFailed(run.runId, acc.nodeIds[0] as string, "att-a2", "boom", false);
+    expect(store.getRun(run.runId)?.state).toBe("failed");
+    expect(runner.projectTerminalProjections(run.runId)).toBe(true);
+    const outbox = outboxRows(card);
+    expect(outbox).toHaveLength(1);
+    expect(cardStatus(card)).toBe("failed");
+    const sup = new ProjectReviewStore(store.db).getSupervision(card);
+    expect(sup?.state).toBe("blocked");
+  });
+
+  it("non-peer root writes no outbox row", () => {
+    const card = seedCard(store);
+    const run = admit(runner, card);
+    driveToReviewAccept(run.runId);
+    expect(runner.projectTerminalProjections(run.runId)).toBe(true);
+    expect(outboxRows(card)).toHaveLength(0);
+    expect(caseRows(card)).toHaveLength(0);
+  });
+
+  it("crash between case insert and settlement converges on redrive", () => {
+    const card = seedPeerCard();
+    const run = admitPeer(card);
+    driveToReviewAccept(run.runId);
+    expect(runner.projectTerminalProjections(run.runId)).toBe(true);
+    const reviewStore = new ProjectReviewStore(store.db);
+    const before = reviewStore.getCasesForProject(card);
+    expect(before).toHaveLength(1);
+    // Simulate a crash after the case insert but before settlement
+    // committed: case exists, supervision non-terminal, no decision/outbox.
+    const caseId = before[0]?.["id"] as string;
+    store.db.prepare(`DELETE FROM project_review_decisions WHERE review_case_id = ?`).run(caseId);
+    store.db.prepare(`DELETE FROM project_acceptance_outbox WHERE project_card_id = ?`).run(card);
+    store.db.prepare(`UPDATE project_review_cases SET status = 'open' WHERE id = ?`).run(caseId);
+    store.db.prepare(`UPDATE project_supervision SET state = 'executing', accepted_decision_id = NULL WHERE project_card_id = ?`).run(card);
+    store.db.prepare(`UPDATE kanban_board SET status = 'running' WHERE id = ?`).run(card);
+    expect(runner.projectTerminalProjections(run.runId)).toBe(true);
+    expect(caseRows(card)).toHaveLength(1);
+    expect(caseRows(card)[0]?.["id"]).toBe(caseId);
+    expect(outboxRows(card)).toHaveLength(1);
+    expect(reviewStore.getSupervision(card)?.state).toBe("accepted");
+  });
+});
