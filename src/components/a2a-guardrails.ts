@@ -8,10 +8,10 @@
  *
  * Two invariants make this a guardrail rather than a suggestion:
  *
- * - The file is a CEILING. `peers.json` per-peer `trust` and
- *   `allowedRead`/`allowedWrite` narrow it and can never widen it, so a
- *   compromised or over-generous peer entry cannot exceed the host's own
- *   whitelist.
+ * - It is GLOBAL and the only source of A2A path scope. peers.json carries
+ *   per-peer `trust`, which decides which sections a peer may use at all; it
+ *   carries no paths of its own, so there is one place to read and one place
+ *   to edit.
  * - Every failure resolves to the shipped defaults, never to `"*"`. A missing,
  *   unreadable, malformed, or partially invalid file yields
  *   `~/.abtars/workspace/projects/*` (the per-card workspace layout from
@@ -172,34 +172,21 @@ export interface A2ACapabilities {
 const DENY_ALL: A2ACapabilities = { peer: null, trust: 0, read: [], write: [], exec: [] };
 
 /**
- * Narrow a ceiling by a per-peer list. Entries outside the ceiling are
- * dropped rather than honored, so peers.json can only restrict. A `"*"` peer
- * list means "no additional restriction", not "everything".
- */
-function narrow(ceiling: A2AScope, peerList: string[] | undefined): A2AScope {
-  if (peerList === undefined) return ceiling;
-  const normalized = peerList.map(normalizeEntry).filter((p): p is string => p !== null);
-  if (normalized.includes("*")) return ceiling;
-  if (ceiling === "*") return normalized;
-  return normalized.filter((candidate) => ceiling.some((root) => isUnder(candidate, root)));
-}
-
-/**
- * Resolve what one peer-originated execution may do: the whitelist ceiling,
- * gated by the peer's trust level and narrowed by its peers.json lists. An
- * unresolvable peer identity denies everything (fail closed).
+ * Resolve what one peer-originated execution may do. Paths come only from the
+ * global whitelist; the peer's `trust` level decides which sections apply.
+ * An unresolvable peer identity denies everything (fail closed).
+ *
+ * #1854: per-peer path lists were deliberately removed from peers.json. The
+ * read/write/execute scope is a host-global guardrail, not a per-peer
+ * negotiation, so there is exactly one place to read and one place to edit.
  */
 export function resolveA2ACapabilities(sourcePeer: string | null): A2ACapabilities {
   if (!sourcePeer) return DENY_ALL;
   let trust = 0;
-  let entryRead: string[] | undefined;
-  let entryWrite: string[] | undefined;
   try {
     const entry = loadPeerConfig().peers[sourcePeer];
     if (!entry) return { ...DENY_ALL, peer: sourcePeer };
     trust = typeof entry.trust === "number" ? entry.trust : 0;
-    entryRead = entry.allowedRead;
-    entryWrite = entry.allowedWrite;
   } catch (err) {
     logWarn(TAG, `Peer config unreadable — denying A2A access for ${sourcePeer}: ${err instanceof Error ? err.message : String(err)}`);
     return { ...DENY_ALL, peer: sourcePeer };
@@ -210,8 +197,8 @@ export function resolveA2ACapabilities(sourcePeer: string | null): A2ACapabiliti
   return {
     peer: sourcePeer,
     trust,
-    read: sections.has("R") ? narrow(whitelist.R, entryRead) : [],
-    write: sections.has("W") ? narrow(whitelist.W, entryWrite) : [],
+    read: sections.has("R") ? whitelist.R : [],
+    write: sections.has("W") ? whitelist.W : [],
     exec: sections.has("X") ? whitelist.X : [],
   };
 }

@@ -128,30 +128,23 @@ describe("trust bounding", () => {
     expect(scopeAllows(caps.exec, inside)).toBe(true);
   });
 
-  it("lets a peers.json list narrow the ceiling but never widen it", async () => {
+  it("ignores per-peer path lists — the global whitelist is the only source", async () => {
     writeWhitelist({ R: [join(home, "workspace", "projects")], W: [], X: [] });
     writePeers({
       molty: {
         host: "h", port: 1, verifyKey: "k", trust: 2,
-        allowedRead: [join(home, "workspace", "projects", "42"), "/etc"],
+        // #1854: these keys are no longer part of the schema. Even when an
+        // operator leaves them in the file, they must not widen or narrow.
+        allowedRead: ["/etc"],
+        allowedWrite: ["*"],
       },
     });
     const { resolveA2ACapabilities, scopeAllows } = await load();
     const caps = resolveA2ACapabilities("molty");
-    expect(scopeAllows(caps.read, join(home, "workspace", "projects", "42", "x.ts"))).toBe(true);
-    // Narrowed: a sibling project inside the ceiling is no longer reachable.
-    expect(scopeAllows(caps.read, join(home, "workspace", "projects", "43"))).toBe(false);
-    // Outside the ceiling: dropped, not honored.
     expect(scopeAllows(caps.read, "/etc/passwd")).toBe(false);
-  });
-
-  it("cannot widen a wildcard peer list past the ceiling", async () => {
-    writeWhitelist({ R: [join(home, "workspace", "projects")], W: [], X: [] });
-    writePeers({ molty: { host: "h", port: 1, verifyKey: "k", trust: 2, allowedRead: ["*"] } });
-    const { resolveA2ACapabilities, scopeAllows } = await load();
-    const caps = resolveA2ACapabilities("molty");
-    expect(scopeAllows(caps.read, "/etc/passwd")).toBe(false);
-    expect(scopeAllows(caps.read, join(home, "workspace", "projects", "42"))).toBe(true);
+    expect(scopeAllows(caps.read, join(home, "workspace", "projects", "43"))).toBe(true);
+    // W is empty in the whitelist, so a "*" peer entry grants nothing.
+    expect(scopeAllows(caps.write, join(home, "workspace", "projects", "43"))).toBe(false);
   });
 });
 

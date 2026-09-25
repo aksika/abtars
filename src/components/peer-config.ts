@@ -27,8 +27,11 @@ export interface PeerEntry {
   maxClass?: 0 | 1 | 2 | 3;
   mode?: "signed";                      // require body-sig for relayed content
   allowedTools?: string[];
-  allowedRead?: string[];
-  allowedWrite?: string[];
+  /**
+   * #1854: per-peer path lists were removed. Incoming A2A read/write scope is
+   * global and owned by ~/.abtars/config/a2a-guardrails.json (R/W/X sections);
+   * `trust` here decides which of those sections a peer may use at all.
+   */
   transport?: "http" | "ws-outbound";
 }
 
@@ -137,8 +140,6 @@ export function loadPeerConfig(): PeerConfig {
             maxClass: normalizePeerMaxClass(e.maxClass, name),
             ...(e.mode === "signed" ? { mode: "signed" as const } : {}),
             ...(Array.isArray(e.allowedTools) ? { allowedTools: e.allowedTools as string[] } : {}),
-            ...(Array.isArray(e.allowedRead) ? { allowedRead: e.allowedRead as string[] } : {}),
-            ...(Array.isArray(e.allowedWrite) ? { allowedWrite: e.allowedWrite as string[] } : {}),
             ...(e.transport === "ws-outbound" ? { transport: "ws-outbound" as const } : {}),
           };
         } else {
