@@ -6,6 +6,10 @@
  * production. These tests drive the guard through the dispatch-resolved
  * workOrigin (the production path) — the synthetic orcContext injection
  * below covers only the legacy O-session path that hid the regression.
+ *
+ * #1856: relay tools stay offered to peer-origin workers (no schema hiding)
+ * so an attempt reaches the execution boundary, which refuses it and records
+ * the correlated auditDeny the live gate observes.
  */
 
 import { describe, it, expect, beforeEach, vi, afterEach } from "vitest";
@@ -121,10 +125,11 @@ describe("#1850 guard over durable origin", () => {
       expect(out.reason).toBe("peer_relay_blocked");
     });
 
-    it(`${tool} stays available to owner-origin workers`, async () => {
+    it(`${tool} stays offered to every origin — refusal happens at execution (#1856)`, async () => {
       const { checkToolAvailability } = await import("./tool-registry.js");
       expect(checkToolAvailability(tool, { workOrigin: ownerOrigin }).allowed).toBe(true);
-      expect(checkToolAvailability(tool, { workOrigin: peerOrigin }).allowed).toBe(false);
+      expect(checkToolAvailability(tool, { workOrigin: peerOrigin }).allowed).toBe(true);
+      expect(checkToolAvailability(tool, { workOrigin: unknownOrigin }).allowed).toBe(true);
     });
   }
 

@@ -53,6 +53,11 @@ export const peerAskHelpTool: ToolDefinition = {
   async execute(args: Record<string, string>, toolContext): Promise<string> {
     const { isActiveCardPeerSourced } = await import("./orc-tools.js");
     if (await isActiveCardPeerSourced(toolContext)) {
+      // #1856: record the correlated denial — relay tools stay offered to
+      // peer-origin workers so the attempt reaches this boundary, which is
+      // the only layer that still refuses relay. The live gate observes it.
+      const { auditDeny } = await import("../tool-sandbox.js");
+      auditDeny("peer_ask_help", undefined, toolContext?.authorizationMode ?? "unknown", "peer_relay_blocked: peer-originated relay refused", toolContext?.workOrigin?.rootCardId);
       return JSON.stringify({ error: "Relaying to other peers is not permitted for peer-originated requests. Peers communicate directly.", reason: "peer_relay_blocked" });
     }
 

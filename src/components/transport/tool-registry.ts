@@ -136,10 +136,10 @@ export interface ToolAvailabilityContext {
    *  policy decides the allowed tool surface at both schema presentation and
    *  execution time; a missing intent kind fails closed. */
   readonly orcContext?: OrcInvocationContextV2;
-  /** #1850: trusted worker origin for relay containment. A present
-   *  peer/unresolvable origin hides the relay tools here (schema
-   *  presentation filters silently; the execution boundary records the
-   *  denial). Absent on non-worker turns, which are unaffected. */
+  /** #1850/#1856: trusted worker origin for relay containment. Relay tools
+   *  stay offered to peer-origin workers so an attempt reaches the execution
+   *  boundary, which refuses it and records the correlated denial there.
+   *  Absent on non-worker turns, which are unaffected. */
   readonly workOrigin?: WorkOrigin;
 }
 
@@ -168,20 +168,12 @@ export function checkToolAvailability(toolName: string, context: ToolAvailabilit
       reason: "Tool 'send_document' is unavailable during unattended or unverified scheduled execution; delivery is owned by scheduled settlement",
     };
   }
-  // #1850: relay containment for card-backed worker turns. Peer-originated
-  // (or unresolvable-origin) workers are not offered the relay tools at all;
-  // the execution boundary records the denial when one is attempted anyway.
-  // Owner roots and contexts without a worker origin are unaffected.
-  if (
-    (toolName === "peer_ask_help" || toolName === "peer_session" || toolName === "peer_doorbell")
-    && context.workOrigin !== undefined
-    && (context.workOrigin.rootKind === "peer" || context.workOrigin.rootKind === "unknown")
-  ) {
-    return {
-      allowed: false,
-      reason: `Tool '${toolName}' is unavailable for peer-originated work (peer_relay_blocked)`,
-    };
-  }
+  // #1856: relay tools are deliberately NOT filtered here. Peer-originated
+  // workers must be able to attempt them so the attempt reaches the
+  // execution boundary, which refuses peer relay and records the
+  // correlated auditDeny (the live gate observes that record). Hiding the
+  // tools only guarantees the denial is never produced. Owner roots and
+  // contexts without a worker origin are unaffected.
   const bound = context.orcContext;
   if (bound) {
     if (!bound.intentKind) {
@@ -772,8 +764,11 @@ const peerSessionTool: ToolDefinition = {
   },
   async execute(args, context) {
     // #1301/#1480 — no relay for a currently authenticated peer-originated Orc run.
+    // #1856: record the correlated denial — the execution boundary is the only
+    // layer that still refuses relay, and the live gate observes this record.
     const { isActiveCardPeerSourced } = await import("./orc-tools.js");
     if (await isActiveCardPeerSourced(context)) {
+      auditDeny("peer_session", undefined, context?.authorizationMode ?? "unknown", "peer_relay_blocked: peer-originated relay refused", context?.workOrigin?.rootCardId);
       return JSON.stringify({ error: "Relaying to other peers is not permitted for peer-originated requests. Peers communicate directly.", reason: "peer_relay_blocked" });
     }
     const { resolvePeerName } = await import("./peer-resolver.js");
@@ -850,8 +845,10 @@ const peerDoorbellTool: ToolDefinition = {
   },
   async execute(args, context) {
     // #1301 — no relay: a peer-originated request must never reach a third peer via us.
+    // #1856: record the correlated denial (see peer_session above).
     const { isActiveCardPeerSourced } = await import("./orc-tools.js");
     if (await isActiveCardPeerSourced(context)) {
+      auditDeny("peer_doorbell", undefined, context?.authorizationMode ?? "unknown", "peer_relay_blocked: peer-originated relay refused", context?.workOrigin?.rootCardId);
       return JSON.stringify({ error: "Relaying to other peers is not permitted for peer-originated requests. Peers communicate directly.", reason: "peer_relay_blocked" });
     }
     const { resolvePeerName } = await import("./peer-resolver.js");
@@ -1006,11 +1003,9 @@ export async function executeToolCall(name: string, args: Record<string, unknown
     // #1680: an Orc intent-surface denial is distinct from the scheduled
     // delivery denial — the stable reason lets tests and operators tell a
     // forged/stale project-bound call from an unattended delivery.
-    // #1850: a relay denial keeps the established peer_relay_blocked refusal
-    // string so observers see the same verdict whichever layer denies.
-    const reason = availability.reason?.includes("peer_relay_blocked") === true
-      ? "peer_relay_blocked"
-      : availability.reason?.includes("no intent kind") === true
+    // #1856: relay refusal lives at the tool handlers (isActiveCardPeerSourced
+    // + auditDeny), not in availability, so no relay branch belongs here.
+    const reason = availability.reason?.includes("no intent kind") === true
       || availability.reason?.includes("intent surface") === true
       ? "orc_intent_surface"
       : availability.reason?.startsWith("Orc invocation context") === true
