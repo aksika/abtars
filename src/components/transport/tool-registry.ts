@@ -10,7 +10,7 @@ import { homedir } from "node:os";
 import { logDebug, logWarn, redactSecrets } from "../logger.js";
 import { logAndSwallow } from "../log-and-swallow.js";
 import { checkTool, auditDeny, type SandboxPolicy } from "../tool-sandbox.js";
-import { authorizePath } from "../authorization.js";
+import { authorizePath, resolveAuthorizationOrigin } from "../authorization.js";
 import { getMasterUserId } from "../master-user.js";
 import { isDefinitivePreDispatchFailure } from "../memory-runtime.js";
 import { runBashCommand } from "../bash-runner.js";
@@ -338,6 +338,8 @@ const bashTool: ToolDefinition = {
           signal: context?.signal,
           executionScope: context?.executionScope,
           authorizationMode: context?.authorizationMode,
+          // #1854: peer-originated bash is decided by the A2A whitelist.
+          origin: resolveAuthorizationOrigin({ workOrigin: context?.workOrigin, userId: context?.userId }),
         },
       );
     }
@@ -1034,7 +1036,13 @@ export async function executeToolCall(name: string, args: Record<string, unknown
       const mode = name.includes("read") || name === "memory_recall" ? "read" as const : "write" as const;
       // #1851: the authorization owner audits path denials itself — no second
       // sandbox_deny row for the same decision.
-      const pathCheck = authorizePath(filePath, mode, context.sandboxPolicy);
+      const pathCheck = authorizePath(
+        filePath,
+        mode,
+        context.sandboxPolicy,
+        // #1854: peer-originated reads/writes are bounded by the A2A whitelist.
+        resolveAuthorizationOrigin({ workOrigin: context.workOrigin, userId: context.userId }),
+      );
       if (!pathCheck.allowed) {
         return JSON.stringify({ error: pathCheck.reason, reason: "peer_sandbox" });
       }

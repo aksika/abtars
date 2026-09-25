@@ -57,6 +57,11 @@ export async function phaseTransport(ctx: BootCtx): Promise<PhaseResult> {
     logWarn("main", `SECURITY_MODE=${securityMode.configured} — OS containment not wired, falling back to guardrails`);
   }
 
+  // #1854: the A2A guardrail ceiling applies independently of SECURITY_MODE,
+  // so the operator sees it even when the mode is off.
+  const { logA2AWhitelist } = await import("../components/a2a-guardrails.js");
+  logA2AWhitelist();
+
   // Initialize context-window-start for all known users
   if (memoryConfig.memoryEnabled) {
     const reg = loadUsers();

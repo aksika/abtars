@@ -1,0 +1,6 @@
+{
+  "_comment": "A2A guardrail whitelist (#1854). Copy to ~/.abtars/config/a2a-guardrails.json. Bounds every peer-originated (A2A) execution on this host. R = readable paths, W = writable paths, X = working directories where a peer command may run. A section containing \"*\" allows everything in that section. This file is a CEILING: peers.json trust and allowedRead/allowedWrite narrow it and can never widen it (trust 0/unknown peer = nothing, 1 = R only, >=2 = R+W+X). A missing, unreadable, or malformed file falls back to these defaults, never to \"*\". Applies regardless of SECURITY_MODE.",
+  "R": ["~/.abtars/workspace/projects/*"],
+  "W": ["~/.abtars/workspace/projects/*"],
+  "X": ["~/.abtars/workspace/projects/*"]
+}

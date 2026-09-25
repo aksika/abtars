@@ -85,9 +85,28 @@ const WRAPPER_POSITIONAL_VALUES_TO_SKIP: ReadonlyMap<string, number> = new Map([
 const CODE_INTERPRETERS = new Set(["node", "nodejs", "python", "python3", "perl", "ruby"]);
 const DYNAMIC_SENSITIVE_COMMANDS = new Set(["rm", "git", "kill", "chmod", "find", "awk", "gawk", "mawk"]);
 
+/** Classification options. */
+export interface ClassifyOptions {
+  /**
+   * #1854: whether the #1771 trusted-root pre-pass may short-circuit to
+   * `allow`. That pre-pass is an owner-facing nuisance filter — it exists so
+   * in-root work does not page the master. A peer-originated execution runs
+   * inside a trusted root by construction (its own project workspace), so
+   * honoring it there would hand a remote peer `sudo` for free. A2A callers
+   * pass false and get the unshortcut tier.
+   */
+  readonly rootScopeTrust?: boolean;
+}
+
 /** Classify a command into block / auth-required / allow. Payload-aware per #1752. */
-export function classifyCommand(cmd: string, cwd?: string): CommandTier {
-  return classifyInternal(typeof cmd === "string" ? cmd : "", 0, MAX_NESTED_BYTES, cwd ?? homedir());
+export function classifyCommand(cmd: string, cwd?: string, options?: ClassifyOptions): CommandTier {
+  return classifyInternal(
+    typeof cmd === "string" ? cmd : "",
+    0,
+    MAX_NESTED_BYTES,
+    cwd ?? homedir(),
+    options?.rootScopeTrust ?? true,
+  );
 }
 
 /**
@@ -106,7 +125,7 @@ export function isRootScopeAllow(cmd: string, cwd?: string): boolean {
   return rootScopePrePass(lexed, heredocs.bodies, cwd ?? homedir());
 }
 
-function classifyInternal(cmd: string, depth: number, remainingBytes: number, cwd: string): CommandTier {
+function classifyInternal(cmd: string, depth: number, remainingBytes: number, cwd: string, rootScopeTrust: boolean): CommandTier {
   if (depth > MAX_NESTED_DEPTH || remainingBytes <= 0) return "auth-required";
 
   const heredocs = maskHeredocBodies(cmd);
@@ -124,11 +143,11 @@ function classifyInternal(cmd: string, depth: number, remainingBytes: number, cw
   // nested payload classification so shell syntax does not recreate the
   // authorization prompt this policy is meant to remove. Explicit paths in
   // nested substitutions are still checked for root/secret escapes.
-  if (rootScopePrePass(lexed, heredocs.bodies, cwd)) return "allow";
+  if (rootScopeTrust && rootScopePrePass(lexed, heredocs.bodies, cwd)) return "allow";
 
   for (const payload of [...lexed.substitutions, ...heredocSubstitutions(heredocs.bodies)]) {
     if (!payload.trim()) return "auth-required";
-    const nestedTier = classifyInternal(payload, depth + 1, remainingBytes - payload.length, cwd);
+    const nestedTier = classifyInternal(payload, depth + 1, remainingBytes - payload.length, cwd, rootScopeTrust);
     if (nestedTier !== "allow") return nestedTier;
   }
 
@@ -159,14 +178,14 @@ function classifyInternal(cmd: string, depth: number, remainingBytes: number, cw
       if (commandIndex === null) return "auth-required";
       const payload = nextValue(segment.tokens, commandIndex + 1);
       if (!payload || payload.dynamic || !payload.value.trim()) return "auth-required";
-      const nestedTier = classifyInternal(payload.value, depth + 1, remainingBytes - payload.value.length, cwd);
+      const nestedTier = classifyInternal(payload.value, depth + 1, remainingBytes - payload.value.length, cwd, rootScopeTrust);
       if (nestedTier !== "allow") return nestedTier;
       continue;
     }
 
     if (word === "eval") {
       if (args.length === 0 || args.some(t => t.dynamic)) return "auth-required";
-      const nestedTier = classifyInternal(args.map(t => t.value).join(" "), depth + 1, remainingBytes - args.reduce((n, t) => n + t.value.length, 0), cwd);
+      const nestedTier = classifyInternal(args.map(t => t.value).join(" "), depth + 1, remainingBytes - args.reduce((n, t) => n + t.value.length, 0), cwd, rootScopeTrust);
       if (nestedTier !== "allow") return nestedTier;
       continue;
     }

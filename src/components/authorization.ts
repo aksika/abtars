@@ -16,6 +16,7 @@ import { dirname, join, resolve, sep } from "node:path";
 import { abmindHome, abtarsHome } from "../paths.js";
 import { logAndSwallow } from "./log-and-swallow.js";
 import { classifyCommand, isRootScopeAllow } from "./guardrails.js";
+import { execScopeAllows, resolveA2ACapabilities, scopeAllows } from "./a2a-guardrails.js";
 import { getEnv } from "./env-schema.js";
 import type { ActionGate, ToolAuthorizationMode } from "./action-gate.js";
 import type { CheckResult, SandboxPolicy } from "./tool-sandbox.js";
@@ -102,14 +103,60 @@ export function writeAuthorizationAudit(entry: AuthorizationAuditEntry): void {
 // ── Bash decision ───────────────────────────────────────────────────────────
 
 export type BashAuthorization =
-  | { readonly decision: "allow"; readonly by: "mode-off" | "classifier" | "root-scope" | "unattended-sleep" | "no-approval-surface" }
+  | { readonly decision: "allow"; readonly by: "mode-off" | "classifier" | "root-scope" | "unattended-sleep" | "no-approval-surface" | "a2a-whitelist" }
   | { readonly decision: "approved"; readonly by: "rule" | "always" | "once" | "unattended-task"; readonly pattern?: string }
-  | { readonly decision: "block"; readonly by: "bridge-self-protection" | "classifier" | "approval"; readonly reason: string };
+  | { readonly decision: "block"; readonly by: "bridge-self-protection" | "classifier" | "approval" | "a2a-whitelist"; readonly reason: string };
 
 export interface BashAuthorizationContext {
   readonly cwd?: string;
   readonly actionGate: ActionGate | null;
   readonly authorizationMode?: ToolAuthorizationMode;
+  /**
+   * #1854: durable origin of this execution. A peer-originated (A2A) command
+   * is decided by the guardrail whitelist, never by an interactive prompt.
+   */
+  readonly origin?: AuthorizationOrigin;
+}
+
+/**
+ * #1854: the origin facts a decision needs, mapped from the #1850 `WorkOrigin`
+ * descriptor or from the A2A chat lane. `unknown` is treated as peer-origin
+ * for containment purposes: an execution whose lineage cannot be proven owner
+ * must not gain owner authority.
+ */
+export interface AuthorizationOrigin {
+  readonly kind: "owner" | "peer" | "unknown";
+  readonly sourcePeer: string | null;
+}
+
+/** True when this origin must be governed by the A2A whitelist. */
+export function isA2AOrigin(origin: AuthorizationOrigin | undefined): boolean {
+  return origin !== undefined && (origin.kind === "peer" || origin.kind === "unknown");
+}
+
+/**
+ * #1854: map host-owned execution facts to an origin. Two inputs, both
+ * host-set and never model-supplied: the #1850 `WorkOrigin` descriptor for
+ * card-backed work, and the `peer:<name>` user namespace the A2A chat lane
+ * assigns (`agent-api-adapter`). Owner chats and composition turns resolve to
+ * undefined and keep the interactive path.
+ */
+export function resolveAuthorizationOrigin(input: {
+  readonly workOrigin?: { readonly rootKind: string; readonly sourcePeer: string | null };
+  readonly userId?: string;
+}): AuthorizationOrigin | undefined {
+  const work = input.workOrigin;
+  if (work !== undefined) {
+    if (work.rootKind === "peer") return { kind: "peer", sourcePeer: work.sourcePeer };
+    if (work.rootKind === "unknown") return { kind: "unknown", sourcePeer: work.sourcePeer };
+    return { kind: "owner", sourcePeer: null };
+  }
+  const userId = input.userId;
+  if (userId !== undefined && userId.startsWith("peer:")) {
+    const name = userId.slice("peer:".length).trim();
+    return { kind: "peer", sourcePeer: name.length > 0 ? name : null };
+  }
+  return undefined;
 }
 
 const BLOCKED_PATTERNS: readonly RegExp[] = [
@@ -164,6 +211,48 @@ export async function authorizeBashCommand(cmd: string, context: BashAuthorizati
       by: "bridge-self-protection",
       reason: "Command blocked: this would kill the bridge process (yourself). Ask the user to send /restart for a session reset.",
     };
+  }
+
+  // #1854: A2A-originated commands are decided by the guardrail whitelist,
+  // before and independently of SECURITY_MODE — mode off must not widen a
+  // peer's reach, and a remote peer must never reach the interactive prompt.
+  // The classifier still applies on top for a command the whitelist admits.
+  if (isA2AOrigin(context.origin)) {
+    const caps = resolveA2ACapabilities(context.origin!.sourcePeer);
+    if (!execScopeAllows(caps, context.cwd)) {
+      writeAuthorizationAudit({
+        surface: "bash",
+        outcome: "block",
+        source: "a2a-whitelist",
+        detail: cmd,
+        pattern: `peer=${caps.peer ?? "unresolved"} trust=${caps.trust} cwd=${context.cwd ?? "(none)"}`,
+      });
+      return {
+        decision: "block",
+        by: "a2a-whitelist",
+        reason: "Command refused: peer-originated execution is not permitted outside the A2A guardrail X scope.",
+      };
+    }
+    // The #1771 trusted-root pre-pass is an owner nuisance filter: a peer
+    // project workspace IS a trusted root, so honoring it here would grant a
+    // remote peer every auth-required command for free.
+    const a2aTier = classifyCommand(cmd, context.cwd, { rootScopeTrust: false });
+    if (a2aTier !== "allow") {
+      writeAuthorizationAudit({
+        surface: "bash",
+        outcome: "block",
+        source: "a2a-whitelist",
+        detail: cmd,
+        pattern: `peer=${caps.peer ?? "unresolved"} tier=${a2aTier}`,
+      });
+      return {
+        decision: "block",
+        by: "a2a-whitelist",
+        reason: "Command refused: peer-originated execution cannot request owner authorization.",
+      };
+    }
+    writeAuthorizationAudit({ surface: "bash", outcome: "allow", source: "a2a-whitelist", detail: cmd });
+    return { decision: "allow", by: "a2a-whitelist" };
   }
 
   const { effective } = resolveSecurityMode();
@@ -260,13 +349,35 @@ function auditPathBlock(filePath: string, source: string): void {
  * policies (peer allowed lists and their blacklist) apply independently of
  * SECURITY_MODE so a peer sandbox is never silently widened by mode off.
  */
-export function authorizePath(filePath: string, mode: "read" | "write", policy: SandboxPolicy): CheckResult {
+export function authorizePath(
+  filePath: string,
+  mode: "read" | "write",
+  policy: SandboxPolicy,
+  origin?: AuthorizationOrigin,
+): CheckResult {
   const expanded = filePath.replace(/^~/, homedir());
   const normalized = resolve(expanded);
   let abs: string;
   try { abs = realpathSync(normalized); } catch { abs = normalized; /* file may not exist yet (write) */ }
 
   const list = mode === "read" ? policy.allowedRead : policy.allowedWrite;
+
+  // #1854: the A2A whitelist bounds peer-originated access before any session
+  // policy, including a wildcard one, and independently of SECURITY_MODE.
+  if (isA2AOrigin(origin)) {
+    const caps = resolveA2ACapabilities(origin!.sourcePeer);
+    const scope = mode === "read" ? caps.read : caps.write;
+    if (!scopeAllows(scope, filePath)) {
+      writeAuthorizationAudit({
+        surface: "path",
+        outcome: "block",
+        source: "a2a-whitelist",
+        detail: filePath,
+        pattern: `peer=${caps.peer ?? "unresolved"} trust=${caps.trust} section=${mode === "read" ? "R" : "W"}`,
+      });
+      return { allowed: false, reason: `Path '${filePath}' is outside the A2A guardrail ${mode === "read" ? "R" : "W"} scope` };
+    }
+  }
 
   if (resolveSecurityMode().effective === "guardrails") {
     const blocked = guardrailBlockedPaths().find((entry) => (mode === "write" || !entry.writeOnly) && matchesBlockedPath(abs, normalized, entry.path));

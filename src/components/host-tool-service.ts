@@ -23,7 +23,7 @@
 import { execFileSync } from "node:child_process";
 import { logWarn } from "./logger.js";
 import { redactSecrets } from "./logger.js";
-import { authorizeBashCommand } from "./authorization.js";
+import { authorizeBashCommand, type AuthorizationOrigin } from "./authorization.js";
 import { fingerprintCommand, previewCommand } from "./transport/tool-failure-diagnostic.js";
 import { runBashCommand } from "./bash-runner.js";
 import { getEnv } from "./env-schema.js";
@@ -49,6 +49,8 @@ export interface HostExecutionContext {
   readonly signal?: AbortSignal;
   readonly executionScope?: ToolExecutionScope;
   readonly authorizationMode?: ToolAuthorizationMode;
+  /** #1854: durable execution origin; peer-originated bash is whitelist-decided. */
+  readonly origin?: AuthorizationOrigin;
 }
 
 /** Resolve one handle to its exact plaintext for the same owner/execution. */
@@ -184,6 +186,7 @@ export class HostToolService {
       cwd: ctx.executionScope?.cwd,
       actionGate: this.deps.actionGate,
       authorizationMode: ctx.authorizationMode,
+      origin: ctx.origin,
     });
     if (decision.decision === "block") {
       logWarn("host-tool-service", `Blocked [${fingerprintCommand(cmd)}]: ${previewCommand(cmd)}`);
