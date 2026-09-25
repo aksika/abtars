@@ -265,4 +265,19 @@ describe("authorization audit schema", () => {
     process.env["ABTARS_HOME"] = join(blocker, "sub");
     expect(() => writeAuthorizationAudit({ surface: "bash", outcome: "block", source: "test", detail: "x" })).not.toThrow();
   });
+
+  it("scrubs sealed-handle tokens from audited details and patterns", () => {
+    setMode("guardrails");
+    writeAuthorizationAudit({
+      surface: "bash",
+      outcome: "denied",
+      source: "master",
+      detail: "echo secret:abcDEF123-_ and more",
+      pattern: "echo secret:abcDEF123-_",
+    });
+    const rows = auditRows();
+    expect(rows).toHaveLength(1);
+    expect(JSON.stringify(rows[0])).not.toContain("secret:abcDEF123-_");
+    expect(rows[0]).toMatchObject({ detail: "echo [SEALED_HANDLE] and more", pattern: "echo [SEALED_HANDLE]" });
+  });
 });

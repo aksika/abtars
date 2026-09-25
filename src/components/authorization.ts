@@ -64,6 +64,18 @@ export interface AuthorizationAuditEntry {
 const AUDIT_DETAIL_MAX = 200;
 
 /**
+ * Sealed handles are bearer credentials for one execution. A model that
+ * pastes a handle into command text (against its instructions) must not
+ * leave it in the audit log; the tool-call audit already scrubs the same
+ * shape (#1660). Applied here so every writer path is covered.
+ */
+const SEALED_HANDLE_RE = /secret:[A-Za-z0-9_-]+/g;
+
+function scrubHandles(value: string): string {
+  return value.replace(SEALED_HANDLE_RE, "[SEALED_HANDLE]");
+}
+
+/**
  * Append one authorization decision. Every decision surface funnels here so
  * the sink has a single schema (event "authorization") alongside the existing
  * tool-call audit rows. Best-effort: a full disk must not change a verdict.
@@ -75,9 +87,9 @@ export function writeAuthorizationAudit(entry: AuthorizationAuditEntry): void {
     surface: entry.surface,
     outcome: entry.outcome,
     source: entry.source,
-    detail: entry.detail.slice(0, AUDIT_DETAIL_MAX),
+    detail: scrubHandles(entry.detail).slice(0, AUDIT_DETAIL_MAX),
   };
-  if (entry.pattern !== undefined) record["pattern"] = entry.pattern.slice(0, AUDIT_DETAIL_MAX);
+  if (entry.pattern !== undefined) record["pattern"] = scrubHandles(entry.pattern).slice(0, AUDIT_DETAIL_MAX);
   const path = join(abtarsHome(), "logs", "audit.jsonl");
   try {
     mkdirSync(dirname(path), { recursive: true });
