@@ -16,7 +16,7 @@
  * logged and left alone.
  */
 
-import { readdirSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { lstatSync, readdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { isPathWithinRoot } from "./workspace-paths.js";
 import { logDebug, logInfo, logWarn } from "./logger.js";
@@ -115,17 +115,27 @@ export function reclaimOrphanedProjectWorkspaces(
     }
     const joined = join(projectsRoot, name);
 
-    let isDirectory = false;
+    let entryLstat;
     try {
-      isDirectory = statSync(joined).isDirectory();
+      entryLstat = lstatSync(joined);
     } catch (err) {
       logWarn(TAG, `Cannot stat candidate — skipping: ${joined} (${err instanceof Error ? err.message : String(err)})`);
       continue;
     }
-    if (!isDirectory) {
+    if (entryLstat.isSymbolicLink()) {
+      // A symlink cannot carry its own observation marker — writes through it
+      // land in the target, possibly outside the root — and unlinking it serves
+      // no reclaim goal. Refuse the entry entirely rather than follow it.
+      logWarn(TAG, `Symlink entry — refusing to touch: ${joined}`);
+      continue;
+    }
+    if (!entryLstat.isDirectory()) {
       logDebug(TAG, `Skipping non-directory entry: ${joined}`);
       continue;
     }
+    // Containment is proved before any mutation (marker write included), not
+    // only before the unlink: a refused candidate must have zero side effects.
+    if (resolveContainedCandidate(joined, canonicalRoot) === undefined) continue;
     summary.scanned += 1;
 
     let cardRow: Record<string, unknown> | undefined;
@@ -181,8 +191,8 @@ function parseCandidateName(name: string): number | undefined {
 function readOrWriteMarker(markerPath: string, nowMs: number): number | undefined {
   try {
     const raw = readFileSync(markerPath, "utf-8").trim();
-    const parsed = Number.parseInt(raw, 10);
-    if (Number.isFinite(parsed) && parsed >= 0) return parsed;
+    const parsed = parseObservedAt(raw);
+    if (parsed !== undefined) return parsed;
     logWarn(TAG, `Unparseable orphan marker — re-arming grace: ${markerPath}`);
   } catch (err) {
     if ((err as { code?: string } | null)?.code !== "ENOENT") {
@@ -201,24 +211,41 @@ function readOrWriteMarker(markerPath: string, nowMs: number): number | undefine
 }
 
 /**
- * Delete one candidate after resolving it inside the projects root. Refuses
- * anything escaping the root and anything resolving to the root itself (a
- * `<id>` symlink pointed at `projects/` would otherwise nuke the subtree).
- * Removes the entry path itself rather than its realpath target, so a
- * within-root symlink deletes only the link, never a sibling card's tree.
+ * The whole trimmed marker must be a non-negative integer: parseInt-style
+ * prefix parsing would accept garbage like "123abc" as a timestamp, and an
+ * empty file must never read as epoch 0 and authorize deletion.
  */
-function removeContainedDirectory(joined: string, canonicalRoot: string): boolean {
+function parseObservedAt(raw: string): number | undefined {
+  if (!/^\d+$/.test(raw)) return undefined;
+  const parsed = Number(raw);
+  return Number.isSafeInteger(parsed) ? parsed : undefined;
+}
+
+/**
+ * Canonicalize a candidate and prove it lies strictly inside the projects
+ * root. Refuses anything escaping the root and anything resolving to the
+ * root itself (a `<id>` symlink pointed at `projects/` would otherwise nuke
+ * the subtree). Returns the canonical path, or undefined with a logged
+ * reason; callers must not touch the entry when it is undefined.
+ */
+function resolveContainedCandidate(joined: string, canonicalRoot: string): string | undefined {
   let candidateReal: string;
   try {
     candidateReal = realpathSync(joined);
   } catch (err) {
-    logWarn(TAG, `Cannot canonicalize candidate — refusing deletion: ${joined} (${err instanceof Error ? err.message : String(err)})`);
-    return false;
+    logWarn(TAG, `Cannot canonicalize candidate — refusing: ${joined} (${err instanceof Error ? err.message : String(err)})`);
+    return undefined;
   }
   if (candidateReal === canonicalRoot || !isPathWithinRoot(canonicalRoot, candidateReal)) {
-    logWarn(TAG, `Candidate escapes projects root — refusing deletion: ${joined}`);
-    return false;
+    logWarn(TAG, `Candidate escapes projects root — refusing: ${joined}`);
+    return undefined;
   }
+  return candidateReal;
+}
+
+/** Delete one contained candidate, re-proving containment immediately before the unlink. */
+function removeContainedDirectory(joined: string, canonicalRoot: string): boolean {
+  if (resolveContainedCandidate(joined, canonicalRoot) === undefined) return false;
   try {
     rmSync(joined, { recursive: true, force: true });
     return true;

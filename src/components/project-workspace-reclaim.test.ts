@@ -129,22 +129,35 @@ describe("reclaimOrphanedProjectWorkspaces", () => {
     expect(existsSync(join(projects, "007"))).toBe(true);
   });
 
-  it("refuses a symlink escaping the projects root", () => {
+  it("refuses a symlink escaping the projects root without writing through it", () => {
     const outside = join(tmp, "outside");
     mkdirSync(outside, { recursive: true });
     writeFileSync(join(outside, "keep.txt"), "live", "utf-8");
     symlinkSync(outside, join(projects, "11"));
     const summary = run([]);
-    expect(summary.removed).toEqual([]);
+    expect(summary).toEqual({ scanned: 0, removed: [], marked: [] });
     expect(existsSync(join(outside, "keep.txt"))).toBe(true);
+    expect(existsSync(join(outside, ORPHAN_MARKER_FILENAME))).toBe(false);
     expect(existsSync(join(projects, "11"))).toBe(true);
   });
 
   it("refuses a symlink pointed at the projects root itself", () => {
     symlinkSync(projects, join(projects, "12"));
     const summary = run([]);
-    expect(summary.removed).toEqual([]);
+    expect(summary).toEqual({ scanned: 0, removed: [], marked: [] });
     expect(existsSync(projects)).toBe(true);
+  });
+
+  it("refuses an in-root symlink without marking or deleting its target", () => {
+    const target = join(projects, "target");
+    mkdirSync(target, { recursive: true });
+    writeFileSync(join(target, "keep.txt"), "live", "utf-8");
+    symlinkSync(target, join(projects, "14"));
+    const summary = run([]);
+    expect(summary).toEqual({ scanned: 0, removed: [], marked: [] });
+    expect(existsSync(join(projects, "14"))).toBe(true);
+    expect(existsSync(join(target, "keep.txt"))).toBe(true);
+    expect(existsSync(join(target, ORPHAN_MARKER_FILENAME))).toBe(false);
   });
 
   it("removes every due directory in one pass and never looks outside the root", () => {
@@ -162,11 +175,18 @@ describe("reclaimOrphanedProjectWorkspaces", () => {
   });
 
   it("re-arms an unparseable marker instead of deleting", () => {
-    const dir = cardDir(31);
-    writeFileSync(join(dir, ORPHAN_MARKER_FILENAME), "not-a-time\n", "utf-8");
-    const summary = run([]);
-    expect(summary.removed).toEqual([]);
-    expect(existsSync(dir)).toBe(true);
-    expect(readFileSync(join(dir, ORPHAN_MARKER_FILENAME), "utf-8").trim()).toBe(String(NOW));
+    const corrupt = ["not-a-time", "123abc", ""];
+    for (const content of corrupt) {
+      const dir = cardDir(31);
+      writeFileSync(join(dir, ORPHAN_MARKER_FILENAME), content, "utf-8");
+      // A stale mtime must not matter: only a valid integer can satisfy the grace.
+      const ancient = new Date(NOW - 30 * DAY_MS);
+      utimesSync(dir, ancient, ancient);
+      const summary = run([]);
+      expect(summary.removed).toEqual([]);
+      expect(existsSync(dir)).toBe(true);
+      expect(readFileSync(join(dir, ORPHAN_MARKER_FILENAME), "utf-8").trim()).toBe(String(NOW));
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });

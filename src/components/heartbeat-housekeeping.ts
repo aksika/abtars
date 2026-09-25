@@ -171,8 +171,7 @@ export function createHousekeepingTask(deps: HousekeepingDeps): HeartbeatTask {
     } catch {
       // better-sqlite3 missing or kanban DB unusable — reclaim treats null as a no-op pass.
     }
-    const summary = reclaimOrphanedProjectWorkspaces(db, join(abtarsHome(), "workspace", "projects"));
-    if (summary.removed.length > 0) logInfo(TAG, `Project workspaces: reclaimed ${summary.removed.length} orphaned directories`);
+    reclaimOrphanedProjectWorkspaces(db, join(abtarsHome(), "workspace", "projects"));
   }
 
   /** #1551 — wires the previously-dead PiRunStore.cleanupOldCommands + the
