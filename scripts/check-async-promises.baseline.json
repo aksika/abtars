@@ -13,7 +13,6 @@
     "src/components/message-pipeline.ts": 1,
     "src/components/peer-transport/peer-ws-broker.ts": 3,
     "src/components/peer-transport/ws-peer-client.ts": 2,
-    "src/components/permission-handler.ts": 1,
     "src/components/pi-executor/pi-coding-session-service.ts": 3,
     "src/components/pi-executor/pi-executor.ts": 4,
     "src/components/service-registry.ts": 1,

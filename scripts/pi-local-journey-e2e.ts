@@ -199,7 +199,6 @@ function buildBridgeEnv(): NodeJS.ProcessEnv {
   env.ENABLE_AGENT_API = "false";
   env.ENABLE_ASYNC_DELEGATION = "true";
   env.SECURITY_MODE = "off";
-  env.TRUST_MODE = "true";
   env.SELFHEAL_MODE = "off";
   env.SUPERVISION = "pi-journey";
   env.MAX_AGENT_CALL_PER_HOUR = "10000";

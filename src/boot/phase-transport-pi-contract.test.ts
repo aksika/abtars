@@ -108,8 +108,8 @@ function makeBootCtx(): BootCtx {
     memoryConfig: { memoryEnabled: false, memoryDir: "/tmp/no-memory" } as BootCtx["memoryConfig"],
     config: {
       transport: {
-        agentCliPath: "node", workingDir: "/tmp/work", trustMode: true,
-        permissionTimeoutMs: 60_000, tmuxSession: "kiro", tmuxCaptureDelaySec: 1, tmuxMaxWaitSec: 60,
+        agentCliPath: "node", workingDir: "/tmp/work",
+        tmuxSession: "kiro", tmuxCaptureDelaySec: 1, tmuxMaxWaitSec: 60,
       },
     } as unknown as BootCtx["config"],
   });

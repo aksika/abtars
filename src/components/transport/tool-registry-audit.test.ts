@@ -7,7 +7,6 @@ import { join } from "node:path";
 const rootScopeMock = vi.hoisted(() => ({ value: false }));
 
 vi.mock("../guardrails.js", () => ({
-  checkCommand: () => null,
   classifyCommand: () => "allow",
   isRootScopeAllow: () => rootScopeMock.value,
 }));

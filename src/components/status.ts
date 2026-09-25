@@ -57,7 +57,6 @@ export interface RuntimeView {
   uptimeMs: number;
   watchdog: { pid: number | null; alive: boolean };
   securityMode: string;
-  trustMode: boolean;
   transport: { ready: boolean; type: string; provider: string; model: string };
   contextPercent: number | null;
   platformStates: Record<string, boolean>;
@@ -356,7 +355,6 @@ export function renderChatStatus(view: StatusView): string {
   }
 
   lines.push(`  Security: ${r.securityMode}`);
-  if (r.trustMode) lines.push("  Trust: (trusted)");
 
   // Body
   lines.push("", "Body:");
@@ -718,16 +716,14 @@ async function collectRuntime(ctx: BridgeStatusCtx, warnings: string[]): Promise
     return { pid, alive };
   })();
 
-  // Security + trust
+  // Security mode (configured provenance; enforced behavior is resolved in authorization.ts)
   let securityMode = "off";
-  let trustMode = false;
   try {
-    const { getSecurityMode } = await import("./guardrails.js");
-    const { getEnv } = await import("./env-schema.js");
-    securityMode = getSecurityMode();
-    trustMode = (getEnv() as { trustMode?: boolean }).trustMode === true;
+    const { resolveSecurityMode } = await import("./authorization.js");
+    const resolved = resolveSecurityMode();
+    securityMode = resolved.fallback ? `${resolved.configured} (fallback: guardrails)` : resolved.configured;
   } catch (err) {
-    logAndSwallow("status", "trust", err);
+    logAndSwallow("status", "security mode", err);
   }
 
   // Platform running states
@@ -927,7 +923,6 @@ async function collectRuntime(ctx: BridgeStatusCtx, warnings: string[]): Promise
     uptimeMs: Date.now() - ctx.startedAt,
     watchdog,
     securityMode,
-    trustMode,
     transport: {
       ready: transportReady,
       type: transportType,

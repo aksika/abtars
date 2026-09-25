@@ -77,8 +77,6 @@ const SENTINEL_CONFIG: Config = {
   transport: {
     agentCliPath: "node",
     workingDir: "/tmp/sentinel-work",
-    trustMode: true,
-    permissionTimeoutMs: 60_000,
     tmuxSession: "kiro",
     tmuxCaptureDelaySec: 1,
     tmuxMaxWaitSec: 60,

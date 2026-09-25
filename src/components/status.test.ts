@@ -56,7 +56,6 @@ function makeRuntimeView(overrides: Partial<RuntimeView> = {}): RuntimeView {
     uptimeMs: 180_000,
     watchdog: { pid: 99990, alive: true },
     securityMode: "owner-only",
-    trustMode: true,
     transport: { ready: true, type: "ACP", provider: "kiro", model: "kiro/claude-sonnet-4-6" },
     contextPercent: 42,
     platformStates: { telegram: true, discord: true, irc: false },

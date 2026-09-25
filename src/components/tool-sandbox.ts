@@ -1,15 +1,12 @@
 /**
- * tool-sandbox.ts — unified policy enforcement for tool access and path restrictions.
- * Provides SandboxPolicy interface, check functions, loop guardrails, and audit logging.
+ * tool-sandbox.ts — session tool-availability policy, loop guardrails, and
+ * sandbox-deny audit rows. Path policy (#1851) lives in authorization.ts.
  */
 
-import { resolve } from "node:path";
-import { realpathSync } from "node:fs";
-import { homedir } from "node:os";
 import { appendFileSync, mkdirSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { join } from "node:path";
-import { abtarsHome, abmindHome } from "../paths.js";
+import { abtarsHome } from "../paths.js";
 import { logAndSwallow } from "./log-and-swallow.js";
 
 export interface SandboxPolicy {
@@ -24,12 +21,6 @@ export interface CheckResult {
   reason?: string;
 }
 
-const PATH_BLACKLIST: readonly string[] = [
-  resolve(abtarsHome(), "config"),
-  resolve(abtarsHome(), "secret"),
-  resolve(abmindHome()),
-];
-
 const AUDIT_DIR = join(abtarsHome(), "logs");
 const AUDIT_PATH = join(AUDIT_DIR, "audit.jsonl");
 try { mkdirSync(AUDIT_DIR, { recursive: true }); } catch (err) { logAndSwallow("tool-sandbox", "mkdirSync", err); }
@@ -40,30 +31,6 @@ export function checkTool(name: string, policy: SandboxPolicy): CheckResult {
   if (name === "execute_bash" && !policy.canExecuteBash) return { allowed: false, reason: `Tool '${name}' not available in this session` };
   if (policy.allowedTools.includes(name)) return { allowed: true };
   return { allowed: false, reason: `Tool '${name}' not available in this session` };
-}
-
-export function checkPath(filePath: string, mode: "read" | "write", policy: SandboxPolicy): CheckResult {
-  // Resolve ~, normalize .., and resolve symlinks to prevent traversal attacks
-  const expanded = filePath.replace(/^~/, homedir());
-  const normalized = resolve(expanded);
-  let abs: string;
-  try { abs = realpathSync(normalized); } catch { abs = normalized; /* file may not exist yet (write) */ }
-
-  const list = mode === "read" ? policy.allowedRead : policy.allowedWrite;
-  // If wildcard, skip blacklist (owner sessions)
-  if (list.length === 1 && list[0] === "*") return { allowed: true };
-  // Blacklist always enforced for explicit path lists
-  for (const blocked of PATH_BLACKLIST) {
-    if (abs === blocked || abs.startsWith(blocked + "/")) {
-      return { allowed: false, reason: `Path '${filePath}' is restricted` };
-    }
-  }
-  if (list.length === 0) return { allowed: false, reason: `No ${mode} access in this session` };
-  for (const prefix of list) {
-    const absPrefix = resolve(prefix.replace(/^~/, homedir()));
-    if (abs === absPrefix || abs.startsWith(absPrefix + "/")) return { allowed: true };
-  }
-  return { allowed: false, reason: `Path '${filePath}' not in allowed ${mode} paths` };
 }
 
 export function buildPolicy(source: "owner" | "peer", config?: Partial<SandboxPolicy>): Readonly<SandboxPolicy> {

@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach } from "vitest";
-import { checkTool, checkPath, buildPolicy, ToolLoopGuard } from "./tool-sandbox.js";
+import { checkTool, buildPolicy, ToolLoopGuard } from "./tool-sandbox.js";
 import type { SandboxPolicy } from "./tool-sandbox.js";
 
 describe("checkTool", () => {
@@ -32,33 +32,6 @@ describe("checkTool", () => {
     expect(checkTool("web_fetch", policy).allowed).toBe(false);
     expect(checkTool("execute_bash", policy).allowed).toBe(false);
     expect(checkTool("memory_store", policy).allowed).toBe(false);
-  });
-});
-
-describe("checkPath", () => {
-  it("allows all paths with wildcard policy", () => {
-    const policy = buildPolicy("owner");
-    expect(checkPath("/etc/passwd", "read", policy).allowed).toBe(true);
-    expect(checkPath("~/.abtars/secret/key", "read", policy).allowed).toBe(true);
-  });
-
-  it("denies blacklisted paths for non-wildcard policies", () => {
-    const policy = buildPolicy("peer", { allowedRead: ["/home"], allowedWrite: ["/home"] });
-    expect(checkPath("~/.abtars/config/peers.json", "read", policy).allowed).toBe(false);
-    expect(checkPath("~/.abtars/secret/KEY", "read", policy).allowed).toBe(false);
-    expect(checkPath("~/.abmind/memory.db", "read", policy).allowed).toBe(false);
-  });
-
-  it("allows paths within allowed prefixes", () => {
-    const policy = buildPolicy("peer", { allowedRead: ["/tmp", "/home/user/data"], allowedWrite: [] });
-    expect(checkPath("/tmp/file.txt", "read", policy).allowed).toBe(true);
-    expect(checkPath("/home/user/data/x.json", "read", policy).allowed).toBe(true);
-    expect(checkPath("/home/user/other", "read", policy).allowed).toBe(false);
-  });
-
-  it("denies write with empty allowedWrite", () => {
-    const policy = buildPolicy("peer", { allowedRead: ["/tmp"], allowedWrite: [] });
-    expect(checkPath("/tmp/file.txt", "write", policy).allowed).toBe(false);
   });
 });
 
@@ -125,46 +98,6 @@ describe("ToolLoopGuard", () => {
     expect(guard.beforeCall("execute_bash", args).allowed).toBe(false);
     guard.resetForTurn();
     expect(guard.beforeCall("execute_bash", args).allowed).toBe(true);
-  });
-});
-
-describe("checkPath — traversal attacks", () => {
-  const policy: SandboxPolicy = {
-    allowedTools: ["file_read", "file_write"],
-    allowedRead: ["~/.abtars/workspace/a2a/"],
-    allowedWrite: ["~/.abtars/workspace/a2a/"],
-    canExecuteBash: false,
-  };
-
-  it("blocks ../ traversal to config", () => {
-    const r = checkPath("~/.abtars/workspace/a2a/../../config/.env", "read", policy);
-    expect(r.allowed).toBe(false);
-  });
-
-  it("blocks ../ traversal to secret", () => {
-    const r = checkPath("~/.abtars/workspace/a2a/../secret/OPENAI_API_KEY", "read", policy);
-    expect(r.allowed).toBe(false);
-  });
-
-  it("blocks ../ traversal to abmind", () => {
-    const r = checkPath("~/.abtars/workspace/a2a/../../../.abmind/memory/memory.db", "read", policy);
-    expect(r.allowed).toBe(false);
-  });
-
-  it("blocks normalized path that escapes sandbox", () => {
-    const r = checkPath("~/.abtars/workspace/a2a/./../../config/peers.json", "read", policy);
-    expect(r.allowed).toBe(false);
-  });
-
-  it("allows valid path within sandbox", () => {
-    const r = checkPath("~/.abtars/workspace/a2a/output.json", "write", policy);
-    expect(r.allowed).toBe(true);
-  });
-
-  it("blocks absolute path to blacklisted dir", () => {
-    const home = require("os").homedir();
-    const r = checkPath(`${home}/.abmind/memory/memory.db`, "read", policy);
-    expect(r.allowed).toBe(false);
   });
 });
 

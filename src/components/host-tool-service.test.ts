@@ -14,7 +14,7 @@ function makeService(overrides?: {
   const resolveHandle = overrides?.handleResolver ?? (async (binding: { memoryId: number; semanticRevision: number }) => ({
     value: FAKE_VALUE,
   }));
-  const actionGate = { requestAuth: vi.fn(async () => true) };
+  const actionGate = { requestAuth: vi.fn(async () => ({ granted: true, by: "once" })) };
   const service = new HostToolService({
     handles,
     actionGate: actionGate as never,
@@ -141,6 +141,48 @@ describe("HostToolService secret_env execution", () => {
     );
     expect(JSON.parse(blocked)).toMatchObject({ error: "policy_rejected" });
     expect(resolver).not.toHaveBeenCalled();
+  });
+});
+
+describe("#1851 authorization mode wiring", () => {
+  it("SECURITY_MODE=off runs an auth-required command with no ActionGate prompt", async () => {
+    const saved = process.env["SECURITY_MODE"];
+    process.env["SECURITY_MODE"] = "off";
+    const { _resetEnv } = await import("./env-schema.js");
+    _resetEnv();
+    try {
+      const { service, actionGate } = makeService();
+      const result = await service.runBash(
+        { command: "node -e \"process.exit(0)\"" },
+        { userId: "u1", executionId: "off-1851" },
+      );
+      expect(JSON.parse(result)).toMatchObject({ exit_code: 0 });
+      expect(actionGate.requestAuth).not.toHaveBeenCalled();
+    } finally {
+      if (saved === undefined) delete process.env["SECURITY_MODE"];
+      else process.env["SECURITY_MODE"] = saved;
+      _resetEnv();
+    }
+  });
+
+  it("SECURITY_MODE=guardrails prompts for the same command", async () => {
+    const saved = process.env["SECURITY_MODE"];
+    process.env["SECURITY_MODE"] = "guardrails";
+    const { _resetEnv } = await import("./env-schema.js");
+    _resetEnv();
+    try {
+      const { service, actionGate } = makeService();
+      const result = await service.runBash(
+        { command: "node -e \"process.exit(0)\"" },
+        { userId: "u1", executionId: "guardrails-1851" },
+      );
+      expect(JSON.parse(result)).toMatchObject({ exit_code: 0 });
+      expect(actionGate.requestAuth).toHaveBeenCalledTimes(1);
+    } finally {
+      if (saved === undefined) delete process.env["SECURITY_MODE"];
+      else process.env["SECURITY_MODE"] = saved;
+      _resetEnv();
+    }
   });
 });
 
@@ -271,8 +313,12 @@ describe("#1716 bounded settlement boundary", () => {
     const sandbox = mkdtempSync(join(tmpdir(), "hostsvc-1771-"));
     const savedHome = process.env["HOME"];
     const savedAbtars = process.env["ABTARS_HOME"];
+    const savedSecurityMode = process.env["SECURITY_MODE"];
     process.env["HOME"] = sandbox;
     process.env["ABTARS_HOME"] = join(sandbox, ".abtars");
+    process.env["SECURITY_MODE"] = "guardrails";
+    const { _resetEnv } = await import("./env-schema.js");
+    _resetEnv();
     try {
       mkdirSync(join(sandbox, ".abtars", "cache"), { recursive: true });
       const { service, actionGate } = makeService();
@@ -293,6 +339,8 @@ describe("#1716 bounded settlement boundary", () => {
     } finally {
       if (savedHome === undefined) delete process.env["HOME"]; else process.env["HOME"] = savedHome;
       if (savedAbtars === undefined) delete process.env["ABTARS_HOME"]; else process.env["ABTARS_HOME"] = savedAbtars;
+      if (savedSecurityMode === undefined) delete process.env["SECURITY_MODE"]; else process.env["SECURITY_MODE"] = savedSecurityMode;
+      _resetEnv();
       rmSync(sandbox, { recursive: true, force: true });
     }
   });

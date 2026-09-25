@@ -128,15 +128,6 @@ export async function loadAndValidateConfig(): Promise<Config> {
     mkdirSync(workingDir, { recursive: true });
   }
 
-  // --- TRUST_MODE (optional boolean, default false) ---
-  const trustMode = parseBoolEnv(
-    "TRUST_MODE",
-    CONFIG_DEFAULTS.transport.trustMode,
-  );
-
-  // --- PERMISSION_TIMEOUT (from env-schema: PERMISSION_TIMEOUT_SEC * 1000) ---
-  const permissionTimeoutMs = getEnv().permissionTimeoutMs;
-
   // --- POLL_TIMEOUT_S (optional number, default 30) ---
   const pollTimeoutS = parseNumberEnv(
     "POLL_TIMEOUT_S",
@@ -204,8 +195,6 @@ export async function loadAndValidateConfig(): Promise<Config> {
     transport: {
       agentCliPath,
       workingDir,
-      trustMode,
-      permissionTimeoutMs,
       tmuxSession,
       tmuxCaptureDelaySec,
       tmuxMaxWaitSec,

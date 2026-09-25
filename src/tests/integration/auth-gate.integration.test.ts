@@ -2,7 +2,7 @@
  * Integration: ActionGate — #790 auth gate.
  */
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { mkdtempSync, rmSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { ActionGate } from "../../components/action-gate.js";
@@ -37,7 +37,7 @@ describe("ActionGate integration (#790)", () => {
     gate.handleCallback(callbackData);
 
     const granted = await authPromise;
-    expect(granted).toBe(false);
+    expect(granted).toMatchObject({ granted: false, by: "master" });
   });
 
   it("allows action after master clicks Allow once", async () => {
@@ -49,7 +49,7 @@ describe("ActionGate integration (#790)", () => {
     gate.handleCallback(callbackData);
 
     const granted = await authPromise;
-    expect(granted).toBe(true);
+    expect(granted).toMatchObject({ granted: true, by: "once" });
   });
 
   it("token is one-use and expires", () => {
@@ -85,7 +85,7 @@ describe("ActionGate integration (#790)", () => {
     // Second request for same action — should auto-grant (no notify)
     notifyCalls = [];
     const granted = await gate.requestAuth("bash-auth", "docker ps");
-    expect(granted).toBe(true);
+    expect(granted).toMatchObject({ granted: true, by: "rule", pattern: "docker ps*" });
     expect(notifyCalls.length).toBe(0); // No Telegram prompt sent
   });
 });
@@ -106,18 +106,13 @@ describe("ActionGate unattended-task fallback (#1629)", () => {
 
   afterEach(() => { rmSync(tmpDir, { recursive: true, force: true }); });
 
-  function auditLines(): string[] {
-    return readFileSync(join(tmpDir, "audit.jsonl"), "utf-8").trim().split("\n").filter(Boolean);
-  }
-
-  it("auto-allows unattended bash with no rule: immediate, no notify, no pending, audited", async () => {
+  it("auto-allows unattended bash with no rule: immediate, no notify, no pending", async () => {
     const started = Date.now();
     const granted = await gate.requestAuth("bash-auth", "gws gmail read | python3 -c 'print(1)'", { mode: "unattended-task" });
-    expect(granted).toBe(true);
+    expect(granted).toMatchObject({ granted: true, by: "unattended-task" });
     expect(Date.now() - started).toBeLessThan(100); // returned immediately, no Telegram wait
     expect(notifyCalls.length).toBe(0);
     expect((gate as unknown as { pending: Map<string, unknown> }).pending.size).toBe(0);
-    expect(auditLines().at(-1)).toContain('"outcome":"allowed-unattended-task"');
   });
 
   it("a persisted deny rule still denies unattended bash (rules outrank fallback)", async () => {
@@ -126,20 +121,18 @@ describe("ActionGate unattended-task fallback (#1629)", () => {
     }));
     const reloaded = new ActionGate(tmpDir);
     const granted = await reloaded.requestAuth("bash-auth", "echo denied-here", { mode: "unattended-task" });
-    expect(granted).toBe(false);
+    expect(granted).toMatchObject({ granted: false, by: "rule", pattern: "echo denied-here" });
     expect(notifyCalls.length).toBe(0);
-    expect(auditLines().at(-1)).toContain('"outcome":"denied-by-rule"');
   });
 
-  it("a persisted allow rule still allows unattended bash with its own audit outcome", async () => {
+  it("a persisted allow rule still allows unattended bash with its own verdict", async () => {
     writeFileSync(join(tmpDir, "rules.json"), JSON.stringify({
       rules: [{ category: "bash-auth", pattern: "echo allowed-here", action: "allow", createdAt: new Date().toISOString() }],
     }));
     const reloaded = new ActionGate(tmpDir);
     const granted = await reloaded.requestAuth("bash-auth", "echo allowed-here", { mode: "unattended-task" });
-    expect(granted).toBe(true);
+    expect(granted).toMatchObject({ granted: true, by: "rule", pattern: "echo allowed-here" });
     expect(notifyCalls.length).toBe(0);
-    expect(auditLines().at(-1)).toContain('"outcome":"allowed-by-rule"');
   });
 
   it("interactive and missing modes retain the Telegram request flow", async () => {
@@ -147,14 +140,14 @@ describe("ActionGate unattended-task fallback (#1629)", () => {
     await new Promise(r => setTimeout(r, 10));
     expect(notifyCalls.length).toBe(1);
     gate.handleCallback(notifyCalls[0]!.buttons[2]!.data);
-    expect(await interactive).toBe(false);
+    expect(await interactive).toMatchObject({ granted: false, by: "master" });
 
     notifyCalls = [];
     const missing = gate.requestAuth("bash-auth", "sudo apt upgrade");
     await new Promise(r => setTimeout(r, 10));
     expect(notifyCalls.length).toBe(1);
     gate.handleCallback(notifyCalls[0]!.buttons[2]!.data);
-    expect(await missing).toBe(false);
+    expect(await missing).toMatchObject({ granted: false, by: "master" });
   });
 
   it("unattended mode does not auto-allow non-bash categories", async () => {
@@ -162,7 +155,6 @@ describe("ActionGate unattended-task fallback (#1629)", () => {
     await new Promise(r => setTimeout(r, 10));
     expect(notifyCalls.length).toBe(1);
     gate.handleCallback(notifyCalls[0]!.buttons[2]!.data);
-    expect(await secret).toBe(false);
-    expect(auditLines().at(-1)).toContain('"outcome":"denied"');
+    expect(await secret).toMatchObject({ granted: false, by: "master" });
   });
 });

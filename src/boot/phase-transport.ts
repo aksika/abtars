@@ -48,27 +48,13 @@ export async function phaseTransport(ctx: BootCtx): Promise<PhaseResult> {
 
   await buildTransport(ctx);
 
-  // Docker detection (#478)
-  const { isDockerActive, isSeatbeltActive } = await import("../components/guardrails.js");
-  if (isDockerActive()) {
-    const { dockerAvailable } = await import("../components/sandbox-runtime.js");
-    if (dockerAvailable()) {
-      ctx.sandboxEnabled = true;
-      logInfo("main", "🐳 Docker mode active — W/B/C sessions will run in Docker containers");
-    } else {
-      logWarn("main", "SECURITY_MODE=docker but Docker not available — falling back to seatbelt");
-    }
-  }
-
-  // Seatbelt detection (#906)
-  if (isSeatbeltActive()) {
-    const { isAvailable, mechanismName } = await import("../components/seatbelt/index.js");
-    if (isAvailable()) {
-      ctx.seatbeltActive = true;
-      logInfo("main", `🛡️ Seatbelt active — bash commands sandboxed via ${mechanismName()}`);
-    } else {
-      logWarn("main", `SECURITY_MODE=seatbelt but ${mechanismName()} not available — falling back to guardrails`);
-    }
+  // #1851: seatbelt/docker are accepted mode values but their OS containment
+  // is not wired (#1758), so they run as guardrails. Say so instead of
+  // claiming an active sandbox.
+  const { resolveSecurityMode } = await import("../components/authorization.js");
+  const securityMode = resolveSecurityMode();
+  if (securityMode.fallback) {
+    logWarn("main", `SECURITY_MODE=${securityMode.configured} — OS containment not wired, falling back to guardrails`);
   }
 
   // Initialize context-window-start for all known users
@@ -504,8 +490,8 @@ export async function buildTransport(ctx: BootCtx): Promise<PhaseResult> {
   }
 
   // #1797: the registry Seatbelt setter is deleted with the legacy Bash path.
-  // ctx.seatbeltActive stays set above for future OS-sandbox work (#1758),
-  // which must wire the sandbox at the service boundary, not the registry.
+  // #1851: seatbelt/docker run as guardrails until #1758 wires the sandbox at
+  // the service boundary; ctx.seatbeltActive/sandboxEnabled stay false.
 
   // #1380: Direct API memory hydration is supplied by the daemon-backed
   // runtime during prompt construction. No abtars-side database or context

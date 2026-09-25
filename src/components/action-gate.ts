@@ -1,10 +1,12 @@
 /**
- * action-gate.ts — Out-of-band authorization for privileged actions.
- * Agent requests a privileged action → Telegram inline keyboard to master → proceed/deny.
+ * action-gate.ts — Out-of-band authorization for privileged actions (#1851).
+ * Agent requests a privileged action → Telegram inline keyboard to master →
+ * proceed/deny. Rules, seeds, and transport only: the caller (authorization.ts)
+ * records the outcome in the single authorization audit sink.
  */
 
 import { randomBytes } from "node:crypto";
-import { readFileSync, mkdirSync, appendFileSync, existsSync } from "node:fs";
+import { readFileSync, mkdirSync, existsSync } from "node:fs";
 import { join, sep } from "node:path";
 import { homedir } from "node:os";
 import { logInfo, logWarn, logError } from "./logger.js";
@@ -32,11 +34,26 @@ export interface AuthRule {
   source?: "seed";
 }
 
+/**
+ * Approval verdict. `by` names which path produced it so the caller can record
+ * one meaningful authorization audit row without ActionGate owning a sink.
+ */
+export type AuthOutcome =
+  | { granted: true; by: "rule"; pattern: string }
+  | { granted: true; by: "always"; pattern: string }
+  | { granted: true; by: "once" }
+  | { granted: true; by: "unattended-task" }
+  | { granted: false; by: "rule"; pattern: string }
+  | { granted: false; by: "timeout" }
+  | { granted: false; by: "no-notify" }
+  | { granted: false; by: "send-failed" }
+  | { granted: false; by: "master" };
+
 export interface AuthRequest {
   id: string;
   category: string;
   detail: string;
-  resolve: (granted: boolean) => void;
+  resolve: (outcome: AuthOutcome) => void;
   timer: ReturnType<typeof setTimeout>;
   reminderSent: boolean;
 }
@@ -169,12 +186,10 @@ export class ActionGate {
   private pending = new Map<string, AuthRequest>();
   private rules: AuthRule[] = [];
   private rulesPath: string;
-  private auditPath: string;
   private notify: NotifyFn | null = null;
 
   constructor(authDir: string) {
     this.rulesPath = join(authDir, "rules.json");
-    this.auditPath = join(authDir, "audit.jsonl");
     mkdirSync(authDir, { recursive: true });
     this.loadRules();
   }
@@ -230,48 +245,42 @@ export class ActionGate {
   }
 
   /**
-   * Request authorization for a privileged action.
-   * Returns true if granted, false if denied/timed out.
+   * Request authorization for a privileged action. Returns the approval
+   * verdict; the caller records it (no audit sink here, #1851).
    *
    * #1629: persistent rules always take precedence. Only when no rule matches
    * may the unattended-task fallback auto-allow — and only for `bash-auth`.
    * The fallback never notifies and never enqueues a pending request.
    */
-  async requestAuth(category: string, detail: string, options: AuthRequestOptions = {}): Promise<boolean> {
+  async requestAuth(category: string, detail: string, options: AuthRequestOptions = {}): Promise<AuthOutcome> {
     // Check persistent rules first — they outrank every fallback
     const matched = this.matchedRule(category, detail);
     if (matched?.action === "allow") {
-      this.audit(category, detail, "allowed-by-rule", matched.pattern);
-      return true;
+      return { granted: true, by: "rule", pattern: matched.pattern };
     }
     if (matched?.action === "deny") {
-      this.audit(category, detail, "denied-by-rule", matched.pattern);
-      return false;
+      return { granted: false, by: "rule", pattern: matched.pattern };
     }
 
     // #1629: unattended scheduled-task execution — no rule, bash only.
-    // Audit evidence is preserved; no pending request, no notification.
     if (category === "bash-auth" && options.mode === "unattended-task") {
-      this.audit(category, detail, "allowed-unattended-task");
-      return true;
+      return { granted: true, by: "unattended-task" };
     }
 
     // No rule — ask master via Telegram
     if (!this.notify) {
       logWarn(TAG, `No notify function — auto-denying ${category}: ${detail.slice(0, 80)}`);
-      this.audit(category, detail, "denied-no-notify");
-      return false;
+      return { granted: false, by: "no-notify" };
     }
 
     const requestId = randomBytes(8).toString("hex");
     const message = this.formatMessage(category, detail);
 
-    return new Promise<boolean>((resolve) => {
+    return new Promise<AuthOutcome>((resolve) => {
       const timer = setTimeout(() => {
         this.pending.delete(requestId);
         logWarn(TAG, `Auth request timed out: ${category} ${detail.slice(0, 60)}`);
-        this.audit(category, detail, "denied-timeout");
-        resolve(false);
+        resolve({ granted: false, by: "timeout" });
       }, 120_000);
 
       // 60s reminder
@@ -283,11 +292,11 @@ export class ActionGate {
         }
       }, 60_000);
 
-      this.pending.set(requestId, { id: requestId, category, detail, resolve: (granted) => {
+      this.pending.set(requestId, { id: requestId, category, detail, resolve: (outcome) => {
         clearTimeout(timer);
         clearTimeout(reminderTimer);
         this.pending.delete(requestId);
-        resolve(granted);
+        resolve(outcome);
       }, timer, reminderSent: false });
 
       this.notify!(message, [
@@ -299,8 +308,7 @@ export class ActionGate {
         clearTimeout(timer);
         clearTimeout(reminderTimer);
         this.pending.delete(requestId);
-        this.audit(category, detail, "denied-send-failed");
-        resolve(false);
+        resolve({ granted: false, by: "send-failed" });
       });
     });
   }
@@ -338,17 +346,14 @@ export class ActionGate {
     if (!req) return false;
 
     if (action === "once") {
-      this.audit(req.category, req.detail, "allowed-once");
-      req.resolve(true);
+      req.resolve({ granted: true, by: "once" });
     } else if (action === "always") {
       // #1771: store the command family, never the raw command text.
       const family = familyPattern(req.detail);
       this.storeRule(req.category, family, "allow");
-      this.audit(req.category, req.detail, "allowed-always", family);
-      req.resolve(true);
+      req.resolve({ granted: true, by: "always", pattern: family });
     } else {
-      this.audit(req.category, req.detail, "denied");
-      req.resolve(false);
+      req.resolve({ granted: false, by: "master" });
     }
     return true;
   }
@@ -411,12 +416,6 @@ export class ActionGate {
       const data = JSON.parse(readFileSync(this.rulesPath, "utf-8"));
       this.rules = data.rules ?? [];
     } catch { this.rules = []; }
-  }
-
-  private audit(category: string, detail: string, outcome: string, pattern?: string): void {
-    const entry: Record<string, string> = { ts: new Date().toISOString(), category, detail: detail.slice(0, 200), outcome };
-    if (pattern !== undefined) entry["pattern"] = pattern.slice(0, 200);
-    try { appendFileSync(this.auditPath, JSON.stringify(entry) + "\n"); } catch { /* best effort */ }
   }
 
   private formatMessage(category: string, detail: string): string {

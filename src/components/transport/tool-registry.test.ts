@@ -9,13 +9,13 @@ const guardrailMocks = vi.hoisted(() => ({
   classifyImpl: "allow" as "allow" | "auth-required" | "block",
 }));
 vi.mock("../guardrails.js", () => ({
-  checkCommand: () => null,
   classifyCommand: () => guardrailMocks.classifyImpl,
   isRootScopeAllow: () => false,
 }));
 import { getToolDefinitions, getToolSchemas, executeToolCall, getToolDescriptor, setSendDocument, setHostToolService } from "./tool-registry.js";
 import { HostToolService } from "../host-tool-service.js";
 import { SealedSecretHandles } from "../sealed-secret-handles.js";
+import { _resetEnv } from "../env-schema.js";
 import type { ActionGate } from "../action-gate.js";
 import { createClientRuntime } from "../memory-runtime.js";
 import { MemoryStoreQuota } from "../memory-store-quota.js";
@@ -593,18 +593,22 @@ describe("memory tools with runtime wired (#1507)", () => {
 describe("execute_bash — #1629 trusted authorization mode", () => {
   beforeEach(() => {
     guardrailMocks.classifyImpl = "allow";
+    process.env["SECURITY_MODE"] = "guardrails";
+    _resetEnv();
     wireRealService(null);
   });
 
   afterEach(() => {
     setHostToolService(null);
+    delete process.env["SECURITY_MODE"];
+    _resetEnv();
   });
 
   function fakeGate() {
     const calls: Array<{ category: string; detail: string; options: { mode?: string } }> = [];
     const requestAuth = vi.fn(async (category: string, detail: string, options: { mode?: string }) => {
       calls.push({ category, detail, options });
-      return true;
+      return { granted: true, by: "once" };
     });
     return { requestAuth, calls };
   }

@@ -19,8 +19,6 @@ export type DiscordConfig = {
 export type TransportConfig = {
   agentCliPath: string;
   workingDir: string;
-  trustMode: boolean;
-  permissionTimeoutMs: number;
   tmuxSession: string;
   tmuxCaptureDelaySec: number;
   tmuxMaxWaitSec: number;
@@ -50,8 +48,6 @@ export const CONFIG_DEFAULTS = {
   transport: {
     agentCliPath: "kiro-cli",
     workingDir: "~/.abtars/workspace",
-    trustMode: false,
-    permissionTimeoutMs: 60_000,
     tmuxSession: "kiro-bridge",
     tmuxCaptureDelaySec: 3,
     tmuxMaxWaitSec: 300,

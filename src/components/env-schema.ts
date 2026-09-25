@@ -115,8 +115,6 @@ const SCHEMA: readonly EnvVarDef[] = [
   { env: "DASHBOARD_MODULE", type: "string", description: "Custom dashboard module path" },
   { env: "NOTEBOOKLM_ENABLED", type: "bool", default: "false", description: "Enable NotebookLM integration" },
   { env: "NOTEBOOKLM_DEFAULT_NOTEBOOK", type: "string", default: "", description: "Default NotebookLM notebook" },
-  { env: "PERMISSION_TIMEOUT_SEC", type: "int", default: "60", description: "Permission prompt timeout (seconds)" },
-  { env: "TRUST_MODE", type: "bool", default: "false", description: "Skip permission prompts" },
   { env: "SECURITY_MODE", type: "string", default: "off", description: "Security mode: off | guardrails | seatbelt | docker" },
   { env: "MAX_AGENT_CALL_PER_HOUR", type: "int", required: true, description: "Agent API rate limit: max requests per caller per hour" },
   { env: "MAX_AGENT_CALL_PER_DAY", type: "int", required: true, description: "Agent API rate limit: max requests per caller per day" },
@@ -222,8 +220,6 @@ export interface EnvConfig {
   // Scheduled runs (#1600)
   taskRunCeilingMs: number;
   taskRunIdleBudgetMs: number;
-  permissionTimeoutMs: number;
-  trustMode: boolean;
   securityMode: string;
   enableDashboard: boolean;
   enableAgentApi: boolean;
@@ -384,8 +380,6 @@ export function initEnv(): Readonly<EnvConfig> {
     dashboardModule: read("DASHBOARD_MODULE"),
     notebooklmEnabled: parseBool(readOr("NOTEBOOKLM_ENABLED", "false")),
     notebooklmDefaultNotebook: readOr("NOTEBOOKLM_DEFAULT_NOTEBOOK", ""),
-    permissionTimeoutMs: parseIntSafe(readOr("PERMISSION_TIMEOUT_SEC", "60"), "PERMISSION_TIMEOUT_SEC") * 1000,
-    trustMode: parseBool(readOr("TRUST_MODE", "false")),
     securityMode: readOr("SECURITY_MODE", "off"),
     enableDashboard: parseBool(readOr("ENABLE_DASHBOARD", "false")),
     enableAgentApi: parseBool(readOr("ENABLE_AGENT_API", "false")),

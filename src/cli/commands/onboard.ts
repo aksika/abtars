@@ -117,7 +117,6 @@ interface WizardAnswers {
   readonly hailMaryModel: string;
   readonly groqApiKey: string;
   readonly securityMode: string;
-  readonly trustMode: boolean;
 }
 
 
@@ -171,12 +170,12 @@ async function runInteractive(existing: WizardAnswers | null): Promise<WizardAns
   const securityMode = await select({
     message: 'Security mode',
     options: [
-      { value: 'off', label: 'off — no restrictions (ActionGate still active)' },
-      { value: 'guardrails', label: 'guardrails — path guard + command blocklist (recommended)' },
-      { value: 'seatbelt', label: 'seatbelt — guardrails + OS per-command sandbox (bwrap/sandbox-exec)' },
-      { value: 'docker', label: 'docker — full isolation: per-session Docker containers (requires Docker)' },
+      { value: 'off', label: 'off — no restrictions and no approval prompts (bridge self-protection stays)' },
+      { value: 'guardrails', label: 'guardrails — path guard, command blocklist, Telegram approval prompts (recommended)' },
+      { value: 'seatbelt', label: 'seatbelt — reserved; runs guardrails until OS sandbox wiring lands' },
+      { value: 'docker', label: 'docker — reserved; runs guardrails until container wiring lands' },
     ],
-    initialValue: existing?.securityMode ?? 'guardrails',
+    initialValue: existing?.securityMode ?? 'off',
   });
   if (isCancel(securityMode)) { cancel('Cancelled.'); return null; }
 
@@ -267,8 +266,7 @@ async function runInteractive(existing: WizardAnswers | null): Promise<WizardAns
     providerApiKey,
     hailMaryModel: modelStr,
     groqApiKey: existing?.groqApiKey ?? '',
-    securityMode: String(securityMode ?? 'guardrails'),
-    trustMode: true,
+    securityMode: String(securityMode ?? 'off'),
   };
 }
 
@@ -359,8 +357,7 @@ function validateNonInteractive(opts: OnboardOptions): WizardAnswers | string {
     providerApiKey: opts.apiKey ?? '',
     hailMaryModel: '',
     groqApiKey: '',
-    securityMode: 'guardrails',
-    trustMode: true,
+    securityMode: 'off',
   };
 }
 
@@ -394,8 +391,7 @@ async function readExisting(envPath: string): Promise<WizardAnswers | null> {
       providerApiKey: '',
       hailMaryModel: '',
       groqApiKey: '',
-      securityMode: kv.get('SECURITY_MODE') ?? 'guardrails',
-      trustMode: kv.get('TRUST_MODE') === 'true',
+      securityMode: kv.get('SECURITY_MODE') ?? 'off',
     };
   } catch {
     return null;
@@ -407,7 +403,7 @@ function mergeEnvContent(existing: string, answers: WizardAnswers): string {
     'MAIN_CHAT_ID',
     'DISCORD_APP_ID', 'DISCORD_A2A_CHANNEL_ID',
     'DEFAULT_PROVIDER', 'DEFAULT_MODEL',
-    'HEARTBEAT_INTERVAL_SEC', 'TRUST_MODE',
+    'HEARTBEAT_INTERVAL_SEC',
     'TELEGRAM_ENABLED', 'DISCORD_ENABLED',
     'LOG_LEVEL', 'ACTIVE_MEMORY', 'ENABLE_AGENT_API', 'SELFHEAL_MODE',
   ]);
@@ -431,7 +427,6 @@ function mergeEnvContent(existing: string, answers: WizardAnswers): string {
   if (answers.discordA2aChannel) newBlock.push(`DISCORD_A2A_CHANNEL_ID=${answers.discordA2aChannel}`);
   newBlock.push(`HEARTBEAT_INTERVAL_SEC=60`);
   newBlock.push(`SECURITY_MODE=${answers.securityMode}`);
-  newBlock.push(`TRUST_MODE=${answers.trustMode ? 'true' : 'false'}`);
   newBlock.push(`TELEGRAM_ENABLED=${answers.telegramToken ? 'true' : 'false'}`);
   newBlock.push(`DISCORD_ENABLED=${answers.discordBotToken ? 'true' : 'false'}`);
   newBlock.push(`LOG_LEVEL=debug`);

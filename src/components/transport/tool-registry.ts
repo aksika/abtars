@@ -9,7 +9,8 @@ import { join } from "node:path";
 import { homedir } from "node:os";
 import { logDebug, logWarn, redactSecrets } from "../logger.js";
 import { logAndSwallow } from "../log-and-swallow.js";
-import { checkTool, checkPath, auditDeny, type SandboxPolicy } from "../tool-sandbox.js";
+import { checkTool, auditDeny, type SandboxPolicy } from "../tool-sandbox.js";
+import { authorizePath } from "../authorization.js";
 import { getMasterUserId } from "../master-user.js";
 import { isDefinitivePreDispatchFailure } from "../memory-runtime.js";
 import { runBashCommand } from "../bash-runner.js";
@@ -1031,9 +1032,10 @@ export async function executeToolCall(name: string, args: Record<string, unknown
     const filePath = stringValue(args["path"] ?? args["file_path"]);
     if (filePath) {
       const mode = name.includes("read") || name === "memory_recall" ? "read" as const : "write" as const;
-      const pathCheck = checkPath(filePath, mode, context.sandboxPolicy);
+      // #1851: the authorization owner audits path denials itself — no second
+      // sandbox_deny row for the same decision.
+      const pathCheck = authorizePath(filePath, mode, context.sandboxPolicy);
       if (!pathCheck.allowed) {
-        auditDeny(name, filePath, "session", pathCheck.reason!);
         return JSON.stringify({ error: pathCheck.reason, reason: "peer_sandbox" });
       }
     }

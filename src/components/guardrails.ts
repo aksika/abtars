@@ -1,6 +1,10 @@
 /**
- * guardrails.ts — path + command restrictions for SECURITY_MODE=guardrails.
- * Defense-in-depth: catches accidental/confused model behavior, NOT adversarial bypass.
+ * guardrails.ts — pure bash command classifier (#1851).
+ *
+ * classifyCommand/isRootScopeAllow return tiers and root-scope scope only;
+ * mode resolution, path policy, approval, and audit live in authorization.ts.
+ * Defense-in-depth: catches accidental/confused model behavior, NOT adversarial
+ * bypass.
  */
 
 import { basename, dirname, join, resolve, sep } from "node:path";
@@ -8,27 +12,6 @@ import { homedir } from "node:os";
 import { existsSync, realpathSync } from "node:fs";
 import { abmindHome, abtarsHome } from "../paths.js";
 import { resolveReleasesDir } from "../cli/deploy-lib/paths.js";
-import { getEnv } from "./env-schema.js";
-import { logWarn } from "./logger.js";
-
-const TAG = "guardrails";
-const HOME = homedir();
-
-const BLOCKED_PATHS = [
-  `${HOME}/.ssh${sep}`,
-  `${HOME}/.abtars/secret${sep}`,
-  `/etc${sep}`,
-  `/proc${sep}`,
-  `/sys${sep}`,
-  `/dev${sep}`,
-  `/root${sep}`,
-  `/run${sep}`,
-];
-
-const WRITE_BLOCKED = [
-  `${HOME}/.abtars/config/peers.json`,
-  `${HOME}/.kiro${sep}`,
-];
 
 const BLOCKED_COMMAND_PREFIXES = [
   "rm -rf /",
@@ -853,61 +836,5 @@ function readBacktick(input: string, start: number): { payload: string; end: num
     if (input[i] === "\\") { i++; continue; }
     if (input[i] === "`") return { payload: input.slice(start + 1, i), end: i };
   }
-  return null;
-}
-
-export type SecurityMode = "off" | "guardrails" | "seatbelt" | "docker";
-
-export function getSecurityMode(): SecurityMode {
-  const mode = getEnv().securityMode as SecurityMode;
-  return mode || "off";
-}
-
-export function isGuardrailsActive(): boolean {
-  return getSecurityMode() !== "off";
-}
-
-export function isSeatbeltActive(): boolean {
-  const m = getSecurityMode();
-  return m === "seatbelt" || m === "docker";
-}
-
-export function isDockerActive(): boolean {
-  return getSecurityMode() === "docker";
-}
-
-/** Check if a file path is allowed. Returns error message or null if OK. */
-export function checkPath(path: string, mode: "read" | "write"): string | null {
-  if (!isGuardrailsActive()) return null;
-
-  const resolved = resolve(path) + (path.endsWith("/") ? sep : "");
-
-  for (const blocked of BLOCKED_PATHS) {
-    if (resolved.startsWith(blocked) || resolved === blocked.slice(0, -1)) {
-      return `Path blocked by guardrails: ${path}`;
-    }
-  }
-
-  if (mode === "write") {
-    for (const wb of WRITE_BLOCKED) {
-      if (resolved.startsWith(wb) || resolved === wb) {
-        return `Write blocked by guardrails: ${path}`;
-      }
-    }
-  }
-
-  return null;
-}
-
-/** Check if a bash command is allowed. Returns error message or null if OK. */
-export function checkCommand(cmd: string, cwd?: string): string | null {
-  if (!isGuardrailsActive()) return null;
-
-  const tier = classifyCommand(cmd, cwd);
-  if (tier === "block") {
-    logWarn(TAG, `Blocked command: ${cmd.slice(0, 100)}`);
-    return `Command blocked by guardrails: ${cmd.slice(0, 60)}`;
-  }
-  // "auth-required" is handled by action-gate at a higher level — not blocked here
   return null;
 }

@@ -69,21 +69,18 @@ describe("ActionGate glob rules + families (#1771)", () => {
   });
   afterEach(() => { rmSync(tmpDir, { recursive: true, force: true }); });
 
-  function auditLines(): string[] {
-    return readFileSync(join(tmpDir, "audit.jsonl"), "utf-8").trim().split("\n").filter(Boolean);
-  }
-
   it("legacy literal rules still match exactly", async () => {
     writeFileSync(join(tmpDir, "rules.json"), JSON.stringify({
       rules: [{ category: "bash-auth", pattern: "echo allowed-here", action: "allow", createdAt: new Date().toISOString() }],
     }));
-    expect(await gate.requestAuth("bash-auth", "echo allowed-here", { mode: "unattended-task" })).toBe(true);
+    expect(await gate.requestAuth("bash-auth", "echo allowed-here", { mode: "unattended-task" }))
+      .toMatchObject({ granted: true, by: "rule", pattern: "echo allowed-here" });
     // Same prefix is NOT a match for a wildcard-less rule
     const second = gate.requestAuth("bash-auth", "echo allowed-here please", { mode: "interactive" });
     await new Promise((r) => setTimeout(r, 10));
     expect(notifyCalls.length).toBe(1);
     gate.handleCallback(notifyCalls[0]!.buttons[2]!.data);
-    expect(await second).toBe(false);
+    expect(await second).toMatchObject({ granted: false, by: "master" });
   });
 
   it("last matching rule wins in both directions", async () => {
@@ -93,17 +90,17 @@ describe("ActionGate glob rules + families (#1771)", () => {
         { category: "bash-auth", pattern: "git push*", action: "deny", createdAt: "2026-09-04T00:00:01.000Z" },
       ],
     }));
-    expect(await gate.requestAuth("bash-auth", "git status", { mode: "unattended-task" })).toBe(true);
-    expect(await gate.requestAuth("bash-auth", "git push --force", { mode: "unattended-task" })).toBe(false);
-    expect(auditLines().at(-1)).toContain('"outcome":"denied-by-rule"');
-    expect(auditLines().at(-1)).toContain('"pattern":"git push*"');
+    expect(await gate.requestAuth("bash-auth", "git status", { mode: "unattended-task" }))
+      .toMatchObject({ granted: true, by: "rule", pattern: "git *" });
+    expect(await gate.requestAuth("bash-auth", "git push --force", { mode: "unattended-task" }))
+      .toMatchObject({ granted: false, by: "rule", pattern: "git push*" });
   });
 
-  it("Always allow stores the family — variants auto-grant with pattern audit", async () => {
+  it("Always allow stores the family — variants auto-grant with the pattern", async () => {
     const first = gate.requestAuth("bash-auth", "git status --porcelain");
     await new Promise((r) => setTimeout(r, 10));
     gate.handleCallback(notifyCalls[0]!.buttons[1]!.data); // "🔓 Always allow"
-    expect(await first).toBe(true);
+    expect(await first).toMatchObject({ granted: true, by: "always", pattern: "git status*" });
 
     const stored = JSON.parse(readFileSync(join(tmpDir, "rules.json"), "utf-8")) as {
       rules: Array<{ pattern: string }>;
@@ -111,18 +108,16 @@ describe("ActionGate glob rules + families (#1771)", () => {
     expect(stored.rules.map((r) => r.pattern)).toEqual(["git status*"]);
 
     notifyCalls = [];
-    expect(await gate.requestAuth("bash-auth", "git status")).toBe(true);
+    expect(await gate.requestAuth("bash-auth", "git status"))
+      .toMatchObject({ granted: true, by: "rule", pattern: "git status*" });
     expect(notifyCalls.length).toBe(0);
-    expect(auditLines().at(-1)).toContain('"outcome":"allowed-by-rule"');
-    expect(auditLines().at(-1)).toContain('"pattern":"git status*"');
-    expect(auditLines()).toContainEqual(expect.stringContaining('"outcome":"allowed-always"'));
   });
 
   it("sudo grants keep the wrapper prefix, never bare sudo*", async () => {
     const first = gate.requestAuth("bash-auth", "sudo rm -rf ~/.abtars/cache");
     await new Promise((r) => setTimeout(r, 10));
     gate.handleCallback(notifyCalls[0]!.buttons[1]!.data);
-    expect(await first).toBe(true);
+    expect(await first).toMatchObject({ granted: true, by: "always", pattern: "sudo rm*" });
     const stored = JSON.parse(readFileSync(join(tmpDir, "rules.json"), "utf-8")) as {
       rules: Array<{ pattern: string }>;
     };
@@ -133,14 +128,14 @@ describe("ActionGate glob rules + families (#1771)", () => {
     await new Promise((r) => setTimeout(r, 10));
     expect(notifyCalls.length).toBe(1);
     gate.handleCallback(notifyCalls[0]!.buttons[2]!.data);
-    expect(await second).toBe(false);
+    expect(await second).toMatchObject({ granted: false, by: "master" });
   });
 
   it("external CLI edits are honored without restart; store does not resurrect removals", async () => {
     writeFileSync(join(tmpDir, "rules.json"), JSON.stringify({
       rules: [{ category: "bash-auth", pattern: "echo one*", action: "allow", createdAt: new Date().toISOString() }],
     }));
-    expect(await gate.requestAuth("bash-auth", "echo one two", { mode: "unattended-task" })).toBe(true);
+    expect(await gate.requestAuth("bash-auth", "echo one two", { mode: "unattended-task" })).toMatchObject({ granted: true, by: "rule" });
     // External removal (as `abtars auth rm` would do)
     writeFileSync(join(tmpDir, "rules.json"), JSON.stringify({ rules: [] }));
     expect(gate.listRules()).toEqual([]);
@@ -148,7 +143,7 @@ describe("ActionGate glob rules + families (#1771)", () => {
     const pending = gate.requestAuth("bash-auth", "npm run build");
     await new Promise((r) => setTimeout(r, 10));
     gate.handleCallback(notifyCalls[0]!.buttons[1]!.data);
-    expect(await pending).toBe(true);
+    expect(await pending).toMatchObject({ granted: true, by: "always", pattern: "npm run*" });
     const stored = JSON.parse(readFileSync(join(tmpDir, "rules.json"), "utf-8")) as {
       rules: Array<{ pattern: string }>;
     };
@@ -208,7 +203,7 @@ describe("trusted-root seed defaults (REQUIREMENT: prompt-free allowed dirs)", (
     const chain =
       `cat ${home}/config/peers.json 2>/dev/null || ` +
       `find ${home} -maxdepth 3 -name "peers.json" -exec cat {} \\;`;
-    expect(await gate.requestAuth("bash-auth", chain, { mode: "interactive" })).toBe(true);
+    expect(await gate.requestAuth("bash-auth", chain, { mode: "interactive" })).toMatchObject({ granted: true, by: "rule" });
     expect(notifyCalls.length).toBe(0);
   });
 
@@ -224,14 +219,14 @@ describe("trusted-root seed defaults (REQUIREMENT: prompt-free allowed dirs)", (
     writeFileSync(join(tmpDir, "rules.json"), JSON.stringify({
       rules: [...afterSeed.rules, { category: "bash-auth", pattern: seedPattern, action: "deny", createdAt: "t-deny" }],
     }));
-    expect(await gate.requestAuth("bash-auth", probe, { mode: "interactive" })).toBe(false);
+    expect(await gate.requestAuth("bash-auth", probe, { mode: "interactive" })).toMatchObject({ granted: false, by: "rule" });
     expect(notifyCalls.length).toBe(0);
     // Order 2: user deny first — identical-pattern seed is skipped, deny stands
     writeFileSync(join(tmpDir, "rules.json"), JSON.stringify({
       rules: [{ category: "bash-auth", pattern: seedPattern, action: "deny", createdAt: "t-deny" }],
     }));
     expect(gate.ensureSeededDefaults()).not.toContain(seedPattern);
-    expect(await gate.requestAuth("bash-auth", probe, { mode: "interactive" })).toBe(false);
+    expect(await gate.requestAuth("bash-auth", probe, { mode: "interactive" })).toMatchObject({ granted: false, by: "rule" });
     expect(notifyCalls.length).toBe(0);
   });
 });

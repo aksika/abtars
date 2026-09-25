@@ -13,8 +13,6 @@ export type {
   AcpPromptResult,
 } from "./acp.js";
 
-export type { PendingPermission } from "./permission.js";
-
 export type {
   TelegramUser,
   TelegramChat,

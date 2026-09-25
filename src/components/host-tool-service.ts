@@ -8,8 +8,9 @@
  * handles. The fixed order is:
  *
  *   1. validate schema and syntax; interactive/scheduled command-policy
- *      checks also run guardrails, bridge-spawn/kill blocks and ActionGate
- *      against the command and variable names only;
+ *      checks run the one authorization decision (bridge-spawn/kill blocks,
+ *      mode semantics, guardrails, ActionGate) against the command and
+ *      variable names only;
  *   2. after any applicable policy decision (none for sleep), resolve every
  *      handle through local abmind with owner/revision recheck; if any fails,
  *      spawn nothing;
@@ -20,9 +21,9 @@
  */
 
 import { execFileSync } from "node:child_process";
-import { logInfo, logWarn } from "./logger.js";
+import { logWarn } from "./logger.js";
 import { redactSecrets } from "./logger.js";
-import { checkCommand, classifyCommand, isRootScopeAllow } from "./guardrails.js";
+import { authorizeBashCommand } from "./authorization.js";
 import { fingerprintCommand, previewCommand } from "./transport/tool-failure-diagnostic.js";
 import { runBashCommand } from "./bash-runner.js";
 import { getEnv } from "./env-schema.js";
@@ -105,27 +106,6 @@ function validateBashSyntax(cmd: string): { ok: true } | { ok: false; stderr: st
   }
 }
 
-const BLOCKED_PATTERNS: readonly RegExp[] = [
-  /\bmain\.js\b/,
-  /\babtars\.sh\b/,
-  /\bwatchdog\.sh\b/,
-  /\blaunchctl\s+(load|bootstrap|kickstart|start)\b/,
-];
-
-function isBridgeSpawnCommand(cmd: string): boolean {
-  return BLOCKED_PATTERNS.some((p) => p.test(cmd));
-}
-
-function isBridgeKillCommand(cmd: string): boolean {
-  const pid = process.pid;
-  const ppid = process.ppid;
-  if (new RegExp(`\\bkill\\s+(-\\d+\\s+)?${pid}\\b`).test(cmd)) return true;
-  if (new RegExp(`\\bkill\\s+(-\\d+\\s+)?${ppid}\\b`).test(cmd)) return true;
-  if (/\b(pkill|killall)\b.*\b(abtars|main\.js|watchdog)\b/.test(cmd)) return true;
-  if (/\bkill\b.*\$\(.*pgrep.*abtars/.test(cmd)) return true;
-  return false;
-}
-
 // ── Service ─────────────────────────────────────────────────────────────────
 
 export class HostToolService {
@@ -196,47 +176,18 @@ export class HostToolService {
       return JSON.stringify(result);
     }
 
-    // Normal sleep is explicitly an unrestricted unattended execution origin:
-    // command guardrails, bridge self-protection, and ActionGate must not turn
-    // a model-produced Bash operation into a Telegram-dependent failure.
-    // Contract validation, syntax reporting, timeouts, cancellation, sealed
-    // handle binding, and output redaction remain execution-boundary duties.
-    if (ctx.authorizationMode !== "unattended-sleep") {
-      // Guardrails — one deterministic policy result for classifier,
-      // guardrail, auth, and audit.
-      const tier = classifyCommand(cmd, ctx.executionScope?.cwd);
-      if (tier === "block") {
-        const blockMsg = checkCommand(cmd, ctx.executionScope?.cwd);
-        if (blockMsg) {
-          logWarn("host-tool-service", `Guardrails blocked [${fingerprintCommand(cmd)}]: ${previewCommand(cmd)}`);
-          return policyRejected(cmd, blockMsg);
-        }
-      }
-
-      // Bridge self-protection — checked before auth, same result for audit.
-      if (isBridgeSpawnCommand(cmd)) {
-        return policyRejected(cmd, "Command blocked: this would spawn/restart a bridge or watchdog process. The bridge is already running under launchd+watchdog supervision.");
-      }
-      if (isBridgeKillCommand(cmd)) {
-        return policyRejected(cmd, "Command blocked: this would kill the bridge process (yourself). Ask the user to send /restart for a session reset.");
-      }
-
-      // #1771: pre-pass allows bypass ActionGate, so they leave no
-      // auth/audit.jsonl trace on this path (no per-call sink exists here) —
-      // emit a structured log line with the root-scope marker instead.
-      if (tier === "allow" && isRootScopeAllow(cmd, ctx.executionScope?.cwd)) {
-        logInfo("host-tool-service", `Root-scope allow [${fingerprintCommand(cmd)}]: ${previewCommand(cmd)}`);
-      }
-
-      // ActionGate: only command + variable names reach the authorization
-      // surface — never handle values (and never plaintext at this point).
-      if (tier === "auth-required" && this.deps.actionGate) {
-        const granted = await this.deps.actionGate.requestAuth("bash-auth", cmd, { mode: ctx.authorizationMode });
-        if (!granted) {
-          logWarn("host-tool-service", `Auth denied [${fingerprintCommand(cmd)}]: ${previewCommand(cmd)}`);
-          return policyRejected(cmd, "Command requires authorization. Master denied or timed out.");
-        }
-      }
+    // One authorization decision (#1851): mode semantics, classifier tier,
+    // bridge self-protection, root-scope allow, and ActionGate approval all
+    // live in authorization.ts and leave one audit row there. Sleep is the
+    // unrestricted unattended execution origin handled inside that decision.
+    const decision = await authorizeBashCommand(cmd, {
+      cwd: ctx.executionScope?.cwd,
+      actionGate: this.deps.actionGate,
+      authorizationMode: ctx.authorizationMode,
+    });
+    if (decision.decision === "block") {
+      logWarn("host-tool-service", `Blocked [${fingerprintCommand(cmd)}]: ${previewCommand(cmd)}`);
+      return policyRejected(cmd, decision.reason);
     }
 
     // Resolve every handle after applicable policy checks; sleep has no
