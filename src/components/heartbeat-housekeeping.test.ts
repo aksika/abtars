@@ -33,6 +33,9 @@ describe("createHousekeepingTask", () => {
     expect(result.state).toBe("ran");
     expect(result.detail).toContain("metrics-sample");
     expect(result.detail).toContain("metrics-flush");
+    // #1846: orphan workspace reclaim rides the same DAY cadence as kanban-cleanup.
+    expect(result.detail).toContain("kanban-cleanup");
+    expect(result.detail).toContain("project-workspace-reclaim");
   });
 
   it("returns idle when no child is due on a subsequent tick", async () => {

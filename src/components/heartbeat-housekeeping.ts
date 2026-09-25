@@ -2,6 +2,7 @@ import { logInfo, logWarn, logError } from "./logger.js";
 import { logAndSwallow } from "./log-and-swallow.js";
 import type { HeartbeatTask, HeartbeatTaskOutcome } from "../types/index.js";
 import type { AbtarsMemoryRuntime } from "./memory-runtime.js";
+import type { TaskDatabase } from "./tasks/kanban-board.js";
 
 const TAG = "housekeeping";
 const MINUTE = 60_000;
@@ -37,6 +38,7 @@ export function createHousekeepingTask(deps: HousekeepingDeps): HeartbeatTask {
     { name: "update-check", intervalMs: 6 * HOUR, run: runUpdateCheck },
     { name: "metrics-prune", intervalMs: DAY, run: pruneMetrics },
     { name: "kanban-cleanup", intervalMs: DAY, run: cleanupKanban },
+    { name: "project-workspace-reclaim", intervalMs: DAY, run: reclaimProjectWorkspaces },
     { name: "pi-command-prune", intervalMs: DAY, run: prunePiCommands },
     { name: "attempt-prune", intervalMs: DAY, run: pruneTerminalAttempts },
   ];
@@ -151,6 +153,26 @@ export function createHousekeepingTask(deps: HousekeepingDeps): HeartbeatTask {
     const { kanbanCleanup } = await import("./tasks/kanban-board.js");
     const purged = kanbanCleanup(7);
     if (purged > 0) logInfo(TAG, `Kanban: purged ${purged} terminal cards (done/failed/delivered) > 7d`);
+  }
+
+  /** #1846 — reclaims per-project workspaces orphaned by the kanban-cleanup
+   * purge above, once their card has been provably absent for a 3-day grace
+   * (7d terminal retention + 3d grace = 10d total). An unavailable task
+   * database is an expected no-op state, not a failure: the reclaim module
+   * logs and deletes nothing on a null handle. */
+  async function reclaimProjectWorkspaces(): Promise<void> {
+    const { reclaimOrphanedProjectWorkspaces } = await import("./project-workspace-reclaim.js");
+    const { requireTaskDatabase } = await import("./tasks/kanban-board.js");
+    const { abtarsHome } = await import("../paths.js");
+    const { join } = await import("node:path");
+    let db: TaskDatabase | null = null;
+    try {
+      db = requireTaskDatabase();
+    } catch {
+      // better-sqlite3 missing or kanban DB unusable — reclaim treats null as a no-op pass.
+    }
+    const summary = reclaimOrphanedProjectWorkspaces(db, join(abtarsHome(), "workspace", "projects"));
+    if (summary.removed.length > 0) logInfo(TAG, `Project workspaces: reclaimed ${summary.removed.length} orphaned directories`);
   }
 
   /** #1551 — wires the previously-dead PiRunStore.cleanupOldCommands + the
