@@ -126,6 +126,7 @@ export function createSpinSessionRegistry(options: { maxTotalSessions: number })
       showThinking: false,
       // Pipeline state defaults (#1040)
       busy: false, queue: [], fullMode: false, pendingStart: false,
+      pendingCoreRehydrate: false,
       seen: false, compacting: false, ctxWarned: false, compactFailures: 0,
       primingTerms: [], completions: [],
       // #1332/#1361: Steering queue and acceptance gate

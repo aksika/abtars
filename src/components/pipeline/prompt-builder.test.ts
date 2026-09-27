@@ -343,3 +343,78 @@ describe("#1869 — session-start owns profile/notes/coreFacts via parts", () =>
     expect(result.prompt).toContain("LEGACY-1869");
   });
 });
+
+describe("#1869 — post-compaction core rehydration is core-only", () => {
+  const PARTS = {
+    soul: "SOUL-REHY", profile: "PROFILE-REHY", notes: "NOTES-REHY",
+    memoryTools: "TOOLS-REHY", coreFacts: "FACTS-REHY",
+  };
+
+  /** An established session: already seen, no pending start, but flagged for
+   *  core rehydration by a completed compaction. */
+  function rehydrateSession(overrides: Record<string, unknown> = {}) {
+    return {
+      id: "master_A_1", userId: "master", platform: "telegram", chatId: 100,
+      seen: true, pendingStart: false, pendingCoreRehydrate: true,
+      ...overrides,
+    } as never;
+  }
+
+  function runtimeFor(shape: unknown, assemble = vi.fn().mockResolvedValue(shape)) {
+    return {
+      runtime: {
+        state: "ready",
+        capabilities: new Set(["durableContext"]),
+        recordMessage: vi.fn().mockResolvedValue({ id: 1 }),
+        assembleSessionContext: assemble,
+      } as never,
+      assemble,
+    };
+  }
+
+  const msg = () => ({ userId: "master", channelId: "1", platform: "telegram", isGroup: false, messageId: "rehy-1" } as never);
+
+  it("re-injects the core parts without the history hydration that compaction just reduced", async () => {
+    const { runtime, assemble } = runtimeFor({
+      coreKnowledge: "", recall: "RECALL-REHY", wakeUp: "WAKE-REHY",
+      soulBundle: PARTS, parts: PARTS,
+    });
+    const session = rehydrateSession();
+    const result = await buildPrompt(msg(), "hello", baseDeps(runtime), masterRegistry(), session);
+
+    expect(result.isSessionStart).toBe(false);
+    for (const marker of ["PROFILE-REHY", "NOTES-REHY", "FACTS-REHY"]) {
+      expect(result.prompt).toContain(marker);
+    }
+    // The point of the narrow path: no consolidations, no message pairs, no
+    // flashback re-added on top of a summary that already covers them.
+    expect(result.prompt).not.toContain("RECALL-REHY");
+    expect(result.prompt).not.toContain("WAKE-REHY");
+    // Immutable parts stay in the compaction-immune system prompt.
+    expect(result.prompt).not.toContain("SOUL-REHY");
+    expect(result.prompt).not.toContain("TOOLS-REHY");
+    // Structural guarantee, not a filter: abmind never builds the hydration.
+    expect(assemble.mock.calls[0]![0]).toMatchObject({ includeHistory: false });
+    // One-shot.
+    expect((session as unknown as { pendingCoreRehydrate: boolean }).pendingCoreRehydrate).toBe(false);
+  });
+
+  it("is a no-op against an older daemon, whose system prompt still carries the parts", async () => {
+    const { runtime } = runtimeFor({ coreKnowledge: "LEGACY-REHY", recall: "", wakeUp: "" });
+    const result = await buildPrompt(msg(), "hello", baseDeps(runtime), masterRegistry(), rehydrateSession());
+    // Re-injecting here would duplicate what the legacy system prompt holds.
+    expect(result.prompt).not.toContain("LEGACY-REHY");
+  });
+
+  it("does not fire on an ordinary turn", async () => {
+    const { runtime, assemble } = runtimeFor({
+      coreKnowledge: "", recall: "", wakeUp: "", soulBundle: PARTS, parts: PARTS,
+    });
+    const result = await buildPrompt(
+      msg(), "hello", baseDeps(runtime), masterRegistry(),
+      rehydrateSession({ pendingCoreRehydrate: false }),
+    );
+    expect(assemble).not.toHaveBeenCalled();
+    expect(result.prompt).not.toContain("PROFILE-REHY");
+  });
+});

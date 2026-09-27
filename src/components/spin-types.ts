@@ -167,6 +167,13 @@ export interface ManagedSession {
   queue: Array<{ msg: import("../types/platform.js").InboundMessage; adapter: import("../types/platform.js").PlatformAdapter }>;
   fullMode: boolean;
   pendingStart: boolean;
+  /** #1869: re-inject ONLY the core parts on the next turn, after a completed
+   *  compaction summarized them away. Distinct from pendingStart, which also
+   *  re-injects history hydration — re-adding that here would partly undo the
+   *  compaction that just ran and duplicate messages the summary covers.
+   *  Optional: absent means not pending, so existing session fixtures and any
+   *  older persisted shape stay valid. Read with `=== true`. */
+  pendingCoreRehydrate?: boolean;
   seen: boolean;
   compacting: boolean;
   ctxWarned: boolean;

@@ -152,23 +152,26 @@ describe("SessionControlService post-compaction rehydration (#1869)", () => {
 });
 
 describe("rehydrateCompactedSession (#1869)", () => {
-  it("marks the durable spin session pendingStart so the next turn reassembles session-start", () => {
-    const session = { pendingStart: false };
+  it("marks the durable spin session for core rehydration, not a full session start", () => {
+    const session = { pendingCoreRehydrate: false, pendingStart: false };
     rehydrateCompactedSession(
       { kind: "durable_conversation", principalId: "u", sessionId: "s" },
       () => session,
     );
-    expect(session.pendingStart).toBe(true);
+    expect(session.pendingCoreRehydrate).toBe(true);
+    // A full session start would also re-inject history hydration, partly
+    // undoing the compaction that just ran.
+    expect(session.pendingStart).toBe(false);
   });
 
   it("ignores local Pi runs and missing sessions", () => {
-    const session = { pendingStart: false };
+    const session = { pendingCoreRehydrate: false };
     // Coding runs never carried core files: nothing to restore.
     rehydrateCompactedSession(
       { kind: "local_pi_run", principalId: "u", runId: "r", generation: 1 },
       () => session,
     );
-    expect(session.pendingStart).toBe(false);
+    expect(session.pendingCoreRehydrate).toBe(false);
     expect(() => rehydrateCompactedSession(
       { kind: "durable_conversation", principalId: "u", sessionId: "gone" },
       () => undefined,

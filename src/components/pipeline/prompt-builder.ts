@@ -130,7 +130,35 @@ export async function buildPrompt(
   // --- Session-start injection (skipped for K — no A SOUL/session assembly) ---
   const entry = pSession;
   const isSessionStart = !entry || entry.pendingStart || !entry.seen;
-  logDebug(TAG, `session-state: key=${sessionKey} seen=${entry?.seen} pendingStart=${entry?.pendingStart} isSessionStart=${isSessionStart} memoryMode=${memoryMode}`);
+  // #1869 — post-compaction core rehydration: the compaction summarized the
+  // core parts away, so re-inject only those. Never the history hydration,
+  // which would partly undo the compaction that just ran.
+  const isCoreRehydrate = !isSessionStart && entry?.pendingCoreRehydrate === true;
+  logDebug(TAG, `session-state: key=${sessionKey} seen=${entry?.seen} pendingStart=${entry?.pendingStart} isSessionStart=${isSessionStart} coreRehydrate=${isCoreRehydrate} memoryMode=${memoryMode}`);
+  if (isCoreRehydrate && memoryRuntime?.state === "ready" && memoryMode !== "skill-isolated") {
+    try {
+      // includeHistory: false — abmind does not even build the hydration
+      // block, so core-only is structural rather than a filter we could
+      // forget to apply.
+      const sessionCtx = await memoryRuntime.assembleSessionContext({
+        identity: { principalId: userId, executionId: sessionKey },
+        modelContextTokens: deps.maxContext,
+        includeHistory: false,
+      });
+      const parts = asSessionSoulBundle(sessionCtx.parts);
+      // Legacy daemons keep the mutable parts in the compaction-immune system
+      // prompt, so there is nothing to restore — injecting here would create
+      // the duplication #1869 exists to remove.
+      const coreBlocks = parts !== undefined ? [parts.profile, parts.notes, parts.coreFacts].filter(Boolean) : [];
+      if (coreBlocks.length > 0) {
+        prompt = `[CONTEXT — do not respond to this section]\n${coreBlocks.join("\n\n")}\n[/CONTEXT]\n\n${prompt}`;
+      }
+      logDebug(TAG, `core-rehydrate: key=${sessionKey} outcome=${coreBlocks.length > 0 ? "ok" : (parts !== undefined ? "empty" : "legacy-noop")} coreChars=${coreBlocks.join("").length}`);
+    } catch (err) {
+      logDebug(TAG, `core-rehydrate: key=${sessionKey} outcome=failed`);
+      logDebug(TAG, `Core rehydration unavailable: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
   if (isSessionStart && memoryRuntime?.state === "ready" && memoryMode !== "skill-isolated") {
     try {
       const sessionCtx = await memoryRuntime.assembleSessionContext({
@@ -160,6 +188,9 @@ export async function buildPrompt(
   if (entry) {
     entry.seen = true;
     entry.pendingStart = false;
+    // #1869 — one-shot: consumed by either branch above, and a full session
+    // start already delivered the core parts.
+    entry.pendingCoreRehydrate = false;
   }
 
   // #1529: classify durable-context intent from configuration and message
