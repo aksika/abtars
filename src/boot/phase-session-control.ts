@@ -9,7 +9,7 @@
 
 import type { BootCtx, PhaseResult } from "./context.js";
 import { logInfo, logWarn } from "../components/logger.js";
-import { SessionControlService, DurableConversationCompactionAdapter, LocalPiRunCompactionAdapter } from "../components/session-control/index.js";
+import { SessionControlService, DurableConversationCompactionAdapter, LocalPiRunCompactionAdapter, rehydrateCompactedSession } from "../components/session-control/index.js";
 import { setSessionControlService } from "../components/session-control/instance.js";
 import { createCompactionSummarizer } from "../components/compact-summarizer.js";
 import { spin as spinInstance } from "../components/spin.js";
@@ -33,6 +33,12 @@ export async function phaseSessionControl(ctx: BootCtx): Promise<PhaseResult> {
         model: event.model,
         failureReason: event.status === "failed" ? "control_failed" : undefined,
       });
+    },
+    // #1869: re-apply the core bundle after a completed compaction. abmind
+    // owns what the bundle is; this harness owns when to re-apply it after
+    // its own compaction — a harness without compaction wires nothing.
+    onCompactionCompleted: (target) => {
+      rehydrateCompactedSession(target, (id) => spinInstance.getSessionById(id));
     },
   });
 

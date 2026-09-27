@@ -4,6 +4,7 @@ import {
   createDisabledRuntime,
   createUnavailableRuntime,
   attemptMemoryMutation,
+  asSessionSoulBundle,
   type MemoryRuntimeCapability,
 } from "./memory-runtime.js";
 import type { AbmindRouteSnapshotV1Like } from "./abmind-route-contract.js";
@@ -635,5 +636,48 @@ describe("#1813 selection carry and compact context", () => {
       expect(res.context).toContain("Rollbacks");
       expect(res.context).toContain("Weekly summary");
     }
+  });
+});
+
+describe("#1869 session parts and test-mode status", () => {
+  const FULL = { soul: "s", profile: "p", notes: "n", memoryTools: "t", coreFacts: "f" };
+
+  it("asSessionSoulBundle accepts the five-string shape, rejects the rest", () => {
+    expect(asSessionSoulBundle(FULL)).toEqual(FULL);
+    for (const bad of [undefined, null, 42, "x", [], { ...FULL, soul: 1 }, { ...FULL, coreFacts: null }, { soul: "s" }]) {
+      expect(asSessionSoulBundle(bad)).toBeUndefined();
+    }
+  });
+
+  it("passes parts through from new daemons; absent on old ones", async () => {
+    const withParts = mockClient(caps(ALL_METHODS));
+    (withParts.privateMemory.assembleSessionContext as Mock).mockResolvedValue({
+      wakeUp: "", recall: "", coreKnowledge: "", soulBundle: FULL, parts: FULL,
+    });
+    const rt = createClientRuntime(withParts);
+    const res = await rt.assembleSessionContext({ identity: { principalId: "u", executionId: "s" } });
+    expect(res.parts).toEqual(FULL);
+
+    const legacy = createClientRuntime(mockClient(caps(ALL_METHODS)));
+    const old = await legacy.assembleSessionContext({ identity: { principalId: "u", executionId: "s" } });
+    expect(old.parts).toBeUndefined();
+    expect(old.coreKnowledge).toBe("");
+  });
+
+  it("maps the daemon memoryTest mode, defaulting absent to false", async () => {
+    for (const [raw, expected] of [
+      [{ memoryTest: true }, true],
+      [{ memoryTest: false }, false],
+      [{}, false],
+      [null, false],
+    ] as const) {
+      const client = mockClient(caps(ALL_METHODS));
+      (client.privateMemory.getRuntimeStatus as Mock).mockResolvedValue(raw);
+      const rt = createClientRuntime(client);
+      expect((await rt.getStatus()).memoryTest).toBe(expected);
+    }
+    // Disabled/unavailable runtimes throw before returning a status.
+    await expect(createDisabledRuntime().getStatus()).rejects.toThrow();
+    await expect(createUnavailableRuntime().getStatus()).rejects.toThrow();
   });
 });

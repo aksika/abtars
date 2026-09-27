@@ -49,12 +49,28 @@ function buildCurrentTime(): string {
 }
 
 /**
+ * Where the mutable sleep-curated parts (profile, notes, core facts) live.
+ * New daemons serve the addressable parts map, so session-start owns them
+ * ("session-start"); older daemons serve only the legacy fields, so the
+ * system prompt keeps carrying them ("system-prompt") — exactly today's
+ * behavior, stale copy and duplication included, but no part dropped during
+ * rollout.
+ */
+export type MutablePartsOwner = "session-start" | "system-prompt";
+
+/**
  * Build the SOUL bundle for any session type.
  *
- * Main (A): full 9-part bundle (identity, tools, profile, notes, facts, skills, model-instructions, emotional, users, time)
- * Others: identity one-liner + core facts + skills + time
+ * Main (A): system-prompt authority keeps the immutable, human-managed parts
+ * (SOUL.md, memory-tools.md) plus skills, model instructions, users and time.
+ * The mutable sleep-curated parts (profile, notes, core facts) live here only
+ * for older daemons; with a parts-capable daemon session-start assembly owns
+ * them via the addressable map, read fresh every session (#1869 — kills the
+ * double injection and the stale boot copy).
+ * Others: identity one-liner + skills + time (non-Main types never carried
+ * core files; the old header comment claiming core facts here was stale).
  */
-export function buildSoulBundle(type: SessionType, bundle?: SessionSoulBundle | null): string | null {
+export function buildSoulBundle(type: SessionType, bundle?: SessionSoulBundle | null, mutableOwner: MutablePartsOwner = "session-start"): string | null {
   const parts: string[] = [];
 
   if (type === "A") {
@@ -72,13 +88,21 @@ export function buildSoulBundle(type: SessionType, bundle?: SessionSoulBundle | 
       const minimal = fallback ? readOr(fallback.path) : "";
       if (minimal) parts.push(minimal);
       else parts.push("[SYSTEM] Memory unavailable. Operate without persistent memory.");
-    } else {
-      // Normal: full bundle
+    } else if (mutableOwner === "system-prompt") {
+      // Older daemon without the parts map: the full legacy bundle. The
+      // stale copy and the session-start duplication persist exactly as
+      // today — working, and no part dropped during rollout.
       if (bundle!.soul) parts.push(bundle!.soul);
       if (bundle!.profile) parts.push(bundle!.profile);
       if (bundle!.notes) parts.push(bundle!.notes);
       if (bundle!.memoryTools) parts.push(bundle!.memoryTools);
       if (bundle!.coreFacts) parts.push(bundle!.coreFacts);
+    } else {
+      // Normal: system-prompt-owned parts only. Profile/notes/coreFacts
+      // arrive via session-start parts (#1869); pushing them here too would
+      // inject every mutable file twice per session (stale + fresh copies).
+      if (bundle!.soul) parts.push(bundle!.soul);
+      if (bundle!.memoryTools) parts.push(bundle!.memoryTools);
     }
 
     const skillsCatalog = readOr(join(abtarsHome(), "skills", "skills_catalog.md"));

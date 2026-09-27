@@ -266,3 +266,80 @@ describe("buildPrompt session-context request (#1776)", () => {
     expect(input).not.toHaveProperty("maxChars");
   });
 });
+
+// ── #1869 split session-start ───────────────────────────────────────────────
+// The Main session carries each core part exactly once across both channels:
+// boot owns soul + memoryTools (soul-bundle.test.ts asserts the mutable parts
+// are absent there); session-start owns profile/notes/coreFacts here and must
+// never re-inject soul/memoryTools.
+
+describe("#1869 — session-start owns profile/notes/coreFacts via parts", () => {
+  const PARTS = {
+    soul: "SOUL-1869", profile: "PROFILE-1869", notes: "NOTES-1869",
+    memoryTools: "TOOLS-1869", coreFacts: "FACTS-1869",
+  };
+
+  function partsRuntime(shape: unknown) {
+    return {
+      state: "ready",
+      capabilities: new Set(["durableContext"]),
+      recordMessage: vi.fn().mockResolvedValue({ id: 1 }),
+      assembleSessionContext: vi.fn().mockResolvedValue(shape),
+    } as never;
+  }
+
+  function sessionMsg() {
+    return { userId: "master", channelId: "1", platform: "telegram", isGroup: false } as never;
+  }
+
+  function countOccurrences(haystack: string, needle: string): number {
+    return haystack.split(needle).length - 1;
+  }
+
+  it("injects profile/notes/coreFacts exactly once each, never soul/memoryTools", async () => {
+    const result = await buildPrompt(
+      sessionMsg(),
+      "hello",
+      baseDeps(partsRuntime({
+        coreKnowledge: "LEGACY-1869", recall: "RECALL-1869", wakeUp: "WAKE-1869",
+        soulBundle: PARTS, parts: PARTS,
+      })),
+      masterRegistry(),
+    );
+    const prompt = result.prompt;
+    for (const marker of ["PROFILE-1869", "NOTES-1869", "FACTS-1869", "RECALL-1869", "WAKE-1869"]) {
+      expect(countOccurrences(prompt, marker)).toBe(1);
+    }
+    expect(prompt).not.toContain("SOUL-1869");
+    expect(prompt).not.toContain("TOOLS-1869");
+    expect(prompt).not.toContain("LEGACY-1869");
+    const idx = (s: string): number => prompt.indexOf(s);
+    expect(idx("PROFILE-1869")).toBeLessThan(idx("NOTES-1869"));
+    expect(idx("NOTES-1869")).toBeLessThan(idx("FACTS-1869"));
+    expect(idx("FACTS-1869")).toBeLessThan(idx("RECALL-1869"));
+    expect(idx("RECALL-1869")).toBeLessThan(idx("WAKE-1869"));
+  });
+
+  it("falls back to the legacy joined field when parts are absent (old daemon)", async () => {
+    const result = await buildPrompt(
+      sessionMsg(),
+      "hello",
+      baseDeps(partsRuntime({ coreKnowledge: "LEGACY-1869", recall: "", wakeUp: "" })),
+      masterRegistry(),
+    );
+    expect(result.prompt).toContain("LEGACY-1869");
+  });
+
+  it("falls back to legacy when parts are malformed, never a partial bundle", async () => {
+    const result = await buildPrompt(
+      sessionMsg(),
+      "hello",
+      baseDeps(partsRuntime({
+        coreKnowledge: "LEGACY-1869", recall: "", wakeUp: "",
+        parts: { soul: 1, profile: null, notes: "x", memoryTools: "y", coreFacts: "z" },
+      })),
+      masterRegistry(),
+    );
+    expect(result.prompt).toContain("LEGACY-1869");
+  });
+});

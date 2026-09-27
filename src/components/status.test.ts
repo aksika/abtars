@@ -66,6 +66,7 @@ function makeRuntimeView(overrides: Partial<RuntimeView> = {}): RuntimeView {
     skillsActive: 5,
     memory: null,
     soulBundle: { available: 4, total: 5 },
+    memoryTestMode: false,
     a2a: { running: true, port: 7100 },
     peersConfigured: 0,
     tasks: { recurring: 3, pending: 2, paused: 0 },
@@ -442,5 +443,23 @@ describe("#1706 renderChatStatus — live memory semantics", () => {
 
     const out = renderChatStatus(view);
     expect(out).toContain("- memory: disabled");
+  });
+});
+
+describe("#1869 renderChatStatus — memory test mode", () => {
+  it("stays silent when the mode is off or unknown", () => {
+    for (const memoryTestMode of [false]) {
+      const view = makeOperatorView({ runtime: makeRuntimeView({ memoryTestMode }) });
+      const out = renderChatStatus(view);
+      expect(out).toContain("soul bundle: 4/5 available");
+      expect(out).not.toContain("memory test mode");
+    }
+  });
+
+  it("reports the mode when the daemon runs with MEMORY_TEST=ON", () => {
+    const view = makeOperatorView({ runtime: makeRuntimeView({ memoryTestMode: true }) });
+    const out = renderChatStatus(view);
+    expect(out).toContain("memory test mode: ON");
+    expect(out).toContain("MEMORY_TEST=ON");
   });
 });

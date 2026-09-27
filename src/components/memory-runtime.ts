@@ -327,6 +327,9 @@ export interface SessionContextResult {
   recall: string;
   coreKnowledge: string;
   soulBundle: SessionSoulBundle;
+  // #1869 — addressable parts from new daemons; absent on older ones, which
+  // serve only the legacy fields. Session-start prefers parts when present.
+  parts?: SessionSoulBundle;
 }
 
 export interface SessionSoulBundle {
@@ -335,6 +338,27 @@ export interface SessionSoulBundle {
   notes: string;
   memoryTools: string;
   coreFacts: string;
+}
+
+/**
+ * #1869 — narrow the unknown wire parts map. Malformed or absent input
+ * yields undefined: the caller falls back to the legacy fields, never a
+ * fabricated or partial bundle.
+ */
+export function asSessionSoulBundle(raw: unknown): SessionSoulBundle | undefined {
+  if (raw === null || raw === undefined) return undefined;
+  if (typeof raw !== "object" || Array.isArray(raw)) return undefined;
+  const record = raw as Record<string, unknown>;
+  for (const key of ["soul", "profile", "notes", "memoryTools", "coreFacts"]) {
+    if (typeof record[key] !== "string") return undefined;
+  }
+  return {
+    soul: record["soul"] as string,
+    profile: record["profile"] as string,
+    notes: record["notes"] as string,
+    memoryTools: record["memoryTools"] as string,
+    coreFacts: record["coreFacts"] as string,
+  };
 }
 
 export interface RecentConversationInput {
@@ -359,6 +383,9 @@ export interface RuntimeStatusResult {
   dbSizeBytes: number;
   rejectedByScanner: number;
   uptimeMs?: number;
+  // #1869 — daemon test-mode state. Older daemons omit it; absence means
+  // false (full bundle).
+  memoryTest: boolean;
 }
 
 export interface CoreKnowledgeInput {
@@ -894,6 +921,9 @@ export function createClientRuntime(client: AbmindClientLike): AbtarsMemoryRunti
         wakeUpMaxChars: input.wakeUpMaxChars,
         includeHistory: input.includeHistory,
       });
+      // #1869 — parts ride the existing method (no new capability): older
+      // daemons omit them and the caller falls back to the legacy fields.
+      // Shape validation lives with the consumer (asSessionSoulBundle).
       return assembled as SessionContextResult;
     },
 
@@ -922,6 +952,8 @@ export function createClientRuntime(client: AbmindClientLike): AbtarsMemoryRunti
         preservedKeywords: typeof stats["preservedKeywords"] === "number" ? stats["preservedKeywords"] : 0,
         dbSizeBytes: typeof stats["dbSizeBytes"] === "number" ? stats["dbSizeBytes"] : 0,
         rejectedByScanner: typeof stats["rejectedByScanner"] === "number" ? stats["rejectedByScanner"] : 0,
+        // #1869 — older daemons omit the mode; absence means full bundle.
+        memoryTest: stats["memoryTest"] === true,
       };
     },
 
@@ -1313,7 +1345,7 @@ export function createDisabledRuntime(): AbtarsMemoryRuntime {
     recall: async () => { unavailable("recall"); return { hits: [], context: "" }; },
     assembleSessionContext: async () => { unavailable("assembleSessionContext"); return { wakeUp: "", recall: "", coreKnowledge: "", soulBundle: emptySoulBundle() }; },
     getRecentConversation: async () => { unavailable("getRecentConversation"); return []; },
-    getStatus: async () => { unavailable("getStatus"); return { totalMessages: 0, extractedMemories: 0, extractedByType: {}, consolidationFiles: { daily: 0, weekly: 0, quarterly: 0 }, ingestedDocuments: 0, preservedKeywords: 0, dbSizeBytes: 0, rejectedByScanner: 0 }; },
+    getStatus: async () => { unavailable("getStatus"); return { totalMessages: 0, extractedMemories: 0, extractedByType: {}, consolidationFiles: { daily: 0, weekly: 0, quarterly: 0 }, ingestedDocuments: 0, preservedKeywords: 0, dbSizeBytes: 0, rejectedByScanner: 0, memoryTest: false }; },
     getSleepStatus: async () => { unavailable("getSleepStatus"); return { state: "idle" }; },
     getCoreKnowledge: async () => { unavailable("getCoreKnowledge"); return ""; },
     recordFeedback: async () => { unavailable("recordFeedback"); return { ok: false }; },
@@ -1351,7 +1383,7 @@ export function createUnavailableRuntime(): AbtarsMemoryRuntime {
     recall: async () => { unavailable("recall"); return { hits: [], context: "" }; },
     assembleSessionContext: async () => { unavailable("assembleSessionContext"); return { wakeUp: "", recall: "", coreKnowledge: "", soulBundle: emptySoulBundle() }; },
     getRecentConversation: async () => { unavailable("getRecentConversation"); return []; },
-    getStatus: async () => { unavailable("getStatus"); return { totalMessages: 0, extractedMemories: 0, extractedByType: {}, consolidationFiles: { daily: 0, weekly: 0, quarterly: 0 }, ingestedDocuments: 0, preservedKeywords: 0, dbSizeBytes: 0, rejectedByScanner: 0 }; },
+    getStatus: async () => { unavailable("getStatus"); return { totalMessages: 0, extractedMemories: 0, extractedByType: {}, consolidationFiles: { daily: 0, weekly: 0, quarterly: 0 }, ingestedDocuments: 0, preservedKeywords: 0, dbSizeBytes: 0, rejectedByScanner: 0, memoryTest: false }; },
     getSleepStatus: async () => { unavailable("getSleepStatus"); return { state: "idle" }; },
     getCoreKnowledge: async () => { unavailable("getCoreKnowledge"); return ""; },
     recordFeedback: async () => { unavailable("recordFeedback"); return { ok: false }; },

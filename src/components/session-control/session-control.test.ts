@@ -6,6 +6,7 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { SessionControlService } from "./service.js";
 import { DurableConversationCompactionAdapter } from "./durable-adapter.js";
+import { rehydrateCompactedSession } from "./rehydrate.js";
 import type { SessionControlAdapter, SessionControlResult, SessionCompactionTelemetryV1 } from "./types.js";
 
 function makeResult(status: SessionControlResult["status"]): SessionControlResult {
@@ -120,6 +121,58 @@ describe("SessionControlService #1406", () => {
       { kind: "compact", reason: "manual" },
     );
     expect(result.status).toBe("failed");
+  });
+});
+
+describe("SessionControlService post-compaction rehydration (#1869)", () => {
+  const target = { kind: "durable_conversation", principalId: "u", sessionId: "s" } as const;
+
+  it("rehydrates only on completed — never on failed or no-op outcomes", async () => {
+    for (const status of ["completed", "nothing_to_compact", "busy", "unsupported", "stale", "failed"] as const) {
+      const seen: unknown[] = [];
+      const service = new SessionControlService({ onCompactionCompleted: (t) => { seen.push(t); } });
+      service.register({
+        targetKind: "durable_conversation",
+        supports: () => true,
+        async execute() { return makeResult(status); },
+      });
+      const result = await service.execute(target, { kind: "compact", reason: "manual" });
+      expect(result.status).toBe(status);
+      expect(seen).toHaveLength(status === "completed" ? 1 : 0);
+      if (status === "completed") expect(seen[0]).toEqual(target);
+    }
+  });
+
+  it("a throwing rehydration hook never breaks the control result", async () => {
+    const service = new SessionControlService({ onCompactionCompleted: () => { throw new Error("boom"); } });
+    service.register(makeRecordingAdapter("durable_conversation"));
+    const result = await service.execute(target, { kind: "compact", reason: "manual" });
+    expect(result.status).toBe("completed");
+  });
+});
+
+describe("rehydrateCompactedSession (#1869)", () => {
+  it("marks the durable spin session pendingStart so the next turn reassembles session-start", () => {
+    const session = { pendingStart: false };
+    rehydrateCompactedSession(
+      { kind: "durable_conversation", principalId: "u", sessionId: "s" },
+      () => session,
+    );
+    expect(session.pendingStart).toBe(true);
+  });
+
+  it("ignores local Pi runs and missing sessions", () => {
+    const session = { pendingStart: false };
+    // Coding runs never carried core files: nothing to restore.
+    rehydrateCompactedSession(
+      { kind: "local_pi_run", principalId: "u", runId: "r", generation: 1 },
+      () => session,
+    );
+    expect(session.pendingStart).toBe(false);
+    expect(() => rehydrateCompactedSession(
+      { kind: "durable_conversation", principalId: "u", sessionId: "gone" },
+      () => undefined,
+    )).not.toThrow();
   });
 });
 

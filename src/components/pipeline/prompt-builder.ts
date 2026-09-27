@@ -11,7 +11,7 @@ import { interceptLargeMessage } from "../message-interceptor.js";
 import { abmind } from "../../utils/abmind-lazy.js";
 import { getEnv } from "../env-schema.js";
 import type { AbtarsMemoryRuntime, MemoryWritePhase } from "../memory-runtime.js";
-import { attemptMemoryMutation, selectInjectedHits } from "../memory-runtime.js";
+import { attemptMemoryMutation, selectInjectedHits, asSessionSoulBundle } from "../memory-runtime.js";
 import { inboundExecutionKey, inboundMessageKey } from "../memory-operation-key.js";
 import type { ConversationBuffer } from "../conversation-buffer.js";
 import { isTrustedScheduledAnnouncement, type InboundMessage } from "../../types/platform.js";
@@ -137,9 +137,18 @@ export async function buildPrompt(
         identity: { principalId: userId, executionId: sessionKey },
         modelContextTokens: deps.maxContext,
       });
-      const sessionParts = [sessionCtx.coreKnowledge, sessionCtx.recall, sessionCtx.wakeUp].filter(Boolean);
+      // #1869 — split by mutability: session-start owns profile/notes/
+      // coreFacts via the addressable parts map (fresh read every session),
+      // while SOUL.md + memory-tools.md stay in the boot system prompt.
+      // Older daemons omit parts: fall back to the legacy joined field, which
+      // still yields a working full bundle.
+      const parts = asSessionSoulBundle(sessionCtx.parts);
+      const coreBlocks = parts !== undefined
+        ? [parts.profile, parts.notes, parts.coreFacts]
+        : [sessionCtx.coreKnowledge];
+      const sessionParts = [...coreBlocks, sessionCtx.recall, sessionCtx.wakeUp].filter(Boolean);
       if (sessionParts.length > 0) volatileContext.push({ kind: "session_start", content: sessionParts.join("\n\n") });
-      logDebug(TAG, `session-assembly: key=${sessionKey} outcome=${sessionParts.length > 0 ? "ok" : "empty"} coreChars=${sessionCtx.coreKnowledge.length} recallChars=${sessionCtx.recall.length} wakeChars=${sessionCtx.wakeUp.length}`);
+      logDebug(TAG, `session-assembly: key=${sessionKey} outcome=${sessionParts.length > 0 ? "ok" : "empty"} parts=${parts !== undefined ? "parts" : "legacy"} coreChars=${parts !== undefined ? coreBlocks.join("").length : sessionCtx.coreKnowledge.length} recallChars=${sessionCtx.recall.length} wakeChars=${sessionCtx.wakeUp.length}`);
     } catch (err) {
       logDebug(TAG, `session-assembly: key=${sessionKey} outcome=failed`);
       logDebug(TAG, `Session context unavailable: ${err instanceof Error ? err.message : String(err)}`);

@@ -37,6 +37,7 @@ function makeReadyRuntime(overrides: Partial<AbtarsMemoryRuntime> = {}): AbtarsM
       totalMessages: 1, extractedMemories: 0, extractedByType: {},
       consolidationFiles: { daily: 0, weekly: 0, quarterly: 0 },
       ingestedDocuments: 0, preservedKeywords: 0, dbSizeBytes: 0, rejectedByScanner: 0,
+      memoryTest: false,
     })),
     getSleepStatus: vi.fn(async () => ({ state: "idle" as const })),
     getCoreKnowledge: vi.fn(async () => ""),

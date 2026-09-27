@@ -79,6 +79,9 @@ export interface RuntimeView {
     lastFailure?: string;
   } | null;
   soulBundle: { available: number; total: number } | null;
+  // #1869 — daemon MEMORY_TEST state. False means off or unknown; the view
+  // renders a line only when true, so the default path gains no noise.
+  memoryTestMode: boolean;
   a2a: { running: boolean; port: number | null };
   peersConfigured: number;
   tasks: { recurring: number; pending: number; paused: number };
@@ -122,8 +125,9 @@ export interface BridgeStatusCtx {
   bridgeLockPath: string;
   heartbeatIntervalMs: number;
   /** #1706: the bridge-owned memory runtime (the stable facade when memory
-   *  is composing late). Optional for CLI callers. */
-  memoryRuntime?: Pick<AbtarsMemoryRuntime, "state" | "compositionDiagnostics">;
+   *  is composing late). Optional for CLI callers. getStatus is picked for
+   *  the #1869 test-mode line, queried live only against a ready runtime. */
+  memoryRuntime?: Pick<AbtarsMemoryRuntime, "state" | "compositionDiagnostics" | "getStatus">;
 }
 
 // ── Constants ────────────────────────────────────────────────────────────────
@@ -419,6 +423,10 @@ export function renderChatStatus(view: StatusView): string {
     const allPresent = r.soulBundle.available === r.soulBundle.total;
     lines.push(`  ${allPresent ? "✓" : "~"} memory: abmind working`);
     lines.push(`    soul bundle: ${r.soulBundle.available}/${r.soulBundle.total} available`);
+    // #1869 — a host left in test mode is observable, not silent.
+    if (r.memoryTestMode) {
+      lines.push("    ! memory test mode: ON (MEMORY_TEST=ON — standing rules withheld, probes valid)");
+    }
   } else if (mem?.state === "unavailable") {
     lines.push("  ✗ memory: unavailable");
   } else if (mem?.state === "disabled") {
@@ -863,6 +871,18 @@ async function collectRuntime(ctx: BridgeStatusCtx, warnings: string[]): Promise
     logAndSwallow("status", "soul", err);
   }
 
+  // #1869 — daemon test-mode state for the status view. Queried live (one
+  // RPC) only against a ready runtime; unknown or unreachable stays false
+  // and renders no line.
+  let memoryTestMode = false;
+  try {
+    if (ctx.memoryRuntime?.state === "ready") {
+      memoryTestMode = (await ctx.memoryRuntime.getStatus()).memoryTest === true;
+    }
+  } catch (err) {
+    logAndSwallow("status", "memory-test-mode", err);
+  }
+
   // Peers configured
   let peersConfigured = 0;
   try {
@@ -938,6 +958,7 @@ async function collectRuntime(ctx: BridgeStatusCtx, warnings: string[]): Promise
     skillsActive,
     memory,
     soulBundle,
+    memoryTestMode,
     a2a,
     peersConfigured,
 
