@@ -104,10 +104,6 @@ vi.mock("../peer-transport/peer-ws-broker.js", () => ({
   }),
 }));
 
-vi.mock("./orc-tools.js", () => ({
-  isActiveCardPeerSourced: () => false,
-}));
-
 vi.mock("./peer-resolver.js", () => ({
   resolvePeerName: (peer: string) => ({ ok: true, peer }),
 }));
@@ -164,7 +160,7 @@ describe("peer_ask_help", () => {
     expect(result.error).toContain("peer_ask_help failed");
   });
 
-  it("sends help request to specified peer", async () => {
+  it("sends help request to specified peer from an owner-origin worker", async () => {
     mockGetConnectedPeers.mockReturnValue(["kp"]);
     mockHasAllCapabilities.mockReturnValue(true);
     mockAskHelp.mockResolvedValue({
@@ -172,7 +168,7 @@ describe("peer_ask_help", () => {
     });
     const result = JSON.parse(await mod.peerAskHelpTool.execute({
       goal: "do something", peer: "kp", request_id: "req-1",
-    }));
+    }, { userId: "agent", workOrigin: { rootCardId: 7, rootKind: "interactive", sourcePeer: null } }));
     expect(result.decision).toBe("accepted");
     expect(result.contribution_ref).toBe("help_abc123");
     expect(mockAskHelp).toHaveBeenCalled();
