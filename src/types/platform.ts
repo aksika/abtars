@@ -49,6 +49,11 @@ export interface InternalScheduledAnnouncementMetadata {
   kind: "scheduled_announcement";
   eventId: string;
   cardId: number;
+  /** #1873: non-imperative durable-record form of the same event payload.
+   *  The live inbound `text` keeps the one-time announcement instruction for
+   *  the delivery attempt; the durable conversation records this form instead,
+   *  so later projections and compaction inputs never replay the instruction. */
+  savedText: string;
 }
 
 /** Runtime trust check for the scheduler-only metadata. The discriminant is

@@ -210,8 +210,10 @@ export async function buildPrompt(
     // #1724: a trusted scheduled-announcement event carries its durable,
     // card-derived identity — delivery retries must deduplicate against the
     // same inbound row instead of recording a fresh turn per attempt.
-    const trustedEventId = isTrustedScheduledAnnouncement(msg.internal) ? msg.internal.eventId : undefined;
-    const messageIdStr = trustedEventId
+    // #1873: that row records the historical form from trusted metadata; the
+    // live text (one-time announcement instruction) is never persisted.
+    const trustedAnnouncement = isTrustedScheduledAnnouncement(msg.internal) ? msg.internal : undefined;
+    const messageIdStr = trustedAnnouncement?.eventId
       ?? (typeof msg.messageId === "number" || typeof msg.messageId === "string" ? String(msg.messageId) : "");
     const messageTimestamp = msg.timestamp;
     const operationKey = messageIdStr
@@ -223,7 +225,7 @@ export async function buildPrompt(
       family: "inbound",
       operationKey,
       run: () => memoryRuntime!.recordMessage(
-        { role: "user", content: text, timestamp: messageTimestamp, userId, sessionId: sessionKey, platformMessageId: typeof msg.messageId === "number" || typeof msg.messageId === "string" ? msg.messageId : undefined },
+        { role: "user", content: trustedAnnouncement?.savedText ?? text, timestamp: messageTimestamp, userId, sessionId: sessionKey, platformMessageId: typeof msg.messageId === "number" || typeof msg.messageId === "string" ? msg.messageId : undefined },
         operationKey,
       ),
     });

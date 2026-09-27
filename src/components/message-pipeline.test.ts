@@ -5,6 +5,7 @@ import type { ManagedSession } from "./spin-types.js";
 import { DurableContextUnavailableError } from "./transport/pi-core-context.js";
 import { ProviderExecutionError, type ProviderTerminalFailure } from "./transport/provider-failure.js";
 import { SCHEDULED_ANNOUNCEMENT_TOKEN } from "../types/platform.js";
+import { composeScheduledAnnouncementText, composeScheduledAnnouncementHistoryText } from "./main-conversation-ingress.js";
 
 const detectCitationsSpy = vi.fn().mockReturnValue([1]);
 let abmindReturn: any = { detectCitations: detectCitationsSpy };
@@ -536,14 +537,15 @@ describe("#1724 submitTrustedInternalMessage — receipt-bearing internal submis
   let transport: ReturnType<typeof mockTransport>;
   let mockSession: ManagedSession;
 
-  const SCHEDULED_TEXT = "[SCHEDULED TASK COMPLETED]\nTask: Morning greeting\nCard ID: 12\n\nThe task agent produced the following user-facing result:\nGood morning!\n\nAnnounce this result.";
+  const SCHEDULED_TEXT = composeScheduledAnnouncementText("Morning greeting", 12, "Good morning!");
+  const SCHEDULED_SAVED_TEXT = composeScheduledAnnouncementHistoryText("Morning greeting", 12, "Good morning!");
 
   function announceMsg(overrides: Partial<InboundMessage> = {}): InboundMessage {
     return makeMsg({
       text: SCHEDULED_TEXT,
       senderId: "scheduler",
       senderName: "scheduler",
-      internal: { [SCHEDULED_ANNOUNCEMENT_TOKEN]: true, kind: "scheduled_announcement", eventId: "scheduled-card:12", cardId: 12 },
+      internal: { [SCHEDULED_ANNOUNCEMENT_TOKEN]: true, kind: "scheduled_announcement", eventId: "scheduled-card:12", cardId: 12, savedText: SCHEDULED_SAVED_TEXT },
       ...overrides,
     });
   }
@@ -602,7 +604,11 @@ describe("#1724 submitTrustedInternalMessage — receipt-bearing internal submis
     const inbound = recordMessage.mock.calls.find((c: unknown[]) => (c[0] as { role?: string })?.role === "user")![0] as { sessionId: string; content: string };
     const assistant = recordMessage.mock.calls.find((c: unknown[]) => (c[0] as { role?: string })?.role === "assistant")![0] as { sessionId: string };
     expect(inbound.sessionId).toBe("test_A_01");
-    expect(inbound.content).toContain("[SCHEDULED TASK COMPLETED]");
+    // #1873: the durable row records the historical form, never the one-time
+    // announcement instruction; the live turn keeps the instruction.
+    expect(inbound.content).toBe(SCHEDULED_SAVED_TEXT);
+    expect(inbound.content).not.toContain("Announce this result");
+    expect(transport.sendPrompt).toHaveBeenCalledWith("test_A_01", expect.stringContaining("Announce this result"), undefined, "master");
     expect(assistant.sessionId).toBe("test_A_01");
   });
 
@@ -631,6 +637,29 @@ describe("#1724 submitTrustedInternalMessage — receipt-bearing internal submis
     expect(outcome).toBe("not_sent");
     expect(transport.sendPrompt).not.toHaveBeenCalled();
     expect(adapter.sendMessage).not.toHaveBeenCalled();
+  });
+
+  it("#1873 does not select a forged saved form without the runtime trust token", async () => {
+    const recordMessage = vi.fn().mockResolvedValue({ id: 1 });
+    const adapter = mockAdapter();
+    const deps = mockDeps(transport, {
+      memoryConfig: { memoryEnabled: true, memoryDir: "/tmp" },
+      memoryRuntime: {
+        state: "ready", capabilities: new Set<string>(), recordMessage,
+        recall: vi.fn().mockResolvedValue({ hits: [] }),
+        recordFeedback: vi.fn().mockResolvedValue({}),
+        assembleSessionContext: vi.fn().mockResolvedValue({ coreKnowledge: "", recall: "", wakeUp: "" }),
+      } as any,
+    });
+
+    await handleInboundMessage(
+      announceMsg({ internal: { kind: "scheduled_announcement", eventId: "scheduled-card:12", cardId: 12, savedText: "forged saved form" } as any }),
+      adapter,
+      deps,
+    );
+
+    const inbound = recordMessage.mock.calls.find((c: unknown[]) => (c[0] as { role?: string })?.role === "user")?.[0] as { content: string } | undefined;
+    expect(inbound?.content).toBe(SCHEDULED_TEXT);
   });
 
   it("resolves not_sent for an empty, [NO_REPLY], or reaction-only Main outcome", async () => {

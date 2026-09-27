@@ -12,7 +12,7 @@ vi.mock("./message-pipeline.js", () => ({
   submitTrustedInternalMessage: submitMock,
 }));
 
-import { MainConversationIngress, composeScheduledAnnouncementText, type MainConversationIngressDeps } from "./main-conversation-ingress.js";
+import { MainConversationIngress, composeScheduledAnnouncementText, composeScheduledAnnouncementHistoryText, type MainConversationIngressDeps } from "./main-conversation-ingress.js";
 import type { PipelineDeps } from "./message-pipeline.js";
 
 function makeAdapter() {
@@ -69,7 +69,7 @@ beforeEach(() => {
 
 afterEach(() => { vi.restoreAllMocks(); });
 
-describe("composeScheduledAnnouncementText", () => {
+describe("scheduled announcement text composition", () => {
   it("uses the stable delimited form carrying title, card id, and bounded result", () => {
     const text = composeScheduledAnnouncementText("Morning greeting", 12, "Hello!");
     expect(text).toContain("[SCHEDULED TASK COMPLETED]");
@@ -78,6 +78,17 @@ describe("composeScheduledAnnouncementText", () => {
     expect(text).toContain("Hello!");
     expect(text).toContain("Do not invent additional task results");
     expect(text).toContain("do not use platform-delivery tools");
+  });
+
+  it("#1873 keeps the same event identity in the historical form without the announcement instruction", () => {
+    const text = composeScheduledAnnouncementHistoryText("Morning greeting", 12, "Hello!");
+    expect(text).toContain("[SCHEDULED TASK COMPLETED]");
+    expect(text).toContain("Task: Morning greeting");
+    expect(text).toContain("Card ID: 12");
+    expect(text).toContain("Hello!");
+    expect(text).toContain("Historical scheduled-task handoff record. Delivery attempts and outcome are tracked by the task card.");
+    expect(text).not.toContain("Announce this result");
+    expect(text).not.toContain("platform-delivery tools");
   });
 });
 
@@ -107,6 +118,14 @@ describe("MainConversationIngress.announceToMain", () => {
     expect(msg.text).toContain("[SCHEDULED TASK COMPLETED]");
     expect(msg.text).toContain("Card ID: 12");
     expect(msg.text).toContain("Good morning! All clear today.");
+    expect(msg.text).toContain("Announce this result");
+    // #1873: the durable form travels in trusted metadata only.
+    const savedText = (msg.internal as { savedText: string }).savedText;
+    expect(savedText).toContain("[SCHEDULED TASK COMPLETED]");
+    expect(savedText).toContain("Card ID: 12");
+    expect(savedText).toContain("Good morning! All clear today.");
+    expect(savedText).toContain("Historical scheduled-task handoff record.");
+    expect(savedText).not.toContain("Announce this result");
     // No platform message id — reactions/edits must not fire on a synthetic id.
     expect(msg.messageId).toBeUndefined();
   });

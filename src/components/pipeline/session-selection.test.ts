@@ -205,6 +205,7 @@ describe("sessionSelectionMiddleware #1724 trusted scheduled announcements", () 
     kind: "scheduled_announcement",
     eventId: "scheduled-card:12",
     cardId: 12,
+    savedText: "saved form",
   };
 
   beforeEach(async () => {

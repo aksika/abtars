@@ -775,6 +775,12 @@ describe("#1724 scheduler E2E — journey 13: complete Main-owned announcement j
     expect(j.mem.rows[0]!.content).toContain("[SCHEDULED TASK COMPLETED]");
     expect(j.mem.rows[0]!.content).toContain(ANNOUNCE_GREETING);
     expect(j.mem.rows[0]!.sessionId).toBe(j.session.id);
+    // #1873: the durable row is the historical form, while the delivery turn
+    // itself still received the one-time announcement instruction.
+    expect(j.mem.rows[0]!.content).toContain("Historical scheduled-task handoff record.");
+    expect(j.mem.rows[0]!.content).not.toContain("Announce this result");
+    const sendPromptMock = j.transport.sendPrompt as unknown as { mock: { calls: Array<[string, string]> } };
+    expect(sendPromptMock.mock.calls[0]![1]).toContain("Announce this result");
     expect(j.mem.rows[1]!.role).toBe("assistant");
     expect(j.mem.rows[1]!.sessionId).toBe(j.session.id);
 
@@ -793,6 +799,10 @@ describe("#1724 scheduler E2E — journey 13: complete Main-owned announcement j
     const contents = projected.messages.map(m => m.content);
     expect(contents.some(c => c.includes("[SCHEDULED TASK COMPLETED]") && c.includes(ANNOUNCE_GREETING))).toBe(true);
     expect(contents.some(c => c.includes("morning briefing"))).toBe(true);
+    // #1873: the follow-up projection carries the historical record and no
+    // system-composed announcement instruction from the recorded event.
+    expect(contents.some(c => c.includes("Historical scheduled-task handoff record."))).toBe(true);
+    expect(contents.every(c => !c.includes("Announce this result"))).toBe(true);
   }, 30_000);
 
   it("keeps the card retryable when Main is busy, without queueing or direct fallback", async () => {
@@ -825,6 +835,11 @@ describe("#1724 scheduler E2E — journey 13: complete Main-owned announcement j
     const announced = j.adapter.sendMessage.mock.calls.some(c => String(c[1]).includes("morning briefing"));
     expect(announced).toBe(false);
     expect(j.mem.rows.some(r => r.role === "assistant" && r.content.length > 0)).toBe(false);
+    // #1873: the inbound row written before the empty turn stays truthful —
+    // historical form, no announcement instruction, no delivery-success claim.
+    const inbound = j.mem.rows.find(r => r.role === "user");
+    expect(inbound?.content).toContain("Historical scheduled-task handoff record.");
+    expect(inbound?.content).not.toContain("Announce this result");
     expect(board.kanbanGetCard(cardId)!.status).toBe("done");
     expect(["definitely_not_sent"]).toContain(board.kanbanGetCard(cardId)!.delivery_result);
   }, 30_000);

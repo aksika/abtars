@@ -55,6 +55,39 @@ export function composeScheduledAnnouncementText(
   cardId: number,
   result: string,
 ): string {
+  return composeScheduledAnnouncementEvent(
+    title,
+    cardId,
+    result,
+    "Announce this result to the user in your own words. Do not invent additional task results and do not use platform-delivery tools.",
+  );
+}
+
+/**
+ * #1873: the durable conversation records this non-imperative form of the same
+ * event payload. It keeps the event preamble, task identity, and result but
+ * replaces the one-time announcement instruction, so later projections and
+ * compaction inputs carry a historical record instead of a standing order.
+ */
+export function composeScheduledAnnouncementHistoryText(
+  title: string,
+  cardId: number,
+  result: string,
+): string {
+  return composeScheduledAnnouncementEvent(
+    title,
+    cardId,
+    result,
+    "Historical scheduled-task handoff record. Delivery attempts and outcome are tracked by the task card.",
+  );
+}
+
+function composeScheduledAnnouncementEvent(
+  title: string,
+  cardId: number,
+  result: string,
+  closing: string,
+): string {
   return [
     "[SCHEDULED TASK COMPLETED]",
     `Task: ${title}`,
@@ -63,7 +96,7 @@ export function composeScheduledAnnouncementText(
     "The task agent produced the following user-facing result:",
     result,
     "",
-    "Announce this result to the user in your own words. Do not invent additional task results and do not use platform-delivery tools.",
+    closing,
   ].join("\n");
 }
 
@@ -147,6 +180,9 @@ export class MainConversationIngress {
           kind: "scheduled_announcement",
           eventId: request.eventId,
           cardId: request.cardId,
+          // #1873: the durable-record form travels in trusted runtime metadata;
+          // the live text stays the delivery attempt's one-time instruction.
+          savedText: composeScheduledAnnouncementHistoryText(request.title, request.cardId, trimmed),
         },
       };
       return submitTrustedInternalMessage(msg, adapter, pipelineDeps);
