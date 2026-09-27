@@ -90,6 +90,9 @@ export interface SleepRuntimeNextLike {
     stepId: string;
     prompt: string;
     deadline: number;
+    /** #1859: the host must withhold every state-changing tool for this
+     *  turn; abmind applies only validated proposals. */
+    proposalOnly?: boolean;
   };
 }
 
@@ -102,7 +105,11 @@ export interface SleepEventsResultLike {
 }
 
 export interface AbmindSleepRuntimeLike {
-  open(providerInstanceId: string, idempotencyKey?: string): Promise<SleepStartResultLike & { leaseId?: string; expiresAt?: number }>;
+  /** #1859: `capabilities` declares the enforcement the provider can give —
+   *  `{ proposalOnly: true }` acknowledges it can withhold state-changing
+   *  tools on proposal-only turns. Abmind refuses proposal-only completions
+   *  to a lease that never declared it. */
+  open(providerInstanceId: string, idempotencyKey?: string, capabilities?: { proposalOnly?: boolean }): Promise<SleepStartResultLike & { leaseId?: string; expiresAt?: number }>;
   next(leaseId: string, waitMs?: number): Promise<SleepRuntimeNextLike>;
   complete(leaseId: string, completionId: string, text: string, outcomeOrKey?: string, idempotencyKey?: string): Promise<{ status: string }>;
   fail(leaseId: string, completionId: string, code: string, failure?: { cause: string; detail?: string; commandFingerprint?: string }, idempotencyKey?: string): Promise<{ status: string }>;

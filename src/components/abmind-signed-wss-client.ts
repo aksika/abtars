@@ -257,7 +257,7 @@ export class AbtarsSignedWssClient implements AbmindClientLike {
       resume: (runId, level, key) => this.call("sleep.resume", { runId, level }, key) as Promise<{ status: string; runId?: string; reason?: string }>,
       events: (afterSeq, limit, waitMs) => this.call("sleep.events", { afterSeq, limit, waitMs }) as Promise<{ runId: string; events: Array<{ seq: number; at: number; event: { type: string; detail?: string } }>; nextSeq: number; gap: boolean; terminal: boolean }>,
       runtime: {
-        open: (id, key) => this.call("sleep.runtime.open", { providerInstanceId: id }, key) as Promise<{ status: string; leaseId?: string; expiresAt?: number }>,
+        open: (id, key, capabilities) => this.call("sleep.runtime.open", { providerInstanceId: id, ...(capabilities?.proposalOnly === true ? { capabilities: { proposalOnly: true } } : {}) }, key) as Promise<{ status: string; leaseId?: string; expiresAt?: number }>,
         next: (leaseId, waitMs) => this.call("sleep.runtime.next", { leaseId, waitMs }) as Promise<{ status: string; heartbeat?: true; completionRequest?: { completionId: string; runId: string; stepId: string; prompt: string; deadline: number } }>,
         complete: (leaseId: string, completionId: string, text: string, outcomeOrKey?: string, key?: string) => {
           let outcome: string | undefined;

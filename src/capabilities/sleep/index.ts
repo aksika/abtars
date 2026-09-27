@@ -42,6 +42,7 @@ function boundedSleepFailure(input: unknown): SleepFailurePayload {
 }
 
 import { writeSleepStatus } from "../../components/transport/bridge-lock-transport.js";
+import { buildPolicy, type SandboxPolicy } from "../../components/tool-sandbox.js";
 import { startSleepCard, type SleepCard } from "./sleep-card.js";
 import type { CapabilityApi } from "../capability.js";
 
@@ -81,7 +82,7 @@ export interface SleepOpts {
    * consumes Spin's classification; it never recomputes one from the raw
    * string.
    */
-  sessionManager: { spin: (opts: { type: string; prompt: string; sessionId?: string; timeoutMs: number; deadlineAt: number; providerInactivityTimeoutMs: number; candidatePolicy: "configured-only"; settlementOwner: "spin" | "caller"; await: true; executionOrigin?: "sleep"; executionScope?: ToolExecutionScope }) => Promise<import("../../components/spin-types.js").AwaitedSpinResult> };
+  sessionManager: { spin: (opts: { type: string; prompt: string; sessionId?: string; timeoutMs: number; deadlineAt: number; providerInactivityTimeoutMs: number; candidatePolicy: "configured-only"; settlementOwner: "spin" | "caller"; await: true; executionOrigin?: "sleep"; executionScope?: ToolExecutionScope; tools?: SandboxPolicy }) => Promise<import("../../components/spin-types.js").AwaitedSpinResult> };
   /**
    * #1611: narrow exact-session quarantine callback. Fences the session by
    * exact id, cancels the active execution, releases the persistent
@@ -188,6 +189,15 @@ const NEXT_RPC_RETRY_DELAY_MS = 3000;
  * import abmind at runtime.
  */
 const SLEEP_PROVIDER_CLEANUP_HEADROOM_MS = 30_000;
+
+/**
+ * #1859: proposal-only turn policy. Only tools known to be read-only remain
+ * available; every write-capable route (Bash, CLI, memory store/edit, file
+ * and task mutations) is withheld before generation and re-checked at
+ * dispatch. `execute_bash` can never be certified read-only by inspection,
+ * so it is denied here.
+ */
+export const PROPOSAL_ONLY_TOOLS: Readonly<SandboxPolicy> = buildPolicy("peer", { allowedTools: ["memory_recall"] });
 
 /**
  * #1517: bounds the provider pump's await on the model transport by the
@@ -414,6 +424,9 @@ export function createSleepHandle(opts: SleepOpts): SleepHandle {
               await: true,
               executionOrigin: "sleep",
               executionScope: cycleExecutionScope,
+              // #1859: a proposal-only step runs with every write-capable
+              // tool withheld; abmind applies only validated proposals.
+              ...(req.proposalOnly === true ? { tools: PROPOSAL_ONLY_TOOLS } : {}),
             }),
             providerRemainingMs,
           );
@@ -693,7 +706,7 @@ export function createSleepHandle(opts: SleepOpts): SleepHandle {
       let leaseId: string | undefined;
       let leaseHandedToPump = false;
       try {
-        const opened = await client.sleep.runtime.open("abtars");
+        const opened = await client.sleep.runtime.open("abtars", undefined, { proposalOnly: true });
         if (opened.status !== "ok" || !opened.leaseId) {
           const reason = `runtime open failed: ${opened.status}`;
           settleAdmission({ status: "rejected", code: "runtime_open_failed", reason });
