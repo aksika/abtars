@@ -132,6 +132,18 @@ export interface RuntimeRecallInput {
   limit?: number;
   maxClassification?: number;
   original?: string;
+  /**
+   * #1867 — discrete retrieval terms (bridge query preparation). Forwarded
+   * as abmind `translated`; when absent or empty the recall falls back to
+   * today's single joined query. memory_recall and the dashboard path omit
+   * this and keep their current contracts.
+   */
+  terms?: string[];
+  /**
+   * #1867 — corpus-df term selection inside abmind. Meaningful only with
+   * `terms`; omitted by every other caller.
+   */
+  selectTerms?: boolean;
   timeStart?: number;
   timeEnd?: number;
   stages?: string[];
@@ -182,6 +194,63 @@ export interface RuntimeRecallResult {
    * Validated at this boundary; malformed selection is dropped.
    */
   selection?: RuntimeRecallSelection;
+  /**
+   * #1867 — per-stage outcomes from abmind (#1861). Advisory diagnostics for
+   * the auto-recall path; validated at this boundary, malformed maps dropped.
+   */
+  stageOutcomes?: RuntimeRecallStageOutcomes;
+  /**
+   * #1867 — weak-evidence flag from abmind (#1861). Advisory: no candidate
+   * had an exact topical match or an above-threshold semantic hit. Gating
+   * injection on it requires the term-emission milestone (discrete terms make
+   * the flag's lexical arm reachable); until the harness proves no
+   * suppression of good recalls, the bridge logs it and injects as today.
+   */
+  weakEvidence?: boolean;
+}
+
+/** #1867 — structural mirror of abmind's stage outcome (validated, not cast). */
+export interface RuntimeRecallStageOutcome {
+  status: "completed" | "not-requested" | "disabled" | "no-provider" | "deadline" | "failed";
+  hitCount: number;
+}
+
+export type RuntimeRecallStageOutcomes = Record<string, RuntimeRecallStageOutcome>;
+
+/**
+ * #1867 — narrow the unknown wire stage-outcome map. Malformed or absent
+ * input yields undefined: diagnostics must never steer injection on a lie.
+ */
+export function asRecallStageOutcomes(raw: unknown): RuntimeRecallStageOutcomes | undefined {
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return undefined;
+  const out: RuntimeRecallStageOutcomes = {};
+  for (const [stage, value] of Object.entries(raw as Record<string, unknown>)) {
+    if (typeof value !== "object" || value === null || Array.isArray(value)) return undefined;
+    const record = value as Record<string, unknown>;
+    const status = record["status"];
+    if (status !== "completed" && status !== "not-requested" && status !== "disabled" &&
+        status !== "no-provider" && status !== "deadline" && status !== "failed") return undefined;
+    const hitCount = record["hitCount"];
+    if (typeof hitCount !== "number" || !Number.isInteger(hitCount) || hitCount < 0) return undefined;
+    out[stage] = { status, hitCount };
+  }
+  return out;
+}
+
+/** #1867 — sanitize discrete recall terms: trim, drop empties, dedupe, cap. */
+export function sanitizeRecallTerms(terms: readonly string[] | undefined): string[] {
+  if (!Array.isArray(terms)) return [];
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const raw of terms) {
+    if (typeof raw !== "string") continue;
+    const term = raw.trim();
+    if (!term || seen.has(term)) continue;
+    seen.add(term);
+    out.push(term);
+    if (out.length >= 16) break;
+  }
+  return out;
 }
 
 /** #1813 — structural mirror of abmind RecallSelectionV1 (validated, not cast). */
@@ -871,8 +940,13 @@ export function createClientRuntime(client: AbmindClientLike): AbtarsMemoryRunti
           Number.isInteger((ref as { revision?: unknown }).revision)),
         ...(input.fastPath.releaseScope === true ? { releaseScope: true } : {}),
       } : undefined;
+      // #1867 — discrete terms cross as abmind `translated` so #1861's
+      // coverage ordering participates; the joined query stays the fallback
+      // when no terms were prepared. selectTerms rides the existing recall
+      // method (no new capability), like #1869's parts.
+      const terms = sanitizeRecallTerms(input.terms);
       const result = (await pm.recall({
-        translated: [input.query],
+        translated: terms.length > 0 ? terms : [input.query],
         original: input.original ?? input.query,
         userId: input.userId,
         limit: input.limit ?? 10,
@@ -880,8 +954,9 @@ export function createClientRuntime(client: AbmindClientLike): AbtarsMemoryRunti
         timeStart: input.timeStart,
         timeEnd: input.timeEnd,
         stages: input.stages,
+        ...(terms.length > 0 && input.selectTerms === true ? { selectTerms: true } : {}),
         ...(fastPath !== undefined ? { fastPath } : {}),
-      })) as { results: Array<Record<string, unknown>>; decision?: unknown; selection?: unknown };
+      })) as { results: Array<Record<string, unknown>>; decision?: unknown; selection?: unknown; stageOutcomes?: unknown; weakEvidence?: unknown };
       const hits: RuntimeRecallHit[] = result.results.map((r) => ({
         content: String(r["content"] ?? ""),
         score: Number(r["score"] ?? 0),
@@ -904,14 +979,19 @@ export function createClientRuntime(client: AbmindClientLike): AbtarsMemoryRunti
       // by asRecallDecision and recall continues as ordinary.
       const decision = asRecallDecision(result.decision);
       const selection = asRecallSelection(result.selection);
+      // #1867 — carry the validated diagnostics; malformed wire values are
+      // dropped and recall continues as ordinary. Advisory only: the bridge
+      // floor and age rules still decide injection.
+      const stageOutcomes = asRecallStageOutcomes(result.stageOutcomes);
+      const weakEvidence = typeof result.weakEvidence === "boolean" ? result.weakEvidence : undefined;
       const ms = Date.now() - t0;
-      logDebug("memory-runtime", `recall: ${hits.length} hits (${compact.length} injected) in ${ms}ms decision=${decision?.outcome ?? "none"} selection=${selection ? `${selection.refs.length} refs${selection.truncated ? " truncated" : ""}` : "none"} top=${hits.slice(0, 3).map((h) => `${h.memoryId ?? "?"}:${h.score.toFixed(3)}`).join(",")}`);
+      logDebug("memory-runtime", `recall: ${hits.length} hits (${compact.length} injected) in ${ms}ms decision=${decision?.outcome ?? "none"} selection=${selection ? `${selection.refs.length} refs${selection.truncated ? " truncated" : ""}` : "none"} top=${hits.slice(0, 3).map((h) => `${h.memoryId ?? "?"}:${h.score.toFixed(3)}`).join(",")} stages=${stageOutcomes ? Object.entries(stageOutcomes).map(([k, v]) => `${k}:${v.status}/${v.hitCount}`).join(" ") : "n/a"} weakEvidence=${weakEvidence ?? "n/a"}`);
       if (isLogLevel("trace")) {
         for (const h of hits.slice(0, 10)) {
           logTrace("memory-runtime", `hit id=${h.memoryId ?? "?"} score=${h.score.toFixed(3)} source=${h.source ?? "?"} text="${redactSecrets(h.content).slice(0, 120)}"`);
         }
       }
-      return { hits, context, ...(decision !== undefined ? { decision } : {}), ...(selection !== undefined ? { selection } : {}) };
+      return { hits, context, ...(decision !== undefined ? { decision } : {}), ...(selection !== undefined ? { selection } : {}), ...(stageOutcomes !== undefined ? { stageOutcomes } : {}), ...(weakEvidence !== undefined ? { weakEvidence } : {}) };
     },
 
     async assembleSessionContext(input: SessionContextInput): Promise<SessionContextResult> {

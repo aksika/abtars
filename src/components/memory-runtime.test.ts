@@ -5,6 +5,8 @@ import {
   createUnavailableRuntime,
   attemptMemoryMutation,
   asSessionSoulBundle,
+  asRecallStageOutcomes,
+  sanitizeRecallTerms,
   type MemoryRuntimeCapability,
 } from "./memory-runtime.js";
 import type { AbmindRouteSnapshotV1Like } from "./abmind-route-contract.js";
@@ -679,5 +681,73 @@ describe("#1869 session parts and test-mode status", () => {
     // Disabled/unavailable runtimes throw before returning a status.
     await expect(createDisabledRuntime().getStatus()).rejects.toThrow();
     await expect(createUnavailableRuntime().getStatus()).rejects.toThrow();
+  });
+});
+
+describe("#1867 discrete terms and diagnostics carry", () => {
+  function recallClient(extra: Record<string, unknown>) {
+    const client = mockClient(caps(["private.recall"], { private_read: "true" }));
+    (client.privateMemory.recall as unknown as Mock).mockResolvedValue({
+      results: [{ content: "The dog chased the fox.", score: 0.9, date: "2026-09-01" }],
+      ...extra,
+    });
+    return client;
+  }
+
+  it("forwards discrete terms as translated with selectTerms, preserving original", async () => {
+    const client = recallClient({});
+    const rt = createClientRuntime(client);
+    await rt.recall({ query: "dog fox looks like", original: "dog fox looks like", userId: "u1", terms: ["dog", "fox"], selectTerms: true });
+    expect(vi.mocked(client.privateMemory.recall)).toHaveBeenCalledWith(expect.objectContaining({
+      translated: ["dog", "fox"],
+      original: "dog fox looks like",
+      selectTerms: true,
+    }));
+  });
+
+  it("falls back to the joined query when no terms were prepared", async () => {
+    const client = recallClient({});
+    const rt = createClientRuntime(client);
+    await rt.recall({ query: "dog fox looks like", userId: "u1" });
+    const call = vi.mocked(client.privateMemory.recall).mock.calls[0]?.[0] as Record<string, unknown>;
+    expect(call["translated"]).toEqual(["dog fox looks like"]);
+    expect(call["selectTerms"]).toBeUndefined();
+  });
+
+  it("sanitizes terms before forwarding (trim, dedupe, drop empties)", () => {
+    expect(sanitizeRecallTerms([" dog ", "", "dog", "fox", 42 as unknown as string])).toEqual(["dog", "fox"]);
+    expect(sanitizeRecallTerms(undefined)).toEqual([]);
+    expect(sanitizeRecallTerms([])).toEqual([]);
+  });
+
+  it("carries validated stageOutcomes and weakEvidence, advisory only", async () => {
+    const stageOutcomes = { Sf: { status: "completed", hitCount: 3 }, Se: { status: "no-provider", hitCount: 0 } };
+    const rt = createClientRuntime(recallClient({ stageOutcomes, weakEvidence: true }));
+    const res = await rt.recall({ query: "dog", userId: "u1", terms: ["dog"], selectTerms: true });
+    expect(res.stageOutcomes).toEqual(stageOutcomes);
+    expect(res.weakEvidence).toBe(true);
+    expect(res.hits).toHaveLength(1);
+  });
+
+  it("drops malformed diagnostics and keeps ordinary recall", async () => {
+    for (const bad of [
+      { stageOutcomes: { Sf: { status: "maybe", hitCount: 1 } }, weakEvidence: "yes" },
+      { stageOutcomes: { Sf: { status: "completed", hitCount: -1 } }, weakEvidence: 1 },
+      { stageOutcomes: [{ status: "completed" }], weakEvidence: null },
+      { stageOutcomes: undefined, weakEvidence: 1 },
+    ]) {
+      const rt = createClientRuntime(recallClient(bad as Record<string, unknown>));
+      const res = await rt.recall({ query: "dog", userId: "u1" });
+      expect(res.stageOutcomes).toBeUndefined();
+      expect(res.weakEvidence).toBeUndefined();
+      expect(res.hits).toHaveLength(1);
+    }
+  });
+
+  it("asRecallStageOutcomes validates the structural mirror", () => {
+    expect(asRecallStageOutcomes({ Sf: { status: "completed", hitCount: 0 } })).toEqual({ Sf: { status: "completed", hitCount: 0 } });
+    for (const bad of [undefined, null, 42, "x", [], { Sf: null }, { Sf: { status: "completed" } }, { Sf: { status: "completed", hitCount: 1.5 } }]) {
+      expect(asRecallStageOutcomes(bad)).toBeUndefined();
+    }
   });
 });

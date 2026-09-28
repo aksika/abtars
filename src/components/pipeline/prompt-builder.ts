@@ -12,6 +12,7 @@ import { abmind } from "../../utils/abmind-lazy.js";
 import { getEnv } from "../env-schema.js";
 import type { AbtarsMemoryRuntime, MemoryWritePhase } from "../memory-runtime.js";
 import { attemptMemoryMutation, selectInjectedHits, asSessionSoulBundle } from "../memory-runtime.js";
+import { prepareRecallQuery, needsTranslation, translateRecallTerms, mergeQueryTerms } from "./recall-query-preparation.js";
 import { inboundExecutionKey, inboundMessageKey } from "../memory-operation-key.js";
 import type { ConversationBuffer } from "../conversation-buffer.js";
 import { isTrustedScheduledAnnouncement, type InboundMessage } from "../../types/platform.js";
@@ -253,7 +254,25 @@ export async function buildPrompt(
       try {
         const t0 = performance.now();
         const priming = pSession?.primingTerms ?? [];
-        const recall = await memoryRuntime.recall({ query: [...new Set([text, ...priming])].join(" "), userId, limit: ACTIVE_MEMORY_LIMIT });
+        // #1867 — discrete terms so #1861's coverage ordering participates on
+        // the auto-recall path; the joined query stays the fallback.
+        // Genuine translation runs only behind the non-English gate, bounded,
+        // with extraction fallback then joined fallback. A term-preparation
+        // failure never emits no query.
+        const prepared = prepareRecallQuery(text, priming);
+        let terms = prepared.terms;
+        if (needsTranslation(text, terms ?? [])) {
+          try {
+            const translated = await translateRecallTerms(deps.sessionManager, text);
+            if (translated.length > 0) terms = mergeQueryTerms([translated, terms ?? [], priming]);
+          } catch (err) {
+            logDebug(TAG, `Recall translation failed, extraction fallback: ${err instanceof Error ? err.message : String(err)}`);
+          }
+        }
+        const recall = await memoryRuntime.recall({
+          query: prepared.query, original: prepared.original, userId, limit: ACTIVE_MEMORY_LIMIT,
+          ...(terms !== undefined && terms.length > 0 ? { terms, selectTerms: true } : {}),
+        });
         const TRIVIAL_TTL_MS = 36 * 60 * 60_000;
         const nowMs = Date.now();
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -280,7 +299,10 @@ export async function buildPrompt(
           // eslint-disable-next-line @typescript-eslint/no-explicit-any
           recalledHits = inject.filter((h: any) => h.memoryId != null).map((h: any) => ({ id: h.memoryId as number, contentEn: h.content as string }));
           recallDecision = recall.decision;
-          logDebug(TAG, `Active recall: ${inject.length}/${hits.length} hits injected (selection ${recall.selection ? "on" : "off"}), ${block.length} chars, ${Math.round(performance.now() - t0)}ms`);
+          // #1867 — diagnostics are advisory: the floor/age rules above still
+          // decide injection. Gating on weakEvidence waits for harness proof
+          // of no suppression (terms now make its lexical arm reachable).
+          logDebug(TAG, `Active recall: ${inject.length}/${hits.length} hits injected (selection ${recall.selection ? "on" : "off"}), weakEvidence=${recall.weakEvidence ?? "n/a"}, ${block.length} chars, ${Math.round(performance.now() - t0)}ms`);
           logTrace(TAG, `recall content: ${block}`);
         }
       } catch (err) {
