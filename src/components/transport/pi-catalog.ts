@@ -93,6 +93,47 @@ export function isWarmed(): boolean {
 export async function loadPiModels(): Promise<Models | null> {
   if (_warmAttempted) return _warmed;
   _warmAttempted = true;
+  _warmed = await warmCatalog();
+  return _warmed;
+}
+
+let _refreshInflight: Promise<Models | null> | null = null;
+
+/**
+ * Re-warm the catalog outside boot (#1875: `/change` entry). Concurrent
+ * callers share one in-flight rebuild; a failed re-warm keeps serving the
+ * previous snapshot. Never throws. The rebuild is local-only
+ * (`allowNetwork: false`): it re-reads installed builtins and the
+ * revision-checked local store, never fetches over the network.
+ */
+export function refreshPiCatalog(): Promise<Models | null> {
+  if (!_refreshInflight) {
+    _warmAttempted = true;
+    _refreshInflight = warmCatalog({ allowNetwork: false }).then(
+      (models) => {
+        // A failed re-warm yields null — keep the previous snapshot, not an empty one.
+        if (models) _warmed = models;
+        _refreshInflight = null;
+        return _warmed;
+      },
+      (err) => {
+        // warmCatalog is best-effort and not expected to reject; unblock
+        // future refreshes either way and keep the previous snapshot.
+        _refreshInflight = null;
+        logWarn(TAG, `catalog re-warm failed — using previous snapshot: ${err instanceof Error ? err.message : String(err)}`);
+        return _warmed;
+      },
+    );
+  }
+  return _refreshInflight;
+}
+
+/**
+ * One warm pass over Pi's catalog, shared by the boot warm (network allowed,
+ * preserving historical behavior) and `/change` refresh (local-only).
+ * Best-effort: returns null on any failure, never throws.
+ */
+async function warmCatalog(opts?: { allowNetwork?: boolean }): Promise<Models | null> {
   try {
     const result = resolvePiInstallation();
     if (result.state !== "compatible") {
@@ -105,11 +146,16 @@ export async function loadPiModels(): Promise<Models | null> {
     const mod = await loadPiModule<{ builtinModels: (opts?: Record<string, unknown>) => Models }>(result.installation, providerSpec);
     const models = mod.builtinModels();
     try {
-      await models.refresh?.();
+      // Boot warms with Pi's default (network allowed); /change refresh
+      // passes allowNetwork: false so a chat command never fetches (#1875).
+      if (opts?.allowNetwork === false) {
+        await models.refresh?.({ allowNetwork: false });
+      } else {
+        await models.refresh?.();
+      }
     } catch (err) {
       logWarn(TAG, `catalog refresh failed (static providers still usable): ${err instanceof Error ? err.message : String(err)}`);
     }
-    _warmed = models;
     const all = models.getModels();
     logInfo(TAG, `pi-ai catalog warmed (${all.length} models)`);
     const byProvider: Record<string, number> = {};
@@ -121,11 +167,11 @@ export async function loadPiModels(): Promise<Models | null> {
     const elapsedMs = Date.now() - t0;
     const sample = all.slice(0, 3).map(m => m.id).join(",");
     logTrace(TAG, `catalog fetch: ${all.length} models in ${elapsedMs}ms; sample=${sample}`);
+    return models;
   } catch (err) {
     logWarn(TAG, `pi-ai catalog unavailable — using models.json floor: ${err instanceof Error ? err.message : String(err)}`);
-    _warmed = null;
+    return null;
   }
-  return _warmed;
 }
 
 // ── C1: precedence — pi metadata when fully resolvable ───────────────────────

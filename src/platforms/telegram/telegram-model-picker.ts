@@ -70,6 +70,15 @@ async function buildModelEntries(providerName: string, providerConfig: { transpo
 export async function handleModelPickerCallback(
   data: string, chatId: number, api: TelegramApi, state: PickerState, deps: PickerDeps,
 ): Promise<void> {
+  // #1875: the interactive callbacks bypass handleModels, so they refresh
+  // here before building any list. Best-effort and bounded — a failed
+  // refresh keeps the previous snapshot and never blocks the picker.
+  {
+    const { refreshPiCatalog } = await import("../../components/transport/pi-catalog.js");
+    const { refreshPiRuntime } = await import("../../components/transport/pi-runtime.js");
+    await refreshPiCatalog();
+    await refreshPiRuntime();
+  }
 
   if (data.startsWith("mb:")) {
     const target = data.slice(3);

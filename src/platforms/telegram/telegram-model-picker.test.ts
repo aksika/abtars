@@ -37,6 +37,13 @@ vi.mock("../../components/transport/pi-catalog.js", () => ({
   modelsForProviderSync: MOCK_modelsForProviderSync,
   mapProviderName: (name: string) => (name === "openrouter" || name === "codex" ? name : null),
   logUnmappedProviderOnce: vi.fn(),
+  // #1875: picker entry refreshes before building lists — no-op in these tests.
+  refreshPiCatalog: vi.fn(async () => null),
+}));
+
+vi.mock("../../components/transport/pi-runtime.js", () => ({
+  // #1875: picker entry refreshes before building lists — no-op in these tests.
+  refreshPiRuntime: vi.fn(async () => true),
 }));
 
 import { handleModelPickerCallback, isModelPickerCallback } from "./telegram-model-picker.js";

@@ -125,6 +125,18 @@ export async function handleModels(text: string, ctx: CommandContext): Promise<b
 
   const arg = text.replace(/^\/(models?)\s*/i, "").trim().toLowerCase();
 
+  // #1875: hot-reload Pi model data on every /model(s) entry so the picker
+  // menu and the dispatch gates agree on the current catalog (covers /change,
+  // /model change, /models quick, the Discord-routed /model switch, and
+  // /model doctor's stale-ID validation below). Best-effort and bounded — a
+  // failed refresh keeps the previous snapshot and never blocks the command.
+  {
+    const { refreshPiCatalog } = await import("../transport/pi-catalog.js");
+    const { refreshPiRuntime } = await import("../transport/pi-runtime.js");
+    await refreshPiCatalog();
+    await refreshPiRuntime();
+  }
+
   // #1468: the early emergency router (recovery handler + first pipeline
   // middleware) claims /emergency and the hailmary aliases. This branch is a
   // defensive fallback only when neither router is wired (isolated caller) —

@@ -7,7 +7,7 @@ vi.mock("../../components/pi-installation.js", () => ({ resolvePiInstallation: v
 import {
   mapProviderName, resolveModelMeta, modelsForProvider, modelsForProviderSync,
   piCostRatesByModel,
-  loadPiModels, getWarmedModels, isWarmed,
+  loadPiModels, refreshPiCatalog, getWarmedModels, isWarmed,
   logUnmappedProviderOnce, _resetUnmappedWarnForTest,
   _resetForTest, _setWarmedForTest,
 } from "./pi-catalog.js";
@@ -258,5 +258,69 @@ describe("loadPiModels (C8)", () => {
     await loadPiModels();
     await loadPiModels();
     expect(mockedResolve).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("refreshPiCatalog (#1875)", () => {
+  const mockedResolve = vi.mocked(resolvePiInstallation);
+  const mockedLoadModule = vi.mocked(loadPiModule);
+  const compatibleInstallation = {
+    executable: "/usr/bin/pi",
+    packageRoot: "/usr/lib/pi-coding-agent",
+    version: "0.85.1",
+    source: "path",
+    pinStatus: "at-pin",
+    moduleRoots: { ai: "/usr/lib/pi-ai", tui: "/usr/lib/pi-tui", agentCore: "/usr/lib/pi-agent-core" },
+  } as const;
+
+  beforeEach(() => {
+    _resetForTest();
+    mockedResolve.mockReset();
+    mockedLoadModule.mockReset();
+  });
+
+  it("picks up new models without a restart", async () => {
+    const v1 = fakeModels({ list: [fakeModel({ id: "glm-4.6" })] });
+    const v2 = fakeModels({
+      list: [fakeModel({ id: "glm-4.6" }), fakeModel({ id: "glm-4.7" })],
+    });
+    mockedResolve.mockReturnValue({ state: "compatible", installation: { ...compatibleInstallation } });
+    mockedLoadModule.mockResolvedValue({ builtinModels: () => v1 });
+    await loadPiModels();
+    expect(modelsForProviderSync("zai")?.map(m => m.id)).toEqual(["glm-4.6"]);
+    mockedLoadModule.mockResolvedValue({ builtinModels: () => v2 });
+    await refreshPiCatalog();
+    expect(modelsForProviderSync("zai")?.map(m => m.id)).toEqual(["glm-4.6", "glm-4.7"]);
+    expect(mockedLoadModule).toHaveBeenCalledTimes(2);
+  });
+
+  it("rebuilds local-only: passes allowNetwork:false to the catalog refresh", async () => {
+    const refresh = vi.fn(async () => ({ aborted: false, errors: new Map<string, Error>() }));
+    mockedResolve.mockReturnValue({ state: "compatible", installation: { ...compatibleInstallation } });
+    mockedLoadModule.mockResolvedValue({ builtinModels: () => fakeModels({ refresh }) });
+    await refreshPiCatalog();
+    expect(refresh).toHaveBeenCalledTimes(1);
+    expect(refresh).toHaveBeenCalledWith({ allowNetwork: false });
+  });
+
+  it("shares one in-flight rebuild across concurrent callers", async () => {
+    mockedResolve.mockReturnValue({ state: "compatible", installation: { ...compatibleInstallation } });
+    let loads = 0;
+    mockedLoadModule.mockImplementation(async () => {
+      loads++;
+      await new Promise(resolve => setTimeout(resolve, 10));
+      return { builtinModels: () => fakeModels() };
+    });
+    const [a, b] = await Promise.all([refreshPiCatalog(), refreshPiCatalog()]);
+    expect(a).toBe(b);
+    expect(loads).toBe(1);
+  });
+
+  it("keeps the previous snapshot when the re-warm fails", async () => {
+    const fm = fakeModels({ list: [fakeModel({ id: "glm-4.6" })] });
+    _setWarmedForTest(fm);
+    mockedResolve.mockReturnValue({ state: "absent" });
+    await expect(refreshPiCatalog()).resolves.toBe(fm);
+    expect(getWarmedModels()).toBe(fm);
   });
 });

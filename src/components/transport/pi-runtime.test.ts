@@ -7,7 +7,7 @@
  * (surface check) plus a real-auth verification during implementation.
  */
 
-import { describe, it, expect, beforeEach } from "vitest";
+import { describe, it, expect, beforeEach, vi } from "vitest";
 import type { ModelRuntime } from "@earendil-works/pi-coding-agent";
 import {
   checkPiManagedAuth,
@@ -15,6 +15,7 @@ import {
   isPiAuthAbsenceMessage,
   isPiManagedModelKnown,
   PiManagedAuthError,
+  refreshPiRuntime,
   resetPiRuntimeForTest,
   setPiRuntimeForTest,
   streamPiManaged,
@@ -24,11 +25,13 @@ function fakeRuntime(overrides?: {
   checkAuth?: (providerId: string) => Promise<{ type: string } | undefined>;
   getModel?: (providerId: string, modelId: string) => { id: string; reasoning: boolean } | undefined;
   streamSimple?: (...args: unknown[]) => unknown;
+  refresh?: (...args: unknown[]) => Promise<unknown>;
 }): ModelRuntime {
   return {
     checkAuth: overrides?.checkAuth ?? (async () => ({ type: "api_key" })),
     getModel: overrides?.getModel ?? (() => ({ id: "m", reasoning: true })),
     streamSimple: overrides?.streamSimple ?? (() => ({ ok: true })),
+    refresh: overrides?.refresh ?? (async () => ({ aborted: false, errors: new Map<string, Error>() })),
   } as unknown as ModelRuntime;
 }
 
@@ -112,6 +115,29 @@ describe("checkPiManagedSelection (#1757)", () => {
     const r = await checkPiManagedSelection("openrouter", { authSource: "pi" });
     expect(r.ok).toBe(false);
     expect(r.reason).toContain("pi auth check");
+  });
+});
+
+describe("refreshPiRuntime (#1875)", () => {
+  it("rebuilds the snapshot local-only and reports ok", async () => {
+    const refresh = vi.fn(async (..._args: unknown[]) => ({ aborted: false, errors: new Map<string, Error>() }));
+    setPiRuntimeForTest(fakeRuntime({ refresh }));
+    await expect(refreshPiRuntime()).resolves.toBe(true);
+    expect(refresh).toHaveBeenCalledTimes(1);
+    const opts = refresh.mock.calls[0]![0] as { allowNetwork?: boolean };
+    expect(opts.allowNetwork).toBe(false);
+  });
+
+  it("returns false without throwing when the rebuild rejects", async () => {
+    setPiRuntimeForTest(fakeRuntime({
+      refresh: async () => { throw new Error("store locked"); },
+    }));
+    await expect(refreshPiRuntime()).resolves.toBe(false);
+  });
+
+  it("returns false when no runtime is available", async () => {
+    setPiRuntimeForTest(null);
+    await expect(refreshPiRuntime()).resolves.toBe(false);
   });
 });
 

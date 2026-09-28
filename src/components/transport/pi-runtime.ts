@@ -107,6 +107,30 @@ async function loadRuntime(): Promise<ModelRuntime | null> {
   }
 }
 
+/** Bound for the `/change`-triggered runtime refresh: local snapshot rebuild, no network. */
+const REFRESH_TIMEOUT_MS = 15_000;
+
+/**
+ * Hot-reload Pi's model snapshot outside boot (#1875: `/change` entry).
+ * Re-reads Pi's models.json, rebuilds providers, and refreshes the composed
+ * catalog — local-only (`allowNetwork: false`), under a bounded signal.
+ * Best-effort and never throwing: on any failure the caller proceeds from the
+ * previous snapshot (restart remains the fallback). Returns whether the
+ * snapshot was rebuilt.
+ */
+export async function refreshPiRuntime(): Promise<boolean> {
+  try {
+    const runtime = await loadRuntime();
+    if (!runtime) return false;
+    await runtime.refresh({ allowNetwork: false, signal: AbortSignal.timeout(REFRESH_TIMEOUT_MS) });
+    return true;
+  } catch (err) {
+    // Best-effort by contract: /change must never break because a rebuild failed.
+    logWarn(TAG, `Pi runtime refresh failed — using previous snapshot: ${err instanceof Error ? err.message : String(err)}`);
+    return false;
+  }
+}
+
 /**
  * Presence-only readiness for a Pi-managed provider. Answers whether Pi can
  * authenticate this provider right now; never a guarantee that a later
