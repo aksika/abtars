@@ -110,15 +110,28 @@ async function loadRuntime(): Promise<ModelRuntime | null> {
 /** Bound for the `/change`-triggered runtime refresh: local snapshot rebuild, no network. */
 const REFRESH_TIMEOUT_MS = 15_000;
 
+let _refreshInflight: Promise<boolean> | null = null;
+
 /**
  * Hot-reload Pi's model snapshot outside boot (#1875: `/change` entry).
- * Re-reads Pi's models.json, rebuilds providers, and refreshes the composed
- * catalog — local-only (`allowNetwork: false`), under a bounded signal.
+ * Re-reads Pi's models.json and the local model store's revision-checked
+ * snapshot, then rebuilds providers — local-only (`allowNetwork: false`),
+ * under a bounded signal. Concurrent callers share one in-flight rebuild.
  * Best-effort and never throwing: on any failure the caller proceeds from the
  * previous snapshot (restart remains the fallback). Returns whether the
  * snapshot was rebuilt.
  */
-export async function refreshPiRuntime(): Promise<boolean> {
+export function refreshPiRuntime(): Promise<boolean> {
+  if (!_refreshInflight) {
+    _refreshInflight = rebuildPiRuntime().finally(() => {
+      // Clear on success and failure so a later /change can rebuild again.
+      _refreshInflight = null;
+    });
+  }
+  return _refreshInflight;
+}
+
+async function rebuildPiRuntime(): Promise<boolean> {
   try {
     const runtime = await loadRuntime();
     if (!runtime) return false;
@@ -128,6 +141,33 @@ export async function refreshPiRuntime(): Promise<boolean> {
     // Best-effort by contract: /change must never break because a rebuild failed.
     logWarn(TAG, `Pi runtime refresh failed — using previous snapshot: ${err instanceof Error ? err.message : String(err)}`);
     return false;
+  }
+}
+
+/**
+ * Menu-side model list for a Pi-managed provider (#1875): the runtime's
+ * composed catalog (installed builtins + local models store + Pi models.json)
+ * after a refresh, so the picker offers exactly what dispatch accepts.
+ * Best-effort: returns null when the provider is unmapped or the runtime is
+ * unavailable — callers fall back to the static pi-ai catalog. Never throws.
+ */
+export async function piRuntimeModelsForProvider(
+  providerName: string,
+): Promise<Array<{ id: string; cost: { input: number; output: number }; contextWindow: number }> | null> {
+  const piProvider = mapProviderName(providerName);
+  if (!piProvider) return null;
+  const runtime = await loadRuntime();
+  if (!runtime) return null;
+  try {
+    return runtime.getModels(piProvider).map(m => ({
+      id: m.id,
+      cost: { input: m.cost.input, output: m.cost.output },
+      contextWindow: m.contextWindow,
+    }));
+  } catch (err) {
+    // Unavailable is not fatal for the picker — it falls back to the static catalog.
+    logWarn(TAG, `Pi runtime model list failed for "${providerName}" — using static catalog: ${err instanceof Error ? err.message : String(err)}`);
+    return null;
   }
 }
 

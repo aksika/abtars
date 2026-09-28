@@ -15,6 +15,7 @@ import {
   isPiAuthAbsenceMessage,
   isPiManagedModelKnown,
   PiManagedAuthError,
+  piRuntimeModelsForProvider,
   refreshPiRuntime,
   resetPiRuntimeForTest,
   setPiRuntimeForTest,
@@ -24,12 +25,14 @@ import {
 function fakeRuntime(overrides?: {
   checkAuth?: (providerId: string) => Promise<{ type: string } | undefined>;
   getModel?: (providerId: string, modelId: string) => { id: string; reasoning: boolean } | undefined;
+  getModels?: (providerId?: string) => Array<{ id: string; cost: { input: number; output: number }; contextWindow: number }>;
   streamSimple?: (...args: unknown[]) => unknown;
   refresh?: (...args: unknown[]) => Promise<unknown>;
 }): ModelRuntime {
   return {
     checkAuth: overrides?.checkAuth ?? (async () => ({ type: "api_key" })),
     getModel: overrides?.getModel ?? (() => ({ id: "m", reasoning: true })),
+    getModels: overrides?.getModels ?? (() => []),
     streamSimple: overrides?.streamSimple ?? (() => ({ ok: true })),
     refresh: overrides?.refresh ?? (async () => ({ aborted: false, errors: new Map<string, Error>() })),
   } as unknown as ModelRuntime;
@@ -138,6 +141,44 @@ describe("refreshPiRuntime (#1875)", () => {
   it("returns false when no runtime is available", async () => {
     setPiRuntimeForTest(null);
     await expect(refreshPiRuntime()).resolves.toBe(false);
+  });
+
+  it("shares one rebuild across concurrent callers", async () => {
+    let rebuilds = 0;
+    const refresh = async (..._args: unknown[]): Promise<unknown> => {
+      rebuilds++;
+      await new Promise(resolve => setTimeout(resolve, 10));
+      return { aborted: false, errors: new Map<string, Error>() };
+    };
+    setPiRuntimeForTest(fakeRuntime({ refresh }));
+    const [a, b] = await Promise.all([refreshPiRuntime(), refreshPiRuntime()]);
+    expect(a).toBe(true);
+    expect(b).toBe(true);
+    expect(rebuilds).toBe(1);
+  });
+});
+
+describe("piRuntimeModelsForProvider (#1875 menu source)", () => {
+  it("maps the runtime's composed models to the picker shape", async () => {
+    setPiRuntimeForTest(fakeRuntime({
+      getModels: () => [
+        { id: "deepseek-v4.1-flash", cost: { input: 0.14, output: 0.28 }, contextWindow: 200000 },
+      ],
+    }));
+    const out = await piRuntimeModelsForProvider("opencode-go");
+    expect(out).toEqual([
+      { id: "deepseek-v4.1-flash", cost: { input: 0.14, output: 0.28 }, contextWindow: 200000 },
+    ]);
+  });
+
+  it("returns null for providers with no Pi mapping", async () => {
+    setPiRuntimeForTest(fakeRuntime());
+    await expect(piRuntimeModelsForProvider("ollama")).resolves.toBeNull();
+  });
+
+  it("returns null when no runtime is available", async () => {
+    setPiRuntimeForTest(null);
+    await expect(piRuntimeModelsForProvider("opencode-go")).resolves.toBeNull();
   });
 });
 

@@ -1,11 +1,16 @@
 /**
  * #1320 — Telegram model picker: tiered ranking (pi-catalog small → direct; large/empty →
  * curated models.json validated against live catalog), and graceful empty-curated message.
+ * #1875 — pi-managed menu sources the runtime composition; apply accepts any offered model.
  */
 import { describe, it, expect, beforeEach, vi } from "vitest";
 
 const MOCK_getModelsForProvider = vi.fn();
 const MOCK_modelsForProviderSync = vi.fn();
+const MOCK_writeTransportConfig = vi.fn();
+const MOCK_piRuntimeModelsForProvider = vi.fn();
+const MOCK_isPiManagedModelKnown = vi.fn();
+const MOCK_checkPiManagedAuth = vi.fn();
 
 vi.mock("../../components/transport-config.js", () => ({
   getModelsForProvider: MOCK_getModelsForProvider,
@@ -15,27 +20,40 @@ vi.mock("../../components/transport-config.js", () => ({
     return `$${c.input}/$${c.output}`;
   },
   loadTransport: () => ({
+    activeRoute: "pi-ai",
+    routes: {
+      "pi-ai": {
+        agents: {
+          main: { model: "tencent/hy3-preview", provider: "openrouter" },
+          professor: { model: "tencent/hy3-preview", provider: "openrouter" },
+        },
+        fallbacks: [],
+      },
+    },
     agents: {
       professor: { model: "tencent/hy3-preview", provider: "openrouter", fallbacks: [] },
     },
     providers: {
       openrouter: { transport: "api", endpoint: "https://openrouter.ai/api/v1" },
       codex: { transport: "api" },
+      "opencode-go": { transport: "api", authSource: "pi" },
     },
   }),
   resolveAgent: () => ({ model: "tencent/hy3-preview", providerName: "openrouter" }),
   getAvailableProviders: () => [
     { name: "openrouter", config: { transport: "api", endpoint: "https://openrouter.ai/api/v1" } },
     { name: "codex", config: { transport: "api" } },
+    { name: "opencode-go", config: { transport: "api", authSource: "pi" } },
   ],
-  writeTransportConfig: vi.fn(),
+  writeTransportConfig: MOCK_writeTransportConfig,
+  cleanDemotedModels: vi.fn(),
   validateProviderReady: () => ({ ok: true }),
   formatValidationError: () => "",
 }));
 
 vi.mock("../../components/transport/pi-catalog.js", () => ({
   modelsForProviderSync: MOCK_modelsForProviderSync,
-  mapProviderName: (name: string) => (name === "openrouter" || name === "codex" ? name : null),
+  mapProviderName: (name: string) => (["openrouter", "codex", "opencode-go"].includes(name) ? name : null),
   logUnmappedProviderOnce: vi.fn(),
   // #1875: picker entry refreshes before building lists — no-op in these tests.
   refreshPiCatalog: vi.fn(async () => null),
@@ -44,6 +62,9 @@ vi.mock("../../components/transport/pi-catalog.js", () => ({
 vi.mock("../../components/transport/pi-runtime.js", () => ({
   // #1875: picker entry refreshes before building lists — no-op in these tests.
   refreshPiRuntime: vi.fn(async () => true),
+  piRuntimeModelsForProvider: MOCK_piRuntimeModelsForProvider,
+  isPiManagedModelKnown: MOCK_isPiManagedModelKnown,
+  checkPiManagedAuth: MOCK_checkPiManagedAuth,
 }));
 
 import { handleModelPickerCallback, isModelPickerCallback } from "./telegram-model-picker.js";
@@ -72,6 +93,14 @@ describe("telegram-model-picker (#1320)", () => {
   beforeEach(() => {
     MOCK_getModelsForProvider.mockReset();
     MOCK_modelsForProviderSync.mockReset();
+    MOCK_writeTransportConfig.mockReset();
+    MOCK_piRuntimeModelsForProvider.mockReset();
+    MOCK_isPiManagedModelKnown.mockReset();
+    MOCK_checkPiManagedAuth.mockReset();
+    // Defaults: runtime unavailable → static pi-ai catalog path (pre-#1875 behavior).
+    MOCK_piRuntimeModelsForProvider.mockResolvedValue(null);
+    MOCK_isPiManagedModelKnown.mockResolvedValue(false);
+    MOCK_checkPiManagedAuth.mockResolvedValue({ ok: true, state: "usable", detail: "" });
   });
 
   describe("isModelPickerCallback", () => {
@@ -192,6 +221,68 @@ describe("telegram-model-picker (#1320)", () => {
       const [, text, opts] = api.sendMessage.mock.calls[0]!;
       expect(text as string).toMatch(/No curated models for openrouter/);
       expect(opts).toBeUndefined();
+    });
+  });
+
+  describe("#1875 — menu and apply agree on the refreshed model set", () => {
+    it("pi-managed provider → menu comes from the runtime composition, not the static catalog", async () => {
+      MOCK_modelsForProviderSync.mockReturnValue([{ id: "static-only", cost: { input: 1, output: 1 } }]);
+      MOCK_piRuntimeModelsForProvider.mockResolvedValue([
+        { id: "deepseek-v4.1-flash", cost: { input: 0.14, output: 0.28 }, contextWindow: 200000 },
+      ]);
+      const api = makeApi();
+      const state = makeState();
+      const deps = makeDeps();
+      await handleModelPickerCallback("mprov:professor:opencode-go", 1, api as never, state, deps);
+      const [, , opts] = api.sendMessage.mock.calls[0]!;
+      const buttons = (opts as { reply_markup: { inline_keyboard: unknown[][] } }).reply_markup.inline_keyboard;
+      const labels = (buttons.flat() as Array<{ text: string }>).map((b) => b.text);
+      expect(labels).toContain("deepseek-v4.1-flash ($0.14/$0.28)");
+      expect(labels).not.toContain("static-only ($1/$1)");
+    });
+
+    it("applies a pi-catalog model that curated models.json does not list", async () => {
+      MOCK_modelsForProviderSync.mockReturnValue([{ id: "omen-alpha", cost: { input: 0.1, output: 0.2 } }]);
+      MOCK_getModelsForProvider.mockReturnValue([]);
+      MOCK_writeTransportConfig.mockReturnValue({ ok: true });
+      const api = makeApi();
+      const state = makeState();
+      const deps = makeDeps();
+      await handleModelPickerCallback("mprov:professor:openrouter", 1, api as never, state, deps);
+      await handleModelPickerCallback("mset:openrouter:0", 1, api as never, state, deps);
+      const texts = api.sendMessage.mock.calls.map(c => String(c[1]));
+      expect(MOCK_writeTransportConfig).toHaveBeenCalledTimes(1);
+      expect(texts.some(t => t.includes("omen-alpha"))).toBe(true);
+      expect(texts.some(t => t.includes("not available"))).toBe(false);
+    });
+
+    it("applies a runtime-known model on a pi-managed provider", async () => {
+      MOCK_modelsForProviderSync.mockReturnValue(null);
+      MOCK_getModelsForProvider.mockReturnValue([]);
+      MOCK_isPiManagedModelKnown.mockResolvedValue(true);
+      MOCK_writeTransportConfig.mockReturnValue({ ok: true });
+      const api = makeApi();
+      const state = makeState();
+      state._pendingSlot = "professor";
+      const deps = makeDeps();
+      await handleModelPickerCallback("mset:opencode-go:muse-spark-1.3-contributor", 1, api as never, state, deps);
+      expect(MOCK_isPiManagedModelKnown).toHaveBeenCalledWith("opencode-go", "muse-spark-1.3-contributor");
+      expect(MOCK_writeTransportConfig).toHaveBeenCalledTimes(1);
+      const texts = api.sendMessage.mock.calls.map(c => String(c[1]));
+      expect(texts.some(t => t.includes("not available"))).toBe(false);
+    });
+
+    it("still rejects a model no source knows", async () => {
+      MOCK_modelsForProviderSync.mockReturnValue(null);
+      MOCK_getModelsForProvider.mockReturnValue([]);
+      MOCK_isPiManagedModelKnown.mockResolvedValue(false);
+      const api = makeApi();
+      const state = makeState();
+      const deps = makeDeps();
+      await handleModelPickerCallback("mset:opencode-go:intruder-model", 1, api as never, state, deps);
+      const texts = api.sendMessage.mock.calls.map(c => String(c[1]));
+      expect(texts.some(t => t.includes("not available"))).toBe(true);
+      expect(MOCK_writeTransportConfig).not.toHaveBeenCalled();
     });
   });
 });

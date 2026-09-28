@@ -39,13 +39,23 @@ export function isModelPickerCallback(data: string): boolean {
  */
 const PICKER_MAX = 50;
 
-async function buildModelEntries(providerName: string, providerConfig: { transport?: string } | undefined): Promise<Array<{ id: string; label: string }>> {
+async function buildModelEntries(providerName: string, providerConfig: { transport?: string; authSource?: string } | undefined): Promise<Array<{ id: string; label: string }>> {
   const { getModelsForProvider, formatRank, formatCost } = await import("../../components/transport-config.js");
 
-  // Tier 1: pi-catalog (small list → use directly)
+  // Tier 1: pi catalog (small list → use directly)
   let pi: Array<{ id: string; cost: { input: number; output: number } }> | null = null;
   const { modelsForProviderSync, mapProviderName, logUnmappedProviderOnce } = await import("../../components/transport/pi-catalog.js");
   pi = modelsForProviderSync(providerName);
+  // #1875: for Pi-managed providers the menu must come from the refreshed
+  // runtime composition (builtins + local models store + Pi models.json) —
+  // the same source the dispatch gate reads — so updated models appear
+  // without a restart. Null/empty runtime list falls back to the static
+  // pi-ai catalog.
+  if (providerConfig?.authSource === "pi") {
+    const { piRuntimeModelsForProvider } = await import("../../components/transport/pi-runtime.js");
+    const runtimeCatalog = await piRuntimeModelsForProvider(providerName);
+    if (runtimeCatalog && runtimeCatalog.length > 0) pi = runtimeCatalog;
+  }
   if (pi === null && providerConfig?.transport === "api" && !mapProviderName(providerName)) {
     // #1747: no pi mapping → Tier 2 falls back to models.json; log once so the
     // silently skipped stale-ID validation filter is observable.
@@ -248,8 +258,21 @@ export async function handleModelPickerCallback(
 
     const providerConfig = tc.providers[providerName];
     if (!providerConfig) { await api.sendMessage(chatId, `❌ Provider ${providerName} not found`); return; }
-    const validModels = getModelsForProvider(providerName);
-    if (!validModels.some(m => m.id === model)) { await api.sendMessage(chatId, `❌ ${model} is not available on ${providerName}. Pick another.`); return; }
+    // #1875: accept any model the picker could have offered — curated models.json
+    // or the pi catalogs — instead of curated alone. The menu's Tier-1 source can
+    // include models curated models.json doesn't list, so a curated-only gate
+    // rejected selections that were visible in the picker.
+    const curatedModels = getModelsForProvider(providerName);
+    const { modelsForProviderSync } = await import("../../components/transport/pi-catalog.js");
+    const piCatalogModels = modelsForProviderSync(providerName) ?? [];
+    let modelKnown = [...curatedModels, ...piCatalogModels].some(m => m.id === model);
+    if (!modelKnown && providerConfig.authSource === "pi") {
+      // Pi-managed providers dispatch through the runtime composition, so
+      // runtime knowledge is the authoritative gate for the refreshed menu.
+      const { isPiManagedModelKnown } = await import("../../components/transport/pi-runtime.js");
+      modelKnown = await isPiManagedModelKnown(providerName, model);
+    }
+    if (!modelKnown) { await api.sendMessage(chatId, `❌ ${model} is not available on ${providerName}. Pick another.`); return; }
     const validation = validateProviderReady(providerName, providerConfig, getEnv());
     if (!validation.ok) { await api.sendMessage(chatId, formatValidationError(providerName, validation)); return; }
     // #1757: Pi-managed providers need a live runtime check — the sync shape
