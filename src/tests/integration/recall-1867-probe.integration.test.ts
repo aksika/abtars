@@ -1,7 +1,10 @@
 /**
  * #1867 — two-path harness + #671 E2E probe (seeded, deterministic).
  *
- * Real bridge-to-abmind composition on a seeded store: the required memory
+ * Real bridge-to-abmind composition: recall goes through abtars'
+ * createClientRuntime over a seeded real MemoryManager, so the probe exercises
+ * the actual boundary (terms → translated, selectTerms passthrough, selection
+ * validation, diagnostics carry) — not just the engine. The required memory
  * (R, #671-shaped: old "midnight architect tester paradox" fact with a
  * Hungarian original), a lexical false-friend distractor (D, #887-shaped:
  * porter-stem collision on architect/architecture plus filler), and 500+
@@ -10,13 +13,14 @@
  * the bridge floor/age rules (prompt-builder.ts), not just abmind rank.
  *
  * Fidelity notes (recorded, not hidden):
- * - Stages are pinned to Sf/Ss/S6 by the harness (no embedding provider in
- *   CI); Se coverage behind 500+ newer rows is #1861's proven territory
- *   (recall-history-coverage.test.ts with a scripted provider). Se/Ss budget
- *   env and vec-index completeness are printed with every run.
- * - Ss sees NULL-signature seeds here, so it completes with 0 hits; the
- *   asserted mechanism is this ticket's (discrete terms → coverage ordering →
- *   df selection → bridge filters).
+ * - Stages are defaulted (as the bridge sends them): Se is disabled by the
+ *   test sandbox (EMBEDDING_ENABLED=false), Ss sees NULL-signature seeds here
+ *   (0 hits), S6 runs. Se coverage behind 500+ newer rows is #1861's proven
+ *   territory (recall-history-coverage.test.ts with a scripted provider).
+ *   Se/Ss budget env and vec-index completeness are emitted as console
+ *   diagnostics by both tests.
+ * - RuntimeRecallHit does not carry emotion/importance flags (production
+ *   mapping), so the bridge filter here sees exactly what production sees.
  * - Hungarian translation arrives as a deterministic fixture (no provider in
  *   tests), per design.md failure semantics; timeout/503 cases keep
  *   deterministic evidence through the same seam.
@@ -25,7 +29,8 @@ import { describe, it, expect } from "vitest";
 import { extractEnglishTokens } from "abmind";
 import { createHarness, memoryDb, type IntegrationHarness } from "./harness.js";
 import { prepareRecallQuery, mergeQueryTerms } from "../../components/pipeline/recall-query-preparation.js";
-import { selectInjectedHits } from "../../components/memory-runtime.js";
+import { createClientRuntime, selectInjectedHits, type AbtarsMemoryRuntime } from "../../components/memory-runtime.js";
+import type { AbmindClientLike } from "../../components/abmind-client-contract.js";
 
 const USER = "u1";
 const DAY = 86400000;
@@ -69,8 +74,24 @@ async function seedStore(h: IntegrationHarness): Promise<{ r: number; d: number 
   return { r, d };
 }
 
+/** Bridge runtime over the real harness MemoryManager, shaped as abmind wires. */
+function bridgeRuntime(h: IntegrationHarness): AbtarsMemoryRuntime {
+  const client = {
+    capabilities: { version: 1, methods: ["private.recall"], domains: ["system", "private"], features: { private_read: "true" } },
+    routeSnapshot: {},
+    privateMemory: {
+      recall: (params: unknown) =>
+        h.memory.recallSearch(params as Parameters<IntegrationHarness["recallSearch"]>[0]) as unknown as Promise<unknown>,
+    },
+    sleep: {},
+    negotiate: async () => ({}),
+    close: async () => {},
+  };
+  return createClientRuntime(client as unknown as AbmindClientLike);
+}
+
 /** Bridge floor + trivial-fact age rule, mirroring prompt-builder.ts. */
-function bridgeFilter(hits: Array<{ score: number; memoryType?: string; createdAt?: number; emotionTags?: unknown; importanceFlags?: unknown }>): typeof hits {
+function bridgeFilter<T extends { score: number; memoryType?: string; createdAt?: number; emotionTags?: unknown; importanceFlags?: unknown }>(hits: T[]): T[] {
   const nowMs = Date.now();
   return hits.filter((h) => {
     if (h.score <= 0.70) return false;
@@ -122,22 +143,24 @@ describe("#1867 #671 probe — improved path injects R at or above D", () => {
           terms = mergeQueryTerms([translated, terms]);
         }
         expect(terms.length).toBeGreaterThan(1);
+        const runtime = bridgeRuntime(h);
         const t0 = performance.now();
-        // Params shaped exactly as memory-runtime.recall sends them.
-        // trackRecalls:false keeps sequential arms deterministic: recall-count
-        // bumps would otherwise shift darwinism scores between arms.
-        const result = await h.recallSearch({
-          translated: terms, original: arm.text, userId: USER, limit: 5, selectTerms: true, trackRecalls: false,
+        // Input shaped exactly as prompt-builder sends it through the runtime.
+        // The runtime path has no track-recalls switch: recall-count boosts
+        // accumulate per arm and land on R and D alike, so the asserted order
+        // is stable across the sequential arms.
+        const result = await runtime.recall({
+          query: prepared.query,
+          original: arm.text,
+          userId: USER,
+          limit: 5,
+          ...(terms.length > 0 ? { terms, selectTerms: true } : {}),
         });
         const ms = Math.round(performance.now() - t0);
-        const rawIds = result.results.map((hit) => hit.id);
+        const rawIds = result.hits.map((hit) => hit.memoryId);
         // The distractor must actually contest, or the probe is vacuous.
         expect(rawIds, `${arm.name}: distractor D absent from raw results`).toContain(d);
-        const filtered = bridgeFilter(result.results.map((hit) => ({
-          score: hit.score, memoryType: hit.memoryType, createdAt: hit.createdAt,
-          emotionTags: hit.emotionTags, importanceFlags: hit.importanceFlags,
-        })).map((f, i) => ({ ...f, memoryId: result.results[i]!.id, content: result.results[i]!.content })));
-        const injected = selectInjectedHits(filtered, result.selection);
+        const injected = selectInjectedHits(bridgeFilter(result.hits), result.selection);
         const injectedIds = injected.map((hit) => hit.memoryId);
         console.info(`[1867-probe] ${arm.name}: ${ms}ms raw=[${rawIds.slice(0, 6).join(",")}] injected=[${injectedIds.join(",")}] weakEvidence=${result.weakEvidence}`);
         expect(injectedIds, `${arm.name}: required memory R not injected`).toContain(r);
@@ -159,23 +182,20 @@ describe("#1867 #671 probe — improved path injects R at or above D", () => {
     const h = await createHarness();
     try {
       const { r, d } = await seedStore(h);
+      console.info(`[1867-probe] env: ${envSnapshot(h)}`);
       // "looks like" has high df from the seeded fillers; the topical terms
       // are rare. Selection must drop the filler before retrieval, leaving a
       // term set R matches exactly (weak evidence clears).
-      const result = await h.recallSearch({
-        translated: ["midnight", "tester", "paradox", "looks", "like"],
+      const runtime = bridgeRuntime(h);
+      const result = await runtime.recall({
+        query: "looks like the midnight tester paradox",
         original: "looks like the midnight tester paradox",
-        userId: USER, limit: 5, selectTerms: true, trackRecalls: false,
+        userId: USER, limit: 5,
+        terms: ["midnight", "tester", "paradox", "looks", "like"], selectTerms: true,
       });
-      const rawIds = result.results.map((hit) => hit.id);
+      const rawIds = result.hits.map((hit) => hit.memoryId);
       expect(rawIds, "distractor D absent from raw results").toContain(d);
-      const injected = selectInjectedHits(
-        bridgeFilter(result.results.map((hit) => ({
-          score: hit.score, memoryType: hit.memoryType, createdAt: hit.createdAt,
-          emotionTags: hit.emotionTags, importanceFlags: hit.importanceFlags,
-        })).map((f, i) => ({ ...f, memoryId: result.results[i]!.id, content: result.results[i]!.content }))),
-        result.selection,
-      ).map((hit) => hit.memoryId);
+      const injected = selectInjectedHits(bridgeFilter(result.hits), result.selection).map((hit) => hit.memoryId);
       expect(injected, "required memory R not injected").toContain(r);
       expect(injected.indexOf(r), "R ranks below distractor D").toBeLessThanOrEqual(injected.indexOf(d));
       expect(result.weakEvidence, "weak evidence after filler selection").toBe(false);
