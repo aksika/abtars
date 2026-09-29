@@ -1,149 +1,49 @@
 # abTARS
 
-**Meet the latest kid on the block.** An agentic framework designed to survive — and do the job.
+abTARS is a personal agent built around [Pi](https://github.com/earendil-works/pi). It runs on your machine and brings Pi into the conversations and workflows you already use, with messaging, tools, scheduled work, memory integration, and supervision.
 
-abTARS is an autonomous AI agent that runs 24/7 on your hardware. It talks to you via Telegram or Discord. It remembers everything. It recovers from failures without intervention. It coordinates with peer instances across machines. Your hardware, your rules, zero cloud dependency.
+Pi's agent core and provider engine power the API model route. abTARS manages message delivery, sessions, tools and permissions, integrations, and background work. ACP is also available as a Pi-free model route.
 
-## Five Layers: Body → Heart → Brain → Soul → Tribe
+## What it does
 
-Each layer builds on the one below it — lower layers work without the higher ones. **Body** boots, connects, and protects itself with nothing else running. **Tribe** — the social layer — needs all four below it.
+- **Talk with your agent** through Telegram, Discord, or the local terminal interface.
+- **Use Pi's model providers** on the API route, or connect through an ACP-compatible agent CLI.
+- **Add long-term memory** with [abmind](https://github.com/aksika/abmind), a separate product that abTARS discovers at runtime. abTARS can also run without abmind.
+- **Work in configured projects** with supervised Pi coding sessions and task runs.
+- **Extend and automate** with tools, skills, scheduled tasks, and optional peer collaboration.
+- **Keep the service running** with process supervision and recovery.
 
-```
-┌─────────────────────────────────────────────┐
-│  Tribe     Peer transport, Gossip, A2A,     │
-│            Agent API, Agent Swarm           │
-├─────────────────────────────────────────────┤
-│  Soul      abmind, Soul bundle, Sleep,      │
-│            Memory IPC, Context assembly     │
-├─────────────────────────────────────────────┤
-│  Brain     Model transport, Pipeline, Spin, │
-│            Sessions, Tools, Skills, Kanban, │
-│            Self-Healer, Pi integration      │
-├─────────────────────────────────────────────┤
-│  Heart     Heartbeat, Cron queue,           │
-│            Health monitoring                │
-├─────────────────────────────────────────────┤
-│  Body      Platforms (Telegram, Discord,    │
-│            Dashboard, CLI,            │
-│            Security/Trust, ActionGate,      │
-│            Doctor, Watchdog, Boot, Config   │
-└─────────────────────────────────────────────┘
-```
+## How it fits together
 
-## Built on the CIA Triad
+Messages enter through Telegram, Discord, or the terminal interface and are handled by abTARS. On the API route, Pi runs the model and tool loop; abTARS supplies the session context and available tools. With ACP, abTARS connects to a compatible agent CLI instead. When abmind is installed and configured, it provides persistent memory independently of the Pi runtime.
 
-The same three security pillars are enforced at every layer, top to bottom:
-
-### Confidentiality — classified, encrypted, compartmented
-
-- **NATO-style memory classification** (Soul) — 4 tiers (UNCLASSIFIED → SECRET), role-gated access
-- **Encryption at rest** (Soul) — AES-256 on memory database, derived key from master passphrase
-- **Secrets vault** (Body) — isolated directory, 600 perms, never exposed to model context
-- **Signed peer comms** (Tribe) — Ed25519 digital signatures on inter-agent channels
-- **Injection scanning** (Tribe) — untrusted peer payloads scanned before execution
-
-### Integrity — verified, consistent, self-correcting
-
-- **Peer trust levels** (Tribe) — trust=0 (full scan + sandbox) to trust=3 (direct execution)
-- **Memory contradiction detection** (Soul) — old facts auto-expire when corrected
-- **Atomic state** (Body/Heart) — crash-safe writes, self-healing lock files, no corrupt state survives
-- **Doctor** (Body) — validates PIDs, DB integrity, FTS health, permissions, TLS identity across all five layers
-- **Single source of truth** (Body) — unified bridge.lock, never deleted, always consistent
-
-### Availability — always up, always recovers
-
-- **3-legged supervision** (Body) — watchdog → bridge, OS supervisor → watchdog, circuit breaker → rollback
-- **Auto-rollback** (Body) — bad deploy detected in ~30s, previous version restored automatically
-- **Self-healing** (Brain) — corrupt/missing state files recreated, bridge respawned without intervention
-- **Stress-tested** — kill watchdog, kill bridge, corrupt state, deploy garbage — recovers every time
-- **Darkwake-aware** (Heart) — no false kills during sleep, correct resume classification
-
-## Plus: Distributed Agent Swarm (Tribe)
-
-One agent is useful. A swarm is unstoppable. abTARS instances discover each other via signed gossip, delegate work by capability and load, transfer artifacts, and deliver results via callbacks — no master, no single point of failure.
-
-- **Multi-instance** — abTARS instances discover each other, delegate work, share results
-- **Gossip health** — UDP broadcast (HMAC-signed), load-based routing
-- **Capability discovery** — auto-detect what each peer can do, route accordingly
-- **Artifact transfer** — files flow between peers inline or via S3
-- **Async delegation** — fire tasks at peers, get callbacks when done
-- **Orc/Worker delegation** — a coordinating agent breaks work down and fans it out across the swarm
-
-## Plus: Pi Integration (Brain)
-
-abTARS integrates [Pi](https://github.com/earendil-works/pi) as a **symbiotic peer**, not a dependency — each runs standalone, runtime discovery bridges them. Additive and reversible: if a Pi package breaks or is absent, abTARS keeps working unchanged.
-
-- **Provider engine (L1 motor)** — Pi's `pi-ai` unlocks ~36 model providers and prompt caching on the `pi-ai` route
-- **Terminal face** — Pi's TUI gives abTARS a terminal interface (`abtars tui`)
-- **Supervised coding agent** — Pi's coding agent runs complex coding tasks as a supervised subprocess (`/pi run`)
-- **Zero coupling** — no npm dependency either direction; emergency execution is a separate ACP hailMary path owned by #1468
-
-## Architecture
-
-```
-You (Telegram / Discord / API client)
-  │
-  ▼
-abTARS (bridge)
-  ├── abmind (Soul — memory, in-process, multi-layer recall, encrypted)
-  ├── Skills (core + self-authored during sleep + downloadable)
-  ├── Tools (browse, bash, MCP, peer_session, peer_ask_help)
-  ├── Tasks (cron scheduler + retry + DoD checks)
-  ├── Agent Swarm (Tribe — async background sessions, Orc/Worker delegation)
-  │
-  ├── kiro-cli        → Claude, DeepSeek, MiniMax, Qwen (free tier)
-  ├── gemini-cli      → Gemini 2.5 Pro/Flash (free tier)
-  ├── pi-ai route     → ollama, OpenRouter, any OpenAI-compatible, Pi's pi-ai (~36 providers)
-  ├── Pi              → TUI face, supervised coding agent
-  │
-  └── Peer Network (Tribe — gossip + HTTP delegation + callbacks)
-```
-
-| Transport | Providers |
-|-----------|-----------|
-| ACP (recommended) | kiro-cli, gemini-cli |
-| pi-ai route | ollama, OpenRouter, any OpenAI-compatible endpoint, Pi's pi-ai (~36 providers) |
-| Hooks (standalone) | abmind lifecycle hooks on any CLI agent |
+The Pi runtime is required for the API route and Pi coding features. The standard installer sets it up. abmind is installed separately when you want its memory features.
 
 ## Requirements
 
-- Node.js 22+
-- A Telegram bot token (Discord optional)
-- At least one model provider
+- Node.js 22.19 or newer
+- A Telegram or Discord bot, if you want to use a messaging platform
+- A model provider for your selected transport
 
-Optional: ollama + `nomic-embed-text` for memory embeddings.
+See the [installation guide](docs/wiki/install.md) for setup and provider configuration.
 
 ## Documentation
 
+- [Quick start](docs/wiki/quickstart.md)
 - [Installation](docs/wiki/install.md)
-- [Configuration](docs/wiki/commands.md)
-- [CLI Reference](docs/wiki/cli.md)
-- [Memory System (abmind)](https://github.com/aksika/abmind)
-- [Skills & Extensions](docs/wiki/skills.md)
-- [Pi Integration](docs/wiki/pi.md)
-- [Deployment & Supervision](docs/wiki/supervision.md)
-- [Resilience & Stress Tests](docs/wiki/resilience.md)
+- [Commands](docs/wiki/commands.md)
+- [Pi integration](docs/wiki/pi.md)
+- [Pi providers and authentication](docs/wiki/pi-providers.md)
+- [Pi coding sessions](docs/wiki/pi-executor.md)
+- [Memory system](https://github.com/aksika/abmind)
+- [Security](docs/wiki/security.md)
+- [Resilience](docs/wiki/resilience.md)
 
-Full docs: **[aksika.github.io/abtars](https://aksika.github.io/abtars/)**
-
-## Numbers
-
-- 2762 tests (abtars) + 1149 tests (abmind)
-- 8 stress-tested failure scenarios with verified auto-recovery
-- 5 agent types (professor, dreamy, browsie, coding, cron)
-- 5 architectural layers (Body, Heart, Brain, Soul, Tribe)
-- ~36 model providers available via Pi's `pi-ai` engine, on top of the always-available hand-rolled floor
-- 3-legged supervision stack (watchdog, OS supervisor, circuit breaker)
-- 3 platform adapters + OpenAI-compatible API
-- 12-step nightly memory maintenance
+Full documentation: [aksika.github.io/abtars](https://aksika.github.io/abtars/)
 
 ## Development
 
-```bash
-git clone https://github.com/aksika/abtars.git
-cd abtars && npm install && npm run build
-npm test
-```
+For local development, run **npm install**, **npm run build**, and **npm test** from the repository.
 
 ## Community
 
