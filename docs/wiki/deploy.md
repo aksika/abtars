@@ -51,9 +51,9 @@ Remote deploy is a single step: `/update dev` (or `alpha` / `stable`).
    manifest + deploy.state
 9. Stop + respawn the bridge (full service restart from the CLI;
    bridge-only kill + watchdog respawn on the Telegram /update path)
-10. Health probe: poll bridge.lock for ~3 min (new PID + fresh lastHeartbeat).
-    Writes deploy.state success / unhealthy / failed. No auto-rollback —
-    roll back manually if unhealthy.
+10. Health probe: poll bridge liveness for ~3 min. The update reports success
+    or an unhealthy result; the health probe itself does not roll back the
+    release. Roll back manually if needed.
 ```
 
 ## Directory layout
@@ -113,9 +113,10 @@ such as `better-sqlite3`.
 
 After respawn, the deploy polls `bridge.lock` every 3s for a new PID with
 a `lastHeartbeat` newer than the restart timestamp (~3 min timeout).
-Success writes `deploy.state: success`. Failure writes `unhealthy`/`failed`
-and the watchdog keeps retrying — check `abtars status` and the logs, then
-roll back manually. There is no automatic rollback.
+Success records a healthy update. Failure reports an unhealthy state; check
+`abtars status` and the logs, then roll back manually if needed. A separate
+boot circuit breaker may restore the previous release after repeated
+unplanned bridge deaths.
 
 ## Deploy to a remote instance
 

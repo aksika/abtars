@@ -1,100 +1,33 @@
 # Artifacts
 
-File sharing between peers in the agent swarm. Two tiers — inline for small files, S3 for large ones.
+abTARS can exchange task artifacts inline between agents and use an optional S3-compatible store for larger files.
 
-## Inline artifacts (< 1MB)
+## Inline artifacts
 
-Workers and Orc exchange small files directly in task payloads. No configuration needed — works out of the box.
+Workers can attach small files to a task result. The recipient can access them in the task workspace.
 
-### Sending files to a remote worker
+- Maximum file size: 1,000,000 bytes before base64 encoding.
+- Request-size limits also apply, so the number of files that fit depends on their encoded size.
+- Filenames are reduced to their base name before transfer.
 
-The Orc includes artifacts when delegating:
+## S3-compatible storage
 
-```
-peer_delegate(peer: "peer-b", goal: "Run this script", artifacts: [{name: "config.json", content: "<base64>"}])
-```
+For larger files, configure an S3-compatible endpoint and bucket in ~/.abtars/config/.env:
 
-The remote worker finds the file at `~/.abtars/workspace/cards/<cardId>/config.json`.
-
-### Returning files from a worker
-
-Workers call `artifact_attach` during execution:
-
-```
-artifact_attach(path: "~/.abtars/workspace/cards/42/results.json")
-```
-
-On task completion, attached files are sent back to the originator via the callback payload.
-
-### Limits
-
-- Max 1MB per file (raw, before base64 encoding)
-- Max 5MB total per request
-- Filenames are sanitized (no path traversal)
-
-## S3 artifact store (unlimited)
-
-For larger files — binaries, datasets, reports. Uses any S3-compatible storage (Cloudflare R2 recommended for free tier).
-
-### Configuration
-
-Add the endpoint and bucket settings to `~/.abtars/config/.env`:
-
-```bash
-ARTIFACT_S3_ENDPOINT=https://<account>.r2.cloudflarestorage.com
+~~~bash
+ARTIFACT_S3_ENDPOINT=https://storage.example.com
 ARTIFACT_S3_BUCKET=abtars-artifacts
 ARTIFACT_S3_REGION=auto
-```
+~~~
 
-The S3 credentials are secrets — store them in the secrets vault, not `.env`:
+Store the access key and secret in abTARS's local credential storage. Do not put them in .env or share them with a task prompt. Use HTTPS with the storage provider.
 
-```bash
-echo -n "<access-key>" > ~/.abtars/secret/ARTIFACT_S3_KEY
-echo -n "<secret>"     > ~/.abtars/secret/ARTIFACT_S3_SECRET
-chmod 600 ~/.abtars/secret/ARTIFACT_S3_KEY ~/.abtars/secret/ARTIFACT_S3_SECRET
-```
+The artifact tools are available when their configuration and required dependencies are present.
 
-They are encrypted at rest and loaded into `process.env` at boot.
+## When to use each
 
-Tools (`artifact_push`, `artifact_pull`) appear automatically after restart when endpoint is configured.
-
-### Usage
-
-```
-# Upload a file
-artifact_push(local_path: "/path/to/binary", remote_path: "shared/vanity-gen-linux")
-
-# Download a file
-artifact_pull(remote_path: "shared/vanity-gen-linux", local_path: "~/.abtars/workspace/vanity-gen")
-```
-
-### Lazy SDK install
-
-The S3 SDK (`@aws-sdk/client-s3`) is NOT installed during `abtars install`. It installs automatically on first `artifact_push` or `artifact_pull` call (~5 second one-time delay). Subsequent calls are instant.
-
-### Path conventions
-
-```
-cards/<cardId>/<filename>     — task-scoped (auto-cleaned with card)
-shared/<filename>             — fleet-wide (binaries, configs)
-reports/<date>/<filename>     — persistent outputs
-```
-
-### Cloudflare R2 free tier
-
-- 10GB storage
-- 1M writes / 10M reads per month
-- Zero egress fees
-- Permanent (not 12-month trial)
-
-Set up at: https://dash.cloudflare.com → R2 → Create bucket → API tokens
-
-## When to use which
-
-| Scenario | Use |
-|----------|-----|
-| Config file for a worker task | Inline (`peer_delegate` with artifacts) |
-| Worker returning a JSON result | Inline (`artifact_attach`) |
-| Distributing a 50MB binary to fleet | S3 (`artifact_push` + URL in task goal) |
-| Sharing a dataset between workers | S3 (`artifact_push`, workers `artifact_pull`) |
-| Backing up kanban state | S3 (reports path) |
+| Use case | Option |
+|----------|--------|
+| Small task input or result | Inline artifact |
+| Large file or shared dataset | S3-compatible storage |
+| Sensitive file | Keep it out of task payloads unless the destination and recipients are trusted |

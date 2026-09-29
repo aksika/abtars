@@ -24,7 +24,7 @@ Output (in `~/.backup-abtars/`):
 | Flag | Description |
 |------|-------------|
 | `--config` | Config-only mode (fast, small) |
-| `--encrypt` | Encrypt the zip using abmind.key (AES-256-GCM) |
+| `--encrypt` | Encrypt the zip archive for safer storage or transfer |
 | `--output <dir>` | Custom output directory (default: `~/.backup-abtars/`) |
 | `--prune-days N` | Retention period in days (default: 7, 0 = no prune) |
 
@@ -58,13 +58,13 @@ No memory, no abmind, no workspace. Filename: `abtars-config-YYYY-MM-DD.zip`.
 
 ### Encryption
 
-The `.abm` file is always encrypted (AES-256-GCM via abmind.key). The `.zip` is plaintext by default — use `--encrypt` to protect it:
+The memory archive is created by abmind; see its documentation for its storage and restore format. The abTARS zip is plaintext by default. It contains configuration and may include credentials, so protect it or use `--encrypt` before moving it off the machine:
 
 ```bash
 abtars backup --encrypt
 ```
 
-Requires `~/.abmind/secret/abmind.key` to exist (created during `abmind install`).
+The `--encrypt` option requires abmind to be installed and configured.
 
 ## Restoring from backup
 
@@ -85,7 +85,7 @@ Auto-detects file type and does the right thing:
 | Flag | Description |
 |------|-------------|
 | `--config` | Restore zip only, skip abmind memory |
-| `--passphrase <p>` | Passed to abmind restore (only needed on fresh machine without key file) |
+| `--passphrase <value>` | Passphrase supplied to abmind when restoring memory, if required |
 
 ### Sibling detection
 
@@ -94,14 +94,14 @@ Backup produces paired files: `abtars-2026-06-05.zip` + `abmind-2026-06-05.abm`.
 ### Examples
 
 ```bash
-# Restore everything (same machine — key file exists)
+# Restore everything when abmind is already set up
 abtars restore ~/.backup-abtars/abtars-2026-06-05.zip
 
 # Config only (skip memory)
 abtars restore ~/.backup-abtars/abtars-config-2026-06-05.zip --config
 
 # Restore encrypted backup on fresh machine
-abtars restore ~/abtars-2026-06-05.zip.enc --passphrase "my-passphrase"
+abtars restore ~/abtars-2026-06-05.zip.enc --passphrase "$ABMIND_RESTORE_PASSPHRASE"
 
 # Restore just memory
 abtars restore ~/.backup-abtars/abmind-2026-06-05.abm
@@ -112,13 +112,13 @@ abtars restore ~/.backup-abtars/abmind-2026-06-05.abm
 ```bash
 # 1. Install
 npm install -g abtars abmind
-abmind install --non-interactive --passphrase "your-passphrase"
+abmind install --non-interactive --passphrase "$ABMIND_PASSPHRASE"
 abtars install
 abtars update
 
 # 2. Restore
 abtars restore ~/path/to/abtars-2026-06-05.zip
-# ↑ automatically restores sibling .abm too (key recreated from passphrase during abmind install)
+# The matching abmind archive is restored alongside the abTARS archive when present.
 
 # 3. Start
 abtars restart --cold

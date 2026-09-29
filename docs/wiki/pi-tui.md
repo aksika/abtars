@@ -5,7 +5,7 @@
 ## Requirements
 
 - Bridge running with `TUI_ENABLED=true` (or `--tui` flag)
-- `@earendil-works/pi-tui` installed (`abtars deps install`)
+- Pi support installed (`abtars deps install pi`)
 - A terminal that supports raw mode (SSH works, tmux works)
 
 ## Usage

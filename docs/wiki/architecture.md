@@ -1,61 +1,26 @@
 # Architecture
 
-```
-┌─────────────┐     ┌──────────────┐     ┌─────────────────┐
-│  Platforms   │────▶│   Pipeline   │────▶│    Transport    │
-│             │     │              │     │                 │
-│ • Telegram  │     │ • Commands   │     │ • CLI (ACP/tmux)│
-│ • Discord   │◀────│ • Memory     │◀────│ • API (HTTP)    │
-│              │     │ • Streaming  │     │ • Fallback      │
-└─────────────┘     └──────────────┘     └─────────────────┘
-                           │
-                    ┌──────┴──────┐
-                    │   abmind    │
-                    │  (memory)   │
-                    └─────────────┘
+## Message interfaces
 
-┌─────────────────────────────────────────────────────────┐
-│                    A2A (Peer-to-Peer)                    │
-│                                                         │
-│  abTARS instance ◀──── /v1/chat/completions ────▶ abTARS instance  │
-│  (Instance A)         JWT + digital signatures     (Instance B)  │
-│                       over Tailscale                               │
-└─────────────────────────────────────────────────────────┘
-```
+Telegram and Discord adapters receive messages and deliver replies. The optional local terminal interface provides a way to work with the agent on the machine running abTARS.
 
-**Platforms** receive messages from users and deliver responses back.
+The message pipeline handles commands, access checks, sessions, prompt construction, tools, and streamed responses.
 
-**Pipeline** processes each message: runs commands, checks permissions, builds prompts with memory context, manages streaming delivery.
+## Execution routes
 
-**Transport** communicates with AI models — either by spawning a CLI tool (Kiro, Gemini) or calling an HTTP API (ollama, OpenRouter).
+- The pi-ai route uses Pi's agent core and provider engine for API model requests and tool execution. abTARS selects the route, assigns models, and manages configured fallback candidates.
+- The ACP route connects to an ACP-compatible agent CLI. It runs independently of Pi.
 
-**abmind** provides persistent memory — recall on every turn, store after every response, sleep cycles for maintenance.
+See [Transport Configuration](/abtars/transport) and [Pi Integration](/abtars/pi).
 
-**A2A (Agent-to-Agent)** enables peer communication between abTARS instances. Agents can ask each other questions, delegate tasks, and share information over an authenticated channel.
+## Optional integrations
 
-## A2A Protocol
+- abmind is a separate, optional product that adds persistent memory.
+- Skills, MCP servers, and browser tools extend the agent when configured.
+- The Agent API lets configured abTARS instances communicate over authenticated peer connections. Peer connections are configured explicitly; see [Peer-to-Peer](/abtars/peers).
 
-Two abTARS instances communicate over an authenticated WS peer route over Tailscale:
+## Background work and recovery
 
-- **Authentication** — Ed25519 request signatures on enrolled keys + TLS cert pinning
-- **Anti-loop** — hop counting prevents infinite ping-pong
-- **Firewall traversal** — signed UDP doorbell on port 5353 for NAT/corporate firewalls; either side dials out, route is bidirectional
-- **Agent tools** — `peer_session` (quick chat, cardless), `peer_ask_help` (durable delegation), `peer_doorbell` (request WSS refresh)
+The heartbeat runs registered periodic work, including scheduled tasks. In daemon mode, the external watchdog and operating-system service manager monitor the bridge and watchdog processes.
 
-Configure peers in `~/.abtars/config/peers.json`.
-
-## Boot Phases
-
-The bridge starts in ordered phases: config → memory → transport → platforms → capabilities → heartbeat → sleep → dashboard. Each phase is independent — if one fails, the rest continue.
-
-## Capabilities
-
-Optional features that load at boot if their requirements are met:
-
-- **Browser** — external `cloak` CLI backed by the CloakBrowser stealth runtime
-- **Skills** — markdown-defined agent behaviors
-- **MCP** — external tool servers via mcporter
-
-## Heartbeat
-
-A periodic tick (configurable interval) that runs scheduled tasks, checks model health, and triggers sleep cycles during quiet hours.
+See [Process Supervision](/abtars/supervision) for recovery behavior.

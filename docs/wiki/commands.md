@@ -19,7 +19,7 @@ All commands work on Telegram and Discord unless noted otherwise.
 | Command | Description |
 |---------|-------------|
 | `/models` | Show current model, transport, agent status |
-| `/models change` | Interactive 3-step picker (Telegram only) |
+| `/models change` | Interactive 4-stage picker (Telegram only) |
 | `/models quick <model>` | Instant switch on same provider |
 | `/models list [provider]` | List providers or models on a provider |
 | `/models restore` | Undo last model/provider switch |

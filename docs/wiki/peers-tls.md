@@ -1,93 +1,19 @@
-# TLS Certificate Setup
+# Secure Peer Connections
 
-How to generate and exchange certificates for secure A2A communication between abTARS instances.
+abTARS provisions and validates its local TLS identity for the Agent API. You do not need to generate certificates by hand or copy private identity material between instances.
 
-## Generate a certificate
+## Configure a peer
 
-Run on each host:
+For each known peer, configure its reachable host, Agent API port, and public verification key in the local peer settings. Configure the reciprocal peer entry on the other instance.
 
-```bash
-cd ~/.abtars/config
-openssl req -x509 -newkey ed25519 \
-  -keyout identity.tls.key \
-  -out identity.crt \
-  -days 3650 \
-  -nodes \
-  -subj "/CN=$(hostname)"
-chmod 600 identity.tls.key
-```
+The public verification key is safe to share with the peer that needs to verify it. Keep private identity material on the instance that created it.
 
-This creates a 10-year self-signed Ed25519 certificate. No CA needed.
+## Network requirements
 
-## Get your fingerprint
+The Agent API uses port 7100 by default. Make sure the configured address and port are reachable over the network used by the peers. For persistent WebSocket communication, one configured peer initiates the connection.
 
-```bash
-openssl x509 -in ~/.abtars/config/identity.crt -fingerprint -sha256 -noout
-```
+## Verify the connection
 
-Output:
-```
-sha256 Fingerprint=9D:45:C0:6E:A9:F1:EF:3E:...
-```
+Use abtars status and abtars doctor to check local service health. If a peer is unavailable, check that both instances are running, the peer address and port are reachable, and the configured public verification key belongs to the intended peer. Review the bridge logs for connection errors.
 
-## Exchange certificates
-
-Each peer needs the other's fingerprint and certificate PEM. Send your `identity.crt` to your peer (it's not secret — it's a public certificate).
-
-```bash
-# Get your cert PEM (send this to your peer)
-cat ~/.abtars/config/identity.crt
-```
-
-## Add peer's cert to peers.json
-
-On **your** host, add the peer's cert info:
-
-```json
-{
-  "peers": {
-    "peer-b": {
-      "host": "<peer-tailscale-ip>",
-      "port": 3100,
-      "token": "...",
-      "verifyKey": "...",
-      "certFingerprint": "B3:9A:5D:54:97:02:52:8E:...",
-      "certPem": "-----BEGIN CERTIFICATE-----\nMIIBNDCB56AD...\n-----END CERTIFICATE-----"
-    }
-  }
-}
-```
-
-Do this on **both** hosts — each needs the other's cert.
-
-## Verify
-
-After restarting both bridges:
-
-```bash
-# Check TLS is active in logs
-grep "TLS" ~/.abtars/logs/bridge-$(date +%F).log
-# Expected: "TLS 1.3 enabled for agent-api (self-signed cert)"
-```
-
-Test the connection:
-```bash
-curl -sk https://<peer-ip>:3100/health
-```
-
-## Troubleshooting
-
-| Problem | Fix |
-|---------|-----|
-| "identity.crt not found" | Run the openssl command above |
-| "agent-api starting without TLS" | Cert files missing — check paths |
-| "cert fingerprint mismatch" | Wrong cert in peers.json — re-exchange |
-| "EADDRINUSE :3100" | Old process holding port — `fuser -k 3100/tcp` |
-| `abtars doctor` warns about certs | Run `chmod 600` on both cert files |
-
-## Notes
-
-- Certificates are valid for 10 years — no rotation needed
-- The private key (`identity.tls.key`) never leaves the host
-- The certificate (`identity.crt`) is safe to share — it's public
-- If you regenerate a cert, you must exchange the new fingerprint with all peers
+See [Peer-to-Peer](./peers.md) for interaction types and peer configuration.

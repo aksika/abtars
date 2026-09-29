@@ -1,97 +1,28 @@
 # Managing the Bridge
 
-## Stop
+## Start, stop, and restart
 
-| Install mode | Command |
-|---|---|
-| `supervised-daemon` (system systemd) | `sudo systemctl stop abtars` |
-| `supervised` (user systemd) | `systemctl --user stop abtars-watchdog` |
-| `simple` (direct, no service) | `abtars stop` |
+~~~bash
+abtars start
+abtars stop
+abtars restart
+abtars restart --cold
+~~~
 
-For daemon modes, `systemctl stop` sends SIGTERM to the watchdog which kills the bridge and exits cleanly.
+Daemon mode runs the watchdog under an operating-system service. Simple mode is started and stopped manually. See [Installation](./install.md) for the mode details.
 
-## Start
+## Status and diagnostics
 
-| Install mode | Command |
-|---|---|
-| `supervised-daemon` | `sudo systemctl start abtars` |
-| `supervised` | `systemctl --user start abtars-watchdog` |
-| `simple` | `abtars start` |
+~~~bash
+abtars status
+abtars doctor
+abtars logs
+~~~
 
-## Restart
-
-| Install mode | Command |
-|---|---|
-| `supervised-daemon` | `sudo systemctl restart abtars` |
-| `supervised` | `systemctl --user restart abtars-watchdog` |
-| `simple` | `abtars restart --cold` |
-
-For a warm restart (no process kill, in-process reload): send `/restart` in Telegram or run `abtars restart`.
-
-## Status
-
-```bash
-abtars status              # operator view: bridge, manifest, daemon, TUI, ports
-/status                    # in chat: same operator view + runtime (model, platforms, kanban, etc.)
-abtars status --json       # machine-readable; pipe to python3 for healthchecks
-```
+Use the status and doctor output to check the bridge and service. The logs command follows the current bridge log.
 
 ## Uninstall
 
-### 1. Stop the service
+Use abtars uninstall to stop the bridge and remove its runtime data. The command asks for confirmation because it deletes the abTARS runtime directory. Back up any data you want to keep first.
 
-```bash
-# supervised-daemon
-sudo systemctl stop abtars
-sudo systemctl disable abtars
-sudo rm /etc/systemd/system/abtars.service
-sudo systemctl daemon-reload
-
-# supervised (user)
-systemctl --user stop abtars-watchdog
-systemctl --user disable abtars-watchdog
-rm ~/.config/systemd/user/abtars-watchdog.service
-systemctl --user daemon-reload
-```
-
-Or use the CLI:
-```bash
-sudo $(which abtars) daemon uninstall    # system scope
-abtars daemon uninstall                  # user scope
-```
-
-### 2. Remove abtars
-
-```bash
-rm -rf ~/.abtars
-rm -f ~/.local/bin/abtars ~/.local/bin/abtars-restart
-npm uninstall -g abtars
-```
-
-### 3. Remove abmind (optional)
-
-```bash
-rm -rf ~/.abmind
-rm -f ~/.local/bin/abmind
-npm uninstall -g abmind
-```
-
-### 4. Verify
-
-```bash
-which abtars    # should return nothing
-which abmind    # should return nothing
-ls ~/.abtars    # should not exist
-ls ~/.abmind    # should not exist
-```
-
-## Logs
-
-```bash
-# Bridge log (today)
-tail -f ~/.abtars/logs/bridge-$(date +%F).log
-
-# Watchdog/systemd journal
-journalctl -u abtars -f          # system scope
-journalctl --user -u abtars-watchdog -f   # user scope
-```
+See [Stop & Uninstall](./stop-uninstall.md) for uninstall details.

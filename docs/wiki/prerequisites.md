@@ -1,120 +1,29 @@
 # Prerequisites
 
-Before installing abTARS, make sure you have the following.
+## Runtime
 
-## Node.js 22+ (required)
+abTARS requires Node.js 22.19 or newer and npm. Install a supported Node.js release for your operating system, then verify:
 
-abTARS requires Node.js 22 or later. Recommended: Node.js 24 (latest even release).
+~~~bash
+node --version
+npm --version
+~~~
 
-**macOS (Homebrew):**
+Git is needed when using a development checkout or building from source.
 
-```bash
-brew install node@24
-brew link node@24
-node --version   # should show v24.x.x
-```
+## Choose an interface
 
-**Linux / WSL (NodeSource):**
+Messaging is optional. Configure a Telegram bot, a Discord application, or use the local terminal interface. Follow [Installation](./install.md) for platform setup and credentials.
 
-```bash
-curl -fsSL https://deb.nodesource.com/setup_24.x | sudo -E bash -
-sudo apt-get install -y nodejs
-node --version   # should show v24.x.x
-```
+## Choose an execution route
 
-**Using nvm:**
+- The pi-ai route uses Pi and a compatible API provider. The installation guide covers the Pi runtime and provider credentials.
+- The ACP route uses an ACP-compatible agent CLI installed on the same machine.
 
-```bash
-nvm install 24 && nvm use 24 && nvm alias default 24
-node --version   # should show v24.x.x
-```
+Provider model IDs, authentication, and account requirements vary. See [Transport Configuration](./transport.md), [Provider Authentication](./pi-auth.md), and the provider's current documentation.
 
-## git (required)
+## Optional integrations
 
-```bash
-git --version   # any recent version
-```
+Install only the integrations you plan to use. abmind is a separate, optional memory system. Browser tools, MCP servers, and other optional dependencies are described in [Dependencies](./dependencies.md).
 
-## Telegram bot token (required)
-
-Create a bot via [@BotFather](https://t.me/BotFather) on Telegram. You'll need:
-- The bot token (e.g. `123456:ABC-DEF...`)
-- Your chat ID (send `/start` to [@userinfobot](https://t.me/userinfobot))
-
-## Model provider (at least one)
-
-| Provider | Type | Setup |
-|----------|------|-------|
-| **ollama** | Local, free | `curl -fsSL https://ollama.ai/install.sh \| sh` (Linux) or `brew install ollama` (macOS) |
-| **OpenRouter** | Cloud, aggregator | Sign up at [openrouter.ai](https://openrouter.ai), get an API key. Access to all major models. |
-| **OpenAI** | Cloud, direct | API key from [platform.openai.com](https://platform.openai.com) |
-| **Anthropic** | Cloud, direct | API key from [console.anthropic.com](https://console.anthropic.com) |
-| **Kiro CLI** | Local AI coding tool | Install [Kiro](https://kiro.dev) separately |
-| **Gemini CLI** | Local AI coding tool | Install [Gemini CLI](https://github.com/google-gemini/gemini-cli) separately |
-
-### Model requirements
-
-abTARS works with any LLM that supports the OpenAI chat completions API format, including local models via ollama.
-
-| | Minimum | Recommended |
-|---|---|---|
-| **Context window** | 32K tokens | 128K+ tokens |
-| **Model quality** | Any instruction-following model | State-of-the-art (GPT-4o, Claude, Gemini Pro, DeepSeek V3+) |
-
-**Context window:** abTARS works with 32K models, but tool use eats context fast. 128K+ recommended for comfortable operation.
-
-**Model quality and security:** abTARS injects persona, memory, and tool schemas into the system prompt. Weaker models may leak instructions or follow injected prompts from user messages. For production, use frontier models.
-
-## Optional dependencies
-
-| Dependency | What for | macOS | Linux/WSL |
-|-----------|----------|-------|-----------|
-| ollama | Local embeddings + models | `brew install ollama` | See [ollama.ai](https://ollama.ai) |
-| bubblewrap | Sandbox (Linux only) | N/A | `apt install bubblewrap` |
-| lightpanda | Fast web fetch | `abtars deps install lightpanda` | `abtars deps install lightpanda` |
-| cloak | Action-capable stealth browser | `abtars deps install cloak` | `abtars deps install cloak` |
-
-Install all optional npm deps with one command once the CLI is available:
-
-```bash
-abtars deps install all
-```
-
-## Do I need sudo? No.
-
-abtars and abmind install, update, and run entirely in user space.
-
-| Component | Location |
-|-----------|----------|
-| Node + npm packages | `~/.nvm/versions/node/...` (nvm) or `~/.npm-global/` |
-| abtars releases | `~/.abtars-releases/` |
-| abtars runtime | `~/.abtars/` |
-| abmind data | `~/.abmind/` |
-| Watchdog service | `~/Library/LaunchAgents/` (macOS) or `~/.config/systemd/user/` (Linux) |
-| Native deps | `~/.local/lib/node_modules/` |
-
-No system paths. No `/usr/local/`. No `/etc/`. No root.
-
-**One exception — systemd linger (Linux only):** for the bridge to survive a reboot as a user systemd service, you may need to enable linger once:
-
-```bash
-sudo loginctl enable-linger $USER
-```
-
-That's a one-time system admin action. After that, you never need sudo again.
-
-**Manual system binaries** (ollama and bwrap) are the only optional dependencies
-that may require a platform package manager. The Lightpanda and Cloak upstream
-installers run in the user-local prefix through `abtars deps`; abtars never runs
-sudo.
-
-**If npm defaults to `/usr/local/` (macOS):** macOS ships with npm pointing at `/usr/local/`, which requires sudo for `npm install -g`. Fix with one of:
-
-- **Redirect npm globals to your home dir:**
-  ```bash
-  npm config set prefix ~/.npm-global
-  echo 'export PATH="$HOME/.npm-global/bin:$PATH"' >> ~/.zshrc && source ~/.zshrc
-  ```
-- **Use nvm (recommended):** nvm installs Node + npm under `~/.nvm/` — no sudo, multiple Node versions, no config needed. See [Node.js 22+](#node-js-22-required) above.
-
-Ready? Go to [Installation](./install.md).
+The normal user-local installation does not require administrator access. Installing operating-system packages or registering a system-scope service may require it; see [Installation](./install.md).

@@ -1,95 +1,54 @@
 # Quick Start
 
-New to abTARS? This page walks you through what you need and what to decide before installing.
+This guide covers the choices to make before installing abTARS. For the full setup, see [Installation](./install.md).
 
-Experienced? Jump straight to [Installation](./install.md) for the full technical steps.
+## What you need
 
-## What you'll need
+1. A machine that can stay available while you use the agent.
+2. Node.js 22.19 or newer and npm.
+3. An interface: a Telegram bot or Discord application for messaging, or the local terminal interface, if enabled.
+4. An execution route:
+   - The pi-ai route uses Pi and an API provider configured for your selected model.
+   - The ACP route uses an ACP-compatible agent CLI.
 
-1. **A computer that stays on** — Mac mini, NUC, old laptop, cloud VM, WSL on your desktop. abTARS runs 24/7 on your hardware.
+See [Installation](./install.md) for exact setup steps and credentials.
 
-2. **Node.js 22+** — the runtime (recommended: Node 24). Install via [Homebrew](https://brew.sh) (`brew install node@24`) on macOS or [NodeSource](https://github.com/nodesource/distributions) on Linux/WSL.
-
-3. **npm** — the package manager. Comes with Node.js.
-
-4. **A Telegram bot token** — create one via [@BotFather](https://t.me/BotFather) on Telegram. This is how you'll talk to your agent.
-
-5. **A model provider** — at least one of:
-   - **ollama** (free, runs locally — good for privacy)
-   - **OpenRouter** (paid, access to all frontier models)
-   - **Kiro CLI / Gemini CLI / Claude Code** (if you already use one)
-
-## Decisions to make
-
-### How should it run?
+## Choose how it runs
 
 | Mode | What it means |
 |------|--------------|
-| **daemon (recommended)** | Installs as an OS service. Auto-restarts on crash, survives reboots, watchdog monitors health. Your agent is always on. |
-| **simple** | Runs in the background. If it crashes, you restart manually. Good for trying things out. |
+| daemon | Installs an operating-system service that starts the watchdog and recovers the bridge after failures. |
+| simple | Runs without the operating-system service. You start and stop it yourself. |
 
-### Which model?
+## Install and verify
 
-The install ships a pi-stack default (GPT-6 Luna realtime via OpenRouter — add
-your API key after install) — just install pi with `abtars deps install pi`.
-For the best experience beyond that:
-- **128K+ context window** — smaller models lose context fast with tool use
-- **Frontier quality** (GPT-4o, Claude, Gemini Pro) — better at following instructions, harder to manipulate
-- **Local models via ollama** — fully private, no API costs, but weaker on complex tasks
+Follow the [Installation guide](./install.md). Then check the bridge:
 
-You can switch models anytime via `/model` in Telegram. No reinstall needed.
+~~~bash
+abtars status
+abtars doctor
+~~~
 
-## Let your AI install it for you
+Send a message through your configured platform, or open the local terminal interface if you enabled it.
 
-If you use an agentic coding tool (Kiro, Claude Code, Gemini CLI, Cursor, Copilot), just give it the [Installation page](./install.md) and ask it to install abTARS for you. It has all the information it needs — prerequisites, commands, platform-specific steps.
-
-> "Install abTARS on this machine following the install guide. Use alpha channel, supervised mode."
-
-That's it. Your AI colleague handles the rest.
-
-## Manual install
-
-Follow [Installation](./install.md) — it has step-by-step instructions for both Linux/WSL and macOS.
-
-## After install
-
-### Verify it works
-
-```bash
-abtars status       # should show bridge: ● running
-abtars doctor       # should show all green
-```
-
-Send a message to your bot on Telegram — it should respond.
-
-### Telegram commands
+## Useful commands
 
 | Command | What it does |
 |---------|-------------|
-| `/status` | Bridge health, uptime, model |
-| `/model` | Switch model/provider on the fly |
-| `/new` | Start a fresh conversation session |
-| `/sleep` | Trigger sleep + memory consolidation |
-| `/help` | Full command list |
+| /status | Show bridge status and uptime |
+| /models | Show the current model and route |
+| /new | Start a fresh conversation |
+| /sleep | Show sleep status |
+| /help | List available commands |
 
-### Customize personality
+## Memory and personalization
 
-Edit `~/.abmind/memory/core/SOUL.md` — this defines who your agent is: name, personality, language, tone. Make it yours.
+abmind is optional and installed separately. When using it, follow the [abmind setup guide](/abmind/install) to configure persistent memory and personalize the agent.
 
-### Updating
+## Updating
 
-```bash
-abtars update --alpha    # pulls latest source, rebuilds, deploys, restarts
-```
-
-### Something broke?
-
-```bash
-abtars doctor --fix
-```
-
-See [Health Check](./healthcheck.md) for more.
+Run abtars update with the channel you want to use, such as --alpha for alpha releases. See [Upgrading](./upgrade.md) for the update and rollback steps.
 
 ## Security
 
-Keep your bot **private** (not searchable publicly) when creating it with @BotFather. abTARS has access to your machine via tools. The built-in allowlist blocks unknown senders, but the bot should not be discoverable in the first place. Only people who know the exact bot username should be able to reach it.
+Keep bot credentials private and configure which user IDs may contact the agent. Do not rely on an unlisted bot name as access control. abTARS can run tools on the machine where it is installed, so grant access deliberately.

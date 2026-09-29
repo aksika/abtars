@@ -23,8 +23,10 @@ abtars update --alpha
 `--stable` tracks stable releases, `--dev` tracks dev (add a directory,
 `--dev <dir>`, to deploy from a local checkout). The update builds from
 source, stages the release, atomically repoints `releases/current`,
-restarts, and health-verifies. There is no auto-rollback — if the bridge
-stays unhealthy, roll back manually (below).
+restarts, and health-verifies. An unhealthy result requires operator review;
+the update health check does not directly roll back the release. A separate
+boot circuit breaker can restore a previous release after repeated unplanned
+bridge deaths.
 
 ## macOS
 
@@ -72,7 +74,7 @@ updates the manifest, and respawns the bridge from the target release.
 
 ## If deploy fails
 
-There is no auto-rollback. If the bridge stays unhealthy after an update:
+If the bridge stays unhealthy after an update:
 
 1. Check logs: `ls ~/.abtars/logs/` and tail the latest bridge log
 2. Check status: `abtars status`, `abtars doctor --fix`

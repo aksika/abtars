@@ -88,15 +88,18 @@ Send a message to your bot on Telegram — it should respond.
 
 ## Adding API keys later
 
-Secrets live in `~/.abtars/secret/`, one file per key (encrypted at rest after first
-boot). The filename becomes the environment variable name:
+Provider credentials live in `~/.abtars/secret/`, one file per credential.
+The filename is the environment-variable name used by provider configuration:
 
 ```bash
-echo -n "sk-or-v1-abc123..." > ~/.abtars/secret/OPENROUTER_API_KEY
-abtars stop && abtars start
+read -rsp "OpenRouter API key: " api_key
+printf '%s' "$api_key" > ~/.abtars/secret/OPENROUTER_API_KEY
+unset api_key
+chmod 600 ~/.abtars/secret/OPENROUTER_API_KEY
+abtars restart --cold
 ```
 
-See [Secrets Vault](./secrets.md) for the full details.
+See [Provider Credentials](./secrets.md) for details.
 
 ## Next steps
 

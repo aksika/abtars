@@ -1,90 +1,25 @@
 # Security
 
-abTARS uses a layered security model with progressive isolation levels.
+The current SECURITY_MODE options are off and guardrails. Operating-system sandboxing and container isolation are not active.
 
-## Security Modes
+## Security modes
 
-Set `SECURITY_MODE` in `~/.abtars/config/.env`:
+Set SECURITY_MODE in ~/.abtars/config/.env:
 
-| Mode | Level | What it does | Overhead |
-|------|-------|-------------|----------|
-| `off` | 0 | No restrictions | 0 |
-| `guardrails` | 1 | App-level command classification + path blocking + ActionGate auth | ~0ms |
-| `seatbelt` ⚠️ BETA | 2 | OS-level sandbox per bash command (bwrap / sandbox-exec) | ~5ms/cmd |
-| `sandbox` | 3 | Full Docker container per session (planned) | ~2s/session |
+| Value | Current behavior |
+|-------|------------------|
+| off | Default. Disables the configured command authorization policy. Bridge self-protection and peer-origin restrictions still apply. |
+| guardrails | Applies application-level command classification, path checks, and approval rules. |
+| seatbelt or docker | Not wired as operating-system containment. These values fall back to guardrails and produce a startup warning. |
 
-Default: `guardrails`
+Unknown values also fall back to guardrails. Do not treat seatbelt or docker as an active sandbox.
 
-## Level 1 — Guardrails
+## Guardrails
 
-Application-level protection. Always active regardless of security mode.
+When SECURITY_MODE=guardrails, abTARS applies application-level checks to supported tool actions. Some commands may be blocked or require approval. These checks are not a substitute for operating-system isolation.
 
-- **Command classification:** dangerous commands (`rm -rf`, `git push --force`, `sudo`) are blocked or require Telegram approval via ActionGate
-- **Path restrictions:** secrets (`~/.abtars/secret/`) and config blocked from bash access
-- **Audit log:** all denied/gated commands logged to `~/.abtars/logs/audit.jsonl`
+Keep API keys and other credentials in the local secret directory, and avoid granting the agent access to workspaces or tools it does not need.
 
-## Level 2 — Seatbelt (BETA)
+## Check the configured mode
 
-```bash
-# Enable:
-echo "SECURITY_MODE=seatbelt" >> ~/.abtars/config/.env
-```
-
-Wraps every `execute_bash` tool call in OS-level sandboxing:
-
-- **Linux:** [bubblewrap](https://github.com/containers/bubblewrap) (`bwrap`) — namespace isolation
-- **macOS:** `sandbox-exec` — Apple's kernel-level sandbox profiles
-
-### What it protects
-
-- Secrets (`~/.abtars/secret/`, `~/.abtars/config/.env`) cannot be read from bash
-- Memory database (`~/.abmind/`) inaccessible
-- Write access limited to workspace + /tmp
-- Network controllable per session type (full, allowlist, or none)
-
-### Requirements
-
-- **Linux:** `sudo apt install bubblewrap` (or `dnf install bubblewrap`)
-- **macOS:** built-in (no install needed)
-
-If the tool isn't available, abTARS falls back to guardrails mode with a warning.
-
-### Session-type policies
-
-| Session | Filesystem | Network |
-|---------|-----------|---------|
-| Main (A) | Read all, write workspace/logs/tmp, deny secret writes | Full |
-| Worker (W) | Read/write own session dir only | Allowlist (model providers) |
-| Browse (B) | Read/write own session dir only | Full |
-
-### Command bypass
-
-Bare read-only commands with no arguments (`date`, `pwd`, `whoami`) skip the sandbox for performance. All other commands are sandboxed.
-
-Destructive patterns (`rm -rf`, `git push --force`, `DROP TABLE`) still require ActionGate approval even with seatbelt active.
-
-### Known limitations (BETA)
-
-- `sandbox-exec` is deprecated by Apple — works today but may break on future macOS versions
-- Some commands may fail due to missing path permissions — check logs for sandbox denial messages
-- Network domain allowlist is enforced at app level on Linux (bwrap can't do domain-level filtering)
-- bwrap version compatibility varies across distros
-
-## Level 3 — Docker Sandbox (planned)
-
-Full session isolation: Worker/Browse/Code sessions run inside Docker containers. Complete filesystem and process isolation. Requires Docker daemon.
-
-Status: bridge-side infrastructure landed, container-side agent pending.
-
-## ActionGate
-
-Privileged commands (classified as `auth-required`) trigger a Telegram inline keyboard asking for approval before execution. Tokens expire after 120 seconds.
-
-When seatbelt is active, non-destructive auth-required commands are auto-approved (the OS sandbox limits blast radius). Destructive patterns always require manual approval.
-
-## Checking Security Status
-
-```bash
-abtars doctor     # shows seatbelt/Docker availability
-/status           # shows active security mode in Telegram
-```
+Run abtars doctor for configuration and credential checks. If SECURITY_MODE is set to seatbelt or docker, review the startup log for the fallback notice that guardrails are being used.

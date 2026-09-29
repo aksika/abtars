@@ -5,20 +5,20 @@ The `abtars` command manages installation, updates, and lifecycle of the bridge.
 ## Usage
 
 ```
-abtars install    [--force] [--mode=simple|supervised|supervised-daemon] [--restore <backup.zip>]
+abtars install    [--force] [--mode=simple|daemon] [--restore <backup.zip>]
 abtars uninstall  [--yes]
-abtars update     [--source local|npm|github] [--from-local]
-abtars rollback   [--to <version>]
+abtars update     [--dev [DIR] | --alpha | --stable]
+abtars rollback   [--to <slot>]
 abtars backup
 abtars start
-abtars stop       [--force]
-abtars restart
+abtars stop
+abtars restart    [--cold]
 abtars status
 abtars logs
 abtars config
 abtars doctor     [<args passed to doctor.sh>...]
 abtars onboard    [--non-interactive --accept-risk --telegram-token ... --telegram-chat-id ...]
-abtars daemon     install|uninstall|start|stop|restart|status
+abtars daemon     install|uninstall|start|stop|restart
 abtars deps       install|list|update|remove
 ```
 
@@ -29,7 +29,7 @@ abtars deps       install|list|update|remove
 First-time setup. Creates `~/.abtars/`, installs the bridge, sets up the watchdog.
 
 - `--force` — overwrite existing installation
-- `--mode` — `simple` (no watchdog), `supervised` (watchdog, manual start), `supervised-daemon` (watchdog + auto-start on boot)
+- `--mode` — `simple` or `daemon`
 - `--restore <backup.zip>` — restore config/state from a backup archive
 
 ### uninstall
@@ -40,16 +40,17 @@ Removes the bridge installation. Stops running processes first.
 
 ### update
 
-Builds and deploys a new version. Stages alongside the running instance, then performs a quick restart (< 2s downtime).
+Builds and deploys a new version from the selected channel.
 
-- `--from-local` — build from the local repo (default for dev workflow)
-- `--source` — choose source: `local`, `npm`, or `github`
+- `--dev [DIR]` — deploy the dev channel, optionally from a local checkout
+- `--alpha` — deploy the alpha channel
+- `--stable` — deploy the stable channel
 
 ### rollback
 
 Revert to a previous version.
 
-- `--to <version>` — specific version to roll back to (defaults to previous)
+- `--to <slot>` — choose a previous release slot (defaults to the latest previous release)
 
 ### backup
 
@@ -57,21 +58,15 @@ Creates a zip archive of config and state (`~/.abtars/config/`, secrets, task DB
 
 ### start
 
-Starts the bridge (and watchdog if in supervised mode).
-
-### start
-
-Starts the bridge (and watchdog if in supervised mode). If already running, prints "already running" and exits.
+Starts the bridge in simple mode or starts its watchdog service in daemon mode.
 
 ### stop
 
 Stops the bridge and watchdog.
 
-- `--force` — required on supervised-daemon installs (kills watchdog first to prevent respawn)
-
 ### restart
 
-Stop + start in sequence.
+Restarts the bridge. Use `--cold` to start a fresh bridge process.
 
 ### status
 
@@ -85,7 +80,7 @@ Diagnoses common issues (stale locks, missing config, port conflicts, dependency
 
 ### onboard
 
-Interactive first-run wizard. Sets up Telegram bot token, chat ID, and initial config.
+Interactive first-run wizard. Configures the install mode, security settings, and messaging platform credentials.
 
 - `--non-interactive` — skip prompts, use flags instead
 - `--telegram-token` — bot token
@@ -106,11 +101,13 @@ Manage the systemd/launchd service.
 
 | Subcommand | Description |
 |------------|-------------|
-| `daemon install` | Install and start the system service (requires sudo) |
+| `daemon install` | Install and start the system-scope service (requires sudo) |
 | `daemon uninstall` | Remove the service |
 | `daemon start` | Start the service |
 | `daemon stop` | Stop the service |
 | `daemon restart` | Restart the service |
+
+Use `abtars status` to inspect bridge and service state.
 
 ### deps
 
@@ -125,11 +122,11 @@ Manage optional CLI npm package groups (native, twitter, pdf, youtube, image, pi
 
 ### tui
 
-Attach a terminal UI to a running bridge over a unix-domain socket (#1315).
+Attach a terminal UI to a running bridge over a unix-domain socket.
 The bridge must have been started with `TUI_ENABLED=true` (or `--tui`).
 
 ```bash
-abtars deps install tui                # one-time: install the pi-tui client dep
+abtars deps install pi                 # install Pi, including its TUI library
 abtars tui                              # attach to the active tui session (auto-creates Main if none)
 abtars tui --session 2                  # switch to existing tui session #2
 abtars tui --new C                      # create a new Code session and attach

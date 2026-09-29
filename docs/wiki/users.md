@@ -1,16 +1,16 @@
 # Multi-User
 
-abTARS supports multiple users with role-based access control.
+abTARS supports multiple configured users with role-based access and per-user tool and platform settings.
 
 ## Configuration
 
-Define users in `~/.abtars/config/users.json`:
+Define users in ~/.abtars/config/users.json:
 
-```json
+~~~json
 {
   "users": [
     {
-      "userId": "master",
+      "userId": "owner",
       "role": "master",
       "maxClass": 3,
       "tools": ["all"],
@@ -22,47 +22,30 @@ Define users in `~/.abtars/config/users.json`:
       "maxClass": 1,
       "tools": ["memory_recall"],
       "platforms": { "telegram": 987654321 },
-      "languages": ["en", "hu"]
+      "languages": ["en"]
     }
   ]
 }
-```
+~~~
+
+Replace the sample IDs and names with your own values.
 
 ## Roles
 
-| Role | Permissions |
-|------|------------|
-| `master` | Full access — all commands, all tools, all memory classes |
-| `user` | Can chat, limited commands (`/new`, `/reset`, `/stop`, `/status`, `/help`), configured tools only |
-| `guest` | Can chat only, no memory recording, no tools |
+| Role | Typical access |
+|------|----------------|
+| master | Administrative commands and configured tools |
+| user | Chat, supported user commands, and configured tools |
+| guest | Limited chat access |
 
-## Memory Classification
+The exact permissions depend on the command, platform, and per-user configuration.
 
-| Class | Label | Who can access |
-|-------|-------|---------------|
-| 0 | UNCLASSIFIED | Everyone |
-| 1 | RESTRICTED | user + master |
-| 2 | CONFIDENTIAL | master only |
-| 3 | SECRET | master only, encrypted at rest |
+## Memory classes
 
-## Approving Users
+When memory integration is enabled, maxClass sets the highest memory class a user may access. Class labels and handling are defined by the installed memory system.
 
-From chat:
-```
-/users                    → list all users
-/users approve <id>       → approve by platform ID (adds as guest)
-/users revoke <userId>    → remove access
-```
+## User administration
 
-## Platform ID Mapping
+The /users command lists and manages configured users. Available subcommands depend on the caller's role; use /help for the current command syntax.
 
-Each user maps to platform-specific IDs:
-
-```json
-"platforms": {
-  "telegram": 123456789,
-  "discord": "987654321098765432"
-}
-```
-
-A user can be on multiple platforms — same memory, same role, different platform IDs.
+A user can have separate platform IDs for Telegram and Discord.

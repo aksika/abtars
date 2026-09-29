@@ -22,7 +22,7 @@ The agent is NOT interrupted — it finishes its current tool call, reads your i
 
 | Transport | Injection timing |
 |-----------|-----------------|
-| Direct API | Between tool calls (true mid-run) |
+| Pi API route | Between tool calls (true mid-run) |
 | ACP | After prompt completes (best-effort, injected as follow-up) |
 
 ## Multiple `/wait` messages

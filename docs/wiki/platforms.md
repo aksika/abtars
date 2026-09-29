@@ -13,7 +13,7 @@ abTARS connects to messaging platforms and routes messages through the AI model 
 
 Full-featured: voice messages (STT/TTS), emoji reactions for memory scoring, inline keyboard pickers for model switching, edit-in-place streaming.
 
-**Config:** `TELEGRAM_ALLOWED_USER_IDS` in `~/.abtars/config/.env`. The bot token itself is a credential — store it in the secrets vault:
+**Config:** `TELEGRAM_ALLOWED_USER_IDS` in `~/.abtars/config/.env`. The bot token itself is a credential — store it in abTARS's local credential storage:
 
 ```bash
 echo -n "123456789:ABC..." > ~/.abtars/secret/TELEGRAM_BOT_TOKEN

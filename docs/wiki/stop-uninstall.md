@@ -1,101 +1,35 @@
-# Stop & Uninstall
+# Stop and Uninstall
 
-## Stop
+## Stop the bridge
 
-### Using abtars command (recommended)
+~~~bash
+abtars stop
+~~~
 
-```bash
-abtars stop --force
-```
+Use abtars status to confirm the bridge and watchdog have stopped. In daemon mode, the CLI coordinates with the service so it does not immediately restart the bridge.
 
-Kills watchdog first (prevents respawn), then bridge. Unloads daemon service so it won't auto-restart. Works on both install modes (simple, daemon).
+## Uninstall abTARS
 
-### Manually (not recommended)
+Back up configuration or task data you want to keep, then run:
 
-**Warning:** If you only `pkill` without disabling the daemon, systemd/launchd will respawn the watchdog immediately.
+~~~bash
+abtars uninstall
+~~~
 
-```bash
-# 1. Disable daemon (prevents auto-restart)
-# macOS:
-launchctl bootout gui/$(id -u)/com.abtars.watchdog
+The command asks you to confirm before deleting the abTARS runtime directory. It also removes the abTARS CLI symlinks. It leaves the source checkout untouched.
 
-# Linux:
-systemctl --user stop abtars-watchdog
-systemctl --user disable abtars-watchdog
+To skip the interactive confirmation in an automated uninstall, pass --yes:
 
-# 2. Kill watchdog + bridge
-pkill -f watchdog.sh
-pkill -f "node.*abtars"
-```
+~~~bash
+abtars uninstall --yes
+~~~
 
-### Verify stopped
+## Remove the CLI package
 
-```bash
-ps aux | grep -E "watchdog|node.*abtars" | grep -v grep
-# Should return nothing
-```
+If you also want to remove the globally installed npm package, run:
 
-## Uninstall
+~~~bash
+npm uninstall -g abtars
+~~~
 
-### 1. Stop first
-
-```bash
-abtars stop --force
-```
-
-### 2. Remove runtime data
-
-```bash
-rm -rf ~/.abtars/
-```
-
-Config, logs, kanban, skills, state — all gone.
-
-### 3. Remove releases + source
-
-```bash
-rm -rf ~/.abtars-releases/
-```
-
-Code, build artifacts, rollback slots, source repos — all gone.
-
-### 4. Remove abmind (if installed)
-
-```bash
-rm -rf ~/.abmind/
-```
-
-Memory database, encryption key, core files — all gone. **Back up `~/.abmind/secret/abmind.key` first if you want to restore memories later.**
-
-### 5. Remove global CLI
-
-```bash
-npm uninstall -g abtars abmind
-```
-
-### 6. Remove daemon config (if supervised-daemon mode)
-
-```bash
-# macOS:
-rm ~/Library/LaunchAgents/com.abtars.watchdog.plist
-
-# Linux:
-rm ~/.config/systemd/user/abtars-watchdog.service
-systemctl --user daemon-reload
-```
-
-### 7. Remove backups (optional)
-
-```bash
-rm -rf ~/.backup-abtars/
-```
-
-### After uninstall
-
-Nothing remains. No system files touched. No root-owned artifacts. Clean machine.
-
-To reinstall later:
-```bash
-npm install -g abtars abmind
-abtars update
-```
+abmind is independent. If it is installed, follow its documentation to back it up or uninstall it separately.

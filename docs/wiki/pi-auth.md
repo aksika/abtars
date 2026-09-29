@@ -17,7 +17,7 @@ The bridge holds the key. `apiKeyEnv` names a file in `~/.abtars/secret/`:
 ```
 
 Raw credential fields (`apiKey`, `token`, …) are rejected — keys never live
-in `transport.json`. See [Secrets Vault](./secrets.md).
+in `transport.json`. See [Provider Credentials](./secrets.md).
 
 ## Keyless local
 

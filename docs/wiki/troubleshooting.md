@@ -188,15 +188,17 @@ npm uninstall -g abtars && npm install -g abtars@alpha
 
 A previous process is still holding the port:
 ```bash
-abtars stop --force
-abtars start
+abtars doctor --fix
+abtars restart --cold
 ```
 
 ### Memory not working
 
 abmind is not installed:
 ```bash
-npm install -g abmind@alpha && abmind install && abtars restart
+npm install -g abmind
+abmind install
+abtars restart
 ```
 
 ---
