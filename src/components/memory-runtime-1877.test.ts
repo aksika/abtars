@@ -114,3 +114,34 @@ describe("#1877 stripRecallFlagsForTool — tool contract preserved", () => {
     expect(a).toBe(b);
   });
 });
+
+describe("#1877 skip signal carry — abmind decides, the bridge only reports", () => {
+  async function recallWith(raw: Record<string, unknown>) {
+    const client = mockClient();
+    (client.privateMemory.recall as Mock).mockResolvedValue({ results: [], ...raw });
+    const runtime = createClientRuntime(client as never);
+    return runtime.recall({ query: "q", userId: "u1", limit: 5, terms: ["thanks"], selectTerms: true });
+  }
+
+  it("carries a reported skip with its reason", async () => {
+    const res = await recallWith({ searchSkipped: true, searchSkippedReason: "no-informative-terms" });
+    expect(res.searchSkipped).toBe(true);
+    expect(res.searchSkippedReason).toBe("no-informative-terms");
+    expect(res.hits).toEqual([]);
+  });
+
+  it("an ordinary empty result reports no skip", async () => {
+    const res = await recallWith({});
+    expect(res.searchSkipped).toBeUndefined();
+    expect(res.searchSkippedReason).toBeUndefined();
+  });
+
+  it("malformed wire values degrade to ordinary recall", async () => {
+    const truthy = await recallWith({ searchSkipped: "yes", searchSkippedReason: "no-informative-terms" });
+    expect(truthy.searchSkipped).toBeUndefined();
+    expect(truthy.searchSkippedReason).toBeUndefined();
+    const badReason = await recallWith({ searchSkipped: true, searchSkippedReason: { nope: 1 } });
+    expect(badReason.searchSkipped).toBe(true);
+    expect(badReason.searchSkippedReason).toBeUndefined();
+  });
+});

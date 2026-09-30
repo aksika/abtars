@@ -210,6 +210,16 @@ export interface RuntimeRecallResult {
    * suppression of good recalls, the bridge logs it and injects as today.
    */
   weakEvidence?: boolean;
+  /**
+   * #1877 — abmind ran no stage because the prepared terms carried no
+   * information for this user's corpus (measured document frequency, not a
+   * per-language word list). Advisory for the turn log: an ordinary empty
+   * result is indistinguishable in behavior, and the bridge injects nothing
+   * either way.
+   */
+  searchSkipped?: boolean;
+  /** #1877 — closed-set reason behind `searchSkipped`, logged verbatim. */
+  searchSkippedReason?: string;
 }
 
 /** #1867 — structural mirror of abmind's stage outcome (validated, not cast). */
@@ -1010,7 +1020,7 @@ export function createClientRuntime(client: AbmindClientLike): AbtarsMemoryRunti
         stages: input.stages,
         ...(terms.length > 0 && input.selectTerms === true ? { selectTerms: true } : {}),
         ...(fastPath !== undefined ? { fastPath } : {}),
-      })) as { results: Array<Record<string, unknown>>; decision?: unknown; selection?: unknown; stageOutcomes?: unknown; weakEvidence?: unknown };
+      })) as { results: Array<Record<string, unknown>>; decision?: unknown; selection?: unknown; stageOutcomes?: unknown; weakEvidence?: unknown; searchSkipped?: unknown; searchSkippedReason?: unknown };
       const hits: RuntimeRecallHit[] = result.results.map((r) => ({
         content: String(r["content"] ?? ""),
         score: Number(r["score"] ?? 0),
@@ -1048,14 +1058,21 @@ export function createClientRuntime(client: AbmindClientLike): AbtarsMemoryRunti
       // floor and age rules still decide injection.
       const stageOutcomes = asRecallStageOutcomes(result.stageOutcomes);
       const weakEvidence = typeof result.weakEvidence === "boolean" ? result.weakEvidence : undefined;
+      // #1877 — skip signal from abmind: validated, never trusted raw. A
+      // malformed value degrades to "ordinary recall" rather than reporting a
+      // skip that did not happen.
+      const searchSkipped = result.searchSkipped === true ? true : undefined;
+      const skipReason = searchSkipped === true && typeof result.searchSkippedReason === "string"
+        ? result.searchSkippedReason.trim().slice(0, 64) || undefined
+        : undefined;
       const ms = Date.now() - t0;
-      logDebug("memory-runtime", `recall: ${hits.length} hits (${compact.length} injected) in ${ms}ms decision=${decision?.outcome ?? "none"} selection=${selection ? `${selection.refs.length} refs${selection.truncated ? " truncated" : ""}` : "none"} top=${hits.slice(0, 3).map((h) => `${h.memoryId ?? "?"}:${h.score.toFixed(3)}`).join(",")} stages=${stageOutcomes ? Object.entries(stageOutcomes).map(([k, v]) => `${k}:${v.status}/${v.hitCount}`).join(" ") : "n/a"} weakEvidence=${weakEvidence ?? "n/a"}`);
+      logDebug("memory-runtime", `recall: ${hits.length} hits (${compact.length} injected) in ${ms}ms decision=${decision?.outcome ?? "none"} selection=${selection ? `${selection.refs.length} refs${selection.truncated ? " truncated" : ""}` : "none"} top=${hits.slice(0, 3).map((h) => `${h.memoryId ?? "?"}:${h.score.toFixed(3)}`).join(",")} stages=${stageOutcomes ? Object.entries(stageOutcomes).map(([k, v]) => `${k}:${v.status}/${v.hitCount}`).join(" ") : "n/a"} weakEvidence=${weakEvidence ?? "n/a"} skipped=${searchSkipped === true ? (skipReason ?? "yes") : "no"}`);
       if (isLogLevel("trace")) {
         for (const h of hits.slice(0, 10)) {
           logTrace("memory-runtime", `hit id=${h.memoryId ?? "?"} score=${h.score.toFixed(3)} source=${h.source ?? "?"} text="${redactSecrets(h.content).slice(0, 120)}"`);
         }
       }
-      return { hits, context, ...(decision !== undefined ? { decision } : {}), ...(selection !== undefined ? { selection } : {}), ...(stageOutcomes !== undefined ? { stageOutcomes } : {}), ...(weakEvidence !== undefined ? { weakEvidence } : {}) };
+      return { hits, context, ...(decision !== undefined ? { decision } : {}), ...(selection !== undefined ? { selection } : {}), ...(stageOutcomes !== undefined ? { stageOutcomes } : {}), ...(weakEvidence !== undefined ? { weakEvidence } : {}), ...(searchSkipped !== undefined ? { searchSkipped } : {}), ...(skipReason !== undefined ? { searchSkippedReason: skipReason } : {}) };
     },
 
     async assembleSessionContext(input: SessionContextInput): Promise<SessionContextResult> {
