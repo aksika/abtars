@@ -443,3 +443,37 @@ describe("peer deny-all policy (#1786)", () => {
     expect(backendRecall).not.toHaveBeenCalled();
   });
 });
+
+describe("#1895 memory_recall Pi boundary", () => {
+  function makeRecallContext(): PiCoreToolContext {
+    return {
+      executionId: "exec_kw",
+      userId: "user_1",
+      sandboxPolicy: buildPolicy("owner", { allowedTools: ["memory_recall"] }),
+      safety: createPiExecutionSafetyController(new FallbackPolicy([{
+        model: "test-model",
+        provider: "test-provider",
+        endpoint: "https://api.test/v1",
+        maxContext: 128000,
+        apiKey: "test-key",
+        source: "primary",
+      }], new ModelHealthRegistry())),
+      memoryToolDeps: { current: null },
+    };
+  }
+
+  it("keywords array survives the Pi boundary intact", async () => {
+    const ctx = makeRecallContext();
+    const tools = createPiAgentTools(ctx);
+    const recallTool = tools.find((t) => t.name === "memory_recall");
+    expect(recallTool).toBeDefined();
+    const keywords = ["Migration", "AND", "rollback", "rollback"];
+    await recallTool!.execute("call_kw", { keywords, limit: 5 });
+    const registry = await import("./tool-registry.js");
+    expect(vi.mocked(registry.executeToolCall)).toHaveBeenCalledWith(
+      "memory_recall",
+      { keywords, limit: 5 },
+      expect.objectContaining({ userId: "user_1" }),
+    );
+  });
+});

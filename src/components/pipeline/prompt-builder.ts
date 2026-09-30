@@ -272,8 +272,11 @@ export async function buildPrompt(
         // #1877 — no bridge-side skip decision: whether a search is worth
         // running is decided by abmind from its own term statistics, in every
         // language, instead of hand-written per-language cue lists.
+        // #1895 — ambient auto-recall: the raw turn always rides along as
+        // original (even when no terms were prepared) with ambient intent.
         const recall = await memoryRuntime.recall({
           query: prepared.query, original: prepared.original, userId, limit: ACTIVE_MEMORY_LIMIT,
+          intent: "ambient",
           ...(terms !== undefined && terms.length > 0 ? { terms, selectTerms: true } : {}),
         });
         const nowMs = Date.now();

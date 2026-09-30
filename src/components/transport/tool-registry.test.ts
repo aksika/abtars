@@ -866,3 +866,106 @@ describe("memory_recall peer clearance cap (#1790)", () => {
     expect(lastRecallRequest()).toMatchObject({ userId: "peer:low", maxClassification: 1 });
   });
 });
+
+describe("memory_recall keyword contract (#1895)", () => {
+  let quotaDir: string;
+  let quota: MemoryStoreQuota;
+  let holder: MemoryToolDependenciesHolder;
+  let client: { privateMemory: { recall: ReturnType<typeof vi.fn> } };
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    quotaDir = mkdtempSync(join(tmpdir(), "abtars-tool-keywords-"));
+    quota = new MemoryStoreQuota({ dbPath: join(quotaDir, "quota.db") });
+    holder = { current: null as unknown as NonNullable<MemoryToolDependenciesHolder["current"]> };
+    const mock = mockAbmindClient({
+      methods: ["private.recall"],
+      features: { private_read: "true", private_write: "false" },
+    });
+    client = mock as unknown as { privateMemory: { recall: ReturnType<typeof vi.fn> } };
+    holder.current = { runtime: createClientRuntime(mock as never), quota };
+    setUserRegistryOverride({
+      users: [{ userId: "master-1", role: "master" as const, maxClass: 1, tools: [], platforms: {} }],
+      byPlatformId: new Map(),
+      byUserId: new Map([["master-1", { userId: "master-1", role: "master" as const, maxClass: 1, tools: [], platforms: {} }]]),
+    });
+  });
+
+  afterEach(() => {
+    quota.close();
+    rmSync(quotaDir, { recursive: true, force: true });
+    holder.current = null;
+    setUserRegistryOverride(null);
+  });
+
+  function ctx() {
+    return { userId: "master-1", sessionType: "A" as const, memoryToolDeps: holder };
+  }
+
+  function lastRecallRequest(): Record<string, unknown> {
+    const calls = client.privateMemory.recall.mock.calls;
+    expect(calls.length).toBeGreaterThan(0);
+    return calls[calls.length - 1]![0] as Record<string, unknown>;
+  }
+
+  it("keyword-only calls work without query and cross verbatim with explicit intent", async () => {
+    const raw = await executeToolCall("memory_recall", { keywords: ["Migration", "AND", "rollback", "rollback"] }, ctx());
+    expect(JSON.parse(raw).hits).toBeDefined();
+    // Case, order, duplicates, and literal boolean words survive; no cap.
+    expect(lastRecallRequest()).toMatchObject({
+      translated: ["Migration", "AND", "rollback", "rollback"],
+      intent: "explicit",
+    });
+  });
+
+  it("query-only calls take the deprecated split path", async () => {
+    const raw = await executeToolCall("memory_recall", { query: "Which staging rollback?" }, ctx());
+    expect(JSON.parse(raw).hits).toBeDefined();
+    // Unicode word runs, no stoplist/ASCII filter, short tokens preserved.
+    expect(lastRecallRequest()).toMatchObject({
+      translated: ["Which", "staging", "rollback"],
+      intent: "explicit",
+    });
+  });
+
+  it("present keywords win over query", async () => {
+    const raw = await executeToolCall("memory_recall", { keywords: ["zebra"], query: "apples" }, ctx());
+    expect(JSON.parse(raw).hits).toBeDefined();
+    expect(lastRecallRequest()).toMatchObject({ translated: ["zebra"], intent: "explicit" });
+  });
+
+  it("invalid keywords are an argument error, never a fallback to query", async () => {
+    for (const args of [
+      { keywords: [], query: "apples" },
+      { keywords: ["ok", "  "], query: "apples" },
+      { keywords: "apples", query: "apples" },
+    ]) {
+      const raw = await executeToolCall("memory_recall", args, ctx());
+      expect(JSON.parse(raw).error).toMatch(/keywords must be a non-empty array/);
+    }
+    expect(client.privateMemory.recall).not.toHaveBeenCalled();
+  });
+
+  it("missing and empty queries are argument errors", async () => {
+    for (const args of [{}, { query: "  !!!  " }, { query: 42 }]) {
+      const raw = await executeToolCall("memory_recall", args, ctx());
+      expect(JSON.parse(raw).error).toMatch(/keywords or query|no keywords/);
+    }
+    expect(client.privateMemory.recall).not.toHaveBeenCalled();
+  });
+
+  it("oversize keyword arrays are never silently capped", async () => {
+    const keywords = Array.from({ length: 24 }, (_, i) => `term${i}`);
+    const raw = await executeToolCall("memory_recall", { keywords }, ctx());
+    expect(JSON.parse(raw).hits).toBeDefined();
+    expect(lastRecallRequest()).toMatchObject({ translated: keywords, intent: "explicit" });
+  });
+
+  it("schema presents keywords preferred and query no longer universally required", () => {
+    const tool = getToolDefinitions().find((t) => t.name === "memory_recall");
+    expect(tool).toBeDefined();
+    const params = tool!.parameters as { required?: string[]; properties?: Record<string, unknown> };
+    expect(params.required ?? []).not.toContain("query");
+    expect(params.properties?.["keywords"]).toBeDefined();
+  });
+});

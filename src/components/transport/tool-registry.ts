@@ -227,6 +227,13 @@ function optionalStringValue(value: unknown): string | undefined {
   return value === undefined || value === null ? undefined : stringValue(value);
 }
 
+/** #1895 — ingress guard for the memory_recall keywords array: non-empty,
+ * every element a non-blank string. Accepted arrays cross verbatim. */
+function isNonBlankStringArray(value: unknown): value is string[] {
+  return Array.isArray(value) && value.length > 0 &&
+    value.every((entry): entry is string => typeof entry === "string" && entry.trim().length > 0);
+}
+
 const CLI_TIMEOUT_MS = 60_000;
 const MEMORY_TOOL_ERROR_MAX = 512;
 
@@ -527,10 +534,14 @@ const memoryRecallTool: ToolDefinition = {
   parameters: {
     type: "object",
     properties: {
-      query: { type: "string", description: "Search query" },
+      // #1895 — discrete keywords are the preferred input; the free-text
+      // query stays as the deprecated alternative, split into keywords at
+      // arrival. Either valid input is sufficient.
+      keywords: { type: "array", items: { type: "string" }, description: "Discrete search keywords (preferred). Non-empty, non-blank strings; wins over query." },
+      query: { type: "string", description: "Deprecated: free-text query, split into keywords at arrival. Prefer keywords." },
       limit: { type: "integer", description: "Max results (default 10)" },
     },
-    required: ["query"],
+    required: [],
   },
   async execute(args, context): Promise<string> {
     const runtime = memoryDeps(context)?.runtime;
@@ -555,14 +566,41 @@ const memoryRecallTool: ToolDefinition = {
         const userEntry = loadUsers().byUserId.get(userId);
         maxClassification = userEntry?.maxClass ?? 1;
       }
+      // #1895 — keyword contract. A present keywords array wins over query
+      // and must be non-empty with only non-blank strings; invalid supplied
+      // keywords are an argument error, never a silent fallback to query.
+      // Query-only calls split Unicode word runs with no stoplist or
+      // ASCII-only filter; short tokens survive on this compatibility path.
+      const rawKeywords = args["keywords"];
+      let terms: string[];
+      if (rawKeywords !== undefined && rawKeywords !== null) {
+        if (!isNonBlankStringArray(rawKeywords)) {
+          return JSON.stringify({ error: "memory_recall: keywords must be a non-empty array of non-blank strings" });
+        }
+        terms = rawKeywords;
+      } else {
+        const rawQuery = args["query"];
+        if (typeof rawQuery !== "string") {
+          return JSON.stringify({ error: "memory_recall: either keywords or query is required" });
+        }
+        const split = rawQuery.match(/[\p{L}\p{N}]+/gu) ?? [];
+        if (split.length === 0) {
+          return JSON.stringify({ error: "memory_recall: query produced no keywords and no keywords were supplied" });
+        }
+        terms = split;
+      }
       const result = await runtime.recall({
-        query: stringValue(args["query"]),
+        // The joined string stays for logging/compatibility; the array below
+        // is the retrieval query and is never replaced by this string.
+        query: terms.join(" "),
+        keywords: terms,
+        intent: "explicit",
         userId,
         limit: parseInt(stringValue(args["limit"] ?? "10"), 10),
         maxClassification,
       });
       // #1837 — tool-path recall summary (the runtime boundary logs detail).
-      logDebug(TAG, `memory_recall: user=${userId} limit=${stringValue(args["limit"] ?? "10")} maxClass=${maxClassification} query="${redactSecrets(stringValue(args["query"])).slice(0, 60)}"`);
+      logDebug(TAG, `memory_recall: user=${userId} limit=${stringValue(args["limit"] ?? "10")} maxClass=${maxClassification} keywords=${terms.length} query="${redactSecrets(terms.join(" ")).slice(0, 60)}"`);
       import("../metrics-collector.js").then(({ recordLatency }) => recordLatency("recall", Date.now() - t0)).catch(err => logAndSwallow(TAG, "record recall latency", err));
       // #1877 — the tool contract predates the carried exemption flags:
       // strip them before agent-visible serialization. Auto-recall reads

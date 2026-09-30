@@ -54,8 +54,13 @@ export class MemorySearchController {
 
     try {
       const t0 = Date.now();
+      // #1895 — deliberate dashboard search: the already-parsed keywords
+      // cross separately (never joined back into a single phrase for
+      // retrieval) with explicit intent, so this path always searches.
       const result = await this.deps.memoryRuntime.recall({
         query: translated.join(" "),
+        keywords: translated,
+        intent: "explicit",
         original: params.get("original")?.trim() || keywordsRaw,
         userId,
         limit: 10,

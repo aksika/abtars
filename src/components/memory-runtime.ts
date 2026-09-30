@@ -141,9 +141,24 @@ export interface RuntimeRecallInput {
   terms?: string[];
   /**
    * #1867 — corpus-df term selection inside abmind. Meaningful only with
-   * `terms`; omitted by every other caller.
+   * `terms`; omitted by every other caller. Deprecated alias for ambient
+   * intent through abmind `0.4.x`; prefer `intent`.
    */
   selectTerms?: boolean;
+  /**
+   * #1895 — recall intent, forwarded to abmind. Ambient callers (auto-recall)
+   * pass `"ambient"`; deliberate callers pass `"explicit"` with `keywords`.
+   * Absent means abmind's ambient default.
+   */
+  intent?: "ambient" | "explicit";
+  /**
+   * #1895 — deliberate caller keywords. Cross as abmind `translated`
+   * verbatim: no trimming, dedupe, or cap (the ambient `sanitizeRecallTerms`
+   * path never touches them). Requires explicit intent; the runtime enforces
+   * it even when the caller omitted the field. `query` stays for logging and
+   * joined-query compatibility but never replaces this array in retrieval.
+   */
+  keywords?: string[];
   timeStart?: number;
   timeEnd?: number;
   stages?: string[];
@@ -264,6 +279,27 @@ export function sanitizeRecallTerms(terms: readonly string[] | undefined): strin
     if (out.length >= 16) break;
   }
   return out;
+}
+
+/**
+ * #1895 — narrow caller keywords for the explicit path. Accepted arrays
+ * cross verbatim (order, duplicates, and case preserved; no cap): any
+ * documented resource limit rejects oversize input explicitly rather than
+ * truncating it. Anything else is a caller bug and throws here, before any
+ * retrieval runs on a silently shortened or substituted query.
+ */
+export function asExplicitKeywords(keywords: unknown): string[] {
+  if (!Array.isArray(keywords) || keywords.length === 0) {
+    throw new Error("explicit keywords must be a non-empty array of non-blank strings");
+  }
+  const accepted: string[] = [];
+  for (const keyword of keywords) {
+    if (typeof keyword !== "string" || keyword.trim().length === 0) {
+      throw new Error("explicit keywords must be a non-empty array of non-blank strings");
+    }
+    accepted.push(keyword);
+  }
+  return accepted;
 }
 
 /** #1877 — flag-field bound: short tag strings already present in the payload. */
@@ -991,7 +1027,7 @@ export function createClientRuntime(client: AbmindClientLike): AbtarsMemoryRunti
     async recall(input: RuntimeRecallInput): Promise<RuntimeRecallResult> {
       requireClientCapability(capabilities, "recall");
       const t0 = Date.now();
-      logDebug("memory-runtime", `recall: query="${redactSecrets(input.query).slice(0, 60)}" user=${input.userId} limit=${input.limit ?? 10} maxClass=${input.maxClassification ?? "?"} stages=[${input.stages?.join(",") ?? "all"}] fastPath=${input.fastPath ? "yes" : "no"}`);
+      logDebug("memory-runtime", `recall: query="${redactSecrets(input.query).slice(0, 60)}" user=${input.userId} limit=${input.limit ?? 10} maxClass=${input.maxClassification ?? "?"} stages=[${input.stages?.join(",") ?? "all"}] intent=${input.keywords !== undefined && input.keywords !== null ? "explicit(keywords)" : (input.intent ?? "default")} fastPath=${input.fastPath ? "yes" : "no"}`);
       const fastPath = input.fastPath !== undefined ? {
         question: input.fastPath.question ?? "",
         answerLanguage: input.fastPath.answerLanguage ?? "en",
@@ -1008,9 +1044,15 @@ export function createClientRuntime(client: AbmindClientLike): AbtarsMemoryRunti
       // coverage ordering participates; the joined query stays the fallback
       // when no terms were prepared. selectTerms rides the existing recall
       // method (no new capability), like #1869's parts.
-      const terms = sanitizeRecallTerms(input.terms);
+      // #1895 — explicit accepted keywords bypass the lossy sanitizer above
+      // and force explicit intent: the caller's array is the retrieval query.
+      const explicitKeywords = input.keywords !== undefined && input.keywords !== null
+        ? asExplicitKeywords(input.keywords)
+        : undefined;
+      const intent = explicitKeywords !== undefined ? "explicit" : input.intent;
+      const terms = explicitKeywords !== undefined ? [] : sanitizeRecallTerms(input.terms);
       const result = (await pm.recall({
-        translated: terms.length > 0 ? terms : [input.query],
+        translated: explicitKeywords ?? (terms.length > 0 ? terms : [input.query]),
         original: input.original ?? input.query,
         userId: input.userId,
         limit: input.limit ?? 10,
@@ -1018,6 +1060,7 @@ export function createClientRuntime(client: AbmindClientLike): AbtarsMemoryRunti
         timeStart: input.timeStart,
         timeEnd: input.timeEnd,
         stages: input.stages,
+        ...(intent !== undefined ? { intent } : {}),
         ...(terms.length > 0 && input.selectTerms === true ? { selectTerms: true } : {}),
         ...(fastPath !== undefined ? { fastPath } : {}),
       })) as { results: Array<Record<string, unknown>>; decision?: unknown; selection?: unknown; stageOutcomes?: unknown; weakEvidence?: unknown; searchSkipped?: unknown; searchSkippedReason?: unknown };

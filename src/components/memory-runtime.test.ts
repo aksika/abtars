@@ -751,3 +751,62 @@ describe("#1867 discrete terms and diagnostics carry", () => {
     }
   });
 });
+
+describe("#1895 explicit keywords and intent carry", () => {
+  function recallClient() {
+    const client = mockClient(caps(["private.recall"], { private_read: "true" }));
+    (client.privateMemory.recall as unknown as Mock).mockResolvedValue({
+      results: [{ content: "The dog chased the fox.", score: 0.9, date: "2026-09-01" }],
+    });
+    return client;
+  }
+
+  it("explicit keywords bypass the lossy sanitizer and force explicit intent", async () => {
+    const client = recallClient();
+    const rt = createClientRuntime(client);
+    const keywords = ["Migration", "AND", "rollback", "rollback", ...Array.from({ length: 20 }, (_, i) => `term${i}`)];
+    await rt.recall({ query: keywords.join(" "), userId: "u1", keywords, intent: "explicit" });
+    expect(vi.mocked(client.privateMemory.recall)).toHaveBeenCalledWith(expect.objectContaining({
+      translated: keywords,
+      intent: "explicit",
+    }));
+    const sent = vi.mocked(client.privateMemory.recall).mock.calls[0]?.[0] as Record<string, unknown>;
+    expect(sent["selectTerms"]).toBeUndefined();
+  });
+
+  it("keywords win over ambient terms and force explicit intent", async () => {
+    const client = recallClient();
+    const rt = createClientRuntime(client);
+    await rt.recall({ query: "q", userId: "u1", terms: ["dog"], selectTerms: true, keywords: ["zebra"] });
+    expect(vi.mocked(client.privateMemory.recall)).toHaveBeenCalledWith(expect.objectContaining({
+      translated: ["zebra"],
+      intent: "explicit",
+    }));
+  });
+
+  it("ambient intent forwards without keywords", async () => {
+    const client = recallClient();
+    const rt = createClientRuntime(client);
+    await rt.recall({ query: "q", original: "q", userId: "u1", terms: ["dog"], selectTerms: true, intent: "ambient" });
+    expect(vi.mocked(client.privateMemory.recall)).toHaveBeenCalledWith(expect.objectContaining({
+      translated: ["dog"],
+      intent: "ambient",
+      selectTerms: true,
+    }));
+  });
+
+  it("asExplicitKeywords accepts verbatim arrays and rejects anything else", async () => {
+    const { asExplicitKeywords } = await import("./memory-runtime.js");
+    expect(asExplicitKeywords(["a", "B", "a"])).toEqual(["a", "B", "a"]);
+    for (const bad of [undefined, null, [], ["ok", ""], ["ok", "  "], "x", [42]]) {
+      expect(() => asExplicitKeywords(bad)).toThrow(/non-empty array of non-blank strings/);
+    }
+  });
+
+  it("invalid keywords reject before any retrieval runs", async () => {
+    const client = recallClient();
+    const rt = createClientRuntime(client);
+    await expect(rt.recall({ query: "q", userId: "u1", keywords: [] })).rejects.toThrow(/non-empty array/);
+    expect(client.privateMemory.recall).not.toHaveBeenCalled();
+  });
+});

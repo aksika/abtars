@@ -158,12 +158,21 @@ describe("#1867 #671 probe — improved path injects R at or above D", () => {
         console.info(`[1867-probe] ${arm.name}: ${ms}ms raw=[${rawIds.slice(0, 6).join(",")}] injected=[${injectedIds.join(",")}] weakEvidence=${result.weakEvidence}`);
         expect(injectedIds, `${arm.name}: required memory R not injected`).toContain(r);
         expect(injectedIds.indexOf(r), `${arm.name}: R ranks below distractor D`).toBeLessThanOrEqual(injectedIds.indexOf(d));
-        if (arm.name !== "hungarian") {
-          // Every English-arm term genuinely matches R, so the lexical arm of
-          // weakEvidence must clear. The Hungarian arm carries untranslatable
-          // source-language residue alongside the fixture translation, so its
-          // flag is logged, not asserted.
+        if (arm.name === "exact") {
+          // Every exact-arm term genuinely matches R, so the lexical arm of
+          // weakEvidence must clear.
           expect(result.weakEvidence, `${arm.name}: weak evidence on an exact topical match`).toBe(false);
+        }
+        if (arm.name === "paraphrase") {
+          // #1895 measured stoplist effect (522-row corpus, ceiling 130):
+          // without the English list the extractor also emits "which"
+          // (df 0, kept as rare) and "the" (df 2, kept). Corpus-common
+          // filler is still dropped ("looks" df 261, "like" df 260), and
+          // injection order is unchanged (R at/above D above), but the
+          // advisory all-terms match now sees a rare filler R lacks. The
+          // flag never gates injection; the changed value is recorded, not
+          // presumed harmless. Hungarian-arm flag stays logged, not asserted.
+          expect(result.weakEvidence, `${arm.name}: expected advisory flag after stoplist removal`).toBe(true);
         }
       }
     } finally {
