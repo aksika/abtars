@@ -177,6 +177,9 @@ export interface RuntimeRecallHit {
   emotionScore?: number;
   createdAt?: number;
   semanticRevision?: number;
+  /** #1877 — 36 h trivial-fact exemption inputs, carried from abmind. */
+  emotionTags?: string;
+  importanceFlags?: string;
 }
 
 export interface RuntimeRecallResult {
@@ -251,6 +254,55 @@ export function sanitizeRecallTerms(terms: readonly string[] | undefined): strin
     if (out.length >= 16) break;
   }
   return out;
+}
+
+/** #1877 — flag-field bound: short tag strings already present in the payload. */
+export const RECALL_FLAG_MAX_CHARS = 256;
+/** #1877 — injection floor; semantics owned by shouldInjectRecallHit. */
+export const RECALL_SCORE_FLOOR = 0.70;
+/** #1877 — trivial-fact TTL; semantics owned by shouldInjectRecallHit. */
+export const TRIVIAL_FACT_TTL_MS = 36 * 60 * 60_000;
+
+/**
+ * #1877 — narrow an unknown wire flag to the carried string shape.
+ * Non-strings drop, accepted values trim, empty-after-trim counts as absent,
+ * over-long values truncate. Absent input yields undefined: recall continues
+ * as ordinary and the age rule filters as today.
+ */
+export function asRecallFlag(raw: unknown): string | undefined {
+  if (typeof raw !== "string") return undefined;
+  const trimmed = raw.trim();
+  if (!trimmed) return undefined;
+  return trimmed.length > RECALL_FLAG_MAX_CHARS ? trimmed.slice(0, RECALL_FLAG_MAX_CHARS) : trimmed;
+}
+
+/**
+ * #1877 — one owner for the bridge floor/age injection rule.
+ * Floor first (`score <= 0.70` rejected), then the 36 h age branch (fact,
+ * `score < 1.0`, `createdAt` older than 36 h, no flags). Tests and the #1867
+ * probe import this predicate; no harness may carry a local copy.
+ */
+export function shouldInjectRecallHit(hit: Pick<RuntimeRecallHit, "score" | "memoryType" | "createdAt" | "emotionTags" | "importanceFlags">, nowMs: number): boolean {
+  if (!(hit.score > RECALL_SCORE_FLOOR)) return false;
+  if (hit.memoryType === "fact" && hit.score < 1.0 && typeof hit.createdAt === "number" && nowMs - hit.createdAt > TRIVIAL_FACT_TTL_MS) {
+    if (!hit.emotionTags && !hit.importanceFlags) return false;
+  }
+  return true;
+}
+
+/**
+ * #1877 — strip the carried exemption flags before agent-visible
+ * `memory_recall` serialization. Returns new hit objects; the input array is
+ * not mutated. Auto-recall reads `recall.hits` pre-serialization and keeps
+ * the fields; dashboard search maps fields explicitly and never sees them.
+ */
+export function stripRecallFlagsForTool<T extends RuntimeRecallHit>(hits: readonly T[]): Array<Omit<T, "emotionTags" | "importanceFlags">> {
+  return hits.map((hit) => {
+    const copy = { ...hit };
+    delete (copy as Partial<RuntimeRecallHit>).emotionTags;
+    delete (copy as Partial<RuntimeRecallHit>).importanceFlags;
+    return copy;
+  });
 }
 
 /** #1813 — structural mirror of abmind RecallSelectionV1 (validated, not cast). */
@@ -972,6 +1024,16 @@ export function createClientRuntime(client: AbmindClientLike): AbtarsMemoryRunti
         emotionScore: typeof r["emotionScore"] === "number" ? r["emotionScore"] : undefined,
         createdAt: typeof r["createdAt"] === "number" ? r["createdAt"] : undefined,
         semanticRevision: typeof r["semanticRevision"] === "number" ? r["semanticRevision"] : undefined,
+        // #1877 — carry the 36 h exemption inputs; malformed wire values
+        // drop and recall continues as ordinary (flags absent).
+        ...(() => {
+          const emotionTags = asRecallFlag(r["emotionTags"]);
+          const importanceFlags = asRecallFlag(r["importanceFlags"]);
+          return {
+            ...(emotionTags !== undefined ? { emotionTags } : {}),
+            ...(importanceFlags !== undefined ? { importanceFlags } : {}),
+          };
+        })(),
       }));
       const compact = selectInjectedHits(hits, asRecallSelection(result.selection));
       const context = compact.map(h => `- (score: ${h.score.toFixed(3)}) ${h.content.slice(0, 200)}`).join("\n");

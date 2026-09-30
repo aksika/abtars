@@ -12,7 +12,7 @@ import { logAndSwallow } from "../log-and-swallow.js";
 import { checkTool, auditDeny, type SandboxPolicy } from "../tool-sandbox.js";
 import { authorizeA2ATool, authorizePath, resolveAuthorizationOrigin } from "../authorization.js";
 import { getMasterUserId } from "../master-user.js";
-import { isDefinitivePreDispatchFailure } from "../memory-runtime.js";
+import { isDefinitivePreDispatchFailure, stripRecallFlagsForTool } from "../memory-runtime.js";
 import { runBashCommand } from "../bash-runner.js";
 import type { ToolExecutionScope } from "../tasks/task-package.js";
 import type { OrcInvocationContextV2 } from "../orc-project/orc-project-contracts.js";
@@ -564,7 +564,10 @@ const memoryRecallTool: ToolDefinition = {
       // #1837 — tool-path recall summary (the runtime boundary logs detail).
       logDebug(TAG, `memory_recall: user=${userId} limit=${stringValue(args["limit"] ?? "10")} maxClass=${maxClassification} query="${redactSecrets(stringValue(args["query"])).slice(0, 60)}"`);
       import("../metrics-collector.js").then(({ recordLatency }) => recordLatency("recall", Date.now() - t0)).catch(err => logAndSwallow(TAG, "record recall latency", err));
-      return JSON.stringify(result);
+      // #1877 — the tool contract predates the carried exemption flags:
+      // strip them before agent-visible serialization. Auto-recall reads
+      // `recall.hits` pre-serialization and is unaffected.
+      return JSON.stringify({ ...result, hits: stripRecallFlagsForTool(result.hits) });
     } catch (err) {
       return JSON.stringify({ error: err instanceof Error ? err.message : String(err) });
     }

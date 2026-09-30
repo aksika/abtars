@@ -82,6 +82,7 @@ const SCHEMA: readonly EnvVarDef[] = [
   // ── Memory ──
   { env: "MEMORY", type: "string", default: "abmind", description: "Memory provider: 'abmind' (default) or 'none'" },
   { env: "ACTIVE_MEMORY", type: "bool", default: "true", description: "Enable ambient recall on every turn" },
+  { env: "RECALL_ROUTER_ENFORCE", type: "bool", default: "false", description: "Enforce deterministic auto-recall skip router (#1877; shadow mode when false)" },
   { env: "PRIMING_MODEL_TOPICS", type: "bool", default: "true", description: "Use model-generated topics for priming" },
 
   // ── ABM-L rendering (abmind, read by abmind directly) ──
@@ -193,6 +194,7 @@ export interface EnvConfig {
   // Memory
   memory: string;
   activeMemory: boolean;
+  recallRouterEnforce: boolean;
   primingModelTopics: boolean;
 
   // Sleep (scheduling is owned by tasks.json #1321; only quality remains; sleep model removed per #1752)
@@ -357,6 +359,7 @@ export function initEnv(): Readonly<EnvConfig> {
 
     activeMemory: parseBool(readOr("ACTIVE_MEMORY", "true")),
     memory: readOr("MEMORY", "auto"),
+    recallRouterEnforce: parseBool(readOr("RECALL_ROUTER_ENFORCE", "false")),
     primingModelTopics: read("PRIMING_MODEL_TOPICS") !== "false",
 
     sleepQuality: read("SLEEP_QUALITY"),

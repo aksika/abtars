@@ -11,7 +11,8 @@ import { interceptLargeMessage } from "../message-interceptor.js";
 import { abmind } from "../../utils/abmind-lazy.js";
 import { getEnv } from "../env-schema.js";
 import type { AbtarsMemoryRuntime, MemoryWritePhase } from "../memory-runtime.js";
-import { attemptMemoryMutation, selectInjectedHits, asSessionSoulBundle } from "../memory-runtime.js";
+import { attemptMemoryMutation, selectInjectedHits, asSessionSoulBundle, shouldInjectRecallHit } from "../memory-runtime.js";
+import { shouldAutoRecall } from "./recall-router.js";
 import { prepareRecallQuery, needsTranslation, translateRecallTerms, mergeQueryTerms } from "./recall-query-preparation.js";
 import { inboundExecutionKey, inboundMessageKey } from "../memory-operation-key.js";
 import type { ConversationBuffer } from "../conversation-buffer.js";
@@ -251,62 +252,78 @@ export async function buildPrompt(
   if (memoryMode !== "skill-isolated" && getEnv().activeMemory && memoryRuntime?.state === "ready") {
     const userEntry = registry.byUserId.get(userId);
     if (userEntry?.role !== "guest" && (contextPercent < 0 || contextPercent < getEnv().ctxCompactPct)) {
+      const priming = pSession?.primingTerms ?? [];
+      // #1877 — deterministic cue router: pure (text, priming) decision.
+      // Shadow mode (default): compute + log while the turn still searches.
+      // Enforcement behind RECALL_ROUTER_ENFORCE; flipping its default is
+      // the ship decision, not part of the code landing.
+      let routing: { decision: "search" | "skip"; matched: string; reason: string };
       try {
-        const t0 = performance.now();
-        const priming = pSession?.primingTerms ?? [];
-        // #1867 — discrete terms so #1861's coverage ordering participates on
-        // the auto-recall path; the joined query stays the fallback.
-        // Genuine translation runs only behind the non-English gate, bounded,
-        // with extraction fallback then joined fallback. A term-preparation
-        // failure never emits no query.
-        const prepared = prepareRecallQuery(text, priming);
-        let terms = prepared.terms;
-        if (needsTranslation(text, terms ?? [])) {
-          try {
-            const translated = await translateRecallTerms(deps.sessionManager, text);
-            if (translated.length > 0) terms = mergeQueryTerms([translated, terms ?? [], priming]);
-          } catch (err) {
-            logDebug(TAG, `Recall translation failed, extraction fallback: ${err instanceof Error ? err.message : String(err)}`);
+        routing = shouldAutoRecall(text, priming);
+      } catch {
+        routing = { decision: "search", matched: "error-fallback", reason: "fallback:search-on-error" };
+      }
+      const enforceRouter = getEnv().recallRouterEnforce;
+      if (routing.decision === "skip" && enforceRouter) {
+        // #1877 — enforced skip: pure omission, indistinguishable downstream
+        // from a search that returned nothing injectable, except here.
+        logDebug(TAG, `Recall router: decision=skip matched=${routing.matched} reason=${routing.reason} enforced=true retrieved=0 injected=0`);
+      } else {
+        try {
+          const t0 = performance.now();
+          // #1867 — discrete terms so #1861's coverage ordering participates on
+          // the auto-recall path; the joined query stays the fallback.
+          // Genuine translation runs only behind the non-English gate, bounded,
+          // with extraction fallback then joined fallback. A term-preparation
+          // failure never emits no query.
+          const prepared = prepareRecallQuery(text, priming);
+          let terms = prepared.terms;
+          if (needsTranslation(text, terms ?? [])) {
+            try {
+              const translated = await translateRecallTerms(deps.sessionManager, text);
+              if (translated.length > 0) terms = mergeQueryTerms([translated, terms ?? [], priming]);
+            } catch (err) {
+              logDebug(TAG, `Recall translation failed, extraction fallback: ${err instanceof Error ? err.message : String(err)}`);
+            }
           }
-        }
-        const recall = await memoryRuntime.recall({
-          query: prepared.query, original: prepared.original, userId, limit: ACTIVE_MEMORY_LIMIT,
-          ...(terms !== undefined && terms.length > 0 ? { terms, selectTerms: true } : {}),
-        });
-        const TRIVIAL_TTL_MS = 36 * 60 * 60_000;
-        const nowMs = Date.now();
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        const hits = recall.hits.filter((h: any) => {
-          if (h.score <= 0.70) return false;
-          if (h.memoryType === "fact" && h.score < 1.0 && h.createdAt && nowMs - h.createdAt > TRIVIAL_TTL_MS) {
-            if (!h.emotionTags && !h.importanceFlags) return false;
+          const recall = await memoryRuntime.recall({
+            query: prepared.query, original: prepared.original, userId, limit: ACTIVE_MEMORY_LIMIT,
+            ...(terms !== undefined && terms.length > 0 ? { terms, selectTerms: true } : {}),
+          });
+          const nowMs = Date.now();
+          // #1877 — single exported predicate owns the floor/age rule.
+          const hits = recall.hits.filter((h) => shouldInjectRecallHit(h, nowMs));
+          let injectedCount = 0;
+          if (hits.length > 0) {
+            // #1813 — inject abmind's deterministic bounded selection when
+            // present and resolvable; otherwise the full filtered set (ordinary
+            // rendering). Selection bounds, never substitutes; the rank order
+            // comes from abmind's final ordering.
+            const inject = selectInjectedHits(hits, recall.selection);
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            const lines = inject.map((h: any) => abmind()?.renderMemory({
+              content_en: h.content,
+            }) ?? h.content);
+            const block = `[MEMORY CONTEXT — auto-recalled, do not repeat verbatim]\n${lines.join("\n")}\n[/MEMORY CONTEXT]`;
+            volatileContext.push({ kind: "recall", content: block });
+            prompt = `${block}\n\n${prompt}`;
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            recalledHits = inject.filter((h: any) => h.memoryId != null).map((h: any) => ({ id: h.memoryId as number, contentEn: h.content as string }));
+            recallDecision = recall.decision;
+            injectedCount = inject.length;
+            // #1867 — diagnostics are advisory: the floor/age rules above still
+            // decide injection. Gating on weakEvidence waits for harness proof
+            // of no suppression (terms now make its lexical arm reachable).
+            logDebug(TAG, `Active recall: ${inject.length}/${hits.length} hits injected (selection ${recall.selection ? "on" : "off"}), weakEvidence=${recall.weakEvidence ?? "n/a"}, ${block.length} chars, ${Math.round(performance.now() - t0)}ms`);
+            logTrace(TAG, `recall content: ${block}`);
           }
-          return true;
-        });
-        if (hits.length > 0) {
-          // #1813 — inject abmind's deterministic bounded selection when
-          // present and resolvable; otherwise the full filtered set (ordinary
-          // rendering). Selection bounds, never substitutes; the rank order
-          // comes from abmind's final ordering.
-          const inject = selectInjectedHits(hits, recall.selection);
-          // eslint-disable-next-line @typescript-eslint/no-explicit-any
-          const lines = inject.map((h: any) => abmind()?.renderMemory({
-            content_en: h.content,
-          }) ?? h.content);
-          const block = `[MEMORY CONTEXT — auto-recalled, do not repeat verbatim]\n${lines.join("\n")}\n[/MEMORY CONTEXT]`;
-          volatileContext.push({ kind: "recall", content: block });
-          prompt = `${block}\n\n${prompt}`;
-          // eslint-disable-next-line @typescript-eslint/no-explicit-any
-          recalledHits = inject.filter((h: any) => h.memoryId != null).map((h: any) => ({ id: h.memoryId as number, contentEn: h.content as string }));
-          recallDecision = recall.decision;
-          // #1867 — diagnostics are advisory: the floor/age rules above still
-          // decide injection. Gating on weakEvidence waits for harness proof
-          // of no suppression (terms now make its lexical arm reachable).
-          logDebug(TAG, `Active recall: ${inject.length}/${hits.length} hits injected (selection ${recall.selection ? "on" : "off"}), weakEvidence=${recall.weakEvidence ?? "n/a"}, ${block.length} chars, ${Math.round(performance.now() - t0)}ms`);
-          logTrace(TAG, `recall content: ${block}`);
+          // #1877 — decision line: one per eligible turn, independent of
+          // injection. The skip/false-skip rates are read from this line.
+          logDebug(TAG, `Recall router: decision=${routing.decision} matched=${routing.matched} reason=${routing.reason} enforced=${enforceRouter} retrieved=${recall.hits.length} injected=${injectedCount}`);
+        } catch (err) {
+          logDebug(TAG, `Recall router: decision=${routing.decision} matched=${routing.matched} reason=${routing.reason} enforced=${enforceRouter} error=${err instanceof Error ? err.message : String(err)}`);
+          logDebug(TAG, `Active recall failed: ${err instanceof Error ? err.message : String(err)}`);
         }
-      } catch (err) {
-        logDebug(TAG, `Active recall failed: ${err instanceof Error ? err.message : String(err)}`);
       }
     }
   }

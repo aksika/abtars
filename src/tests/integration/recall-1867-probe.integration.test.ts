@@ -19,8 +19,8 @@
  *   territory (recall-history-coverage.test.ts with a scripted provider).
  *   Se/Ss budget env and vec-index completeness are emitted as console
  *   diagnostics by both tests.
- * - RuntimeRecallHit does not carry emotion/importance flags (production
- *   mapping), so the bridge filter here sees exactly what production sees.
+ * - RuntimeRecallHit carries emotion/importance flags (#1877 production
+ *   predicate); the bridge filter here is that predicate, not a copy.
  * - Hungarian translation arrives as a deterministic fixture (no provider in
  *   tests), per design.md failure semantics; timeout/503 cases keep
  *   deterministic evidence through the same seam.
@@ -29,12 +29,11 @@ import { describe, it, expect } from "vitest";
 import { extractEnglishTokens } from "abmind";
 import { createHarness, memoryDb, type IntegrationHarness } from "./harness.js";
 import { prepareRecallQuery, mergeQueryTerms } from "../../components/pipeline/recall-query-preparation.js";
-import { createClientRuntime, selectInjectedHits, type AbtarsMemoryRuntime } from "../../components/memory-runtime.js";
+import { createClientRuntime, selectInjectedHits, shouldInjectRecallHit, type AbtarsMemoryRuntime } from "../../components/memory-runtime.js";
 import type { AbmindClientLike } from "../../components/abmind-client-contract.js";
 
 const USER = "u1";
 const DAY = 86400000;
-const TRIVIAL_TTL_MS = 36 * 60 * 60_000;
 
 // Fictional fixture text — independent of any private live memory.
 const R_EN = "The midnight perfectionist architect resolved the tester paradox";
@@ -90,16 +89,10 @@ function bridgeRuntime(h: IntegrationHarness): AbtarsMemoryRuntime {
   return createClientRuntime(client as unknown as AbmindClientLike);
 }
 
-/** Bridge floor + trivial-fact age rule, mirroring prompt-builder.ts. */
-function bridgeFilter<T extends { score: number; memoryType?: string; createdAt?: number; emotionTags?: unknown; importanceFlags?: unknown }>(hits: T[]): T[] {
+/** #1877 — bridge floor + trivial-fact age rule: the production predicate, not a copy. */
+function bridgeFilter<T extends { score: number; memoryType?: string; createdAt?: number; emotionTags?: string; importanceFlags?: string }>(hits: T[]): T[] {
   const nowMs = Date.now();
-  return hits.filter((h) => {
-    if (h.score <= 0.70) return false;
-    if (h.memoryType === "fact" && h.score < 1.0 && h.createdAt && nowMs - h.createdAt > TRIVIAL_TTL_MS) {
-      if (!h.emotionTags && !h.importanceFlags) return false;
-    }
-    return true;
-  });
+  return hits.filter((h) => shouldInjectRecallHit(h, nowMs));
 }
 
 function envSnapshot(h: IntegrationHarness): string {
