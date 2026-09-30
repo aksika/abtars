@@ -12,7 +12,7 @@ import { abmind } from "../../utils/abmind-lazy.js";
 import { getEnv } from "../env-schema.js";
 import type { AbtarsMemoryRuntime, MemoryWritePhase } from "../memory-runtime.js";
 import { attemptMemoryMutation, selectInjectedHits, asSessionSoulBundle, shouldInjectRecallHit } from "../memory-runtime.js";
-import { shouldAutoRecall } from "./recall-router.js";
+import { shouldAutoRecall, type AutoRecallRouting } from "./recall-router.js";
 import { prepareRecallQuery, needsTranslation, translateRecallTerms, mergeQueryTerms } from "./recall-query-preparation.js";
 import { inboundExecutionKey, inboundMessageKey } from "../memory-operation-key.js";
 import type { ConversationBuffer } from "../conversation-buffer.js";
@@ -257,7 +257,7 @@ export async function buildPrompt(
       // Shadow mode (default): compute + log while the turn still searches.
       // Enforcement behind RECALL_ROUTER_ENFORCE; flipping its default is
       // the ship decision, not part of the code landing.
-      let routing: { decision: "search" | "skip"; matched: string; reason: string };
+      let routing: AutoRecallRouting;
       try {
         routing = shouldAutoRecall(text, priming);
       } catch {

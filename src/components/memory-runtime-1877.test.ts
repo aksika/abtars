@@ -11,7 +11,6 @@ import {
   shouldInjectRecallHit,
   asRecallFlag,
   stripRecallFlagsForTool,
-  RECALL_SCORE_FLOOR,
   TRIVIAL_FACT_TTL_MS,
 } from "./memory-runtime.js";
 
@@ -42,10 +41,8 @@ describe("#1877 shouldInjectRecallHit — one owner for the floor/age rule", () 
   it("drops the same old low-score fact without flags, injects it with flags (age branch, not floor)", () => {
     const now = Date.now();
     const old = now - 30 * DAY;
+    // 0.85 clears the 0.70 floor and stays below 1.0, so the age branch decides.
     const score = 0.85;
-    // Score clears the floor so the age branch decides.
-    expect(score).toBeGreaterThan(RECALL_SCORE_FLOOR);
-    expect(score).toBeLessThan(1.0);
     expect(shouldInjectRecallHit({ score, memoryType: "fact", createdAt: old }, now)).toBe(false);
     expect(shouldInjectRecallHit({ score, memoryType: "fact", createdAt: old, importanceFlags: "standing-constraint" }, now)).toBe(true);
     expect(shouldInjectRecallHit({ score, memoryType: "fact", createdAt: old, emotionTags: "joy" }, now)).toBe(true);
@@ -64,6 +61,9 @@ describe("#1877 shouldInjectRecallHit — one owner for the floor/age rule", () 
     const old = now - 30 * DAY;
     expect(shouldInjectRecallHit({ score: 0.85, memoryType: "note", createdAt: old }, now)).toBe(true);
     expect(shouldInjectRecallHit({ score: 0.85 }, now)).toBe(true);
+    // createdAt 0 is "no timestamp" (truthy test as in the original rule):
+    // it never enters the age branch, so the fact injects unchanged.
+    expect(shouldInjectRecallHit({ score: 0.85, memoryType: "fact", createdAt: 0 }, now)).toBe(true);
   });
 });
 

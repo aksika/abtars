@@ -12,11 +12,12 @@
  * 3. Else → search. Uncertainty searches; default is search.
  *
  * Cue coverage is English + Hungarian at minimum. The lists below are
- * derived from the held-out turn corpus in `recall-router.test.ts`
- * (search-required, self-contained, ambiguous cases including corrections,
- * scoped exceptions, conflicts, and action-with-constraint turns); misses
- * found during measurement are recorded there and fed back into these
- * lists, not invented from intuition.
+ * derived from the turn corpus in `recall-router.test.ts` (search-required,
+ * self-contained, ambiguous cases including corrections, scoped exceptions,
+ * conflicts, and action-with-constraint turns) and recorded in
+ * `specs/1877/tasks.md`; misses found during measurement are fed back into
+ * these lists, not invented from intuition. Real-traffic false-skip
+ * measurement is the Molty shadow log (AC6), not this corpus.
  */
 
 export type AutoRecallDecision = "search" | "skip";
@@ -70,7 +71,7 @@ const SEARCH_CUES: ReadonlyArray<{ name: string; patterns: RegExp[] }> = [
     ],
   },
   {
-    name: "question-about-past",
+    name: "question",
     patterns: [
       /\b(what|which|when|where|who|how|why)\b[^.!?]*\?/iu,
       /\b(mit|melyik|mikor|hol|ki|hogyan|mi[eé]rt)\b[^.!?]*\?/iu,
@@ -94,6 +95,18 @@ const ACKS = new Set([
   "szuper", "klassz", "jó lesz",
 ]);
 
+// Pure filler tokens: a turn made only of these carries no retrieval
+// content. Deliberately an allowlist, not a length/charset heuristic:
+// "deploy failed" is ultra-short but retrieval-worthy, and any heuristic
+// loose enough to admit "yes" would false-skip it.
+const FILLERS = new Set([
+  "yes", "no", "yeah", "yep", "nope", "nah", "sure", "ok", "okay", "k", "thx", "ty",
+  "hmm", "hm", "mhm", "aha", "ah", "oh", "wow", "lol", "haha", "hehe",
+  "cool", "nice", "good", "fine", "done", "right", "got", "it",
+  "igen", "nem", "ja", "jó", "oké", "hát", "na", "jaj", "hűha", "hű",
+  "persze", "tényleg", "valóban", "rendben", "szuper", "klassz",
+]);
+
 function normalizeTurn(text: string): string {
   return text.trim().toLowerCase().replace(/[.!…]+$/u, "").replace(/\s+/gu, " ").trim();
 }
@@ -109,13 +122,10 @@ function hasProperNounBeyondFirst(text: string): boolean {
   return false;
 }
 
-function isUltraShortSelfContained(normalized: string): boolean {
-  if (normalized.includes("?")) return false;
-  const tokens = normalized.split(/\s+/u).filter(Boolean);
-  if (tokens.length > 2) return false;
-  if (normalized.length > 20) return false;
-  if (!/^[a-záéíóöőúüű0-9\s!,.-]+$/iu.test(normalized)) return false;
-  return true;
+function fillerOnly(normalized: string): boolean {
+  const tokens = normalized.split(/[^\p{L}\p{N}]+/u).filter(Boolean);
+  if (tokens.length === 0 || tokens.length > 3) return false;
+  return tokens.every((token) => FILLERS.has(token));
 }
 
 function primingMatchesCurrent(text: string, priming: readonly string[]): string | undefined {
@@ -127,6 +137,15 @@ function primingMatchesCurrent(text: string, priming: readonly string[]): string
     if (lower.includes(term)) return raw.trim();
   }
   return undefined;
+}
+
+/** Skip on a listed self-contained pattern unless priming tie-breaks to search. */
+function selfContainedOr(text: string, priming: readonly string[], pattern: string): AutoRecallRouting {
+  const tie = primingMatchesCurrent(text, priming);
+  if (tie !== undefined) {
+    return { decision: "search", matched: "priming-term-match", reason: `tie-breaker:priming-term("${tie}")` };
+  }
+  return { decision: "skip", matched: pattern, reason: `self-contained:${pattern}` };
 }
 
 /**
@@ -150,27 +169,9 @@ export function shouldAutoRecall(text: string, priming: readonly string[]): Auto
       return { decision: "search", matched: "named-entity", reason: "search-cue:named-entity(proper-noun)" };
     }
 
-    if (GREETINGS.has(normalized)) {
-      const tie = primingMatchesCurrent(input, priming);
-      if (tie !== undefined) {
-        return { decision: "search", matched: "priming-term-match", reason: `tie-breaker:priming-term("${tie}")` };
-      }
-      return { decision: "skip", matched: "greeting", reason: "self-contained:greeting" };
-    }
-    if (ACKS.has(normalized)) {
-      const tie = primingMatchesCurrent(input, priming);
-      if (tie !== undefined) {
-        return { decision: "search", matched: "priming-term-match", reason: `tie-breaker:priming-term("${tie}")` };
-      }
-      return { decision: "skip", matched: "acknowledgement", reason: "self-contained:acknowledgement" };
-    }
-    if (normalized && isUltraShortSelfContained(normalized)) {
-      const tie = primingMatchesCurrent(input, priming);
-      if (tie !== undefined) {
-        return { decision: "search", matched: "priming-term-match", reason: `tie-breaker:priming-term("${tie}")` };
-      }
-      return { decision: "skip", matched: "ultra-short", reason: "self-contained:ultra-short" };
-    }
+    if (GREETINGS.has(normalized)) return selfContainedOr(input, priming, "greeting");
+    if (ACKS.has(normalized)) return selfContainedOr(input, priming, "acknowledgement");
+    if (fillerOnly(normalized)) return selfContainedOr(input, priming, "filler-only");
 
     return { decision: "search", matched: "default", reason: "default:search" };
   } catch {

@@ -281,10 +281,12 @@ export function asRecallFlag(raw: unknown): string | undefined {
  * Floor first (`score <= 0.70` rejected), then the 36 h age branch (fact,
  * `score < 1.0`, `createdAt` older than 36 h, no flags). Tests and the #1867
  * probe import this predicate; no harness may carry a local copy.
+ * `createdAt` stays a truthiness test exactly as the original inline rule
+ * had it: 0/absent means "no timestamp" and never enters the age branch.
  */
 export function shouldInjectRecallHit(hit: Pick<RuntimeRecallHit, "score" | "memoryType" | "createdAt" | "emotionTags" | "importanceFlags">, nowMs: number): boolean {
   if (!(hit.score > RECALL_SCORE_FLOOR)) return false;
-  if (hit.memoryType === "fact" && hit.score < 1.0 && typeof hit.createdAt === "number" && nowMs - hit.createdAt > TRIVIAL_FACT_TTL_MS) {
+  if (hit.memoryType === "fact" && hit.score < 1.0 && hit.createdAt && nowMs - hit.createdAt > TRIVIAL_FACT_TTL_MS) {
     if (!hit.emotionTags && !hit.importanceFlags) return false;
   }
   return true;

@@ -50,8 +50,10 @@ const SELF_CONTAINED_MAY_SKIP: Array<[string, string]> = [
   ["köszi", "acknowledgement HU"],
   ["köszönöm", "acknowledgement HU"],
   ["rendben", "acknowledgement HU"],
-  ["yes", "ultra-short"],
-  ["ok!", "ultra-short with punctuation"],
+  ["yes", "filler-only EN"],
+  ["yep yep", "filler-only EN"],
+  ["igen", "filler-only HU"],
+  ["persze, oké", "filler-only HU with punctuation"],
 ];
 
 describe("#1877 router — held-out corpus", () => {
@@ -71,7 +73,7 @@ describe("#1877 router — held-out corpus", () => {
     for (const [text, label] of SELF_CONTAINED_MAY_SKIP) {
       const routing = shouldAutoRecall(text, []);
       expect(routing.decision, `${label}: ${text}`).toBe("skip");
-      expect(["greeting", "acknowledgement", "ultra-short"]).toContain(routing.matched);
+      expect(["greeting", "acknowledgement", "filler-only"]).toContain(routing.matched);
     }
   });
 
@@ -80,9 +82,22 @@ describe("#1877 router — held-out corpus", () => {
     // would force search everywhere and make the router a no-op.
     expect(shouldAutoRecall("hi", ["deploy", "deadline", "migration"]).decision).toBe("skip");
     // But when a priming term matches the current message, it pushes to search.
-    const routing = shouldAutoRecall("hi deploy", ["deploy"]);
+    const routing = shouldAutoRecall("igen", ["igen"]);
     expect(routing.decision).toBe("search");
     expect(routing.matched).toBe("priming-term-match");
+  });
+
+  it("short retrieval-worthy turns search — the skip rule is an allowlist, not a length heuristic", () => {
+    // "deploy failed" is ultra-short and would false-skip under any
+    // length/charset heuristic loose enough to admit "yes".
+    expect(shouldAutoRecall("deploy failed", []).decision).toBe("search");
+    expect(shouldAutoRecall("migration broke", []).decision).toBe("search");
+    expect(shouldAutoRecall("hello today", []).decision).toBe("search");
+  });
+
+  it("priming tie-breaker requires a match on a listed self-contained pattern", () => {
+    expect(shouldAutoRecall("deploy failed", ["deploy"]).decision).toBe("search");
+    expect(shouldAutoRecall("hi", ["deploy"]).matched).toBe("greeting");
   });
 
   it("is total — never throws, falls back to search", () => {
@@ -93,6 +108,6 @@ describe("#1877 router — held-out corpus", () => {
 
   it("proper-noun heuristic searches named references without firing on sentence case", () => {
     expect(shouldAutoRecall("ask Anna about Friday", []).decision).toBe("search");
-    expect(shouldAutoRecall("hello today", []).decision).toBe("skip");
+    expect(shouldAutoRecall("hi there", []).decision).toBe("skip");
   });
 });
