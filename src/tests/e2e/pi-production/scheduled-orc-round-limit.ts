@@ -15,7 +15,7 @@
 import { readFileSync, writeFileSync, existsSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { TIMEOUTS, type ProviderSummary } from "./contracts.js";
-import { FIXTURE_MODEL_B } from "./bridge-config.js";
+import { FIXTURE_MODEL_A, FIXTURE_MODEL_B } from "./bridge-config.js";
 import { waitFor } from "./child-process.js";
 import type { PiAcceptanceContext } from "./scenarios.js";
 import { resolveNativeDep } from "../../../utils/lazy-require.js";
@@ -204,6 +204,23 @@ function enqueueToolRounds(ctx: PiAcceptanceContext, count: number): void {
   }
 }
 
+/** #1900: explicit boot-greeting scripts so a fresh bridge's autonomous
+ *  [SESSION START] turn never consumes a scheduled response and never takes
+ *  a 503 that would mark the candidate unhealthy. Constrained to the boot
+ *  marker so scheduled traffic cannot consume them. */
+function enqueueBootGreeting(ctx: PiAcceptanceContext): void {
+  for (const candidate of [FIXTURE_MODEL_A, FIXTURE_MODEL_B] as const) {
+    ctx.provider.enqueue({
+      candidate,
+      expectation: {
+        candidate,
+        orderedContains: ["[SESSION START]"],
+      },
+      action: { kind: "text", chunks: ["boot ok"] },
+    });
+  }
+}
+
 /** #1900: freshness gate — a new observation cannot reuse an earlier
  *  attempt's terminal evidence. The Orc release must be at/after the
  *  observation's restart boundary (5s clock slack). */
@@ -239,13 +256,27 @@ async function waitForScheduledObservation(
     if (evidence.terminalOutcome !== undefined) return null;
     if (evidence.supervisionState !== "awaiting_contract") return null;
     return { summaries, evidence };
-  }, TIMEOUTS.scheduledObservationMs, `scheduled Orc observation for ${SCHEDULED_TASK_ID} (180s budget)`);
+  }, TIMEOUTS.scheduledObservationMs, `scheduled Orc observation for ${SCHEDULED_TASK_ID} (180s budget)`, () => {
+    // Bounded diagnostics for the timeout — counts and identities only.
+    const summaries = ctx.provider.summariesFor(FIXTURE_MODEL_B).filter((s) => s.seq > afterSeq);
+    const scheduled = summaries.filter(isScheduledSummary);
+    const evidence = readBridgeHomeEvidence(ctx, summaries);
+    return [
+      `afterSeq=${afterSeq} bTotal=${summaries.length} matched=${scheduled.length}`,
+      `toolResponses=${scheduled.filter((s) => s.action === "toolCall").length}`,
+      `runId=${evidence.runId ?? "none"} cardId=${evidence.cardId ?? "none"}`,
+      `supervision=${evidence.supervisionState ?? "none"} terminal=${evidence.terminalOutcome ?? "none"}`,
+      `orc=${evidence.orcFailureCode ?? "none"} fresh=${evidence.orcReleasedAt ?? "none"}`,
+      `dbError=${evidence.dbReadError ?? "none"}`,
+    ].join(" ");
+  });
 }
 
 /** #1548 Task 7 cell A: Orc round-limit failure during a scheduled project. */
 export async function scheduledOrcRoundLimit(ctx: PiAcceptanceContext): Promise<void> {
   installScheduledRoundLimitFixture(ctx);
   enqueueToolRounds(ctx, 8); // covers the authoring retries inside the window
+  enqueueBootGreeting(ctx);
   const afterSeq = ctx.provider.requestCount;
   const observationStart = Date.now();
   ctx.bridge = await ctx.restartBridge();
@@ -304,6 +335,7 @@ export async function scheduledOrcRoundLimitRestart(ctx: PiAcceptanceContext): P
   // project is still awaiting its contract races the scheduler's Orc capacity
   // guard and produces an unrelated intent_not_actionable retry.
   enqueueToolRounds(ctx, 8);
+  enqueueBootGreeting(ctx);
   const firstAfterSeq = ctx.provider.requestCount;
   const firstStart = Date.now();
   ctx.bridge = await ctx.restartBridge();
@@ -323,6 +355,7 @@ export async function scheduledOrcRoundLimitRestart(ctx: PiAcceptanceContext): P
 
   // Second restart after the failure fact: the same durable run must recover.
   enqueueToolRounds(ctx, 8);
+  enqueueBootGreeting(ctx);
   const secondAfterSeq = ctx.provider.requestCount;
   const secondStart = Date.now();
   ctx.bridge = await ctx.restartBridge();
