@@ -270,7 +270,6 @@ async function runLane(
   });
 
   let setupError: Error | null = null;
-  let configAbtarsHome = "";
 
   try {
     if (isExpired()) throw laneTimeout("lane-setup");
@@ -299,7 +298,6 @@ async function runLane(
     if (isExpired()) throw laneTimeout("lane-setup");
     const config = buildBridgeConfig(runRoot, owner.descriptor, provider.baseUrl, lane, abmindRoot);
     bridgeEnv = config.bridgeEnv;
-    configAbtarsHome = config.abtarsHome;
 
     // 4. Spawn the built bridge entry point. Owned before readiness inside
     // spawnBridge so a boot timeout cannot leak it.
@@ -633,7 +631,6 @@ async function runLane(
         // best effort
       }
     }
-    void configAbtarsHome;
     // #1900: a lane passes only when all executed scenarios pass and cleanup
     // succeeds. Blocked counts as non-green for the lane state.
     const state = deriveLaneState(scenarioResults);

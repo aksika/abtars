@@ -111,11 +111,12 @@ describe("#1900 provider full-request recognition", () => {
   it("bounds the marker registry and resets with the fixture lifecycle", async () => {
     provider = new ScriptedProvider();
     await provider.start();
-    expect(() => provider.registerMarker("")).toThrow();
-    expect(() => provider.registerMarker("x".repeat(257))).toThrow();
-    for (let i = 0; i < 8; i++) provider.registerMarker(`marker-${i}`);
-    expect(() => provider.registerMarker("marker-overflow")).toThrow();
-    provider.clear();
+    const registry = provider;
+    expect(() => registry.registerMarker("")).toThrow();
+    expect(() => registry.registerMarker("x".repeat(257))).toThrow();
+    for (let i = 0; i < 8; i++) registry.registerMarker(`marker-${i}`);
+    expect(() => registry.registerMarker("marker-overflow")).toThrow();
+    registry.clear();
     // After clear the registry resets — registering again succeeds.
     provider.registerMarker(GOAL);
     provider.enqueue({

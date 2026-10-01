@@ -103,10 +103,6 @@ export class ScriptedProvider {
     this.registeredMarkers.add(marker);
   }
 
-  clearRegisteredMarkers(): void {
-    this.registeredMarkers.clear();
-  }
-
   clear(): void {
     this.scripts.clear();
     this.summaries = [];
