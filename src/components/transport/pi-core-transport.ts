@@ -366,6 +366,13 @@ export class PiCoreTransport implements IKiroTransport {
       this._intermediateText = "";
       this._toolCallsSucceeded = 0;
       this._lastToolFailure = null;
+      // #1905: prompt-local exclusion lifecycle — a failed attempt degrades at
+      // most its own prompt. Cleared once here, after the exclusive slot is
+      // acquired (a rejected overlapping call never reaches this line) and
+      // before any model selection; never between attempts within the prompt,
+      // so within-prompt fallback is unaffected. Successful-turn rotation and
+      // shared registry health are intentionally untouched.
+      this.policy.excludedKeys.clear();
       // #1297: terminal-failure state is allocated per execution — a previous
       // request's credit failure can never contaminate a later request.
       const executionState: { terminalFailure: ProviderTerminalFailure | null } = { terminalFailure: null };

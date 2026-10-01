@@ -1038,7 +1038,7 @@ describe("createPiStreamFn", () => {
     }));
   });
 
-  it("does NOT report credits_exhausted for a mix of credit and transient failures", async () => {
+  it("reports all_candidates_failed (not credits_exhausted) for a mix of credit and transient failures", async () => {
     const first = makeCandidate({ model: "first", endpoint: "https://first/v1" });
     const second = makeCandidate({ model: "second", endpoint: "https://second/v1" });
     const mixedPolicy = new FallbackPolicy([first, second], registry);
@@ -1052,7 +1052,12 @@ describe("createPiStreamFn", () => {
     });
     for await (const _ev of await streamFn(makeModel({ api: "openai-completions" }), { messages: [] }, {})) { /* consume */ }
 
-    expect(onTerminalFailure).not.toHaveBeenCalled();
+    expect(onTerminalFailure).toHaveBeenCalledTimes(1);
+    expect(onTerminalFailure).toHaveBeenCalledWith(expect.objectContaining({
+      code: "all_candidates_failed",
+      retryable: false,
+      attemptedCandidates: 1,
+    }));
   });
 
   it("attempts a viable fallback and never reports credits_exhausted when one candidate succeeds", async () => {
@@ -1101,7 +1106,7 @@ describe("createPiStreamFn", () => {
     }));
   });
 
-  it("does NOT report a terminal code for a mix of overflow and auth failures", async () => {
+  it("reports all_candidates_failed (not context_overflow) for a mix of overflow and auth failures", async () => {
     const first = makeCandidate({ model: "first", endpoint: "https://first/v1" });
     const second = makeCandidate({ model: "second", endpoint: "https://second/v1" });
     const mixedPolicy = new FallbackPolicy([first, second], registry);
@@ -1115,7 +1120,12 @@ describe("createPiStreamFn", () => {
     for await (const _ev of await streamFn(makeModel({ api: "openai-completions" }), { messages: [] }, {})) { /* consume */ }
 
     expect(attemptFactory).toHaveBeenCalledTimes(2);
-    expect(onTerminalFailure).not.toHaveBeenCalled();
+    expect(onTerminalFailure).toHaveBeenCalledTimes(1);
+    expect(onTerminalFailure).toHaveBeenCalledWith(expect.objectContaining({
+      code: "all_candidates_failed",
+      retryable: false,
+      attemptedCandidates: 2,
+    }));
   });
 
   it("still reports credits_exhausted when all candidates are credit-failed (#1297 unchanged)", async () => {
@@ -1145,5 +1155,58 @@ describe("createPiStreamFn", () => {
     for await (const _ev of await streamFn(makeModel({ api: "openai-completions" }), { messages: [] }, { signal: controller.signal })) { /* consume */ }
 
     expect(onTerminalFailure).not.toHaveBeenCalled();
+  });
+
+  // ── Generic exhaustion (#1905) ──────────────────────────────────────────
+
+  it("reports all_candidates_failed with zero attempts when the latch excludes the sole candidate", async () => {
+    const only = makeCandidate({ model: "only", endpoint: "https://only/v1" });
+    const latchedPolicy = new FallbackPolicy([only], registry);
+    // Simulate a previous prompt's failed attempt that was never cleared.
+    latchedPolicy.excludedKeys.add("only@https://only/v1");
+
+    const onTerminalFailure = vi.fn();
+    const attemptFactory = vi.fn();
+    const streamFn = createPiStreamFn({
+      policy: latchedPolicy, executionId: "exec_latch",
+      createPiAiAttempt: attemptFactory, onTerminalFailure,
+    });
+    const events: any[] = [];
+    for await (const ev of await streamFn(makeModel({ api: "openai-completions" }), { messages: [] }, {})) events.push(ev);
+
+    expect(attemptFactory).not.toHaveBeenCalled();
+    expect(onTerminalFailure).toHaveBeenCalledTimes(1);
+    expect(onTerminalFailure).toHaveBeenCalledWith(expect.objectContaining({
+      code: "all_candidates_failed",
+      retryable: false,
+      attemptedCandidates: 0,
+    }));
+    expect(events.some((e) => e.type === "error")).toBe(true);
+    // Skip evidence is retained at the selection boundary even though
+    // selectModel clears lastDecision on exhaustion.
+    expect(latchedPolicy.lastDecision).toBeNull();
+    expect(latchedPolicy.lastSkipped.join("; ")).toContain("only");
+  });
+
+  it("reports all_candidates_failed when every candidate fails transiently", async () => {
+    const first = makeCandidate({ model: "first", endpoint: "https://first/v1" });
+    const second = makeCandidate({ model: "second", endpoint: "https://second/v1" });
+    const transientPolicy = new FallbackPolicy([first, second], registry);
+
+    const onTerminalFailure = vi.fn();
+    const attemptFactory = vi.fn().mockRejectedValue(new Error("API error 500: server failure"));
+    const streamFn = createPiStreamFn({
+      policy: transientPolicy, executionId: "exec_1",
+      createPiAiAttempt: attemptFactory, onTerminalFailure,
+    });
+    for await (const _ev of await streamFn(makeModel({ api: "openai-completions" }), { messages: [] }, {})) { /* consume */ }
+
+    expect(attemptFactory).toHaveBeenCalledTimes(2);
+    expect(onTerminalFailure).toHaveBeenCalledTimes(1);
+    expect(onTerminalFailure).toHaveBeenCalledWith(expect.objectContaining({
+      code: "all_candidates_failed",
+      retryable: false,
+      attemptedCandidates: 2,
+    }));
   });
 });

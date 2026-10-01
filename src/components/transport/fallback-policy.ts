@@ -17,6 +17,10 @@ export class FallbackPolicy {
   readonly candidates: readonly ModelCandidate[];
   readonly registry: ModelHealthRegistry;
   lastDecision: FallbackDecision | null = null;
+  /** Skip reasons from the most recent selectModel call, including exhaustion.
+   * #1905: selectModel clears lastDecision on exhaustion, so diagnostics read
+   * this field synchronously at the selection boundary instead. */
+  lastSkipped: string[] = [];
   /** Candidates temporarily skipped by successful-turn rotation. */
   rotationExcludedKeys: Set<string> = new Set();
   /** Candidates excluded for a behavior incident in the current prompt. */
@@ -50,9 +54,11 @@ export class FallbackPolicy {
         continue;
       }
       this.lastDecision = { chosen: c, skipped };
+      this.lastSkipped = skipped;
       return c;
     }
     this.lastDecision = null;
+    this.lastSkipped = skipped;
     return null;
   }
 

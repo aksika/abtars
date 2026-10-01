@@ -9,7 +9,7 @@ import type {
   SimpleStreamOptions,
   Usage,
 } from "@earendil-works/pi-ai";
-import { logDebug } from "../logger.js";
+import { logDebug, redactSecrets } from "../logger.js";
 import type { FallbackPolicy } from "./fallback-policy.js";
 import type { ModelCandidate } from "./model-candidates.js";
 import { candidateKey } from "./model-candidates.js";
@@ -46,7 +46,9 @@ export interface AbtarsPiStreamFnOptions {
   /** #1506: Absolute deadline epoch ms — inactivity timeout is capped by remaining. */
   deadlineAt?: number;
   /** #1297: execution-local terminal-failure channel. Fired once when the
-   *  fallback loop exhausts with every candidate sticky credit-failed. */
+   *  fallback loop exhausts: every candidate sticky credit-failed
+   *  (`credits_exhausted`), every attempt over-context (`context_overflow`),
+   *  or other genuine exhaustion (`all_candidates_failed`, #1905). */
   onTerminalFailure?: (failure: ProviderTerminalFailure) => void;
   /** #1748: opaque per-session cache identity forwarded as pi's
    *  `options.sessionId`. Stable across turns and candidate rotation; derived
@@ -327,6 +329,12 @@ export function createPiStreamFn(options: AbtarsPiStreamFnOptions): StreamFn {
       const orderedCandidates = firstSelected
         ? [firstSelected, ...options.policy.candidates.filter((candidate) => candidate !== firstSelected)]
         : [];
+      // #1905: zero-attempt exhaustion (latch or registry skips) must leave
+      // evidence at the selection boundary — selectModel clears lastDecision
+      // on exhaustion, so read lastSkipped synchronously here.
+      if (!firstSelected && options.policy.candidates.length > 0) {
+        logDebug(TAG, `no candidate available at prompt start execution=${options.executionId} skipped=[${options.policy.lastSkipped.join("; ").slice(0, 500)}]`);
+      }
       let attemptedCandidateCount = 0;
       // #1745: execution-scoped overflow count. Overflow is a property of THIS
       // request's size, not of any candidate's health. Never promote it to the
@@ -335,7 +343,11 @@ export function createPiStreamFn(options: AbtarsPiStreamFnOptions): StreamFn {
       let overflowFailures = 0;
       for (const candidate of orderedCandidates) {
         const selected = options.policy.selectModel();
-        if (!selected || selected !== candidate) continue;
+        if (!selected || selected !== candidate) {
+          // #1905: fallback-chain skip evidence at debug; bounded, no prompts.
+          logDebug(TAG, `candidate skipped execution=${options.executionId} candidate=${candidateKey(candidate.model, candidate.endpoint)} skipped=[${options.policy.lastSkipped.join("; ").slice(0, 300)}]`);
+          continue;
+        }
         attemptedCandidateCount++;
         if (signal.aborted) {
           yield terminalError(model, "aborted", "Execution cancelled");
@@ -391,12 +403,15 @@ export function createPiStreamFn(options: AbtarsPiStreamFnOptions): StreamFn {
           // to skip — still poison via poisonCandidate().
           // #1297: the actual classification (credits, auth, rate_limit,
           // transient, ...) is recorded, not an unconditional transient.
-          const poisonCandidate = (kind: ErrorKind = "transient", retryAfterMs?: number): void => {
+          const poisonCandidate = (kind: ErrorKind = "transient", retryAfterMs?: number, detail?: string): void => {
             options.policy.recordError(candidate, kind, retryAfterMs);
             options.policy.excludedKeys.add(candidateKey(candidate.model, candidate.endpoint));
+            // #1905: bounded redacted provider error evidence at the
+            // attempt-failure branch — error text only, never prompts.
             // A provider failure is a fallback event, not a successful-turn
             // rotation event. Healthy candidates from the prior rotation
             // cycle must be eligible for recovery.
+            logDebug(TAG, `candidate excluded execution=${options.executionId} candidate=${candidateKey(candidate.model, candidate.endpoint)} kind=${kind}${detail ? ` error="${detail}"` : ""}`);
             options.policy.rotationExcludedKeys.clear();
           };
           const finishAttempt = (result: ProviderCallTerminal["result"], message?: AssistantMessage, kind?: ErrorKind, retryAfterMs?: number): void => {
@@ -414,7 +429,10 @@ export function createPiStreamFn(options: AbtarsPiStreamFnOptions): StreamFn {
               options.policy.recordSuccess(candidate);
             } else if (result !== "aborted") {
               if (kind === "context_exceeded") overflowFailures++;
-              poisonCandidate(kind, retryAfterMs);
+              // #1905: bounded redacted provider error evidence at the
+              // attempt-failure branch — error text only, never prompts.
+              const failureText = message?.errorMessage ? redactSecrets(message.errorMessage).slice(0, 300) : undefined;
+              poisonCandidate(kind, retryAfterMs, failureText);
             }
           };
 
@@ -595,14 +613,29 @@ export function createPiStreamFn(options: AbtarsPiStreamFnOptions): StreamFn {
       } else if (!signal.aborted && attemptedCandidateCount > 0 && overflowFailures === attemptedCandidateCount) {
         // #1745: every attempted candidate rejected the request as over-context.
         // Mirrors the credits predicate's same-cause-for-every-candidate
-        // semantics; a mixed execution (overflow + auth) reports no terminal
-        // code so the session is not reset on ambiguous evidence. Credits keeps
+        // semantics; a mixed execution (overflow + auth) reports no overflow
+        // code so the session is not reset on ambiguous evidence (it falls
+        // through to the generic exhaustion code below). Credits keeps
         // precedence — at most one terminal code is emitted per execution.
         options.onTerminalFailure?.({
           code: "context_overflow",
           retryable: false,
           attemptedCandidates: attemptedCandidateCount,
           message: "The request exceeds the context window of every configured model",
+        });
+      } else if (!signal.aborted && options.policy.candidates.length > 0) {
+        // #1905: genuine exhaustion with no single-cause verdict — mixed
+        // failure kinds, latch/registry zero-attempt, or silent empty streams.
+        // Surface a typed provider failure so spin/sleep observe provider
+        // failure instead of a settled domain empty. Credits/overflow keep
+        // precedence above; abort, cancellation, and committed output return
+        // earlier and never reach this branch.
+        logDebug(TAG, `all candidates exhausted execution=${options.executionId} attempted=${attemptedCandidateCount} skipped=[${options.policy.lastSkipped.join("; ").slice(0, 500)}]`);
+        options.onTerminalFailure?.({
+          code: "all_candidates_failed",
+          retryable: false,
+          attemptedCandidates: attemptedCandidateCount,
+          message: "All model candidates failed",
         });
       }
       yield terminalError(model, signal.aborted ? "aborted" : "error", signal.aborted ? "Execution cancelled" : "All model candidates failed");

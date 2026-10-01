@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   ProviderExecutionError,
+  isAllCandidatesFailed,
   isContextOverflowFailure,
   isCreditsExhausted,
   isProviderExecutionError,
@@ -8,8 +9,8 @@ import {
 } from "./provider-failure.js";
 
 describe("provider-failure contract (#1297, #1745)", () => {
-  it("declares credits_exhausted and context_overflow as terminal codes", () => {
-    expect(TERMINAL_FAILURE_CODES).toEqual(["credits_exhausted", "context_overflow"]);
+  it("declares credits_exhausted, context_overflow, and all_candidates_failed as terminal codes", () => {
+    expect(TERMINAL_FAILURE_CODES).toEqual(["credits_exhausted", "context_overflow", "all_candidates_failed"]);
   });
 
   it("isContextOverflowFailure matches a ProviderExecutionError with code context_overflow", () => {
@@ -42,5 +43,18 @@ describe("provider-failure contract (#1297, #1745)", () => {
     expect(isContextOverflowFailure("context window")).toBe(false);
     expect(isContextOverflowFailure(undefined)).toBe(false);
     expect(isContextOverflowFailure({ failure: { code: "context_overflow" } })).toBe(false);
+  });
+
+  it("isAllCandidatesFailed matches only the generic exhaustion code (#1905)", () => {
+    const generic = new ProviderExecutionError({
+      code: "all_candidates_failed",
+      retryable: false,
+      attemptedCandidates: 0,
+      message: "All model candidates failed",
+    });
+    expect(isAllCandidatesFailed(generic)).toBe(true);
+    expect(isProviderExecutionError(generic)).toBe(true);
+    expect(isCreditsExhausted(generic)).toBe(false);
+    expect(isContextOverflowFailure(generic)).toBe(false);
   });
 });

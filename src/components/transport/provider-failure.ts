@@ -4,8 +4,10 @@
  * The Pi transport carries provider failure classification (model health kinds,
  * status/message parsing) at the adapter boundary. When an execution ends with
  * every configured candidate blocked by the SAME provider-neutral cause, the
- * stream boundary reports a structured terminal failure and core transport
- * throws a typed `ProviderExecutionError`. Downstream consumers (scheduled-task
+ * stream boundary reports that structured terminal failure; other genuine
+ * exhaustion (mixed kinds, zero-attempt, silent empty streams) reports the
+ * generic `all_candidates_failed` code (#1905). Core transport throws a typed
+ * `ProviderExecutionError` for any of them. Downstream consumers (scheduled-task
  * runner, failure hook) identify the condition by type + exact code — never by
  * matching an error message.
  *
@@ -13,7 +15,7 @@
  * appear here or in any downstream consumer.
  */
 
-export const TERMINAL_FAILURE_CODES = ["credits_exhausted", "context_overflow"] as const;
+export const TERMINAL_FAILURE_CODES = ["credits_exhausted", "context_overflow", "all_candidates_failed"] as const;
 export type TerminalFailureCode = (typeof TERMINAL_FAILURE_CODES)[number];
 
 export interface ProviderTerminalFailure {
@@ -48,4 +50,12 @@ export function isCreditsExhausted(err: unknown): boolean {
 /** #1745: every attempted candidate rejected the request as over-context. */
 export function isContextOverflowFailure(err: unknown): boolean {
   return isProviderExecutionError(err) && err.failure.code === "context_overflow";
+}
+
+/** #1905: every configured candidate failed or was unavailable with no
+ * single-cause verdict (mixed failure kinds, latch/registry zero-attempt, or
+ * silent empty streams). Never reported for credit/overflow exhaustion —
+ * those keep their exact codes above. */
+export function isAllCandidatesFailed(err: unknown): boolean {
+  return isProviderExecutionError(err) && err.failure.code === "all_candidates_failed";
 }
