@@ -983,3 +983,96 @@ describe("WorkflowPorts #1804 planner vocabulary and alias compatibility", () =>
     }
   });
 });
+
+describe("#1902 scheduled admission drains initial planning", () => {
+  let runner: Runner;
+  let store: Store;
+
+  beforeEach(() => {
+    ({ runner, store } = setup());
+    for (const t of ["workflow_ingress", "workflow_deliveries", "workflow_commands", "workflow_budgets", "workflow_node_deps", "workflow_nodes", "workflow_plan_revisions", "workflow_operations", "workflow_runs"]) {
+      store.db.exec(`DELETE FROM ${t}`);
+    }
+  });
+
+  it("admitSupervised queues one planning job that the planner backend executes; redrive duplicates nothing and the legacy Orc ledger stays empty", async () => {
+    // Faithful scheduled identity: the O root is sourced to a live occurrence,
+    // the same correlation production admission depends on.
+    const schedRunId = `sched-1902-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    const goal = `scheduled planning probe ${schedRunId}`;
+    const card = Number(store.db.prepare(
+      `INSERT INTO kanban_board (title, source, source_id, type, status, goal) VALUES (?, 'task', ?, 'O', 'running', ?)`,
+    ).run(`probe ${schedRunId}`, schedRunId, goal).lastInsertRowid);
+    store.db.prepare(`INSERT OR IGNORE INTO task_state (task_id) VALUES (?)`).run("probe-task");
+    store.db.prepare(
+      `INSERT INTO task_runs (run_id, task_id, group_id, attempt, trigger, occurrence_at,
+        reserved_at, deadline_at, phase, last_progress_at, owner_pid)
+       VALUES (?, ?, ?, 1, 'schedule', 1000, 1000, 9999999999, 'executing', 1000, 123456)`,
+    ).run(schedRunId, "probe-task", "probe-task");
+
+    const admitted = runner.admitSupervised({
+      rootCardId: card, source: "task", sourceId: schedRunId, scheduledRunId: schedRunId,
+    });
+    expect(admitted.kind).toBe("admitted");
+    const runId = admitted.runId as string;
+
+    // Real planner backend; only the model service is substituted.
+    const prompts: string[] = [];
+    const planner = new Ports.SpinPlannerBackend({
+      runner,
+      callModel: async (prompt: string) => {
+        prompts.push(prompt);
+        return JSON.stringify({
+          nodes: [
+            { label: "a", kind: "work", instructions: "do", capability: "general", outputs: ["o"], acceptance: ["done"], dependsOn: [] },
+          ],
+          requiredOutputs: ["o"],
+        });
+      },
+    });
+    type Cmd = import("./orc-workflow-store.js").CommandRow;
+    const dispatched: string[] = [];
+    const ports = {
+      executor: { name: "t-exec", dispatch: (cmd: Cmd) => { dispatched.push(`${cmd.nodeId}:${cmd.action}`); } },
+      reviewer: { name: "t-rev", startReview: (_cmd: Cmd) => {} },
+      planner,
+    };
+
+    // The post-admission wake drains the queued initial planning command.
+    expect(runner.drain(50, ports)).toBeGreaterThan(0);
+    const deadline = Date.now() + 3000;
+    while (store.currentRevision(runId) !== 1 && Date.now() < deadline) {
+      await new Promise((r) => setTimeout(r, 20));
+    }
+    // Real planner work started on the scheduled goal, exactly once.
+    expect(prompts.length).toBe(1);
+    expect(prompts[0]).toContain(goal);
+    expect(store.currentRevision(runId)).toBe(1);
+
+    // Duplicate admission (reattach) heals without a second planning job, and
+    // redrive routes follow-on work without re-invoking the planner.
+    const again = runner.admitSupervised({
+      rootCardId: card, source: "task", sourceId: schedRunId, scheduledRunId: schedRunId,
+    });
+    expect(again.kind).toBe("duplicate");
+    runner.drain(50, ports);
+    await new Promise((r) => setTimeout(r, 100));
+    expect(prompts.length).toBe(1);
+    const planJobs = store.db.prepare(
+      `SELECT COUNT(*) AS n FROM workflow_commands WHERE run_id = ? AND node_id = '__plan__' AND action = 'plan'`,
+    ).get(runId) as { n: number };
+    expect(planJobs.n).toBe(1);
+
+    // The retired supervised-brain ledger stays untouched: planning flows
+    // through workflow commands, never an Orc authoring run.
+    const legacyTable = store.db.prepare(
+      `SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'orc_project_runs'`,
+    ).get() as { name: string } | undefined;
+    if (legacyTable) {
+      const legacyRows = store.db.prepare(
+        `SELECT COUNT(*) AS n FROM orc_project_runs WHERE project_card_id = ?`,
+      ).get(card) as { n: number };
+      expect(legacyRows.n).toBe(0);
+    }
+  });
+});
