@@ -24,6 +24,7 @@ function mockClient(caps: AbmindCapabilitiesV1, overrides?: Partial<import("abmi
       getRuntimeStatus: vi.fn().mockResolvedValue(null),
       getCoreKnowledge: vi.fn().mockResolvedValue(""),
       recordFeedback: vi.fn().mockResolvedValue(undefined),
+      checkWorthRetrieving: vi.fn(),
       embed: vi.fn().mockResolvedValue({ vectors: [], model: "" }),
       rebuildFtsIndexes: vi.fn().mockResolvedValue({ rebuilt: [] }),
       instantStore: vi.fn().mockResolvedValue({ stored: true, memoriesCount: 1 }),
@@ -47,7 +48,7 @@ function caps(methods: string[], features: Record<string, string> = {}): AbmindC
 const ALL_METHODS = [
   "private.recall", "private.recordMessage", "private.instantStore", "private.edit",
   "private.rebuildFts", "private.recordFeedback", "private.getCoreKnowledge", "private.getRuntimeStatus",
-  "private.projectConversationContext",
+  "private.projectConversationContext", "private.checkWorthRetrieving",
 ];
 
 describe("capability projection", () => {
@@ -55,12 +56,12 @@ describe("capability projection", () => {
     {
       methods: ALL_METHODS,
       features: { private_read: "true", private_write: "true", private_mutation_contract: "revision-v1" },
-      expected: ["recall", "recordMessage", "instantStore", "editMemory", "rebuildFts", "feedback", "coreKnowledge", "status", "durableContext"],
+      expected: ["recall", "recordMessage", "instantStore", "editMemory", "rebuildFts", "feedback", "coreKnowledge", "status", "durableContext", "worthRetrieving"],
     },
     {
       methods: ALL_METHODS,
       features: { private_read: "true", private_write: "false" },
-      expected: ["recall", "recordMessage", "feedback", "coreKnowledge", "status", "durableContext"],
+      expected: ["recall", "recordMessage", "feedback", "coreKnowledge", "status", "durableContext", "worthRetrieving"],
     },
     {
       methods: ALL_METHODS,
@@ -93,7 +94,7 @@ describe("capability projection", () => {
     for (const cap of expected) {
       expect(rt.supports(cap)).toBe(true);
     }
-    const allCaps: MemoryRuntimeCapability[] = ["recall", "recordMessage", "instantStore", "editMemory", "rebuildFts", "feedback", "coreKnowledge", "status", "durableContext"];
+    const allCaps: MemoryRuntimeCapability[] = ["recall", "recordMessage", "instantStore", "editMemory", "rebuildFts", "feedback", "coreKnowledge", "status", "durableContext", "worthRetrieving"];
     for (const cap of allCaps) {
       if (expected.includes(cap)) {
         expect(rt.supports(cap), `${cap} should be supported`).toBe(true);
@@ -122,6 +123,54 @@ describe("capability projection", () => {
     (client as any).capabilities = malformed;
     const rt = createClientRuntime(client);
     expect([...rt.capabilities]).toEqual([]);
+  });
+});
+
+describe("worthRetrieving (#1894)", () => {
+  function checkClient(check: unknown, methods = [...ALL_METHODS]) {
+    const client = mockClient(caps(methods, { private_read: "true" }));
+    (client.privateMemory as unknown as Record<string, unknown>)["checkWorthRetrieving"] = check;
+    return { client, rt: createClientRuntime(client) };
+  }
+
+  it("passes the ambient verdict through with scope filters", async () => {
+    const check = vi.fn().mockResolvedValue({ verdict: "skip", corpusSize: 14, ceiling: 3 });
+    const { client, rt } = checkClient(check);
+    const result = await rt.worthRetrieving!({ original: "köszi", userId: "u1", limit: 5 });
+    expect(result).toEqual({ verdict: "skip", corpusSize: 14, ceiling: 3 });
+    expect(check).toHaveBeenCalledWith(expect.objectContaining({
+      original: "köszi", userId: "u1", intent: "ambient", limit: 5,
+    }));
+    expect(client.privateMemory.recall).not.toHaveBeenCalled();
+  });
+
+  it("missing capability returns null (older daemon falls back to ordinary recall)", async () => {
+    const check = vi.fn();
+    const { rt } = checkClient(check, ["private.recall", "private.recordMessage"]);
+    expect(await rt.worthRetrieving!({ original: "köszi", userId: "u1" })).toBeNull();
+    expect(check).not.toHaveBeenCalled();
+  });
+
+  it("missing method returns null without calling", async () => {
+    const client = mockClient(caps(ALL_METHODS, { private_read: "true" }));
+    delete (client.privateMemory as unknown as Record<string, unknown>)["checkWorthRetrieving"];
+    const rt = createClientRuntime(client);
+    expect(await rt.worthRetrieving!({ original: "köszi", userId: "u1" })).toBeNull();
+  });
+
+  it("a thrown check error returns null (failure favors searching)", async () => {
+    const { rt } = checkClient(vi.fn().mockRejectedValue(new Error("daemon down")));
+    expect(await rt.worthRetrieving!({ original: "köszi", userId: "u1" })).toBeNull();
+  });
+
+  it.each([
+    ["absent", undefined],
+    ["wrong verdict", { verdict: "maybe", corpusSize: 1, ceiling: 0 }],
+    ["non-object", "skip"],
+    ["null", null],
+  ])("malformed verdict (%s) returns null", async (_label, raw) => {
+    const { rt } = checkClient(vi.fn().mockResolvedValue(raw));
+    expect(await rt.worthRetrieving!({ original: "köszi", userId: "u1" })).toBeNull();
   });
 });
 

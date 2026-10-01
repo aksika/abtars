@@ -30,6 +30,9 @@ export type MemoryRuntimeCapability =
   | "dreamQuestionsNextPending"
   // #1813 — advisory post-response attribution (private.attribution).
   | "attribution"
+  // #1894 — cheap worth-retrieving verdict (private.checkWorthRetrieving).
+  // Older daemons lack the method and callers fall back to ordinary recall.
+  | "worthRetrieving"
   // #1660: composite local sealed-secret capability (find + resolve on a
   // local route). Absent for signed peers and remote routes.
   | "sealedSecrets";
@@ -175,6 +178,31 @@ export interface RuntimeRecallInput {
     delivered?: ReadonlyArray<{ id: number; revision: number }>;
     releaseScope?: boolean;
   };
+}
+
+/**
+ * #1894 — cheap worth-retrieving input: the raw turn plus the effective
+ * recall scope, mirroring the filters full recall judges the skip with.
+ */
+export interface WorthRetrievingInput {
+  original: string;
+  userId: string;
+  limit?: number;
+  maxClassification?: number;
+  timeStart?: number;
+  timeEnd?: number;
+  topic?: string;
+  tier?: "core" | "general";
+  emotion?: string;
+  includeExpired?: boolean;
+  resolution?: "signal" | "compact" | "standard" | "full";
+}
+
+/** #1894 — abmind df verdict plus the diagnostics behind it. */
+export interface WorthRetrievingResult {
+  verdict: "skip" | "search";
+  corpusSize: number;
+  ceiling: number;
 }
 
 export interface RuntimeRecallHit {
@@ -855,6 +883,12 @@ export interface AbtarsMemoryRuntime {
   supports(capability: MemoryRuntimeCapability): boolean;
   recordMessage(input: RecordMessageInput, operationKey: string): Promise<RecordMessageResult>;
   recall(input: RuntimeRecallInput): Promise<RuntimeRecallResult>;
+  /**
+   * #1894 — cheap worth-retrieving check. Optional: facades without it
+   * (older runtimes, recomposed test doubles) proceed to ordinary recall.
+   * Present implementations never throw (null on any failure).
+   */
+  worthRetrieving?(input: WorthRetrievingInput): Promise<WorthRetrievingResult | null>;
   assembleSessionContext(input: SessionContextInput): Promise<SessionContextResult>;
   getRecentConversation(input: RecentConversationInput): Promise<RecentConversationResult>;
   getStatus(input?: RuntimeStatusInput): Promise<RuntimeStatusResult>;
@@ -929,6 +963,9 @@ function projectCapabilities(client: AbmindClientLike): Set<MemoryRuntimeCapabil
   // #1813 — advisory attribution; mixed-version daemons without the method
   // simply lack the capability and callers report unsupported.
   if (methods.has("private.attribution")) result.add("attribution");
+  // #1894 — same shape: mixed-version daemons without the method simply lack
+  // the capability and callers proceed to ordinary recall.
+  if (methods.has("private.checkWorthRetrieving") && features["private_read"] === "true") result.add("worthRetrieving");
   if (methods.has("private.getCoreKnowledge")) result.add("coreKnowledge");
   if (methods.has("private.getRuntimeStatus")) result.add("status");
   if (methods.has("private.projectConversationContext") && features["private_read"] === "true") result.add("durableContext");
@@ -1116,6 +1153,46 @@ export function createClientRuntime(client: AbmindClientLike): AbtarsMemoryRunti
         }
       }
       return { hits, context, ...(decision !== undefined ? { decision } : {}), ...(selection !== undefined ? { selection } : {}), ...(stageOutcomes !== undefined ? { stageOutcomes } : {}), ...(weakEvidence !== undefined ? { weakEvidence } : {}), ...(searchSkipped !== undefined ? { searchSkipped } : {}), ...(skipReason !== undefined ? { searchSkippedReason: skipReason } : {}) };
+    },
+
+    /**
+     * #1894 — cheap worth-retrieving check before ambient recall. Returns the
+     * verdict, or null when the check is unsupported, unavailable, failed, or
+     * malformed — null always means "proceed to ordinary recall". Never
+     * throws and never translates: check failure is handled here, separately
+     * from the recall path, so a broken check cannot abort the turn.
+     */
+    async worthRetrieving(input: WorthRetrievingInput): Promise<WorthRetrievingResult | null> {
+      try {
+        if (!capabilities.has("worthRetrieving")) return null;
+        // Mixed-version daemon without the method: unsupported, never an error.
+        if (typeof pm.checkWorthRetrieving !== "function") return null;
+        const raw = (await pm.checkWorthRetrieving({
+          original: input.original,
+          userId: input.userId,
+          intent: "ambient",
+          limit: input.limit ?? 10,
+          ...(input.maxClassification !== undefined ? { maxClassification: input.maxClassification } : {}),
+          ...(input.timeStart !== undefined ? { timeStart: input.timeStart } : {}),
+          ...(input.timeEnd !== undefined ? { timeEnd: input.timeEnd } : {}),
+          ...(input.topic !== undefined ? { topic: input.topic } : {}),
+          ...(input.tier !== undefined ? { tier: input.tier } : {}),
+          ...(input.emotion !== undefined ? { emotion: input.emotion } : {}),
+          ...(input.includeExpired !== undefined ? { includeExpired: input.includeExpired } : {}),
+          ...(input.resolution !== undefined ? { resolution: input.resolution } : {}),
+        })) as unknown;
+        if (!raw || typeof raw !== "object") return null;
+        const record = raw as Record<string, unknown>;
+        if (record["verdict"] !== "skip" && record["verdict"] !== "search") return null;
+        return {
+          verdict: record["verdict"],
+          corpusSize: typeof record["corpusSize"] === "number" ? record["corpusSize"] : 0,
+          ceiling: typeof record["ceiling"] === "number" ? record["ceiling"] : 0,
+        };
+      } catch (err) {
+        logDebug("memory-runtime", `worthRetrieving failed, ordinary recall: ${err instanceof Error ? err.message : String(err)}`);
+        return null;
+      }
     },
 
     async assembleSessionContext(input: SessionContextInput): Promise<SessionContextResult> {

@@ -144,6 +144,88 @@ describe("#1813 — compact evidence injection", () => {
   });
 });
 
+// ── #1894 check-first, translation-free ambient recall ───────────────────────
+
+describe("#1894 — ambient recall asks the cheap check first", () => {
+  function checkRuntime(check: unknown, recall: ReturnType<typeof vi.fn>) {
+    return {
+      state: "ready",
+      capabilities: new Set(["durableContext"]),
+      recordMessage: vi.fn().mockResolvedValue({ id: 1 }),
+      worthRetrieving: vi.fn().mockResolvedValue(check),
+      recall,
+      assembleSessionContext: vi.fn().mockResolvedValue({ coreKnowledge: "", recall: "", wakeUp: "" }),
+    } as never;
+  }
+
+  function turnDeps(runtime: unknown, dispatchBackground?: ReturnType<typeof vi.fn>) {
+    return {
+      memoryRuntime: runtime,
+      memoryConfig: { memoryEnabled: true, memoryDir: "/tmp" },
+      sessionManager: {
+        getActiveSessionId: () => "master_A_1",
+        ...(dispatchBackground !== undefined ? { dispatchBackground } : {}),
+      },
+      conversationBuffer: { drain: () => "" },
+      contextPercent: -1,
+    } as never;
+  }
+
+  function turn(runtime: unknown, text: string, dispatchBackground?: ReturnType<typeof vi.fn>) {
+    return buildPrompt(
+      { userId: "master", channelId: "1", platform: "telegram", isGroup: false } as never,
+      text,
+      turnDeps(runtime, dispatchBackground),
+      masterRegistry(),
+    );
+  }
+
+  it("a skip verdict returns before recall with no memory block", async () => {
+    const recall = vi.fn();
+    const result = await turn(
+      checkRuntime({ verdict: "skip", corpusSize: 14, ceiling: 3 }, recall),
+      "köszi",
+    );
+    expect(recall).not.toHaveBeenCalled();
+    expect(result.prompt).not.toContain("MEMORY CONTEXT");
+    expect(result.recalledHits).toBeUndefined();
+  });
+
+  it("a search verdict runs one ambient recall and never touches a model", async () => {
+    const dispatchBackground = vi.fn();
+    const recall = vi.fn().mockResolvedValue({ hits: [], context: "" });
+    const runtime = checkRuntime({ verdict: "search", corpusSize: 14, ceiling: 3 }, recall);
+    await turn(runtime, "köszi migrációs terv", dispatchBackground);
+    expect(recall).toHaveBeenCalledTimes(1);
+    expect(recall).toHaveBeenCalledWith(expect.objectContaining({ intent: "ambient", original: "köszi migrációs terv" }));
+    expect(dispatchBackground).not.toHaveBeenCalled();
+  });
+
+  it("a failed check falls back to ordinary recall without a model call", async () => {
+    const dispatchBackground = vi.fn();
+    const recall = vi.fn().mockResolvedValue({ hits: [], context: "" });
+    const runtime = checkRuntime(null, recall);
+    (runtime as { worthRetrieving: ReturnType<typeof vi.fn> }).worthRetrieving.mockRejectedValueOnce(new Error("daemon down"));
+    await turn(runtime, "köszi", dispatchBackground);
+    expect(recall).toHaveBeenCalledTimes(1);
+    expect(dispatchBackground).not.toHaveBeenCalled();
+  });
+
+  it("a runtime without the check (older shape) recalls ordinarily", async () => {
+    const recall = vi.fn().mockResolvedValue({ hits: [], context: "" });
+    const legacy = {
+      state: "ready",
+      capabilities: new Set(["durableContext"]),
+      recordMessage: vi.fn().mockResolvedValue({ id: 1 }),
+      recall,
+      assembleSessionContext: vi.fn().mockResolvedValue({ coreKnowledge: "", recall: "", wakeUp: "" }),
+    } as never;
+    const result = await turn(legacy, "köszi");
+    expect(recall).toHaveBeenCalledTimes(1);
+    expect(result.prompt).not.toContain("MEMORY CONTEXT");
+  });
+});
+
 describe("buildPrompt durable-context classification (#1529)", () => {
   it("maps a numeric record ID to durable intent with that exact cursor", async () => {
     const recordMessage = vi.fn().mockResolvedValue({ id: 42 });

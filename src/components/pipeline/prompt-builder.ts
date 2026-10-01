@@ -12,7 +12,7 @@ import { abmind } from "../../utils/abmind-lazy.js";
 import { getEnv } from "../env-schema.js";
 import type { AbtarsMemoryRuntime, MemoryWritePhase } from "../memory-runtime.js";
 import { attemptMemoryMutation, selectInjectedHits, asSessionSoulBundle, shouldInjectRecallHit } from "../memory-runtime.js";
-import { prepareRecallQuery, needsTranslation, translateRecallTerms, mergeQueryTerms } from "./recall-query-preparation.js";
+import { prepareRecallQuery } from "./recall-query-preparation.js";
 import { inboundExecutionKey, inboundMessageKey } from "../memory-operation-key.js";
 import type { ConversationBuffer } from "../conversation-buffer.js";
 import { isTrustedScheduledAnnouncement, type InboundMessage } from "../../types/platform.js";
@@ -253,32 +253,40 @@ export async function buildPrompt(
     if (userEntry?.role !== "guest" && (contextPercent < 0 || contextPercent < getEnv().ctxCompactPct)) {
       const priming = pSession?.primingTerms ?? [];
       try {
-        const t0 = performance.now();
-        // #1867 — discrete terms so #1861's coverage ordering participates on
-        // the auto-recall path; the joined query stays the fallback.
-        // Genuine translation runs only behind the non-English gate, bounded,
-        // with extraction fallback then joined fallback. A term-preparation
-        // failure never emits no query.
-        const prepared = prepareRecallQuery(text, priming);
-        let terms = prepared.terms;
-        if (needsTranslation(text, terms ?? [])) {
-          try {
-            const translated = await translateRecallTerms(deps.sessionManager, text);
-            if (translated.length > 0) terms = mergeQueryTerms([translated, terms ?? [], priming]);
-          } catch (err) {
-            logDebug(TAG, `Recall translation failed, extraction fallback: ${err instanceof Error ? err.message : String(err)}`);
-          }
+        // #1894 — cheap worth-retrieving check before any query preparation:
+        // a skip verdict returns before recall. No translation or LLM call
+        // exists anywhere on this path; a missing or failed check falls back
+        // to ordinary ambient recall below. Check failure is handled here,
+        // separately from the recall handler, so it cannot abort the turn.
+        let check: { verdict: "skip" | "search" } | null = null;
+        try {
+          check = await memoryRuntime.worthRetrieving?.({ original: text, userId, limit: ACTIVE_MEMORY_LIMIT }) ?? null;
+        } catch (err) {
+          logDebug(TAG, `Active recall check failed, ordinary recall: ${err instanceof Error ? err.message : String(err)}`);
         }
-        // #1877 — no bridge-side skip decision: whether a search is worth
-        // running is decided by abmind from its own term statistics, in every
-        // language, instead of hand-written per-language cue lists.
-        // #1895 — ambient auto-recall: the raw turn always rides along as
-        // original (even when no terms were prepared) with ambient intent.
-        const recall = await memoryRuntime.recall({
-          query: prepared.query, original: prepared.original, userId, limit: ACTIVE_MEMORY_LIMIT,
-          intent: "ambient",
-          ...(terms !== undefined && terms.length > 0 ? { terms, selectTerms: true } : {}),
-        });
+        if (check !== null && check.verdict === "skip") {
+          // #1877 — one line per eligible turn, independent of injection, so
+          // skipped searches are observable instead of silent.
+          logDebug(TAG, `Active recall outcome: retrieved=0 injected=0 skipped=yes(no-informative-terms)`);
+        } else {
+          const t0 = performance.now();
+          // #1867 — discrete terms so #1861's coverage ordering participates on
+          // the auto-recall path; the joined query stays the fallback.
+          // Extraction and priming composition are pure and synchronous; the
+          // raw turn still rides along as `original` for source-language
+          // matching. A term-preparation failure never emits no query.
+          const prepared = prepareRecallQuery(text, priming);
+          const terms = prepared.terms;
+          // #1877 — no bridge-side skip decision: whether a search is worth
+          // running is decided by abmind from its own term statistics, in every
+          // language, instead of hand-written per-language cue lists.
+          // #1895 — ambient auto-recall: the raw turn always rides along as
+          // original (even when no terms were prepared) with ambient intent.
+          const recall = await memoryRuntime.recall({
+            query: prepared.query, original: prepared.original, userId, limit: ACTIVE_MEMORY_LIMIT,
+            intent: "ambient",
+            ...(terms !== undefined && terms.length > 0 ? { terms, selectTerms: true } : {}),
+          });
         const nowMs = Date.now();
         // #1877 — single exported predicate owns the floor/age rule.
         const hits = recall.hits.filter((h) => shouldInjectRecallHit(h, nowMs));
@@ -307,6 +315,7 @@ export async function buildPrompt(
         // #1877 — one line per eligible turn, independent of injection, so
         // skipped searches are observable instead of silent.
         logDebug(TAG, `Active recall outcome: retrieved=${recall.hits.length} injected=${hits.length} skipped=${recall.searchSkipped === true ? `yes(${recall.searchSkippedReason ?? "unknown"})` : "no"}`);
+        }
       } catch (err) {
         logDebug(TAG, `Active recall failed: ${err instanceof Error ? err.message : String(err)}`);
       }

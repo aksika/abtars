@@ -56,6 +56,8 @@ export interface AbmindPrivateMemoryLike {
   recordFeedback(input: unknown, idempotencyKey?: string): Promise<unknown>;
   /** #1813 — advisory attribution; absent on mixed-version daemons. */
   attribution?(input: unknown): Promise<unknown>;
+  /** #1894 — cheap worth-retrieving verdict; absent on mixed-version daemons. */
+  checkWorthRetrieving?(input: unknown): Promise<unknown>;
   /** #1527: daemon-owned durable context projection (private read). */
   projectConversationContext(input: unknown): Promise<unknown>;
   /** #1406: daemon-owned durable compaction prepare (private read). */

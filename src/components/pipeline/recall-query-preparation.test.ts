@@ -1,12 +1,11 @@
 /**
- * #1867 — bridge query preparation: discrete terms, non-English gate, and
- * bounded translation with extraction/joined fallbacks.
+ * #1867 — bridge query preparation: discrete terms with extraction/joined
+ * fallbacks. #1894 — ambient auto-recall is translation-free and LLM-free:
+ * extraction plus priming composition only.
  */
-import { describe, it, expect, vi } from "vitest";
+import { describe, it, expect } from "vitest";
 import {
   prepareRecallQuery,
-  needsTranslation,
-  translateRecallTerms,
   mergeQueryTerms,
   MAX_QUERY_TERMS,
 } from "./recall-query-preparation.js";
@@ -54,50 +53,5 @@ describe("mergeQueryTerms", () => {
 
   it("trims and drops empties", () => {
     expect(mergeQueryTerms([["  a  ", "", "b"]])).toEqual(["a", "b"]);
-  });
-});
-
-describe("needsTranslation", () => {
-  it("English turns never need translation", () => {
-    const text = "what do you know about Patchright deployment";
-    expect(needsTranslation(text, TOKENS(text))).toBe(false);
-  });
-
-  it("Hungarian turns with no ASCII coverage need translation", () => {
-    expect(needsTranslation("mit mondott a svéd váltókezelő?", [])).toBe(true);
-  });
-
-  it("Hungarian turns dominated by source language need translation", () => {
-    // One proper noun surfaced, most letter content still Hungarian.
-    expect(needsTranslation("ki volt Morgenson a viccben?", ["Morgenson"])).toBe(true);
-  });
-
-  it("short texts never trigger translation", () => {
-    expect(needsTranslation("ok", [])).toBe(false);
-  });
-});
-
-describe("translateRecallTerms", () => {
-  it("parses line-per-term output into terms", async () => {
-    const caller = { dispatchBackground: vi.fn().mockResolvedValue("architect\nparadox\ntester") };
-    const terms = await translateRecallTerms(caller, "ki volt az építész?");
-    expect(terms).toEqual(["architect", "paradox", "tester"]);
-    expect(caller.dispatchBackground).toHaveBeenCalledOnce();
-  });
-
-  it("a translation failure throws so the caller falls back", async () => {
-    const caller = { dispatchBackground: vi.fn().mockRejectedValue(new Error("timeout")) };
-    await expect(translateRecallTerms(caller, "ki volt az építész?")).rejects.toThrow("timeout");
-  });
-
-  it("empty input yields no terms without calling", async () => {
-    const caller = { dispatchBackground: vi.fn() };
-    expect(await translateRecallTerms(caller, "   ")).toEqual([]);
-    expect(caller.dispatchBackground).not.toHaveBeenCalled();
-  });
-
-  it("unparseable output yields no terms (caller falls back)", async () => {
-    const caller = { dispatchBackground: vi.fn().mockResolvedValue("a be -- ...") };
-    expect(await translateRecallTerms(caller, "valami")).toEqual([]);
   });
 });
