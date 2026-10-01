@@ -10,7 +10,7 @@ import { localTime } from "../../utils/local-time.js";
 import { interceptLargeMessage } from "../message-interceptor.js";
 import { abmind } from "../../utils/abmind-lazy.js";
 import { getEnv } from "../env-schema.js";
-import type { AbtarsMemoryRuntime, MemoryWritePhase } from "../memory-runtime.js";
+import type { AbtarsMemoryRuntime, MemoryWritePhase, WorthRetrievingResult } from "../memory-runtime.js";
 import { attemptMemoryMutation, selectInjectedHits, asSessionSoulBundle, shouldInjectRecallHit } from "../memory-runtime.js";
 import { prepareRecallQuery } from "./recall-query-preparation.js";
 import { inboundExecutionKey, inboundMessageKey } from "../memory-operation-key.js";
@@ -258,7 +258,7 @@ export async function buildPrompt(
         // exists anywhere on this path; a missing or failed check falls back
         // to ordinary ambient recall below. Check failure is handled here,
         // separately from the recall handler, so it cannot abort the turn.
-        let check: { verdict: "skip" | "search" } | null = null;
+        let check: WorthRetrievingResult | null = null;
         try {
           check = await memoryRuntime.worthRetrieving?.({ original: text, userId, limit: ACTIVE_MEMORY_LIMIT }) ?? null;
         } catch (err) {
@@ -266,8 +266,9 @@ export async function buildPrompt(
         }
         if (check !== null && check.verdict === "skip") {
           // #1877 — one line per eligible turn, independent of injection, so
-          // skipped searches are observable instead of silent.
-          logDebug(TAG, `Active recall outcome: retrieved=0 injected=0 skipped=yes(no-informative-terms)`);
+          // skipped searches are observable instead of silent. The df
+          // diagnostics mirror the abmind skip log that no longer runs.
+          logDebug(TAG, `Active recall outcome: retrieved=0 injected=0 skipped=yes(no-informative-terms) (df>${check.ceiling} of ${check.corpusSize})`);
         } else {
           const t0 = performance.now();
           // #1867 — discrete terms so #1861's coverage ordering participates on
@@ -287,34 +288,34 @@ export async function buildPrompt(
             intent: "ambient",
             ...(terms !== undefined && terms.length > 0 ? { terms, selectTerms: true } : {}),
           });
-        const nowMs = Date.now();
-        // #1877 — single exported predicate owns the floor/age rule.
-        const hits = recall.hits.filter((h) => shouldInjectRecallHit(h, nowMs));
-        if (hits.length > 0) {
-          // #1813 — inject abmind's deterministic bounded selection when
-          // present and resolvable; otherwise the full filtered set (ordinary
-          // rendering). Selection bounds, never substitutes; the rank order
-          // comes from abmind's final ordering.
-          const inject = selectInjectedHits(hits, recall.selection);
-          // eslint-disable-next-line @typescript-eslint/no-explicit-any
-          const lines = inject.map((h: any) => abmind()?.renderMemory({
-            content_en: h.content,
-          }) ?? h.content);
-          const block = `[MEMORY CONTEXT — auto-recalled, do not repeat verbatim]\n${lines.join("\n")}\n[/MEMORY CONTEXT]`;
-          volatileContext.push({ kind: "recall", content: block });
-          prompt = `${block}\n\n${prompt}`;
-          // eslint-disable-next-line @typescript-eslint/no-explicit-any
-          recalledHits = inject.filter((h: any) => h.memoryId != null).map((h: any) => ({ id: h.memoryId as number, contentEn: h.content as string }));
-          recallDecision = recall.decision;
-          // #1867 — diagnostics are advisory: the floor/age rules above still
-          // decide injection. Gating on weakEvidence waits for harness proof
-          // of no suppression (terms now make its lexical arm reachable).
-          logDebug(TAG, `Active recall: ${inject.length}/${hits.length} hits injected (selection ${recall.selection ? "on" : "off"}), weakEvidence=${recall.weakEvidence ?? "n/a"}, ${block.length} chars, ${Math.round(performance.now() - t0)}ms`);
-          logTrace(TAG, `recall content: ${block}`);
-        }
-        // #1877 — one line per eligible turn, independent of injection, so
-        // skipped searches are observable instead of silent.
-        logDebug(TAG, `Active recall outcome: retrieved=${recall.hits.length} injected=${hits.length} skipped=${recall.searchSkipped === true ? `yes(${recall.searchSkippedReason ?? "unknown"})` : "no"}`);
+          const nowMs = Date.now();
+          // #1877 — single exported predicate owns the floor/age rule.
+          const hits = recall.hits.filter((h) => shouldInjectRecallHit(h, nowMs));
+          if (hits.length > 0) {
+            // #1813 — inject abmind's deterministic bounded selection when
+            // present and resolvable; otherwise the full filtered set (ordinary
+            // rendering). Selection bounds, never substitutes; the rank order
+            // comes from abmind's final ordering.
+            const inject = selectInjectedHits(hits, recall.selection);
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            const lines = inject.map((h: any) => abmind()?.renderMemory({
+              content_en: h.content,
+            }) ?? h.content);
+            const block = `[MEMORY CONTEXT — auto-recalled, do not repeat verbatim]\n${lines.join("\n")}\n[/MEMORY CONTEXT]`;
+            volatileContext.push({ kind: "recall", content: block });
+            prompt = `${block}\n\n${prompt}`;
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            recalledHits = inject.filter((h: any) => h.memoryId != null).map((h: any) => ({ id: h.memoryId as number, contentEn: h.content as string }));
+            recallDecision = recall.decision;
+            // #1867 — diagnostics are advisory: the floor/age rules above still
+            // decide injection. Gating on weakEvidence waits for harness proof
+            // of no suppression (terms now make its lexical arm reachable).
+            logDebug(TAG, `Active recall: ${inject.length}/${hits.length} hits injected (selection ${recall.selection ? "on" : "off"}), weakEvidence=${recall.weakEvidence ?? "n/a"}, ${block.length} chars, ${Math.round(performance.now() - t0)}ms`);
+            logTrace(TAG, `recall content: ${block}`);
+          }
+          // #1877 — one line per eligible turn, independent of injection, so
+          // skipped searches are observable instead of silent.
+          logDebug(TAG, `Active recall outcome: retrieved=${recall.hits.length} injected=${hits.length} skipped=${recall.searchSkipped === true ? `yes(${recall.searchSkippedReason ?? "unknown"})` : "no"}`);
         }
       } catch (err) {
         logDebug(TAG, `Active recall failed: ${err instanceof Error ? err.message : String(err)}`);
