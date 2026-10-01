@@ -64,13 +64,21 @@ describe("#1520 failure policy matrix", () => {
     expect(() => makeTaskFailure("execution", "made_up_code", PHASE, "x", "none")).toThrow("Unknown task failure code");
   });
 
-  // #1297: credits_exhausted is a recognized execution diagnostic without a
-  // schema migration — version stays 1 and the policy path stays the ordinary
-  // non-retryable execution branch.
+  // #1297/#1745/#1905: typed provider terminal codes are recognized execution
+  // diagnostics without a schema migration — version stays 1 and the policy
+  // path stays the ordinary non-retryable execution branch.
   it("credits_exhausted is a recognized execution code at v1", () => {
     const d = makeTaskFailure("execution", "credits_exhausted", PHASE, "all providers out of credits", "none");
     expect(d.version).toBe(1);
     expect(parseTaskFailure(JSON.parse(JSON.stringify(d)))).toEqual(d);
+  });
+
+  it("context_overflow and all_candidates_failed are recognized execution codes at v1", () => {
+    for (const code of ["context_overflow", "all_candidates_failed"]) {
+      const d = makeTaskFailure("execution", code, PHASE, "provider terminal failure", "none");
+      expect(d.version).toBe(1);
+      expect(parseTaskFailure(JSON.parse(JSON.stringify(d)))).toEqual(d);
+    }
   });
 
   it("credits_exhausted decides as non-retryable execution (no retry timestamp)", () => {

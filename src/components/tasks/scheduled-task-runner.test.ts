@@ -725,4 +725,28 @@ describe("ScheduledTaskRunner #1297 credits_exhausted mapping", () => {
       diagnostic: expect.objectContaining({ code: "model_error" }),
     }));
   });
+
+  it("#1905: a typed all_candidates_failed maps without an unknown-code throw", async () => {
+    const agentRunner = vi.fn(async () => {
+      throw new ProviderExecutionError({
+        code: "all_candidates_failed",
+        retryable: false,
+        attemptedCandidates: 0,
+        message: "All model candidates failed",
+      });
+    });
+    const runner = new ScheduledTaskRunner({ agentRunner });
+    const outcome = await runner.run(makeEntry("generic-exhaustion"), makeReservation("generic-exhaustion"));
+
+    expect(outcome.status).toBe("failed");
+    expect(outcome.safeDetail).toBe("All model candidates failed");
+    expect(mockedSettle).toHaveBeenCalledWith(expect.objectContaining({
+      outcome: "failed",
+      diagnostic: expect.objectContaining({
+        category: "execution",
+        code: "all_candidates_failed",
+        retryability: "none",
+      }),
+    }));
+  });
 });
