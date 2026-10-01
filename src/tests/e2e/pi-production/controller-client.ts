@@ -91,7 +91,18 @@ export class OwnerControllerClient {
       input: true,
     });
     const client = new OwnerControllerClient(child);
-    await client.waitForDescriptor();
+    try {
+      await client.waitForDescriptor();
+    } catch (err) {
+      // #1900: own the child before readiness — a descriptor timeout must not
+      // leak the controller process.
+      try {
+        await child.terminate();
+      } catch {
+        // best effort — caller still sees the original descriptor failure
+      }
+      throw err;
+    }
     return client;
   }
 

@@ -83,6 +83,14 @@ export const TIMEOUTS = {
   controllerCommandMs: 60_000,
   /** Whole-run budget. */
   runMs: 20 * 60_000,
+  /** #1900: per-lane execution deadline including setup (distinct from runMs legacy). */
+  laneExecutionMs: 20 * 60_000,
+  /** #1900: one scheduled observation phase after each restart becomes ready,
+   *  covering provider rounds plus terminal-attempt settlement. Three such
+   *  observations allow nine minutes total, leaving lane headroom. */
+  scheduledObservationMs: 180_000,
+  /** #1900: independent cleanup budget, not charged against execution. */
+  laneCleanupMs: 60_000,
 } as const;
 
 // ── Reason codes (identical across lanes so the matrix exposes parity) ──────
@@ -162,4 +170,8 @@ export interface ProviderSummary {
   markerHashes: string[];
   /** Bounded synthetic user-message texts for substring marker matching. */
   markerTexts: string[];
+  /** #1900: bounded registered marker identities matched in complete request
+   *  text before preview truncation. Existing markerHashes retain their
+   *  whole-text hash meaning; this field carries only registered identities. */
+  matchedMarkers: string[];
 }

@@ -23,8 +23,7 @@ import { getRunFromDatabase } from "../../../components/tasks/task-history-store
 import { wrapTaskDatabase } from "../../../components/tasks/kanban-board.js";
 
 export const SCHEDULED_TASK_ID = "scheduled-limit";
-const SCHEDULED_GOAL = `PI-E2E-SCHEDULED ${SCHEDULED_TASK_ID}`;
-const SCHEDULED_PROJECT_MARKER = "[SCHEDULED TASK PROJECT —";
+export const SCHEDULED_GOAL = `PI-E2E-SCHEDULED ${SCHEDULED_TASK_ID}`;
 
 /** #1548 R9: bounded scheduled fixture + per-scenario maxToolRounds override. */
 export function installScheduledRoundLimitFixture(ctx: PiAcceptanceContext): void {
@@ -85,26 +84,38 @@ interface BridgeHomeEvidence {
   supervisionState?: string;
   workerCardCount: number;
   providerRoundLimit: boolean;
+  /** #1900: durable Orc authoring failure code for the scheduled card. */
+  orcFailureCode?: string;
+  /** #1900: correlated terminal authoring evidence (prompt_round_limit). */
+  orcRoundLimit: boolean;
+  /** #1900: Orc release timestamp for freshness correlation. */
+  orcReleasedAt?: string;
+  /** #1900: last durable read error — never treated as proof of absence. */
+  dbReadError?: string;
 }
 
-function isScheduledSummary(summary: ProviderSummary): boolean {
-  // The task goal is appended after the provider fixture's bounded marker-text
-  // window, but the production Orc header is present near the beginning of
-  // the request. The caller scopes summaries to the current restart before
-  // using this predicate.
-  return summary.markerTexts.some((t) => t.includes(SCHEDULED_PROJECT_MARKER) || t.includes(SCHEDULED_GOAL));
+export type { BridgeHomeEvidence };
+
+export function isScheduledSummary(summary: ProviderSummary): boolean {
+  // #1900: full-request recognition via bounded registered identities.
+  // The synthetic goal is matched in complete message text before preview
+  // truncation, so its offset beyond 300 chars or inside decorated context
+  // no longer matters. Preview substring matching is retired.
+  return summary.matchedMarkers.includes(SCHEDULED_GOAL);
 }
 
 /** Read-only evidence over the bridge home's durable files. */
-function readBridgeHomeEvidence(ctx: PiAcceptanceContext, providerSummaries: ProviderSummary[]): BridgeHomeEvidence {
+export function readBridgeHomeEvidence(ctx: PiAcceptanceContext, providerSummaries: ProviderSummary[]): BridgeHomeEvidence {
   const home = ctx.abtarsHome;
-  const evidence: BridgeHomeEvidence = { workerCardCount: 0, providerRoundLimit: false };
+  const evidence: BridgeHomeEvidence = { workerCardCount: 0, providerRoundLimit: false, orcRoundLimit: false };
 
   // #1601: durable run state now lives in the shared task database
   // (task_runs rows); the legacy task-state.json is migrated once at boot.
   // #1568: the terminal event lives in the bounded task_run_history table.
   const dbPath = join(home, "kanban", "kanban.db");
-  if (existsSync(dbPath)) {
+  if (!existsSync(dbPath)) {
+    evidence.dbReadError = `kanban db missing at ${dbPath}`;
+  } else {
     try {
       // Reuse the production native-dependency resolver. The bridge HOME is
       // isolated, but the dependency itself is the existing host install.
@@ -132,23 +143,51 @@ function readBridgeHomeEvidence(ctx: PiAcceptanceContext, providerSummaries: Pro
           evidence.supervisionState = sup?.state;
           const children = db.prepare("SELECT COUNT(*) AS n FROM kanban_board WHERE parent_id = ?").get(evidence.cardId) as { n: number };
           evidence.workerCardCount = Number(children?.n ?? 0);
+          // #1900: durable Orc authoring terminal class, read-only without
+          // instantiating a production store that would migrate the database.
+          // The authoring attempt ends with prompt_round_limit; Spin releases
+          // the owned Orc run with that failure code. Filter to the
+          // contract-authoring intent so unrelated worker/review runs cannot
+          // satisfy the evidence.
+          try {
+            const orc = db.prepare(
+              "SELECT failure_code, released_at FROM orc_project_runs WHERE project_card_id = ? AND intent_kind = 'contract_authoring' ORDER BY created_at DESC LIMIT 1",
+            ).get(evidence.cardId) as { failure_code?: string | null; released_at?: string | null } | undefined;
+            evidence.orcFailureCode = orc?.failure_code ?? undefined;
+            evidence.orcReleasedAt = orc?.released_at ?? undefined;
+            evidence.orcRoundLimit = evidence.orcFailureCode === "prompt_round_limit";
+          } catch (err) {
+            // Missing table or unreadable rows fail the cell below; never
+            // treated as proof of an absent terminal event.
+            evidence.dbReadError = `orc runs unreadable: ${err instanceof Error ? err.message : String(err)}`;
+          }
         }
       } finally {
         (db as unknown as { close(): void }).close();
       }
-    } catch {
-      // db unavailable in the test process — provider evidence still stands
+    } catch (err) {
+      // #1900: database read errors cannot be treated as proof of an absent
+      // terminal event. Record and fail the cell; provider evidence alone is
+      // insufficient.
+      evidence.dbReadError = `kanban db unreadable: ${err instanceof Error ? err.message : String(err)}`;
     }
   }
 
-  // Round-limit class: the scheduled request stream saw two toolCall rounds.
+  // Round-limit class: two matching tool-call responses after the restart
+  // sequence boundary. Request counts alone are insufficient.
   const scheduled = providerSummaries.filter(isScheduledSummary);
-  evidence.providerRoundLimit = scheduled.some((s) => s.action === "toolCall") && scheduled.length >= 2;
+  const toolResponses = scheduled.filter((s) => s.action === "toolCall");
+  evidence.providerRoundLimit = toolResponses.length >= 2;
 
   return evidence;
 }
 
 function enqueueToolRounds(ctx: PiAcceptanceContext, count: number): void {
+  // #1900: constrain scheduled tool scripts to candidate B plus presence of
+  // the synthetic goal. Unrelated B traffic stays unscripted (HTTP 503) and
+  // cannot consume these responses. The strict option has no general
+  // non-consuming fallback that could conceal unaccepted traffic.
+  ctx.provider.registerMarker(SCHEDULED_GOAL);
   for (let i = 0; i < count; i++) {
     ctx.provider.enqueue({
       // Scheduled project authoring uses the production O session profile,
@@ -156,19 +195,51 @@ function enqueueToolRounds(ctx: PiAcceptanceContext, count: number): void {
       // fallback candidate B; queue the responses on the route the real Orc
       // request actually takes rather than changing production routing.
       candidate: FIXTURE_MODEL_B,
-      expectation: undefined,
+      expectation: {
+        candidate: FIXTURE_MODEL_B,
+        orderedContains: [SCHEDULED_GOAL],
+      },
       action: { kind: "toolCall", name: "execute_bash", arguments: { command: "echo round" } },
     });
   }
 }
 
-async function waitForScheduledRequest(ctx: PiAcceptanceContext, afterSeq: number): Promise<ProviderSummary[]> {
+/** #1900: freshness gate — a new observation cannot reuse an earlier
+ *  attempt's terminal evidence. The Orc release must be at/after the
+ *  observation's restart boundary (5s clock slack). */
+export function isFreshOrcEvidence(evidence: BridgeHomeEvidence, observationStart: number): boolean {
+  if (!evidence.orcReleasedAt) return false;
+  const releasedMs = Date.parse(evidence.orcReleasedAt);
+  if (Number.isNaN(releasedMs)) return false;
+  return releasedMs >= observationStart - 5_000;
+}
+
+/** #1900: one 180s observation budget after each restart becomes ready,
+ *  covering provider rounds plus terminal-attempt settlement. No fresh
+ *  timeout per probe. Freshness: the Orc release must be at or after the
+ *  observation start so a new observation cannot reuse an earlier attempt's
+ *  terminal evidence. */
+async function waitForScheduledObservation(
+  ctx: PiAcceptanceContext,
+  afterSeq: number,
+  observationStart: number,
+): Promise<{ summaries: ProviderSummary[]; evidence: BridgeHomeEvidence }> {
   return waitFor(async () => {
     const summaries = ctx.provider.summariesFor(FIXTURE_MODEL_B).filter((s) => s.seq > afterSeq);
-    return summaries.filter(isScheduledSummary).length >= 2
-      ? summaries
-      : null;
-  }, TIMEOUTS.runMs, `scheduled Orc tool rounds for ${SCHEDULED_TASK_ID}`);
+    const scheduled = summaries.filter(isScheduledSummary);
+    const toolResponses = scheduled.filter((s) => s.action === "toolCall");
+    if (toolResponses.length < 2) return null;
+    const evidence = readBridgeHomeEvidence(ctx, summaries);
+    if (evidence.dbReadError) return null;
+    if (!evidence.providerRoundLimit) return null;
+    if (!evidence.orcRoundLimit) return null;
+    // Freshness: Orc release at/after this observation's restart boundary.
+    if (!isFreshOrcEvidence(evidence, observationStart)) return null;
+    if (!evidence.runId || evidence.cardId === undefined) return null;
+    if (evidence.terminalOutcome !== undefined) return null;
+    if (evidence.supervisionState !== "awaiting_contract") return null;
+    return { summaries, evidence };
+  }, TIMEOUTS.scheduledObservationMs, `scheduled Orc observation for ${SCHEDULED_TASK_ID} (180s budget)`);
 }
 
 /** #1548 Task 7 cell A: Orc round-limit failure during a scheduled project. */
@@ -176,14 +247,41 @@ export async function scheduledOrcRoundLimit(ctx: PiAcceptanceContext): Promise<
   installScheduledRoundLimitFixture(ctx);
   enqueueToolRounds(ctx, 8); // covers the authoring retries inside the window
   const afterSeq = ctx.provider.requestCount;
+  const observationStart = Date.now();
   ctx.bridge = await ctx.restartBridge();
 
-  const summaries = await waitForScheduledRequest(ctx, afterSeq);
-  const evidence = readBridgeHomeEvidence(ctx, summaries);
-  ctx.writeArtifact("scheduled-orc-round-limit.json", JSON.stringify({ evidence, providerSummaries: summaries.map((s) => ({ seq: s.seq, action: s.action, toolCalls: s.toolCalls, markerTexts: s.markerTexts.slice(0, 2) })) }, null, 2));
+  const observed = await waitForScheduledObservation(ctx, afterSeq, observationStart);
+  const summaries = observed.summaries;
+  const evidence = observed.evidence;
+  // #1900: bounded match evidence only — registered identities/hashes, never
+  // complete request text or expanded previews.
+  ctx.writeArtifact("scheduled-orc-round-limit.json", JSON.stringify({
+    evidence: {
+      runId: evidence.runId,
+      cardId: evidence.cardId,
+      supervisionState: evidence.supervisionState,
+      terminalOutcome: evidence.terminalOutcome,
+      orcFailureCode: evidence.orcFailureCode,
+      providerRoundLimit: evidence.providerRoundLimit,
+      orcRoundLimit: evidence.orcRoundLimit,
+    },
+    providerSummaries: summaries.filter(isScheduledSummary).map((s) => ({
+      seq: s.seq,
+      action: s.action,
+      toolCalls: s.toolCalls,
+      matchedMarkers: s.matchedMarkers,
+      markerHashes: s.markerHashes,
+    })),
+  }, null, 2));
 
+  if (evidence.dbReadError) {
+    throw new Error(`scheduled-orc-round-limit: durable evidence unreadable (${evidence.dbReadError})`);
+  }
   if (!evidence.providerRoundLimit) {
     throw new Error(`scheduled-orc-round-limit: round-limit class not observed (summaries: ${JSON.stringify(summaries.map((s) => ({ seq: s.seq, action: s.action, toolCalls: s.toolCalls })))})`);
+  }
+  if (!evidence.orcRoundLimit) {
+    throw new Error(`scheduled-orc-round-limit: terminal authoring evidence missing (orcFailureCode=${evidence.orcFailureCode ?? "none"} — expected prompt_round_limit)`);
   }
   if (!evidence.runId) {
     throw new Error("scheduled-orc-round-limit: no durable scheduled run reservation");
@@ -207,30 +305,49 @@ export async function scheduledOrcRoundLimitRestart(ctx: PiAcceptanceContext): P
   // guard and produces an unrelated intent_not_actionable retry.
   enqueueToolRounds(ctx, 8);
   const firstAfterSeq = ctx.provider.requestCount;
+  const firstStart = Date.now();
   ctx.bridge = await ctx.restartBridge();
 
-  const summaries = await waitForScheduledRequest(ctx, firstAfterSeq);
-  const first = readBridgeHomeEvidence(ctx, summaries);
+  const firstObserved = await waitForScheduledObservation(ctx, firstAfterSeq, firstStart);
+  const first = firstObserved.evidence;
+  if (first.dbReadError) {
+    throw new Error(`scheduled-orc-round-limit-restart: durable evidence unreadable before restart (${first.dbReadError})`);
+  }
   if (!first.runId) {
     throw new Error("scheduled-orc-round-limit-restart: no durable run before restart");
+  }
+  if (!first.orcRoundLimit) {
+    throw new Error(`scheduled-orc-round-limit-restart: terminal authoring evidence missing before restart (orcFailureCode=${first.orcFailureCode ?? "none"})`);
   }
   const beforeRestart = Date.now();
 
   // Second restart after the failure fact: the same durable run must recover.
   enqueueToolRounds(ctx, 8);
   const secondAfterSeq = ctx.provider.requestCount;
+  const secondStart = Date.now();
   ctx.bridge = await ctx.restartBridge();
-  const postSummaries = await waitForScheduledRequest(ctx, secondAfterSeq);
-  const second = readBridgeHomeEvidence(ctx, postSummaries);
+  const secondObserved = await waitForScheduledObservation(ctx, secondAfterSeq, secondStart);
+  const postSummaries = secondObserved.summaries;
+  const second = secondObserved.evidence;
   ctx.writeArtifact("scheduled-orc-round-limit-restart.json", JSON.stringify({
     beforeRestart,
-    first: { runId: first.runId, cardId: first.cardId, supervisionState: first.supervisionState },
-    second: { runId: second.runId, cardId: second.cardId, supervisionState: second.supervisionState, terminalOutcome: second.terminalOutcome },
-    providerSummaries: postSummaries.map((s) => ({ seq: s.seq, action: s.action, toolCalls: s.toolCalls })),
+    first: { runId: first.runId, cardId: first.cardId, supervisionState: first.supervisionState, orcFailureCode: first.orcFailureCode },
+    second: { runId: second.runId, cardId: second.cardId, supervisionState: second.supervisionState, terminalOutcome: second.terminalOutcome, orcFailureCode: second.orcFailureCode },
+    providerSummaries: postSummaries.filter(isScheduledSummary).map((s) => ({ seq: s.seq, action: s.action, toolCalls: s.toolCalls, matchedMarkers: s.matchedMarkers })),
   }, null, 2));
+
+  if (second.dbReadError) {
+    throw new Error(`scheduled-orc-round-limit-restart: durable evidence unreadable after restart (${second.dbReadError})`);
+  }
 
   if (second.runId !== first.runId) {
     throw new Error(`scheduled-orc-round-limit-restart: run identity changed across restart (${first.runId} -> ${second.runId ?? "none"})`);
+  }
+  if (second.cardId !== first.cardId) {
+    throw new Error(`scheduled-orc-round-limit-restart: root card changed across restart (${first.cardId} -> ${second.cardId ?? "none"})`);
+  }
+  if (!second.orcRoundLimit) {
+    throw new Error(`scheduled-orc-round-limit-restart: terminal authoring evidence missing after restart (orcFailureCode=${second.orcFailureCode ?? "none"})`);
   }
   if (second.terminalOutcome !== undefined) {
     throw new Error(`scheduled-orc-round-limit-restart: run settled ${second.terminalOutcome} after restart — expected the recovered run without a terminal row`);

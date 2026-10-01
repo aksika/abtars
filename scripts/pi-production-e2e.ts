@@ -182,11 +182,13 @@ async function main(): Promise<void> {
         console.log(`  ⊘ ${lane.lane} — blocked: ${lane.blockedBy}`);
         continue;
       }
-      const failed = lane.scenarios.filter((s) => s.state === "failed").length;
+      // #1900: blocked scenarios are non-pass (fail-closed) and agree with
+      // matrix/JUnit counts, including a lane whose only non-pass is blocked.
+      const failed = lane.scenarios.filter((s) => s.state !== "passed").length;
       console.log(`  ${failed === 0 ? "+" : "x"} ${lane.lane} — ${lane.scenarios.length - failed}/${lane.scenarios.length} passed (${(lane.scenarios.reduce((a, s) => a + s.durationMs, 0) / 1000).toFixed(1)}s)`);
       for (const scenario of lane.scenarios) {
         const icon = scenario.state === "passed" ? "  +" : "  x";
-        const detail = scenario.failure ? `  ${scenario.failure.code}: ${scenario.failure.message.slice(0, 300)}` : "";
+        const detail = scenario.failure ? `  ${scenario.failure.code}: ${scenario.failure.message.slice(0, 300)}` : scenario.state !== "passed" ? `  ${scenario.state}` : "";
         console.log(`${icon} ${scenario.name} (${scenario.durationMs}ms)${detail}`);
       }
     }

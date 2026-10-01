@@ -36,9 +36,21 @@ export class ScriptedProvider {
   private seq = 0;
   private port = 0;
   private closed = false;
+  // #1900: bounded registered synthetic markers for full-request recognition.
+  // Matched against complete message text before preview truncation or
+  // volatile-context stripping. Bounded to 8 markers of 256 chars each;
+  // persisted evidence carries only these registered identities.
+  private registeredMarkers: Set<string> = new Set();
+  private openSockets: Set<import("node:net").Socket> = new Set();
 
   constructor() {
     this.server = createServer((req, res) => void this.handle(req, res));
+    this.server.on("connection", (socket) => {
+      this.openSockets.add(socket);
+      socket.on("close", () => {
+        this.openSockets.delete(socket);
+      });
+    });
   }
 
   async start(): Promise<void> {
@@ -79,15 +91,42 @@ export class ScriptedProvider {
     this.scripts.set(script.candidate, queue);
   }
 
+  /** #1900: register one exact synthetic goal for full-text recognition.
+   *  Bounded: at most 8 markers, each at most 256 chars. */
+  registerMarker(marker: string): void {
+    if (marker.length === 0 || marker.length > 256) {
+      throw new Error(`registered marker must be 1-256 chars (got ${marker.length})`);
+    }
+    if (!this.registeredMarkers.has(marker) && this.registeredMarkers.size >= 8) {
+      throw new Error("registered marker limit reached (8)");
+    }
+    this.registeredMarkers.add(marker);
+  }
+
+  clearRegisteredMarkers(): void {
+    this.registeredMarkers.clear();
+  }
+
   clear(): void {
     this.scripts.clear();
     this.summaries = [];
     this.seq = 0;
+    this.registeredMarkers.clear();
   }
 
   async close(): Promise<void> {
     if (this.closed) return;
     this.closed = true;
+    // #1900: terminate held/idle connections so cleanup cannot hang on open
+    // provider sockets. Destroying sockets resolves acquisitionHold waits via
+    // their close listener and aborts held generations.
+    for (const socket of [...this.openSockets]) {
+      try {
+        socket.destroy();
+      } catch {
+        // best effort — server close still proceeds
+      }
+    }
     await new Promise<void>((resolve) => this.server.close(() => resolve()));
   }
 
@@ -123,6 +162,12 @@ export class ScriptedProvider {
     }
 
     const request = this.normalize(payload);
+    // #1900: full-request recognition against complete message text before
+    // preview truncation or volatile-context stripping, so a goal beyond
+    // character 300 or inside decorated context is still recognized.
+    const matchedMarkers = [...this.registeredMarkers].filter((marker) =>
+      request.messages.some((m) => m.text.includes(marker)),
+    );
     const summary: ProviderSummary = {
       seq: ++this.seq,
       candidate: request.model,
@@ -134,6 +179,7 @@ export class ScriptedProvider {
       // Bounded synthetic user-message texts (markers only — the fixture
       // never receives real content) so scenarios can substring-match.
       markerTexts: request.userTexts.map((t) => t.slice(0, 300)),
+      matchedMarkers,
     };
 
     const queue = this.scripts.get(request.model);
@@ -202,8 +248,13 @@ export class ScriptedProvider {
         // placeholder the host immediately replaces on steer.
         this.sseStart(res);
         this.sseChunk(res, request.model, "…");
-        await script.action.release;
-        if (res.writableEnded) {
+        // #1900: race the release against connection close so provider
+        // shutdown terminates held generations instead of hanging.
+        const released = await Promise.race([
+          script.action.release.then(() => true),
+          new Promise<boolean>((resolve) => res.once("close", () => resolve(false))),
+        ]);
+        if (!released || res.writableEnded) {
           summary.aborted = true;
           return;
         }
@@ -243,16 +294,11 @@ export class ScriptedProvider {
 
   private popScript(queue: ProviderScript[] | undefined, request: ReturnType<ScriptedProvider["normalize"]>): ProviderScript | undefined {
     if (!queue || queue.length === 0) return undefined;
-    // Unconstrained scripts (no expectation) are consumed FIFO by the next
-    // request on this candidate — the smoke one-shot pattern.
-    const unconstrainedIndex = queue.findIndex((s) => !s.expectation);
-    if (unconstrainedIndex >= 0) return queue.splice(unconstrainedIndex, 1)[0];
-    // Constrained scripts are consumed only by a request whose semantic
-    // expectation fully matches. A request that matches nothing (a boot
-    // greeting, a fail-closed turn that never reached the provider, or any
-    // other unexpected turn) is unscripted and MUST NOT consume queued
-    // scripts — otherwise one stray turn mis-pops a later scenario's script
-    // and the expectation failure poisons the candidate health registry.
+    // #1900: constrained scripts win over unconstrained FIFO. A scheduled
+    // request must receive its constrained scheduled response even when an
+    // unrelated unconstrained script is queued on the same candidate;
+    // otherwise the unconstrained script shadows the scheduled one and the
+    // scheduled evidence is consumed by the wrong traffic.
     for (let i = 0; i < queue.length; i++) {
       const script = queue[i]!;
       if (!script.expectation) continue;
@@ -263,6 +309,14 @@ export class ScriptedProvider {
         // not this script — keep looking
       }
     }
+    // Unconstrained scripts (no expectation) are consumed FIFO by the next
+    // request on this candidate that matched no constrained script — the
+    // smoke one-shot pattern. A request that matches nothing (a boot
+    // greeting, a fail-closed turn that never reached the provider, or any
+    // other unexpected turn) is unscripted when no unconstrained script
+    // remains and MUST NOT consume queued constrained scripts.
+    const unconstrainedIndex = queue.findIndex((s) => !s.expectation);
+    if (unconstrainedIndex >= 0) return queue.splice(unconstrainedIndex, 1)[0];
     return undefined;
   }
 
