@@ -221,6 +221,27 @@ function enqueueBootGreeting(ctx: PiAcceptanceContext): void {
   }
 }
 
+/** #1900: explicit health-probe scripts for the model's `hi` check. The probe
+ *  is a single `hi` user message; without a script it takes a 503 that marks
+ *  the candidate unhealthy and suppresses the scheduled authoring that follows.
+ *  Constrained to `hi` with excludes so scheduled/PI traffic cannot consume
+ *  them and they cannot conceal unaccepted traffic. */
+function enqueueHealthProbe(ctx: PiAcceptanceContext): void {
+  for (const candidate of [FIXTURE_MODEL_A, FIXTURE_MODEL_B] as const) {
+    for (let i = 0; i < 2; i++) {
+      ctx.provider.enqueue({
+        candidate,
+        expectation: {
+          candidate,
+          orderedContains: ["hi"],
+          excludes: [SCHEDULED_GOAL, "[SESSION START]", "PI-E2E-", "PI-SMOKE-"],
+        },
+        action: { kind: "text", chunks: ["ok"] },
+      });
+    }
+  }
+}
+
 /** #1900: freshness gate — a new observation cannot reuse an earlier
  *  attempt's terminal evidence. The Orc release must be at/after the
  *  observation's restart boundary (5s clock slack). */
@@ -277,6 +298,7 @@ export async function scheduledOrcRoundLimit(ctx: PiAcceptanceContext): Promise<
   installScheduledRoundLimitFixture(ctx);
   enqueueToolRounds(ctx, 8); // covers the authoring retries inside the window
   enqueueBootGreeting(ctx);
+  enqueueHealthProbe(ctx);
   const afterSeq = ctx.provider.requestCount;
   const observationStart = Date.now();
   ctx.bridge = await ctx.restartBridge();
@@ -336,6 +358,7 @@ export async function scheduledOrcRoundLimitRestart(ctx: PiAcceptanceContext): P
   // guard and produces an unrelated intent_not_actionable retry.
   enqueueToolRounds(ctx, 8);
   enqueueBootGreeting(ctx);
+  enqueueHealthProbe(ctx);
   const firstAfterSeq = ctx.provider.requestCount;
   const firstStart = Date.now();
   ctx.bridge = await ctx.restartBridge();
@@ -356,6 +379,7 @@ export async function scheduledOrcRoundLimitRestart(ctx: PiAcceptanceContext): P
   // Second restart after the failure fact: the same durable run must recover.
   enqueueToolRounds(ctx, 8);
   enqueueBootGreeting(ctx);
+  enqueueHealthProbe(ctx);
   const secondAfterSeq = ctx.provider.requestCount;
   const secondStart = Date.now();
   ctx.bridge = await ctx.restartBridge();
