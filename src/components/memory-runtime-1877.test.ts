@@ -12,6 +12,7 @@ import {
   asRecallFlag,
   stripRecallFlagsForTool,
   TRIVIAL_FACT_TTL_MS,
+  type RuntimeRecallHit,
 } from "./memory-runtime.js";
 
 const DAY = 86400000;
@@ -107,8 +108,9 @@ describe("#1877 stripRecallFlagsForTool — tool contract preserved", () => {
   });
 
   it("serialized tool output is byte-identical with and without carried flags", () => {
-    const base = { hits: [{ content: "c", score: 0.9, date: "d", memoryId: 1 }], context: "ctx" };
-    const withFlags = { ...base, hits: [{ ...base.hits[0], emotionTags: "joy", importanceFlags: "x" }] };
+    const baseHit: RuntimeRecallHit = { content: "c", score: 0.9, date: "d", memoryId: 1 };
+    const base = { hits: [baseHit], context: "ctx" };
+    const withFlags = { ...base, hits: [{ ...baseHit, emotionTags: "joy", importanceFlags: "x" }] };
     const a = JSON.stringify({ ...base, hits: stripRecallFlagsForTool(base.hits) });
     const b = JSON.stringify({ ...withFlags, hits: stripRecallFlagsForTool(withFlags.hits) });
     expect(a).toBe(b);
