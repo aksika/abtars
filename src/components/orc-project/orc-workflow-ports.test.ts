@@ -1000,15 +1000,16 @@ describe("#1902 scheduled admission drains initial planning", () => {
     // the same correlation production admission depends on.
     const schedRunId = `sched-1902-${Date.now()}-${Math.random().toString(36).slice(2)}`;
     const goal = `scheduled planning probe ${schedRunId}`;
+    const probeTask = `probe-task-${schedRunId}`;
     const card = Number(store.db.prepare(
       `INSERT INTO kanban_board (title, source, source_id, type, status, goal) VALUES (?, 'task', ?, 'O', 'running', ?)`,
     ).run(`probe ${schedRunId}`, schedRunId, goal).lastInsertRowid);
-    store.db.prepare(`INSERT OR IGNORE INTO task_state (task_id) VALUES (?)`).run("probe-task");
+    store.db.prepare(`INSERT OR IGNORE INTO task_state (task_id) VALUES (?)`).run(probeTask);
     store.db.prepare(
       `INSERT INTO task_runs (run_id, task_id, group_id, attempt, trigger, occurrence_at,
         reserved_at, deadline_at, phase, last_progress_at, owner_pid)
        VALUES (?, ?, ?, 1, 'schedule', 1000, 1000, 9999999999, 'executing', 1000, 123456)`,
-    ).run(schedRunId, "probe-task", "probe-task");
+    ).run(schedRunId, probeTask, probeTask);
 
     const admitted = runner.admitSupervised({
       rootCardId: card, source: "task", sourceId: schedRunId, scheduledRunId: schedRunId,
@@ -1065,6 +1066,72 @@ describe("#1902 scheduled admission drains initial planning", () => {
 
     // The retired supervised-brain ledger stays untouched: planning flows
     // through workflow commands, never an Orc authoring run.
+    const legacyTable = store.db.prepare(
+      `SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'orc_project_runs'`,
+    ).get() as { name: string } | undefined;
+    if (legacyTable) {
+      const legacyRows = store.db.prepare(
+        `SELECT COUNT(*) AS n FROM orc_project_runs WHERE project_card_id = ?`,
+      ).get(card) as { n: number };
+      expect(legacyRows.n).toBe(0);
+    }
+  });
+
+  it("invalid planning stimulus exhausts the finite budget and fails the run with no revision", async () => {
+    // #1902 cell mechanism: a deterministic model failure (non-proposal
+    // text on every call) must surface as explicit bounded PlanRejected
+    // facts — consumed budget, requeued rounds, then terminal failure —
+    // never a silent stall and never an admitted revision.
+    const schedRunId = `sched-1902-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    const goal = `scheduled exhaustion probe ${schedRunId}`;
+    const probeTask = `probe-task-${schedRunId}`;
+    const card = Number(store.db.prepare(
+      `INSERT INTO kanban_board (title, source, source_id, type, status, goal) VALUES (?, 'task', ?, 'O', 'running', ?)`,
+    ).run(`probe ${schedRunId}`, schedRunId, goal).lastInsertRowid);
+    store.db.prepare(`INSERT OR IGNORE INTO task_state (task_id) VALUES (?)`).run(probeTask);
+    store.db.prepare(
+      `INSERT INTO task_runs (run_id, task_id, group_id, attempt, trigger, occurrence_at,
+        reserved_at, deadline_at, phase, last_progress_at, owner_pid)
+       VALUES (?, ?, ?, 1, 'schedule', 1000, 1000, 9999999999, 'executing', 1000, 123456)`,
+    ).run(schedRunId, probeTask, probeTask);
+
+    const admitted = runner.admitSupervised({
+      rootCardId: card, source: "task", sourceId: schedRunId, scheduledRunId: schedRunId,
+    });
+    expect(admitted.kind).toBe("admitted");
+    const runId = admitted.runId as string;
+
+    let calls = 0;
+    const planner = new Ports.SpinPlannerBackend({
+      runner,
+      callModel: async () => {
+        calls++;
+        return "not json at all";
+      },
+    });
+    type Cmd = import("./orc-workflow-store.js").CommandRow;
+    const ports = {
+      executor: { name: "t-exec", dispatch: (_cmd: Cmd) => {} },
+      reviewer: { name: "t-rev", startReview: (_cmd: Cmd) => {} },
+      planner,
+    };
+
+    // Redrive until terminal: each round consumes one plan_revision, then
+    // the exhausted round fails the run with plan_rejected diagnostics.
+    const deadline = Date.now() + 5000;
+    while (store.getRun(runId)?.state !== "failed" && Date.now() < deadline) {
+      runner.drain(50, ports);
+      await new Promise((r) => setTimeout(r, 50));
+    }
+    // Three rounds (default plan_revision budget of 2): two rejections plus
+    // the exhausting attempt pair, six model calls in total.
+    expect(calls).toBe(6);
+    expect(store.getRun(runId)?.state).toBe("failed");
+    const budgets = store.readBudgets(runId);
+    expect(budgets["plan_revision"]?.allowed).toBe(2);
+    expect(budgets["plan_revision"]?.consumed).toBe(2);
+    expect(store.currentRevision(runId)).toBe(0);
+
     const legacyTable = store.db.prepare(
       `SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'orc_project_runs'`,
     ).get() as { name: string } | undefined;

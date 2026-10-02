@@ -4,7 +4,8 @@
  * - Blocked-only and cleanup-failure lanes render as JUnit failures and agree
  *   with matrix counts (fail-closed).
  * - Per-lane provider summaries do not overwrite each other.
- * - Stale Orc terminal evidence cannot pass (freshness gate).
+ * - Terminal planning-failure custody holds across restart (identities, exact
+ *   budget exhaustion, no admitted revision, blocked supervision).
  * - A failed scheduled predecessor blocks its restart successor.
  */
 
@@ -15,7 +16,8 @@ import { join } from "node:path";
 import { ResultWriter } from "./result-writer.js";
 import type { PiAcceptanceMatrixV1 } from "./contracts.js";
 import { deriveLaneState, shouldBlockScheduledRestart } from "./runner.js";
-import { isScheduledSummary, isFreshOrcEvidence, SCHEDULED_GOAL } from "./scheduled-orc-round-limit.js";
+import { isScheduledSummary, verifyTerminalCustody, SCHEDULED_GOAL } from "./scheduled-orc-round-limit.js";
+import type { PlanningCustodyFacts } from "./scheduled-orc-round-limit.js";
 import type { ProviderSummary } from "./contracts.js";
 
 function summary(seq: number, state: string, matched: string[] = []): ProviderSummary {
@@ -113,28 +115,33 @@ describe("#1900 reporting and evidence gates", () => {
     })).toBe(false);
   });
 
-  it("rejects stale Orc terminal evidence", () => {
-    const now = Date.now();
-    // Fresh: released now, observation started a minute ago.
-    expect(isFreshOrcEvidence({
-      workerCardCount: 0,
-      providerRoundLimit: true,
-      orcRoundLimit: true,
-      orcReleasedAt: new Date(now).toISOString(),
-    }, now - 60_000)).toBe(true);
-    // Stale: released an hour ago, observation started now — reuse forbidden.
-    expect(isFreshOrcEvidence({
-      workerCardCount: 0,
-      providerRoundLimit: true,
-      orcRoundLimit: true,
-      orcReleasedAt: new Date(now - 3_600_000).toISOString(),
-    }, now)).toBe(false);
-    // Missing release never counts as fresh.
-    expect(isFreshOrcEvidence({
-      workerCardCount: 0,
-      providerRoundLimit: true,
-      orcRoundLimit: true,
-    }, now)).toBe(false);
+  it("holds terminal planning-failure custody across restart", () => {
+    const terminal: PlanningCustodyFacts = {
+      runId: "sched-1", cardId: 7, workflowRunCount: 1, workflowState: "failed",
+      planRevisionAllowed: 2, planRevisionConsumed: 2, planRevisionAdmitted: 0,
+      supervisionState: "blocked",
+    };
+    // Identical facts after restart: custody holds.
+    expect(verifyTerminalCustody(terminal, { ...terminal })).toEqual([]);
+    // Changed run identity: resurrected or replaced, not recovered.
+    expect(verifyTerminalCustody(terminal, { ...terminal, runId: "sched-2" })).not.toEqual([]);
+    // Changed root card: custody broken.
+    expect(verifyTerminalCustody(terminal, { ...terminal, cardId: 8 })).not.toEqual([]);
+    // Duplicate workflow run for the occurrence: duplicate logical job.
+    expect(verifyTerminalCustody(terminal, { ...terminal, workflowRunCount: 2 })).not.toEqual([]);
+    // Run no longer failed: resurrection.
+    expect(verifyTerminalCustody(terminal, { ...terminal, workflowState: "planning" })).not.toEqual([]);
+    // Budget not exhausted: a different failure than the diagnosed one.
+    expect(verifyTerminalCustody(terminal, { ...terminal, planRevisionConsumed: 1 })).not.toEqual([]);
+    // Consumption went backwards: facts corrupted.
+    expect(verifyTerminalCustody(
+      { ...terminal, planRevisionConsumed: 2 },
+      { ...terminal, planRevisionConsumed: 1 },
+    )).not.toEqual([]);
+    // Revision admitted: outside this journey's envelope.
+    expect(verifyTerminalCustody(terminal, { ...terminal, planRevisionAdmitted: 1 })).not.toEqual([]);
+    // Supervision not blocked: terminal settlement not projected.
+    expect(verifyTerminalCustody(terminal, { ...terminal, supervisionState: "awaiting_contract" })).not.toEqual([]);
   });
 
   it("blocks the restart successor when its predecessor did not pass", () => {
