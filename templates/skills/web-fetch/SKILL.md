@@ -35,8 +35,10 @@ Limitations: no JS execution, rate-limited (don't loop >5 URLs rapidly), some ag
 ## Level 3 — lightpanda (JS rendering, fast)
 
 ```bash
-lightpanda fetch --dump markdown --strip-mode full --wait-ms 5000 "URL"
+lightpanda fetch --dump markdown --strip-mode clutter --wait-ms 5000 "URL"
 ```
+
+Valid `--strip-mode` values: `clutter|css|js|invisible|shell|ui` (repeatable).
 
 Use when:
 - Levels 1-2 returned empty/broken content
