@@ -108,7 +108,7 @@ describe("#1813 — compact evidence injection", () => {
     expect(compactBlock).toContain(CONSTRAINT);
     expect(compactBlock).not.toContain("aaaa");
     expect(compactBlock.length).toBeLessThan(fullBlock.length);
-    // Only injected rows feed post-response attribution.
+    // Only injected rows are reported as recalled hits.
     expect(compact.recalledHits).toEqual([{ id: 3, contentEn: CONSTRAINT }]);
     expect(full.recalledHits?.length).toBe(3);
   });
@@ -144,15 +144,20 @@ describe("#1813 — compact evidence injection", () => {
   });
 });
 
-// ── #1894 check-first, translation-free ambient recall ───────────────────────
+// ── #1908 ambient recall: no bridge-side raw-only precheck ─────────────────
+// A raw-only host verdict must never terminate a turn that informative
+// context would rescue, so the bridge does not consult the cheap check on
+// the ambient path at all. The daemon's ambient planner owns the combined
+// skip (raw, hints, eligible context); worthRetrieving stays for CLI and
+// explicit precheck uses.
 
-describe("#1894 — ambient recall asks the cheap check first", () => {
-  function checkRuntime(check: unknown, recall: ReturnType<typeof vi.fn>) {
+describe("#1908 — ambient recall skips only on the engine verdict", () => {
+  function ambientRuntime(recall: ReturnType<typeof vi.fn>) {
     return {
       state: "ready",
       capabilities: new Set(["durableContext"]),
       recordMessage: vi.fn().mockResolvedValue({ id: 1 }),
-      worthRetrieving: vi.fn().mockResolvedValue(check),
+      worthRetrieving: vi.fn().mockResolvedValue({ verdict: "skip", corpusSize: 14, ceiling: 3 }),
       recall,
       assembleSessionContext: vi.fn().mockResolvedValue({ coreKnowledge: "", recall: "", wakeUp: "" }),
     } as never;
@@ -180,13 +185,13 @@ describe("#1894 — ambient recall asks the cheap check first", () => {
     );
   }
 
-  it("a skip verdict returns before recall with no memory block", async () => {
-    const recall = vi.fn();
-    const result = await turn(
-      checkRuntime({ verdict: "skip", corpusSize: 14, ceiling: 3 }, recall),
-      "köszi",
-    );
-    expect(recall).not.toHaveBeenCalled();
+  it("never consults the cheap check; an engine skip injects nothing", async () => {
+    const recall = vi.fn().mockResolvedValue({ hits: [], context: "", searchSkipped: true, searchSkippedReason: "no-informative-terms" });
+    const runtime = ambientRuntime(recall);
+    const result = await turn(runtime, "köszi");
+    expect((runtime as { worthRetrieving: ReturnType<typeof vi.fn> }).worthRetrieving).not.toHaveBeenCalled();
+    expect(recall).toHaveBeenCalledTimes(1);
+    expect(recall).toHaveBeenCalledWith(expect.objectContaining({ intent: "ambient", original: "köszi" }));
     expect(result.prompt).not.toContain("MEMORY CONTEXT");
     expect(result.recalledHits).toBeUndefined();
   });
@@ -194,20 +199,10 @@ describe("#1894 — ambient recall asks the cheap check first", () => {
   it("a search verdict runs one ambient recall and never touches a model", async () => {
     const dispatchBackground = vi.fn();
     const recall = vi.fn().mockResolvedValue({ hits: [], context: "" });
-    const runtime = checkRuntime({ verdict: "search", corpusSize: 14, ceiling: 3 }, recall);
+    const runtime = ambientRuntime(recall);
     await turn(runtime, "köszi migrációs terv", dispatchBackground);
     expect(recall).toHaveBeenCalledTimes(1);
     expect(recall).toHaveBeenCalledWith(expect.objectContaining({ intent: "ambient", original: "köszi migrációs terv" }));
-    expect(dispatchBackground).not.toHaveBeenCalled();
-  });
-
-  it("a failed check falls back to ordinary recall without a model call", async () => {
-    const dispatchBackground = vi.fn();
-    const recall = vi.fn().mockResolvedValue({ hits: [], context: "" });
-    const runtime = checkRuntime(null, recall);
-    (runtime as { worthRetrieving: ReturnType<typeof vi.fn> }).worthRetrieving.mockRejectedValueOnce(new Error("daemon down"));
-    await turn(runtime, "köszi", dispatchBackground);
-    expect(recall).toHaveBeenCalledTimes(1);
     expect(dispatchBackground).not.toHaveBeenCalled();
   });
 

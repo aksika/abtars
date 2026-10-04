@@ -28,8 +28,6 @@ export type MemoryRuntimeCapability =
   | "compaction"
   | "dreamQuestions"
   | "dreamQuestionsNextPending"
-  // #1813 — advisory post-response attribution (private.attribution).
-  | "attribution"
   // #1894 — cheap worth-retrieving verdict (private.checkWorthRetrieving).
   // Older daemons lack the method and callers fall back to ordinary recall.
   | "worthRetrieving"
@@ -165,19 +163,6 @@ export interface RuntimeRecallInput {
   timeStart?: number;
   timeEnd?: number;
   stages?: string[];
-  /**
-   * #1813 — optional fast-path intent. Forwarded to abmind recall; omitted
-   * means ordinary recall. Turn identity should come from the trusted
-   * execution context, never from model arguments.
-   */
-  fastPath?: {
-    question?: string;
-    answerLanguage?: string;
-    session?: string;
-    turn?: string;
-    delivered?: ReadonlyArray<{ id: number; revision: number }>;
-    releaseScope?: boolean;
-  };
 }
 
 /**
@@ -229,14 +214,8 @@ export interface RuntimeRecallResult {
   hits: RuntimeRecallHit[];
   context: string;
   /**
-   * #1813 — validated fast-path decision envelope when abmind returned one.
-   * Absent means ordinary recall. Structural mirror of abmind's
-   * RecallDecisionV1, validated at this boundary because the wire is unknown.
-   */
-  decision?: RuntimeRecallDecision;
-  /**
-   * #1813 — deterministic bounded injection selection from abmind. Present on
-   * ordinary recall too (no fast-path flag, profile, or backend needed).
+   * Deterministic bounded injection selection from abmind. Present on
+   * ordinary recall too (no flag, profile, or backend needed).
    * Validated at this boundary; malformed selection is dropped.
    */
   selection?: RuntimeRecallSelection;
@@ -462,55 +441,6 @@ export function selectInjectedHits<T extends { memoryId?: number; content: strin
   return out;
 }
 
-/** #1813 — structural mirror of abmind RecallDecisionV1 (validated, not cast). */
-export interface RuntimeRecallDecision {
-  version: 1;
-  outcome: "answer" | "continue" | "already-supplied";
-  answerText?: string;
-  answerLanguage?: string;
-  sourceIds: number[];
-  sourceRevisions: Record<number, number>;
-  selectedRefs: number[];
-  profile: string;
-  questionSet: string;
-}
-
-/**
- * #1813 — narrow the unknown wire decision to the structural mirror.
- * Anything malformed is dropped: an unverified verdict must never steer
- * delivery. Returns undefined for absent input.
- */
-export function asRecallDecision(raw: unknown): RuntimeRecallDecision | undefined {
-  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return undefined;
-  const record = raw as Record<string, unknown>;
-  if (record["version"] !== 1) return undefined;
-  const outcome = record["outcome"];
-  if (outcome !== "answer" && outcome !== "continue" && outcome !== "already-supplied") return undefined;
-  if (!Array.isArray(record["sourceIds"]) || !record["sourceIds"].every((id) => typeof id === "number")) return undefined;
-  if (!Array.isArray(record["selectedRefs"]) || !record["selectedRefs"].every((id) => typeof id === "number")) return undefined;
-  const revisions = record["sourceRevisions"];
-  if (typeof revisions !== "object" || revisions === null || Array.isArray(revisions)) return undefined;
-  for (const [key, value] of Object.entries(revisions as Record<string, unknown>)) {
-    if (!Number.isInteger(Number(key)) || typeof value !== "number") return undefined;
-  }
-  if (typeof record["profile"] !== "string" || typeof record["questionSet"] !== "string") return undefined;
-  const answerText = record["answerText"];
-  if (answerText !== undefined && typeof answerText !== "string") return undefined;
-  const answerLanguage = record["answerLanguage"];
-  if (answerLanguage !== undefined && typeof answerLanguage !== "string") return undefined;
-  return {
-    version: 1,
-    outcome,
-    ...(answerText !== undefined ? { answerText } : {}),
-    ...(answerLanguage !== undefined ? { answerLanguage } : {}),
-    sourceIds: record["sourceIds"] as number[],
-    sourceRevisions: revisions as Record<number, number>,
-    selectedRefs: record["selectedRefs"] as number[],
-    profile: record["profile"] as string,
-    questionSet: record["questionSet"] as string,
-  };
-}
-
 export interface SessionContextInput {
   identity: { principalId: string; executionId: string };
   prompt?: string;
@@ -599,42 +529,6 @@ export interface FeedbackInput {
 
 export interface FeedbackResult {
   ok: boolean;
-}
-
-/** #1813 — advisory attribution input (final delivered response + supplied ids). */
-export interface AttributionInput {
-  userId: string;
-  response: string;
-  sourceIds: number[];
-  maxClassification?: number;
-}
-
-/** #1813 — structural mirror of abmind AttributionResultV1 (validated, not cast). */
-export interface AttributionResult {
-  sources: Array<{ id: number; verdict: "used" | "not-used" | "unknown" }>;
-  profile: string;
-  questionSet: string;
-}
-
-/**
- * #1813 — narrow the unknown wire attribution result. Malformed or absent
- * input yields null: the caller reports unsupported, never a fabricated
- * unused-memory verdict.
- */
-export function asAttributionResult(raw: unknown): AttributionResult | null {
-  if (raw === null || raw === undefined) return null;
-  if (typeof raw !== "object" || Array.isArray(raw)) return null;
-  const record = raw as Record<string, unknown>;
-  if (!Array.isArray(record["sources"])) return null;
-  const sources: AttributionResult["sources"] = [];
-  for (const entry of record["sources"] as unknown[]) {
-    if (typeof entry !== "object" || entry === null || Array.isArray(entry)) return null;
-    const { id, verdict } = entry as { id?: unknown; verdict?: unknown };
-    if (typeof id !== "number" || (verdict !== "used" && verdict !== "not-used" && verdict !== "unknown")) return null;
-    sources.push({ id, verdict });
-  }
-  if (typeof record["profile"] !== "string" || typeof record["questionSet"] !== "string") return null;
-  return { sources, profile: record["profile"], questionSet: record["questionSet"] };
 }
 
 export interface MaintenanceInput {
@@ -896,12 +790,6 @@ export interface AbtarsMemoryRuntime {
   getSleepStatus(): Promise<SleepStatusLike>;
   getCoreKnowledge(input: CoreKnowledgeInput): Promise<CoreKnowledgeResult>;
   recordFeedback(input: FeedbackInput, operationKey: string): Promise<FeedbackResult>;
-  /**
-   * #1813 — advisory post-response attribution. Returns the validated verdict
-   * or null when unsupported/inactive; never throws for ordinary attribution
-   * failures (transport errors still propagate to the caller).
-   */
-  attribution(input: AttributionInput): Promise<AttributionResult | null>;
   embed(input: EmbeddingInput): Promise<EmbeddingResult>;
   runMaintenance(input: MaintenanceInput): Promise<MaintenanceResult>;
   instantStore(input: InstantStoreInput): Promise<InstantStoreResult>;
@@ -960,9 +848,6 @@ function projectCapabilities(client: AbmindClientLike): Set<MemoryRuntimeCapabil
   if (methods.has("private.edit") && features["private_write"] === "true" && revisionContract) result.add("editMemory");
   if (methods.has("private.rebuildFts") && features["private_write"] === "true") result.add("rebuildFts");
   if (methods.has("private.recordFeedback")) result.add("feedback");
-  // #1813 — advisory attribution; mixed-version daemons without the method
-  // simply lack the capability and callers report unsupported.
-  if (methods.has("private.attribution")) result.add("attribution");
   // #1894 — same shape: mixed-version daemons without the method simply lack
   // the capability and callers proceed to ordinary recall.
   if (methods.has("private.checkWorthRetrieving") && features["private_read"] === "true") result.add("worthRetrieving");
@@ -1064,19 +949,7 @@ export function createClientRuntime(client: AbmindClientLike): AbtarsMemoryRunti
     async recall(input: RuntimeRecallInput): Promise<RuntimeRecallResult> {
       requireClientCapability(capabilities, "recall");
       const t0 = Date.now();
-      logDebug("memory-runtime", `recall: query="${redactSecrets(input.query).slice(0, 60)}" user=${input.userId} limit=${input.limit ?? 10} maxClass=${input.maxClassification ?? "?"} stages=[${input.stages?.join(",") ?? "all"}] intent=${input.keywords !== undefined && input.keywords !== null ? "explicit(keywords)" : (input.intent ?? "default")} fastPath=${input.fastPath ? "yes" : "no"}`);
-      const fastPath = input.fastPath !== undefined ? {
-        question: input.fastPath.question ?? "",
-        answerLanguage: input.fastPath.answerLanguage ?? "en",
-        principal: input.userId,
-        session: input.fastPath.session ?? "",
-        turn: input.fastPath.turn ?? "",
-        delivered: (input.fastPath.delivered ?? []).filter((ref) =>
-          typeof ref === "object" && ref !== null &&
-          Number.isInteger((ref as { id?: unknown }).id) &&
-          Number.isInteger((ref as { revision?: unknown }).revision)),
-        ...(input.fastPath.releaseScope === true ? { releaseScope: true } : {}),
-      } : undefined;
+      logDebug("memory-runtime", `recall: query="${redactSecrets(input.query).slice(0, 60)}" user=${input.userId} limit=${input.limit ?? 10} maxClass=${input.maxClassification ?? "?"} stages=[${input.stages?.join(",") ?? "all"}] intent=${input.keywords !== undefined && input.keywords !== null ? "explicit(keywords)" : (input.intent ?? "default")}`);
       // #1867 — discrete terms cross as abmind `translated` so #1861's
       // coverage ordering participates; the joined query stays the fallback
       // when no terms were prepared. selectTerms rides the existing recall
@@ -1099,8 +972,7 @@ export function createClientRuntime(client: AbmindClientLike): AbtarsMemoryRunti
         stages: input.stages,
         ...(intent !== undefined ? { intent } : {}),
         ...(terms.length > 0 && input.selectTerms === true ? { selectTerms: true } : {}),
-        ...(fastPath !== undefined ? { fastPath } : {}),
-      })) as { results: Array<Record<string, unknown>>; decision?: unknown; selection?: unknown; stageOutcomes?: unknown; weakEvidence?: unknown; searchSkipped?: unknown; searchSkippedReason?: unknown };
+      })) as { results: Array<Record<string, unknown>>; selection?: unknown; stageOutcomes?: unknown; weakEvidence?: unknown; searchSkipped?: unknown; searchSkippedReason?: unknown };
       const hits: RuntimeRecallHit[] = result.results.map((r) => ({
         content: String(r["content"] ?? ""),
         score: Number(r["score"] ?? 0),
@@ -1129,9 +1001,6 @@ export function createClientRuntime(client: AbmindClientLike): AbtarsMemoryRunti
       }));
       const compact = selectInjectedHits(hits, asRecallSelection(result.selection));
       const context = compact.map(h => `- (score: ${h.score.toFixed(3)}) ${h.content.slice(0, 200)}`).join("\n");
-      // #1813 — carry the validated decision; malformed envelopes are dropped
-      // by asRecallDecision and recall continues as ordinary.
-      const decision = asRecallDecision(result.decision);
       const selection = asRecallSelection(result.selection);
       // #1867 — carry the validated diagnostics; malformed wire values are
       // dropped and recall continues as ordinary. Advisory only: the bridge
@@ -1146,13 +1015,13 @@ export function createClientRuntime(client: AbmindClientLike): AbtarsMemoryRunti
         ? result.searchSkippedReason.trim().slice(0, 64) || undefined
         : undefined;
       const ms = Date.now() - t0;
-      logDebug("memory-runtime", `recall: ${hits.length} hits (${compact.length} injected) in ${ms}ms decision=${decision?.outcome ?? "none"} selection=${selection ? `${selection.refs.length} refs${selection.truncated ? " truncated" : ""}` : "none"} top=${hits.slice(0, 3).map((h) => `${h.memoryId ?? "?"}:${h.score.toFixed(3)}`).join(",")} stages=${stageOutcomes ? Object.entries(stageOutcomes).map(([k, v]) => `${k}:${v.status}/${v.hitCount}`).join(" ") : "n/a"} weakEvidence=${weakEvidence ?? "n/a"} skipped=${searchSkipped === true ? (skipReason ?? "yes") : "no"}`);
+      logDebug("memory-runtime", `recall: ${hits.length} hits (${compact.length} injected) in ${ms}ms selection=${selection ? `${selection.refs.length} refs${selection.truncated ? " truncated" : ""}` : "none"} top=${hits.slice(0, 3).map((h) => `${h.memoryId ?? "?"}:${h.score.toFixed(3)}`).join(",")} stages=${stageOutcomes ? Object.entries(stageOutcomes).map(([k, v]) => `${k}:${v.status}/${v.hitCount}`).join(" ") : "n/a"} weakEvidence=${weakEvidence ?? "n/a"} skipped=${searchSkipped === true ? (skipReason ?? "yes") : "no"}`);
       if (isLogLevel("trace")) {
         for (const h of hits.slice(0, 10)) {
           logTrace("memory-runtime", `hit id=${h.memoryId ?? "?"} score=${h.score.toFixed(3)} source=${h.source ?? "?"} text="${redactSecrets(h.content).slice(0, 120)}"`);
         }
       }
-      return { hits, context, ...(decision !== undefined ? { decision } : {}), ...(selection !== undefined ? { selection } : {}), ...(stageOutcomes !== undefined ? { stageOutcomes } : {}), ...(weakEvidence !== undefined ? { weakEvidence } : {}), ...(searchSkipped !== undefined ? { searchSkipped } : {}), ...(skipReason !== undefined ? { searchSkippedReason: skipReason } : {}) };
+      return { hits, context, ...(selection !== undefined ? { selection } : {}), ...(stageOutcomes !== undefined ? { stageOutcomes } : {}), ...(weakEvidence !== undefined ? { weakEvidence } : {}), ...(searchSkipped !== undefined ? { searchSkipped } : {}), ...(skipReason !== undefined ? { searchSkippedReason: skipReason } : {}) };
     },
 
     /**
@@ -1249,19 +1118,6 @@ export function createClientRuntime(client: AbmindClientLike): AbtarsMemoryRunti
     async recordFeedback(input: FeedbackInput, operationKey: string): Promise<FeedbackResult> {
       await pm.recordFeedback(input, operationKey);
       return { ok: true };
-    },
-
-    async attribution(input: AttributionInput): Promise<AttributionResult | null> {
-      requireClientCapability(capabilities, "attribution");
-      // Mixed-version daemon without the method: unsupported, never an error.
-      if (typeof pm.attribution !== "function") return null;
-      const raw = await pm.attribution({
-        userId: input.userId,
-        response: input.response,
-        sourceIds: input.sourceIds.filter((id) => Number.isInteger(id)),
-        ...(input.maxClassification !== undefined ? { maxClassification: input.maxClassification } : {}),
-      });
-      return asAttributionResult(raw);
     },
 
     async embed(input: EmbeddingInput): Promise<EmbeddingResult> {
@@ -1630,7 +1486,6 @@ export function createDisabledRuntime(): AbtarsMemoryRuntime {
     getSleepStatus: async () => { unavailable("getSleepStatus"); return { state: "idle" }; },
     getCoreKnowledge: async () => { unavailable("getCoreKnowledge"); return ""; },
     recordFeedback: async () => { unavailable("recordFeedback"); return { ok: false }; },
-    attribution: async () => { unavailable("attribution"); return null; },
     embed: async () => { unavailable("embed"); return { vectors: [], model: "" }; },
     runMaintenance: async () => { unavailable("runMaintenance"); return { ok: false, summary: "Memory disabled" }; },
     instantStore: async () => { unavailable("instantStore"); return { stored: false, memoriesCount: 0, code: "memory_unavailable", message: "Memory is disabled", requestId: "", retryable: false, action: "stop" as const, stage: "pre_dispatch" as const }; },
@@ -1668,7 +1523,6 @@ export function createUnavailableRuntime(): AbtarsMemoryRuntime {
     getSleepStatus: async () => { unavailable("getSleepStatus"); return { state: "idle" }; },
     getCoreKnowledge: async () => { unavailable("getCoreKnowledge"); return ""; },
     recordFeedback: async () => { unavailable("recordFeedback"); return { ok: false }; },
-    attribution: async () => { unavailable("attribution"); return null; },
     embed: async () => { unavailable("embed"); return { vectors: [], model: "" }; },
     runMaintenance: async () => { unavailable("runMaintenance"); return { ok: false, summary: "Memory unavailable" }; },
     instantStore: async () => { unavailable("instantStore"); return { stored: false, memoriesCount: 0, code: "memory_unavailable", message: "Memory unavailable", requestId: "", retryable: false, action: "stop" as const, stage: "pre_dispatch" as const }; },

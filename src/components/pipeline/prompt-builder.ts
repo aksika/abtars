@@ -10,7 +10,7 @@ import { localTime } from "../../utils/local-time.js";
 import { interceptLargeMessage } from "../message-interceptor.js";
 import { abmind } from "../../utils/abmind-lazy.js";
 import { getEnv } from "../env-schema.js";
-import type { AbtarsMemoryRuntime, MemoryWritePhase, WorthRetrievingResult } from "../memory-runtime.js";
+import type { AbtarsMemoryRuntime, MemoryWritePhase } from "../memory-runtime.js";
 import { attemptMemoryMutation, selectInjectedHits, asSessionSoulBundle, shouldInjectRecallHit } from "../memory-runtime.js";
 import { prepareRecallQuery } from "./recall-query-preparation.js";
 import { inboundExecutionKey, inboundMessageKey } from "../memory-operation-key.js";
@@ -37,12 +37,6 @@ export interface BuildPromptResult {
   isSessionStart: boolean;
   imageContent?: { mime: string; base64: string; path: string };
   recalledHits?: Array<{ id: number; contentEn: string }>;
-  /**
-   * #1813 — validated fast-path decision envelope from auto-recall, when
-   * abmind returned one. Absent means ordinary recall; the pipeline treats
-   * absence as no verdict, never as consent to skip the agent.
-   */
-  recallDecision?: import("../memory-runtime.js").RuntimeRecallDecision;
   /** #1529: explicit durable-context intent — never an ambiguous optional cursor. */
   durableContextIntent: DurableContextIntent;
   /** #1335: structured current turn components for Pi cache-stable assembly. */
@@ -243,34 +237,17 @@ export async function buildPrompt(
 
   // --- Active recall (skipped for K — skill-isolated memory boundary) ---
   let recalledHits: Array<{ id: number; contentEn: string }> | undefined;
-  // #1813 — fast-path decision from auto-recall, carried for the pipeline
-  // skip gate. No fastPath intent is attached here (first pull, unverified
-  // question language), so this is present only when a future caller intent
-  // produces one; absence means the ordinary agent path.
-  let recallDecision: BuildPromptResult["recallDecision"];
   if (memoryMode !== "skill-isolated" && getEnv().activeMemory && memoryRuntime?.state === "ready") {
     const userEntry = registry.byUserId.get(userId);
     if (userEntry?.role !== "guest" && (contextPercent < 0 || contextPercent < getEnv().ctxCompactPct)) {
       const priming = pSession?.primingTerms ?? [];
       try {
-        // #1894 — cheap worth-retrieving check before any query preparation:
-        // a skip verdict returns before recall. No translation or LLM call
-        // exists anywhere on this path; a missing or failed check falls back
-        // to ordinary ambient recall below. Check failure is handled here,
-        // separately from the recall handler, so it cannot abort the turn.
-        let check: WorthRetrievingResult | null = null;
-        try {
-          check = await memoryRuntime.worthRetrieving?.({ original: text, userId, limit: ACTIVE_MEMORY_LIMIT }) ?? null;
-        } catch (err) {
-          logDebug(TAG, `Active recall check failed, ordinary recall: ${err instanceof Error ? err.message : String(err)}`);
-        }
-        if (check !== null && check.verdict === "skip") {
-          // #1877 — one line per eligible turn, independent of injection, so
-          // skipped searches are observable instead of silent. The df
-          // diagnostics mirror the abmind skip log that no longer runs.
-          logDebug(TAG, `Active recall outcome: retrieved=0 injected=0 skipped=yes(no-informative-terms) (df>${check.ceiling} of ${check.corpusSize})`);
-        } else {
-          const t0 = performance.now();
+        // #1908 — no bridge-side raw-only precheck: the daemon's ambient
+        // planner judges the combined skip (raw, hints, eligible context),
+        // so a raw-only verdict here must never terminate a turn that
+        // informative context would rescue. The engine skip stays observable
+        // per eligible turn below.
+        const t0 = performance.now();
           // #1867 — discrete terms so #1861's coverage ordering participates on
           // the auto-recall path; the joined query stays the fallback.
           // Extraction and priming composition are pure and synchronous; the
@@ -292,7 +269,7 @@ export async function buildPrompt(
           // #1877 — single exported predicate owns the floor/age rule.
           const hits = recall.hits.filter((h) => shouldInjectRecallHit(h, nowMs));
           if (hits.length > 0) {
-            // #1813 — inject abmind's deterministic bounded selection when
+            // Inject abmind's deterministic bounded selection when
             // present and resolvable; otherwise the full filtered set (ordinary
             // rendering). Selection bounds, never substitutes; the rank order
             // comes from abmind's final ordering.
@@ -306,7 +283,6 @@ export async function buildPrompt(
             prompt = `${block}\n\n${prompt}`;
             // eslint-disable-next-line @typescript-eslint/no-explicit-any
             recalledHits = inject.filter((h: any) => h.memoryId != null).map((h: any) => ({ id: h.memoryId as number, contentEn: h.content as string }));
-            recallDecision = recall.decision;
             // #1867 — diagnostics are advisory: the floor/age rules above still
             // decide injection. Gating on weakEvidence waits for harness proof
             // of no suppression (terms now make its lexical arm reachable).
@@ -316,7 +292,6 @@ export async function buildPrompt(
           // #1877 — one line per eligible turn, independent of injection, so
           // skipped searches are observable instead of silent.
           logDebug(TAG, `Active recall outcome: retrieved=${recall.hits.length} injected=${hits.length} skipped=${recall.searchSkipped === true ? `yes(${recall.searchSkippedReason ?? "unknown"})` : "no"}`);
-        }
       } catch (err) {
         logDebug(TAG, `Active recall failed: ${err instanceof Error ? err.message : String(err)}`);
       }
@@ -346,5 +321,5 @@ export async function buildPrompt(
     volatileContext,
   };
 
-  return { prompt, isSessionStart, imageContent, recalledHits, recallDecision, durableContextIntent, currentTurn };
+  return { prompt, isSessionStart, imageContent, recalledHits, durableContextIntent, currentTurn };
 }

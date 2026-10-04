@@ -63,8 +63,7 @@ function makeSession(id: string): ManagedSession {
   return {
     id, userId: "master", platform: "telegram", chatId: 100,
     // Production master sessions use streaming delivery (spin.ts); the
-    // compact turn must prove itself on that path, including post-response
-    // attribution which the simple-delivery early return never reaches.
+    // compact turn must prove itself on that path.
     delivery: "streaming", active: true, status: "ready",
     idleTimeoutMs: 0, lastActiveAt: Date.now(), messageCount: 0, tokenCount: 0, toolCallCount: 0,
     log: [], shortIndex: 1, showThinking: false,
@@ -94,7 +93,7 @@ const COMPACT_SELECTION = {
 };
 
 function mockMemoryRuntime(selection: unknown) {
-  const caps = new Set<string>(["recall", "recordMessage", "attribution"]);
+  const caps = new Set<string>(["recall", "recordMessage"]);
   const recall = vi.fn(async () => ({
     hits: broadHits(),
     context: "",
@@ -107,7 +106,6 @@ function mockMemoryRuntime(selection: unknown) {
     recall,
     recordMessage: vi.fn().mockResolvedValue({ id: 7 }),
     recordFeedback: vi.fn().mockResolvedValue({}),
-    attribution: vi.fn().mockResolvedValue(null),
   };
 }
 
@@ -145,7 +143,7 @@ function makeMsg(text: string): InboundMessage {
   };
 }
 
-describe("#1813 — compact injection lifecycle", () => {
+describe("compact injection lifecycle", () => {
   async function setupSpin(session: ManagedSession, transport: IKiroTransport) {
     const spinMod = await import("../spin.js");
     vi.spyOn(spinMod.spin, "ensureSessionTransport").mockImplementation(async (s) => {
@@ -179,10 +177,6 @@ describe("#1813 — compact injection lifecycle", () => {
     const prompt = String(vi.mocked(transport.sendPrompt).mock.calls[0]?.[1] ?? "");
     expect(prompt).toContain(CONSTRAINT);
     expect(prompt).not.toContain("aaaa");
-    // Attribution sees the injected row only.
-    expect(runtime.attribution).toHaveBeenCalledWith(
-      expect.objectContaining({ sourceIds: [3] }),
-    );
   });
 
   it("renders every hit when the turn carries no selection", async () => {

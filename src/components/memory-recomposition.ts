@@ -74,7 +74,6 @@ export class RecomposableMemoryRuntime implements RecomposableMemoryRuntimeContr
       getSleepStatus: () => resolve().getSleepStatus(),
       getCoreKnowledge: (input) => resolve().getCoreKnowledge(input),
       recordFeedback: (input, operationKey) => resolve().recordFeedback(input, operationKey),
-      attribution: (input) => resolve().attribution(input),
       embed: (input) => resolve().embed(input),
       runMaintenance: (input) => resolve().runMaintenance(input),
       instantStore: (input) => resolve().instantStore(input),

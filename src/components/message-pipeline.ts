@@ -16,9 +16,8 @@ import { synthesizeSpeech, type TtsConfig } from "./tts.js";
 import { attemptMemoryMutation } from "./memory-runtime.js";
 import { assistantMessageKey, feedbackKey } from "./memory-operation-key.js";
 
-/** Retry a send operation on transient network errors — owned by
- * pipeline/fast-path-answer.ts so the fast-path delivery shares it. */
-import { retrySend } from "./pipeline/fast-path-answer.js";
+/** Retry a send operation on transient network errors. */
+import { retrySend } from "./pipeline/delivery-retry.js";
 
 /** A compaction trigger is eligible only after the assistant row has a
  * durable identity. `attemptMemoryMutation` intentionally swallows write
@@ -376,7 +375,7 @@ export async function handleInboundMessage(
     // the spec; the chokepoint at spin.ts#sendPrompt carries it through to the
     // transport, which fails closed when durable context is required but
     // unavailable.
-    const { prompt: builtPrompt, imageContent, recalledHits, recallDecision, isSessionStart, durableContextIntent, currentTurn } = await buildPrompt(msg, text, {
+    const { prompt: builtPrompt, imageContent, recalledHits, durableContextIntent, currentTurn } = await buildPrompt(msg, text, {
       memoryRuntime: deps.memoryRuntime, memoryConfig, sessionManager: deps.sessionManager, conversationBuffer, contextPercent: ctxPct, maxContext: deps.maxContext,
       isAcp: transport.getRuntimeStatus?.().route === "acp",
     }, registry, effectiveSession);
@@ -385,58 +384,6 @@ export async function handleInboundMessage(
       await adapter.sendMessage(channelId, "⛔ Message blocked — suspicious content detected.", { threadId: msg.threadId });
       settle("not_sent");
       return;
-    }
-
-    // #1813 — fast-path answer gate. Only an eligible "answer" verdict skips
-    // model invocation, and only on a Main text turn; everything else falls
-    // through to the ordinary agent path below. Delivery below is Main-owned
-    // (send + assistant record + compaction + metrics + settle), exactly once.
-    const { fastPathAnswerText, deliverFastPathAnswer } = await import("./pipeline/fast-path-answer.js");
-    // #1837 — decision outcome at DEBUG whether or not the gate opens.
-    if (recallDecision) {
-      logDebug(TAG, `fast-path decision: outcome=${recallDecision.outcome} profile=${recallDecision.profile} set=${recallDecision.questionSet} sources=[${recallDecision.sourceIds.join(",")}]`);
-    }
-    const fastPathRendered = fastPathAnswerText(recallDecision, {
-      sessionType: sessionType(effectiveSession),
-      skillIsolated: isSkillSession,
-      hasAttachment: imageContent !== undefined,
-      voice: isVoice,
-      sessionStart: isSessionStart,
-      delivery: ctx.delivery,
-    });
-    if (fastPathRendered !== null && deps.memoryRuntime) {
-      const fastPathCorrelation: DeliveryCorrelation | undefined =
-        pSession.activeExecutionId
-          ? { sessionId: activeSessionId, executionId: pSession.activeExecutionId, kind: "final_assistant" }
-          : undefined;
-      try {
-        const fast = await deliverFastPathAnswer(fastPathRendered.display, {
-          adapter,
-          channelId,
-          threadId: msg.threadId,
-          deliveryCorrelation: fastPathCorrelation,
-          recordAssistant: deps.memoryRuntime.state === "ready" ? {
-            runtime: deps.memoryRuntime,
-            recordText: fastPathRendered.record,
-            platform: msg.platform,
-            userId,
-            sessionId: activeSessionId,
-            guest: registry.byUserId.get(userId)?.role === "guest",
-          } : undefined,
-        });
-        if (fast.delivered) {
-          if (fast.recorded) {
-            scheduleAutomaticCompaction(deps, userId, activeSessionId, durableContextIntent);
-          }
-          effectiveSession.messageCount = (effectiveSession.messageCount ?? 0) + 1;
-          effectiveSession.contextPercent = transport.contextPercent >= 0 ? transport.contextPercent : undefined;
-          logInfo(TAG, `→ [${msg.platform}] Fast-path delivery, transport skipped`);
-          settle("sent");
-          return;
-        }
-      } catch (err) {
-        logAndSwallow(TAG, "fast-path delivery", err);
-      }
     }
 
     let prompt = builtPrompt;
@@ -958,30 +905,6 @@ export async function handleInboundMessage(
         }
       } catch (err) {
         logWarn(TAG, `Citation detection failed: ${err instanceof Error ? err.message : String(err)}`);
-      }
-    }
-
-    // --- #1813: advisory post-response attribution (diagnostics only) ---
-    // Judges the delivered response against the actually supplied memories.
-    // Never writes, never settles, never touches citation feedback: failures
-    // and unsupported runtimes vanish into a debug line.
-    if (recalledHits && recalledHits.length > 0 && userResponse.trim().length > 0
-      && deps.memoryRuntime?.state === "ready" && deps.memoryRuntime.supports("attribution")) {
-      try {
-        const verdict = await deps.memoryRuntime.attribution({
-          userId,
-          response: userResponse,
-          sourceIds: recalledHits.map(h => h.id),
-        });
-        if (verdict) {
-          const used = verdict.sources.filter(s => s.verdict === "used").map(s => s.id);
-          const unknown = verdict.sources.filter(s => s.verdict === "unknown").map(s => s.id);
-          logDebug(TAG, `Attribution (${verdict.profile}): used=[${used.join(",")}] unknown=[${unknown.join(",")}]`);
-        } else {
-          logDebug(TAG, "Attribution unsupported or inactive for this turn");
-        }
-      } catch (err) {
-        logAndSwallow(TAG, "attribution", err);
       }
     }
 
