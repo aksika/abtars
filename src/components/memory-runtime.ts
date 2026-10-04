@@ -242,6 +242,12 @@ export interface RuntimeRecallResult {
   searchSkipped?: boolean;
   /** #1877 — closed-set reason behind `searchSkipped`, logged verbatim. */
   searchSkippedReason?: string;
+  /**
+   * #1908 — ambient planner diagnostics from abmind (content-free). Present
+   * on planned ambient recalls; validated at this boundary and preserved
+   * through routing for honest turn logs.
+   */
+  ambient?: RuntimeAmbientPlan;
 }
 
 /** #1867 — structural mirror of abmind's stage outcome (validated, not cast). */
@@ -360,7 +366,56 @@ export function stripRecallFlagsForTool<T extends RuntimeRecallHit>(hits: readon
   });
 }
 
-/** #1813 — structural mirror of abmind RecallSelectionV1 (validated, not cast). */
+/**
+ * #1908 — structural mirror of abmind ambient planner diagnostics. Content
+ * free: term counts, plans, semantic source, and rejection counters only.
+ * A malformed or absent envelope is dropped (the recall proceeds).
+ */
+export interface RuntimeAmbientPlan {
+  plans: "raw" | "raw+context";
+  semanticSource: "raw" | "context" | "fallback";
+  rawTermsTotal: number;
+  rawTermsInformative: number;
+  hintsTotal: number;
+  hintsInformative: number;
+  contextConsidered: number;
+  contextEligible: number;
+  contextRejected: Record<string, number>;
+  skipReason?: string;
+}
+
+export function asAmbientPlan(raw: unknown): RuntimeAmbientPlan | undefined {
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return undefined;
+  const record = raw as Record<string, unknown>;
+  const plans = record["plans"];
+  if (plans !== "raw" && plans !== "raw+context") return undefined;
+  const semanticSource = record["semanticSource"];
+  if (semanticSource !== "raw" && semanticSource !== "context" && semanticSource !== "fallback") return undefined;
+  const count = (value: unknown): number => (typeof value === "number" && Number.isFinite(value) ? value : 0);
+  const rejected: Record<string, number> = {};
+  const rawRejected = record["contextRejected"];
+  if (typeof rawRejected === "object" && rawRejected !== null && !Array.isArray(rawRejected)) {
+    for (const [key, value] of Object.entries(rawRejected as Record<string, unknown>)) {
+      if (typeof value === "number" && Number.isFinite(value)) rejected[key] = value;
+    }
+  }
+  const skipReason = record["skipReason"];
+  return {
+    plans,
+    semanticSource,
+    rawTermsTotal: count(record["rawTermsTotal"]),
+    rawTermsInformative: count(record["rawTermsInformative"]),
+    hintsTotal: count(record["hintsTotal"]),
+    hintsInformative: count(record["hintsInformative"]),
+    contextConsidered: count(record["contextConsidered"]),
+    contextEligible: count(record["contextEligible"]),
+    contextRejected: rejected,
+    ...(typeof skipReason === "string" ? { skipReason } : {}),
+  };
+}
+
+/**
+ * #1813 — structural mirror of abmind RecallSelectionV1 (validated, not cast). */
 export interface RuntimeRecallSelectionRef {
   id: number;
   revision: number;
@@ -972,7 +1027,7 @@ export function createClientRuntime(client: AbmindClientLike): AbtarsMemoryRunti
         stages: input.stages,
         ...(intent !== undefined ? { intent } : {}),
         ...(terms.length > 0 && input.selectTerms === true ? { selectTerms: true } : {}),
-      })) as { results: Array<Record<string, unknown>>; selection?: unknown; stageOutcomes?: unknown; weakEvidence?: unknown; searchSkipped?: unknown; searchSkippedReason?: unknown };
+      })) as { results: Array<Record<string, unknown>>; selection?: unknown; stageOutcomes?: unknown; weakEvidence?: unknown; searchSkipped?: unknown; searchSkippedReason?: unknown; ambient?: unknown };
       const hits: RuntimeRecallHit[] = result.results.map((r) => ({
         content: String(r["content"] ?? ""),
         score: Number(r["score"] ?? 0),
@@ -1014,14 +1069,17 @@ export function createClientRuntime(client: AbmindClientLike): AbtarsMemoryRunti
       const skipReason = searchSkipped === true && typeof result.searchSkippedReason === "string"
         ? result.searchSkippedReason.trim().slice(0, 64) || undefined
         : undefined;
+      // #1908 — carry the validated planner diagnostics; malformed envelopes
+      // drop and recall continues as ordinary.
+      const ambient = asAmbientPlan(result.ambient);
       const ms = Date.now() - t0;
-      logDebug("memory-runtime", `recall: ${hits.length} hits (${compact.length} injected) in ${ms}ms selection=${selection ? `${selection.refs.length} refs${selection.truncated ? " truncated" : ""}` : "none"} top=${hits.slice(0, 3).map((h) => `${h.memoryId ?? "?"}:${h.score.toFixed(3)}`).join(",")} stages=${stageOutcomes ? Object.entries(stageOutcomes).map(([k, v]) => `${k}:${v.status}/${v.hitCount}`).join(" ") : "n/a"} weakEvidence=${weakEvidence ?? "n/a"} skipped=${searchSkipped === true ? (skipReason ?? "yes") : "no"}`);
+      logDebug("memory-runtime", `recall: ${hits.length} hits (${compact.length} injected) in ${ms}ms selection=${selection ? `${selection.refs.length} refs${selection.truncated ? " truncated" : ""}` : "none"} plans=${ambient ? ambient.plans : "n/a"} semantic=${ambient ? ambient.semanticSource : "n/a"} top=${hits.slice(0, 3).map((h) => `${h.memoryId ?? "?"}:${h.score.toFixed(3)}`).join(",")} stages=${stageOutcomes ? Object.entries(stageOutcomes).map(([k, v]) => `${k}:${v.status}/${v.hitCount}`).join(" ") : "n/a"} weakEvidence=${weakEvidence ?? "n/a"} skipped=${searchSkipped === true ? (skipReason ?? "yes") : "no"}`);
       if (isLogLevel("trace")) {
         for (const h of hits.slice(0, 10)) {
           logTrace("memory-runtime", `hit id=${h.memoryId ?? "?"} score=${h.score.toFixed(3)} source=${h.source ?? "?"} text="${redactSecrets(h.content).slice(0, 120)}"`);
         }
       }
-      return { hits, context, ...(selection !== undefined ? { selection } : {}), ...(stageOutcomes !== undefined ? { stageOutcomes } : {}), ...(weakEvidence !== undefined ? { weakEvidence } : {}), ...(searchSkipped !== undefined ? { searchSkipped } : {}), ...(skipReason !== undefined ? { searchSkippedReason: skipReason } : {}) };
+      return { hits, context, ...(selection !== undefined ? { selection } : {}), ...(stageOutcomes !== undefined ? { stageOutcomes } : {}), ...(weakEvidence !== undefined ? { weakEvidence } : {}), ...(searchSkipped !== undefined ? { searchSkipped } : {}), ...(skipReason !== undefined ? { searchSkippedReason: skipReason } : {}), ...(ambient !== undefined ? { ambient } : {}) };
     },
 
     /**

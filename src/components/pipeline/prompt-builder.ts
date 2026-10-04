@@ -289,9 +289,10 @@ export async function buildPrompt(
             logDebug(TAG, `Active recall: ${inject.length}/${hits.length} hits injected (selection ${recall.selection ? "on" : "off"}), weakEvidence=${recall.weakEvidence ?? "n/a"}, ${block.length} chars, ${Math.round(performance.now() - t0)}ms`);
             logTrace(TAG, `recall content: ${block}`);
           }
-          // #1877 — one line per eligible turn, independent of injection, so
-          // skipped searches are observable instead of silent.
-          logDebug(TAG, `Active recall outcome: retrieved=${recall.hits.length} injected=${hits.length} skipped=${recall.searchSkipped === true ? `yes(${recall.searchSkippedReason ?? "unknown"})` : "no"}`);
+          // #1877/#1908 — one line per eligible turn, independent of injection,
+          // so skipped searches and the planner's plan/semantic choice are
+          // observable instead of silent.
+          logDebug(TAG, `Active recall outcome: retrieved=${recall.hits.length} injected=${hits.length} skipped=${recall.searchSkipped === true ? `yes(${recall.searchSkippedReason ?? "unknown"})` : "no"} plans=${recall.ambient?.plans ?? "n/a"} semantic=${recall.ambient?.semanticSource ?? "n/a"}`);
       } catch (err) {
         logDebug(TAG, `Active recall failed: ${err instanceof Error ? err.message : String(err)}`);
       }

@@ -562,6 +562,58 @@ describe("recall carries no decision field after FASTPATH removal", () => {
   });
 });
 
+describe("#1908 ambient planner diagnostics carry", () => {
+  function recallClient(extra: unknown) {
+    const client = mockClient(caps(["private.recall"], { private_read: "true" }));
+    (client.privateMemory.recall as unknown as Mock).mockResolvedValue({
+      results: [{ id: 3, content: "Deploys run via /deploy prod.", score: 0.9, date: "2026-09-01" }],
+      ...(typeof extra === "object" && extra !== null ? extra as Record<string, unknown> : {}),
+    });
+    return client;
+  }
+
+  it("carries validated diagnostics through the runtime", async () => {
+    const rt = createClientRuntime(recallClient({
+      ambient: {
+        plans: "raw+context",
+        semanticSource: "context",
+        rawTermsTotal: 3,
+        rawTermsInformative: 0,
+        hintsTotal: 1,
+        hintsInformative: 0,
+        contextConsidered: 1,
+        contextEligible: 1,
+        contextRejected: { "over-budget": 0, "foreign-principal": 1 },
+      },
+    }));
+    const res = await rt.recall({ query: "deploy", userId: "u1" });
+    expect(res.ambient).toEqual({
+      plans: "raw+context",
+      semanticSource: "context",
+      rawTermsTotal: 3,
+      rawTermsInformative: 0,
+      hintsTotal: 1,
+      hintsInformative: 0,
+      contextConsidered: 1,
+      contextEligible: 1,
+      contextRejected: { "over-budget": 0, "foreign-principal": 1 },
+    });
+  });
+
+  it("drops a malformed diagnostics envelope", async () => {
+    for (const bad of [
+      { plans: "maybe", semanticSource: "context" },
+      { plans: "raw", semanticSource: "guess" },
+      "raw+context",
+    ]) {
+      const rt = createClientRuntime(recallClient({ ambient: bad }));
+      const res = await rt.recall({ query: "deploy", userId: "u1" });
+      expect(res.ambient).toBeUndefined();
+      expect(res.hits).toHaveLength(1);
+    }
+  });
+});
+
 describe("#1813 selection carry and compact context", () => {
   function recallClient(results: Array<Record<string, unknown>>, selection: unknown) {
     const client = mockClient(caps(["private.recall"], { private_read: "true" }));
