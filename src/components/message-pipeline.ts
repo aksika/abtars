@@ -4,9 +4,10 @@
  * streaming → response delivery → memory → auto-compact.
  */
 
+import { randomUUID } from "node:crypto";
 import { logInfo, logWarn, logError, logDebug } from "./logger.js";
 import { logAndSwallow } from "./log-and-swallow.js";
-import { cleanResponse, SUPPORT_STRIP_RE } from "./clean-response.js";
+import { cleanResponse, extractSupportIds, SUPPORT_STRIP_RE } from "./clean-response.js";
 import { loadUsers } from "./user-registry.js";
 import { ModelNotFoundError } from "./transport/acp-transport.js";
 import { DurableContextUnavailableError } from "./transport/pi-core-context.js";
@@ -15,7 +16,7 @@ import type { SttConfig } from "./stt.js";
 import { synthesizeSpeech, type TtsConfig } from "./tts.js";
 import { attemptMemoryMutation } from "./memory-runtime.js";
 import { assistantMessageKey, feedbackKey } from "./memory-operation-key.js";
-import { publishAnswerRecord, resolveAnswerSupport, takeToolEvidence } from "./answer-evidence.js";
+import { beginAnswerSend, publishAnswerRecord, resolveAnswerSupport, peekToolEvidence, takeToolEvidence, recordFeedbackBatch } from "./answer-evidence.js";
 
 /** Retry a send operation on transient network errors. */
 import { retrySend } from "./pipeline/delivery-retry.js";
@@ -81,38 +82,6 @@ export async function settleDreamQuestion(
       : "unknown";
     logWarn(TAG, `dream question settlement failed (id=${question.id} code=${code}) — row stays pending`);
   }
-}
-
-// #1913: publish one answer record for a delivered turn. All platform sends
-// already resolved, so registration strictly precedes any reaction lookup.
-// TUI turns are excluded (no reaction surface addresses them).
-function publishDeliveredAnswer(args: {
-  platform: string;
-  channelId: string;
-  userId: string;
-  sessionId: string;
-  executionId: string | undefined;
-  declared: readonly number[];
-  heuristic: readonly number[];
-  autoInjected: readonly number[];
-  messageIds: readonly (number | string)[];
-}): void {
-  if (args.platform === "tui" || args.messageIds.length === 0) return;
-  const support = resolveAnswerSupport({
-    declared: args.declared,
-    heuristic: args.heuristic,
-    autoInjected: args.autoInjected,
-    toolDelivered: takeToolEvidence(args.executionId),
-  });
-  publishAnswerRecord({
-    platform: args.platform,
-    channelId: args.channelId,
-    principal: args.userId,
-    sessionId: args.sessionId,
-    executionId: args.executionId ?? `${args.sessionId}-legacy`,
-    support,
-    messageIds: args.messageIds.map(String),
-  });
 }
 
 const STOPWORDS = new Set(["the","a","an","is","are","was","were","be","been",
@@ -379,10 +348,9 @@ export async function handleInboundMessage(
   let toolElapsedTimer: ReturnType<typeof setInterval> | undefined;
   let streamMsgId: number | string | undefined; // tool indicator message (editable)
   let assistantDurablyRecorded = false;
-  // #1913: platform message IDs carrying answer text this turn (pre-tool
-  // segments, terminal chunks). Every entry aliases one answer record so a
-  // reaction on any chunk resolves to the same validated support.
-  const deliveredAnswerIds: Array<number | string> = [];
+  let evidenceExecutionId: string | undefined;
+  const deliveryFallbackId = randomUUID();
+  let settleAnswerFeedback: (() => Promise<void>) | undefined;
   /** #1619: pipeline-owned incremental delivery controller (master/direct, non-TUI). */
   let incremental: import("./incremental-block-delivery.js").IncrementalBlockDeliveryController | null = null;
   try {
@@ -409,6 +377,40 @@ export async function handleInboundMessage(
       settle("not_sent");
       return;
     }
+
+    // Capture support at each text segment's boundary. Later reads must never
+    // ground text already delivered; successful chunks survive later failures.
+    const citedDeliveredIds = new Set<number>();
+    const answerIdentity = (): string => evidenceExecutionId ?? pSession.activeExecutionId ?? deliveryFallbackId;
+    const supportFor = (answerText: string, declared: readonly number[]): number[] => {
+      if (!memoryConfig.memoryEnabled || deps.memoryRuntime?.state !== "ready") return [];
+      let heuristic: number[] = [];
+      try { heuristic = abmind()?.detectCitations?.(answerText, recalledHits ?? []) ?? []; }
+      catch (err) { logWarn(TAG, `Citation detection failed: ${err instanceof Error ? err.message : String(err)}`); }
+      return resolveAnswerSupport({
+        declared, heuristic, autoInjected: recalledHits?.map((hit) => hit.id) ?? [],
+        toolDelivered: peekToolEvidence(answerIdentity()),
+      });
+    };
+    const deliverAnswer = async (send: () => Promise<number | string | void>, support: readonly number[]): Promise<number | string | void> => {
+      const executionId = answerIdentity();
+      const finishSend = beginAnswerSend(msg.platform, channelId);
+      try {
+        const sentId = await send();
+        if (sentId !== undefined && msg.platform !== "tui") {
+          publishAnswerRecord({ platform: msg.platform, channelId, principal: userId,
+            sessionId: activeSessionId, executionId, support, messageIds: [String(sentId)] });
+        }
+        for (const id of support) citedDeliveredIds.add(id);
+        return sentId;
+      } finally { finishSend(); }
+    };
+    settleAnswerFeedback = async () => {
+      if (!memoryConfig.memoryEnabled || deps.memoryRuntime?.state !== "ready") return;
+      const targets = [...citedDeliveredIds].map((memoryId) => ({ memoryId,
+        operationKey: feedbackKey(msg.platform, channelId, userId, answerIdentity(), memoryId, "cite", "auto") }));
+      await recordFeedbackBatch(deps.memoryRuntime, userId, "cite", targets);
+    };
 
     let prompt = builtPrompt;
     if (bootstrapPrefix) {
@@ -567,11 +569,11 @@ export async function handleInboundMessage(
         await incremental?.flushBeforeSemantics();
         const clean = sanitizeOutbound(text);
         if (!clean) return;
+        const support = supportFor(clean, extractSupportIds(text));
         if (streamMsgId && adapter.editMessage) {
           try {
-            await adapter.editMessage(channelId, streamMsgId, clean);
-            // The edited status message now carries answer text: alias it.
-            deliveredAnswerIds.push(streamMsgId);
+            const editedId = streamMsgId;
+            await deliverAnswer(async () => { await adapter.editMessage!(channelId, editedId, clean); return editedId; }, support);
             streamMsgId = undefined;
             incremental?.segmentDelivered(clean);
             sentAnyChunk = true;
@@ -579,8 +581,7 @@ export async function handleInboundMessage(
           } catch { /* fall through to a fresh send */ }
         }
         try {
-          const sentId = await retrySend(() => adapter.sendMessage(channelId, clean, { threadId: msg.threadId }));
-          if (sentId !== undefined) deliveredAnswerIds.push(sentId);
+          await deliverAnswer(() => retrySend(() => adapter.sendMessage(channelId, clean, { threadId: msg.threadId })), support);
           streamMsgId = undefined;
           incremental?.segmentDelivered(clean);
           sentAnyChunk = true;
@@ -604,7 +605,10 @@ export async function handleInboundMessage(
       directContextTurn,
       settlementOwner: "spin",
       await: true,
-    }).then(r => r.result);
+    }).then(r => {
+      evidenceExecutionId = r.executionId;
+      return r.result;
+    });
     // #1292: the model call is started early to overlap with the setReaction/sendTyping
     // round-trips below, but is not awaited until later in this try block. Without this
     // guard, a fast provider-down rejection (403 / all models exhausted) floats as an
@@ -654,13 +658,16 @@ export async function handleInboundMessage(
     // Successful segments are removed only from a matching prefix; failed
     // segments are retained and merged in. Thinking never participates.
     let reconciledResponse = pSession.fullMode ? response : (cleanAnswer || response);
+    // Reconciliation sanitizes text, including support markers. Capture the
+    // declaration first so tool-only answers retain their references.
+    const terminalDeclaredSupportIds = extractSupportIds(reconciledResponse);
     if (incremental) {
       const reconciled = incremental.reconcileTerminal(reconciledResponse);
       await incremental.end();
       reconciledResponse = reconciled;
     }
     const rawResponse = reconciledResponse;
-    const { text: cleanedText, reactionEmoji, noReply, topics, supportIds: declaredSupportIds } = cleanResponse(rawResponse);
+    const { text: cleanedText, reactionEmoji, noReply, topics } = cleanResponse(rawResponse);
     let userResponse = cleanedText;
     // #1724: a reaction-only turn is a chat control signal, never a
     // deliverable announcement payload — it must not settle as "sent".
@@ -668,8 +675,8 @@ export async function handleInboundMessage(
 
     // #1397: Capture stable execution ID before async cleanup may clear it.
     const deliveryCorrelation: DeliveryCorrelation | undefined =
-      pSession.activeExecutionId
-        ? { sessionId: activeSessionId, executionId: pSession.activeExecutionId, kind: "final_assistant" }
+      evidenceExecutionId
+        ? { sessionId: activeSessionId, executionId: evidenceExecutionId, kind: "final_assistant" }
         : undefined;
 
     // #869: strip <think>/<thinking> blocks (Pi transport handles thinking natively via events)
@@ -698,6 +705,8 @@ export async function handleInboundMessage(
       userResponse = `${userResponse}\n\n${DREAMY_QUESTION_SUFFIX_PREFIX}${bootQuestion!.text}`;
     }
 
+    const terminalSupport = supportFor(userResponse, terminalDeclaredSupportIds);
+
     // --- #936: Simple delivery (non-master sessions) ---
     // #1651 v2: a reaction-only response IS a deliverable chat reply in simple
     // delivery too — apply it before the no-reply/empty handling, matching the
@@ -720,8 +729,7 @@ export async function handleInboundMessage(
         for (const chunk of chunks) {
           const clean = chunk.replace(/\[TOPICS:\s*.+?\]/gi, "").replace(/\[REACT:.+?\]/gi, "").trim();
           if (clean) {
-            const sentId = await retrySend(() => adapter.sendMessage(channelId, clean, { threadId: msg.threadId, deliveryCorrelation }));
-            if (sentId !== undefined) deliveredAnswerIds.push(sentId);
+            await deliverAnswer(() => retrySend(() => adapter.sendMessage(channelId, clean, { threadId: msg.threadId, deliveryCorrelation })), terminalSupport);
             sentAnyChunk = true;
           }
         }
@@ -765,16 +773,7 @@ export async function handleInboundMessage(
       // #938: Update session metrics
       effectiveSession.messageCount = (effectiveSession.messageCount ?? 0) + 1;
       effectiveSession.contextPercent = transport.contextPercent >= 0 ? transport.contextPercent : undefined;
-      effectiveSession.toolCallCount = (effectiveSession.toolCallsSucceeded ?? 0) + (transport.toolCallsSucceeded ?? 0);
-      // #1913: publish the answer record for simple delivery (declared support
-      // only; no heuristic citation on this path). No record, no feedback.
-      publishDeliveredAnswer({
-        platform: msg.platform, channelId, userId,
-        sessionId: activeSessionId, executionId: deliveryCorrelation?.executionId,
-        declared: declaredSupportIds ?? [], heuristic: [],
-        autoInjected: recalledHits?.map((h) => h.id) ?? [],
-        messageIds: deliveredAnswerIds,
-      });
+      effectiveSession.toolCallCount = (effectiveSession.toolCallCount ?? 0) + (transport.toolCallsSucceeded ?? 0);
       return;
     }
 
@@ -827,9 +826,7 @@ export async function handleInboundMessage(
       const clean = chunk.replace(/\[TOPICS:\s*.+?\]/gi, "").replace(/\[REACT:.+?\]/gi, "").trim();
       if (clean) {
         await adapter.sendTyping?.(channelId, msg.threadId);
-        lastSentMsgId = await retrySend(() => adapter.sendMessage(channelId, clean, { threadId: msg.threadId, deliveryCorrelation }));
-        // #1913: every delivered chunk aliases the same answer record.
-        if (lastSentMsgId !== undefined) deliveredAnswerIds.push(lastSentMsgId);
+        lastSentMsgId = (await deliverAnswer(() => retrySend(() => adapter.sendMessage(channelId, clean, { threadId: msg.threadId, deliveryCorrelation })), terminalSupport)) ?? undefined;
         sentAnyChunk = true;
       }
     }
@@ -919,46 +916,6 @@ export async function handleInboundMessage(
     effectiveSession.contextPercent = ctxAfter >= 0 ? ctxAfter : undefined;
     effectiveSession.toolCallCount = (effectiveSession.toolCallCount ?? 0) + (transport.toolCallsSucceeded ?? 0);
 
-    // --- #824: Citation detection — did the agent use the recalled memories? ---
-    // #1913: automatic citation keeps its own "auto" idempotency identity so
-    // an explicit reaction later is an independent event, never a replay.
-    let heuristicCitedIds: number[] = [];
-    if (recalledHits && recalledHits.length > 0 && memoryConfig.memoryEnabled && deps.memoryRuntime?.state === "ready") {
-      try {
-        const mod = abmind();
-        if (mod) {
-          const { detectCitations } = mod;
-          const citedIds = detectCitations(userResponse, recalledHits);
-          heuristicCitedIds = [...citedIds];
-          for (const memoryId of citedIds) {
-            const messageIdForFeedback = lastSentMsgId != null ? String(lastSentMsgId) : deliveryCorrelation?.executionId ?? `${activeSessionId}-${Date.now()}`;
-            const operationKey = feedbackKey(msg.platform, msg.channelId, userId, messageIdForFeedback, memoryId, "cite", "auto");
-            await attemptMemoryMutation({
-              phase: "after_delivery",
-              family: "feedback",
-              operationKey,
-              run: () => deps.memoryRuntime!.recordFeedback({ userId, memoryId, feedbackType: "cite" }, operationKey),
-            });
-          }
-          logDebug(TAG, `Citation: ${citedIds.length}/${recalledHits.length} recalled memories cited`);
-        }
-      } catch (err) {
-        logWarn(TAG, `Citation detection failed: ${err instanceof Error ? err.message : String(err)}`);
-      }
-    }
-
-    // #1913: publish the answer record binding every delivered chunk to the
-    // validated support (agent declaration plus heuristic citation, both
-    // checked against injected and tool-delivered evidence). No record means
-    // later reactions safely no-op instead of boosting unrelated recalls.
-    publishDeliveredAnswer({
-      platform: msg.platform, channelId, userId,
-      sessionId: activeSessionId, executionId: deliveryCorrelation?.executionId,
-      declared: declaredSupportIds ?? [], heuristic: heuristicCitedIds,
-      autoInjected: recalledHits?.map((h) => h.id) ?? [],
-      messageIds: deliveredAnswerIds,
-    });
-
     // --- AfterMessage hook ---
     if (hasHooks("AfterMessage")) {
       fireHook("AfterMessage", {
@@ -1033,6 +990,8 @@ export async function handleInboundMessage(
       if (notifyUser) await adapter.sendMessage(channelId, `❌ ${reason}`, { threadId: msg.threadId }).catch(err => logAndSwallow(TAG, "adapter call", err));
     }
   } finally {
+    await settleAnswerFeedback?.();
+    takeToolEvidence(evidenceExecutionId);
     clearInterval(typingInterval);
     clearTimeout(typingTtlTimer);
     if (toolElapsedTimer) clearInterval(toolElapsedTimer);

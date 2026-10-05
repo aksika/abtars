@@ -718,14 +718,16 @@ export class Spin {
     }
     const stepIndex = (session.messageCount >> 1) + 1;
 
-    // #1691: one active O execution per reusable session. A second O call
+    // #1691/#1913: one active A/O execution per reusable session. A second call
     // against a session whose execution is still running is rejected before
     // any session field, turn control, card association, or transport state
     // is mutated — it is never serialized behind the first execution and can
     // never overwrite its context. The coordinator's start-port catch maps
     // this rejected start to the bounded `start_port_rejected` release.
-    if (spec.type === "O" && session.activeExecutionId) {
-      throw new SpinDispatchAdmissionError("type_busy", "O session is busy — an execution is already active on this session");
+    if ((spec.type === "O" || spec.type === "A") && session.activeExecutionId) {
+      // Chat reaction starts must not replace the running turn's generation
+      // before the transport rejects overlap. The caller queues this refusal.
+      throw new SpinDispatchAdmissionError("type_busy", `${spec.type} session is busy — an execution is already active on this session`);
     }
 
     // A legacy/user O turn has no project authority. Never inherit the prior
@@ -1222,7 +1224,7 @@ export class Spin {
       const telemetryUsage = executionTelemetry.snapshot();
       executionTelemetry.close();
       await this.finishSpin(spec, profile, session, capturedExecutionId, cardId, stepIndex, started, result, outcome, terminate, telemetryUsage, this.boundTurnContext(boundOrcContext, boundOrcTurnControl, boundMaxPromptRounds));
-      return { sessionId: session.id, cardId, result, outcome };
+      return { sessionId: session.id, executionId: capturedExecutionId, cardId, result, outcome };
     } catch (err) {
       const telemetryUsage = executionTelemetry.snapshot();
       executionTelemetry.close();

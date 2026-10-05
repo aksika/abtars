@@ -1273,4 +1273,47 @@ describe("#1913 answer records", () => {
     await handleInboundMessage(makeMsg(), adapter, deps);
     expect(lookupAnswerRecord("telegram", "100", "103")?.support).toEqual([1]);
   });
+  it("publishes each successful chunk before later delivery fails", async () => {
+    const { adapter, deps } = rig("Two chunks. [SUPPORT: 1]", 104, []);
+    adapter.chunkResponse = () => ["First chunk", "Second chunk"];
+    adapter.sendMessage = vi.fn().mockImplementation(async (_channel: string, content: string) => {
+      if (content === "First chunk") return 104;
+      if (content === "Second chunk") {
+        expect(lookupAnswerRecord("telegram", "100", "104")?.support).toEqual([1]);
+        throw new Error("permanent send failure");
+      }
+      return 105;
+    });
+    await handleInboundMessage(makeMsg(), adapter, deps);
+    expect(lookupAnswerRecord("telegram", "100", "104")?.support).toEqual([1]);
+    expect(lookupAnswerRecord("telegram", "100", "105")).toBeUndefined();
+  });
+
+  it("uses settled execution identity for tool-only support after session cleanup", async () => {
+    const { adapter, deps } = rig("Kedden! [SUPPORT: 313]", 106, []);
+    deps.memoryRuntime!.recall = vi.fn().mockResolvedValue({ hits: [] });
+    deps.sessionManager.spin = vi.fn().mockImplementation(async () => {
+      const { recordToolEvidence } = await import("./answer-evidence.js");
+      recordToolEvidence("settled-execution", [{ memoryId: 313 }]);
+      return { sessionId: "test_A_01", executionId: "settled-execution", result: "Kedden! [SUPPORT: 313]", outcome: "text" };
+    });
+    await handleInboundMessage(makeMsg(), adapter, deps);
+    expect(lookupAnswerRecord("telegram", "100", "106")).toMatchObject({ executionId: "settled-execution", support: [313] });
+  });
+
+  it("does not give a pre-tool segment support from a later read", async () => {
+    const { adapter, deps } = rig("Later answer. [SUPPORT: 313]", 108, []);
+    deps.memoryRuntime!.recall = vi.fn().mockResolvedValue({ hits: [] });
+    adapter.sendMessage = vi.fn().mockImplementation(async (_channel: string, content: string) => content === "Earlier answer." ? 107 : 108);
+    deps.sessionManager.spin = vi.fn().mockImplementation(async () => {
+      await (currentTransport as IKiroTransport).onSegmentBreak?.("Earlier answer. [SUPPORT: 313]");
+      const { recordToolEvidence } = await import("./answer-evidence.js");
+      recordToolEvidence("later-read-execution", [{ memoryId: 313 }]);
+      return { sessionId: "test_A_01", executionId: "later-read-execution", result: "Later answer. [SUPPORT: 313]", outcome: "text" };
+    });
+    await handleInboundMessage(makeMsg(), adapter, deps);
+    expect(lookupAnswerRecord("telegram", "100", "107")).toBeUndefined();
+    expect(lookupAnswerRecord("telegram", "100", "108")?.support).toEqual([313]);
+  });
+
 });

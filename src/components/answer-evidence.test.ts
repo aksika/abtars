@@ -6,6 +6,9 @@
  */
 import { describe, it, expect } from "vitest";
 import {
+  beginAnswerSend,
+  resolveReactionAnswer,
+  recordDeliveredRecall,
   recordToolEvidence,
   takeToolEvidence,
   validateSupportIds,
@@ -13,6 +16,7 @@ import {
   publishAnswerRecord,
   lookupAnswerRecord,
   recordFeedbackBatch,
+  recordReactionFeedback,
   formatFeedbackOutcome,
   isExecutionOverlapError,
   ANSWER_RECORD_TTL_MS,
@@ -90,8 +94,51 @@ describe("#1913 answer evidence", () => {
 
   it("detects execution overlap without matching ordinary failures", () => {
     expect(isExecutionOverlapError(new Error("Pi execution already active — overlapping sendPrompt rejected"))).toBe(true);
-    expect(isExecutionOverlapError(Object.assign(new Error("busy"), { name: "SpinDispatchAdmissionError" }))).toBe(true);
+    expect(isExecutionOverlapError(Object.assign(new Error("busy"), { name: "SpinDispatchAdmissionError", code: "type_busy" }))).toBe(true);
     expect(isExecutionOverlapError(new Error("credits exhausted"))).toBe(false);
     expect(isExecutionOverlapError(undefined)).toBe(false);
+    expect(isExecutionOverlapError(Object.assign(new Error("busy"), { name: "SpinDispatchAdmissionError", code: "session_capacity" }))).toBe(false);
+  });
+});
+
+
+describe("#1913 review regressions", () => {
+  it("defers a reaction until the current send has registered its target", async () => {
+    const complete = beginAnswerSend("telegram", "pending-chat");
+    const reaction = resolveReactionAnswer("telegram", "pending-chat", "pending-msg");
+    publishAnswerRecord({ platform: "telegram", channelId: "pending-chat", principal: "user1",
+      sessionId: "s", executionId: "pending-exec", support: [11], messageIds: ["pending-msg"] });
+    complete();
+    expect((await reaction)?.support).toEqual([11]);
+  });
+
+  it("does not retain undelivered IDs from incomplete recall JSON", () => {
+    recordDeliveredRecall("truncated-exec", '{"hits":[{"memoryId":22}],"truncated":');
+    expect(takeToolEvidence("truncated-exec").size).toBe(0);
+    recordDeliveredRecall("complete-exec", '{"hits":[{"memoryId":22}]}');
+    expect([...takeToolEvidence("complete-exec").keys()]).toEqual([22]);
+  });
+
+  it("does not report explicit false or structured authorization errors as applied", async () => {
+    const runtime = { recordFeedback: async (input: { memoryId: number }) => {
+      if (input.memoryId === 1) return { ok: false };
+      throw Object.assign(new Error("Denied"), { code: "unauthorized" });
+    } };
+    expect(await recordFeedbackBatch(runtime, "u", "cite", [
+      { memoryId: 1, operationKey: "false" }, { memoryId: 2, operationKey: "denied" },
+    ])).toEqual({ applied: [], rejected: [2], unknown: [1] });
+  });
+
+  it("retains unknown outcomes across concurrent reactions and separate chunk records", async () => {
+    const common = { platform: "telegram", channelId: "unknown-chat", principal: "u", sessionId: "s", executionId: "unknown-exec", support: [1] };
+    publishAnswerRecord({ ...common, messageIds: ["a"] });
+    publishAnswerRecord({ ...common, messageIds: ["b"] });
+    let attempts = 0;
+    const runtime = { recordFeedback: async () => { attempts++; throw new Error("lost response"); } };
+    const first = lookupAnswerRecord("telegram", "unknown-chat", "a")!;
+    const second = lookupAnswerRecord("telegram", "unknown-chat", "b")!;
+    const outcomes = await Promise.all([recordReactionFeedback(runtime, first, "cite"), recordReactionFeedback(runtime, second, "cite")]);
+    expect(outcomes).toEqual([{ applied: [], rejected: [], unknown: [1] }, { applied: [], rejected: [], unknown: [1] }]);
+    expect(attempts).toBe(1);
   });
 });

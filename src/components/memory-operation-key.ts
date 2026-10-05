@@ -122,18 +122,18 @@ export function assistantMessageKey(
 /**
  * Build a feedback-record operation key.
  *
- * Identity tuple: [platform, channelId, userId, messageId, memoryId,
+ * Identity tuple: [platform, channelId, userId, answerId, memoryId,
  * feedbackType, source]. Source separates automatic citation from explicit
  * reaction (#1913): the same positive signal through both paths is two
  * independent events, never a replay. Includes feedbackType so independent
- * cite/reject events on the same message do not collide, but replaying the
- * identical reaction safely replays.
+ * cite/reject events on the same answer do not collide. Use the execution
+ * identity so reactions on different chunks safely replay the same event.
  */
 export function feedbackKey(
   platform: string,
   channelId: string,
   userId: string,
-  messageId: string,
+  answerId: string,
   memoryId: number,
   feedbackType: string,
   source: "auto" | "explicit",
@@ -141,14 +141,14 @@ export function feedbackKey(
   requireNonEmpty(platform, "platform");
   requireNonEmpty(channelId, "channelId");
   requireNonEmpty(userId, "userId");
-  requireNonEmpty(messageId, "messageId");
+  requireNonEmpty(answerId, "answerId");
   requireNonEmpty(feedbackType, "feedbackType");
   requireNonEmpty(source, "source");
   return memoryOperationKey("feedback", [
     platform,
     channelId,
     userId,
-    messageId,
+    answerId,
     String(memoryId),
     feedbackType,
     source,

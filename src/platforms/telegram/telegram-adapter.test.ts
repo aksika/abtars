@@ -352,7 +352,7 @@ describe("TelegramAdapter", () => {
       const { publishAnswerRecord } = await import("../../components/answer-evidence.js");
       const { feedbackKey } = await import("../../components/memory-operation-key.js");
       publishAnswerRecord(
-        { platform: "telegram", channelId: "42", principal: "master", sessionId: "s", executionId: "e", support: [7, 9], messageIds: ["210"] },
+        { platform: "telegram", channelId: "42", principal: "master", sessionId: "s", executionId: "e210", support: [7, 9], messageIds: ["210"] },
         Date.now(),
       );
 
@@ -362,12 +362,12 @@ describe("TelegramAdapter", () => {
       expect(recordFeedback).toHaveBeenNthCalledWith(
         1,
         { userId: "master", memoryId: 7, feedbackType: "cite" },
-        feedbackKey("telegram", "42", "master", "210", 7, "cite", "explicit"),
+        feedbackKey("telegram", "42", "master", "e210", 7, "cite", "explicit"),
       );
       expect(recordFeedback).toHaveBeenNthCalledWith(
         2,
         { userId: "master", memoryId: 9, feedbackType: "cite" },
-        feedbackKey("telegram", "42", "master", "210", 9, "cite", "explicit"),
+        feedbackKey("telegram", "42", "master", "e210", 9, "cite", "explicit"),
       );
     });
 
@@ -383,7 +383,7 @@ describe("TelegramAdapter", () => {
       await readyAdapter(recordFeedback);
       const { publishAnswerRecord } = await import("../../components/answer-evidence.js");
       publishAnswerRecord(
-        { platform: "telegram", channelId: "42", principal: "someone-else", sessionId: "s", executionId: "e", support: [7], messageIds: ["212"] },
+        { platform: "telegram", channelId: "42", principal: "someone-else", sessionId: "s", executionId: "e212", support: [7], messageIds: ["212"] },
         Date.now(),
       );
       await (TelegramPollerMock as any)._handler(reactionUpdate(212));
@@ -395,7 +395,7 @@ describe("TelegramAdapter", () => {
       await readyAdapter(recordFeedback);
       const { publishAnswerRecord } = await import("../../components/answer-evidence.js");
       publishAnswerRecord(
-        { platform: "telegram", channelId: "42", principal: "master", sessionId: "s", executionId: "e", support: [7], messageIds: ["213"] },
+        { platform: "telegram", channelId: "42", principal: "master", sessionId: "s", executionId: "e213", support: [7], messageIds: ["213"] },
         Date.now(),
       );
       await (TelegramPollerMock as any)._handler({
@@ -417,7 +417,7 @@ describe("TelegramAdapter", () => {
       await readyAdapter(recordFeedback);
       const { publishAnswerRecord } = await import("../../components/answer-evidence.js");
       publishAnswerRecord(
-        { platform: "telegram", channelId: "42", principal: "master", sessionId: "s", executionId: "e", support: [7], messageIds: ["214"] },
+        { platform: "telegram", channelId: "42", principal: "master", sessionId: "s", executionId: "e214", support: [7], messageIds: ["214"] },
         Date.now(),
       );
       const spinMod = await import("../../components/spin.js");
@@ -434,7 +434,7 @@ describe("TelegramAdapter", () => {
       await readyAdapter(recordFeedback);
       const { publishAnswerRecord } = await import("../../components/answer-evidence.js");
       publishAnswerRecord(
-        { platform: "telegram", channelId: "42", principal: "master", sessionId: "s", executionId: "e", support: [7], messageIds: ["215"] },
+        { platform: "telegram", channelId: "42", principal: "master", sessionId: "s", executionId: "e215", support: [7], messageIds: ["215"] },
         Date.now(),
       );
       const spinMod = await import("../../components/spin.js");
@@ -453,7 +453,7 @@ describe("TelegramAdapter", () => {
       const ready = await readyAdapter(recordFeedback);
       const { publishAnswerRecord } = await import("../../components/answer-evidence.js");
       publishAnswerRecord(
-        { platform: "telegram", channelId: "42", principal: "master", sessionId: "s", executionId: "e", support: [7], messageIds: ["216"] },
+        { platform: "telegram", channelId: "42", principal: "master", sessionId: "s", executionId: "e216", support: [7], messageIds: ["216"] },
         Date.now(),
       );
       await (TelegramPollerMock as any)._handler({

@@ -417,21 +417,16 @@ export class DiscordAdapter implements PlatformAdapter {
       const score = emojiToScore(emoji);
       if (score !== 0) {
         const feedbackType = score < 0 ? "reject" : "cite";
-        const { lookupAnswerRecord, recordFeedbackBatch, formatFeedbackOutcome } =
+        const { resolveReactionAnswer, recordReactionFeedback, formatFeedbackOutcome } =
           await import("../../components/answer-evidence.js");
-        const record = lookupAnswerRecord("discord", channelId, messageId);
+        const record = await resolveReactionAnswer("discord", channelId, messageId);
         const actorUserId = loadUsers().byPlatformId.get("discord:" + user.id)?.userId;
         if (!record) {
           logDebug(TAG, `No answer record for msg ${messageId} — reaction feedback no-op`);
         } else if (!actorUserId || actorUserId !== record.principal) {
           logDebug(TAG, `Reaction actor mismatch on msg ${messageId} — feedback denied`);
         } else {
-          const { feedbackKey } = await import("../../components/memory-operation-key.js");
-          const targets = record.support.map((memoryId) => ({
-            memoryId,
-            operationKey: feedbackKey("discord", channelId, record.principal, messageId, memoryId, feedbackType, "explicit"),
-          }));
-          const outcome = await recordFeedbackBatch(this.deps.memoryRuntime, record.principal, feedbackType, targets);
+          const outcome = await recordReactionFeedback(this.deps.memoryRuntime, record, feedbackType);
           logDebug(TAG, `Recall feedback for msg ${messageId}: ${formatFeedbackOutcome(outcome)} (emoji ${emoji})`);
         }
       }

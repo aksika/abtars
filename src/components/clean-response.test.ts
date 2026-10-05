@@ -88,3 +88,13 @@ describe("classifyContent (#1651)", () => {
     expect(classifyContent(raw)).toBe(expected);
   });
 });
+
+
+describe("#1913 support metadata validation", () => {
+  it("strips malformed/empty metadata and rejects partial numeric tokens", () => {
+    const cleaned = cleanResponse("First. [SUPPORT: 12 34, nope, 56] Second. [SUPPORT: ]");
+    expect(cleaned.supportIds).toEqual([56]);
+    expect(cleaned.text).toBe("First.  Second.");
+    expect(cleaned.text).not.toContain("SUPPORT");
+  });
+});

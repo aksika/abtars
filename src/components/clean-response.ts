@@ -10,9 +10,9 @@ const TOPICS_RE = /\[TOPICS:\s*(.+?)\]/i;
 // #1913: agent-declared answer support (memory IDs only). Parsed before
 // stripping; validated against host-observed evidence by the pipeline, so a
 // forged marker degrades to the eligible subset instead of authorizing writes.
-const SUPPORT_RE = /\[SUPPORT:\s*([\d\s,]+)\]/gi;
+const SUPPORT_RE = /\[SUPPORT:\s*([^\]]*)\]/gi;
 /** Delivery-time strip for the support marker (segments, TTS inputs). */
-export const SUPPORT_STRIP_RE = /\s*\[SUPPORT:\s*[\d\s,]+\]\s*/gi;
+export const SUPPORT_STRIP_RE = /\[SUPPORT:[^\]]*\]/gi;
 
 // Internal context markers — strip if model echoes them back
 const CONTEXT_BLOCK_RE = /\[CONTEXT[^\]]*\][\s\S]*?\[\/CONTEXT\]/gi;
@@ -44,8 +44,9 @@ export function extractSupportIds(raw: string): number[] {
   let match: RegExpExecArray | null;
   while ((match = SUPPORT_RE.exec(raw)) !== null) {
     for (const part of match[1]!.split(",")) {
-      const id = Number.parseInt(part.trim(), 10);
-      if (!Number.isInteger(id) || id <= 0 || id > 2147483647 || seen.has(id)) continue;
+      if (!/^\d+$/.test(part.trim())) continue;
+      const id = Number(part.trim());
+      if (!Number.isSafeInteger(id) || id <= 0 || seen.has(id)) continue;
       seen.add(id);
       out.push(id);
       if (out.length >= 20) return out;

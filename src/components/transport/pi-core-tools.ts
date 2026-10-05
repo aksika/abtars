@@ -1,4 +1,5 @@
 import { logWarn } from "../logger.js";
+import { recordDeliveredRecall } from "../answer-evidence.js";
 import { PI_CORE_TOOL_RESULT_MAX_CHARS } from "./tool-result-limits.js";
 import type { AgentTool, AgentToolResult } from "./pi-core-types.js";
 
@@ -210,8 +211,12 @@ function definitionToAgentTool(descriptor: PortToolDescriptor, context: PiCoreTo
 
         context.onToolSuccess?.();
 
+        const delivered = limitPiCoreToolResult(descriptor.name, result);
+        if (descriptor.name === "memory_recall" && !lastDiag && !signal?.aborted && !context.signal?.aborted) {
+          recordDeliveredRecall(context.executionId, delivered);
+        }
         return {
-          content: [{ type: "text", text: limitPiCoreToolResult(descriptor.name, result) }],
+          content: [{ type: "text", text: delivered }],
           details: { tool: descriptor.name },
         };
       } catch (err) {

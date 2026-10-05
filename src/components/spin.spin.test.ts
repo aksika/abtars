@@ -1465,8 +1465,8 @@ describe("spin(spec) — unified session API (#1271)", () => {
     });
   });
 
-  describe("#1691 — one active O execution per reusable session", () => {
-    it("a second O call on a busy session is rejected before mutation; the first execution settles with its own context", async () => {
+  describe("#1691 — one active A/O execution per reusable session", () => {
+    it.each(["A", "O"] as const)("a second %s call is rejected before mutation; the first execution keeps its identity", async (type) => {
       let releaseFirst!: () => void;
       const firstHeld = new Promise<void>(r => { releaseFirst = r; });
       const sendCalls: Array<{ context: unknown }> = [];
@@ -1479,29 +1479,30 @@ describe("spin(spec) — unified session API (#1271)", () => {
       });
       spin.setRuntime(makeRuntime() as any);
 
-      // Allocate the reusable O session and attach its persistent transport.
-      const oSession = spin.createSession("aksika", "background", "O") as import("./spin-types.js").ManagedSession;
+      // Allocate the reusable session and attach its persistent transport.
+      const oSession = spin.createSession("aksika", "background", type) as import("./spin-types.js").ManagedSession;
       oSession.transport = heldTransport;
 
-      const first = spin.spin({ settlementOwner: "spin", type: "O", sessionId: oSession.id, prompt: "first turn", await: true });
+      const first = spin.spin({ settlementOwner: "spin", type, sessionId: oSession.id, prompt: "first turn", await: true });
       await vi.waitFor(() => expect(sendCalls).toHaveLength(1));
       const firstExecutionId = oSession.activeExecutionId;
       expect(firstExecutionId).toBeDefined();
       expect((sendCalls[0]!.context as { executionId?: string }).executionId).toBe(firstExecutionId);
 
-      // A second O call against the same session is rejected with the bounded
+      // A second call against the same session is rejected with the bounded
       // admission error BEFORE it can overwrite the session's active execution
       // id, orc fields, or transport state — it never reaches sendPrompt.
       await expect(
-        spin.spin({ settlementOwner: "spin", type: "O", sessionId: oSession.id, prompt: "second turn", await: true }),
+        spin.spin({ settlementOwner: "spin", type, sessionId: oSession.id, prompt: "second turn", await: true }),
       ).rejects.toMatchObject({ name: "SpinDispatchAdmissionError", code: "type_busy" });
       expect(sendCalls).toHaveLength(1);
-      expect(oSession.activeExecutionId).toBeDefined();
+      expect(oSession.activeExecutionId).toBe(firstExecutionId);
       // Release the first turn: it settles with its own captured identity and
       // clears the session marker for the next execution.
       releaseFirst();
       const firstResult = await first;
       expect(firstResult.result).toBe("first result");
+      expect(firstResult.executionId).toBe(firstExecutionId);
       // finishSpin clears the marker — the session is single-flight again.
       expect(oSession.activeExecutionId).toBeUndefined();
     });

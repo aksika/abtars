@@ -409,6 +409,8 @@ export interface SpinDispatchResult {
  * required: no consumer may reconstruct the outcome from result truthiness.
  */
 export interface AwaitedSpinResult extends SpinDispatchResult {
+  /** Settled execution identity; the session may already have released it. */
+  executionId?: string;
   result: string;
   outcome: ContentOutcome;
 }

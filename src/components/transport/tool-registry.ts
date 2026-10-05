@@ -530,7 +530,7 @@ function finalizeStoreQuota(
 
 const memoryRecallTool: ToolDefinition = {
   name: "memory_recall",
-  description: "Search memories by keyword or semantic query. Returns relevant stored memories. Verify one claim per call with focused keywords: a combined multi-claim query can bury individual facts, and a fact missing from one broad search is inconclusive, never proof it was never stored.",
+  description: "Search memories by keyword or semantic query. Returns relevant stored memories. Verify one claim per call with focused keywords: a combined multi-claim query can bury individual facts, and a fact missing from one broad search is inconclusive, never proof it was never stored. Preserve evidence from earlier successful reads; a cautionary lesson is not a contradiction. Distinguish a remembered joke from an actual event and correct claims only when evidence warrants it. When your answer uses returned memories, end that answer or text segment with [SUPPORT: id, ...], using only their memoryId values. Do not declare unused results.",
   parameters: {
     type: "object",
     properties: {
@@ -599,13 +599,6 @@ const memoryRecallTool: ToolDefinition = {
         limit: parseInt(stringValue(args["limit"] ?? "10"), 10),
         maxClassification,
       });
-      // #1913: retain memory IDs actually delivered to the agent for this
-      // execution. Answer attribution validates the agent's declared support
-      // against this host-observed set; failures here must never invent IDs.
-      try {
-        const { recordToolEvidence } = await import("../answer-evidence.js");
-        recordToolEvidence(context?.executionId, result.hits ?? []);
-      } catch (err) { logAndSwallow(TAG, "record tool evidence", err); }
       // #1837 — tool-path recall summary (the runtime boundary logs detail).
       logDebug(TAG, `memory_recall: user=${userId} limit=${stringValue(args["limit"] ?? "10")} maxClass=${maxClassification} keywords=${terms.length} query="${redactSecrets(terms.join(" ")).slice(0, 60)}"`);
       import("../metrics-collector.js").then(({ recordLatency }) => recordLatency("recall", Date.now() - t0)).catch(err => logAndSwallow(TAG, "record recall latency", err));

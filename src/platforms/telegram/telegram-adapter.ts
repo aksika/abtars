@@ -491,9 +491,9 @@ export class TelegramAdapter implements PlatformAdapter {
       const score = emojiToScore(emojis[0]!);
       if (score !== 0) {
         const feedbackType = score < 0 ? "reject" : "cite";
-        const { lookupAnswerRecord, recordFeedbackBatch, formatFeedbackOutcome } =
+        const { resolveReactionAnswer, recordReactionFeedback, formatFeedbackOutcome } =
           await import("../../components/answer-evidence.js");
-        const record = lookupAnswerRecord("telegram", String(chatId), String(reaction.message_id));
+        const record = await resolveReactionAnswer("telegram", String(chatId), String(reaction.message_id));
         const actorUserId = loadUsers().byPlatformId.get(`telegram:${user.id}`)?.userId;
         if (!record) {
           logDebug(TAG, `No answer record for msg ${reaction.message_id} — reaction feedback no-op`);
@@ -502,12 +502,7 @@ export class TelegramAdapter implements PlatformAdapter {
           logDebug(TAG, `Reaction actor mismatch on msg ${reaction.message_id} — feedback denied`);
           feedbackSuffix = " (memory feedback: denied, actor mismatch)";
         } else {
-          const { feedbackKey } = await import("../../components/memory-operation-key.js");
-          const targets = record.support.map((memoryId) => ({
-            memoryId,
-            operationKey: feedbackKey("telegram", String(chatId), record.principal, String(reaction.message_id), memoryId, feedbackType, "explicit"),
-          }));
-          const outcome = await recordFeedbackBatch(this.deps.memoryRuntime, record.principal, feedbackType, targets);
+          const outcome = await recordReactionFeedback(this.deps.memoryRuntime, record, feedbackType);
           const summary = formatFeedbackOutcome(outcome);
           logDebug(TAG, `Recall feedback for msg ${reaction.message_id}: ${summary} (emoji ${emojis[0]})`);
           feedbackSuffix = ` (memory feedback: ${summary})`;

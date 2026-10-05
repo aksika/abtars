@@ -277,12 +277,12 @@ describe("DiscordAdapter", () => {
       expect(recordFeedback).toHaveBeenNthCalledWith(
         1,
         { userId: "master", memoryId: 7, feedbackType: "cite" },
-        feedbackKey("discord", "ch9", "master", "901", 7, "cite", "explicit"),
+        feedbackKey("discord", "ch9", "master", "e", 7, "cite", "explicit"),
       );
       expect(recordFeedback).toHaveBeenNthCalledWith(
         2,
         { userId: "master", memoryId: 9, feedbackType: "cite" },
-        feedbackKey("discord", "ch9", "master", "901", 9, "cite", "explicit"),
+        feedbackKey("discord", "ch9", "master", "e", 9, "cite", "explicit"),
       );
     });
 

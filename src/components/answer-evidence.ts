@@ -6,18 +6,19 @@
  *
  * - Tool evidence: memory IDs actually delivered to the agent by successful
  *   `memory_recall` calls, keyed by Spin execution. Automatic injection joins
- *   at publish time from the pipeline's own `recalledHits`.
- * - Answer records: one bounded process-local record per delivered answer,
+ *   when each segment's support is captured from the pipeline's `recalledHits`.
+ * - Answer records: bounded process-local records for delivered segments,
  *   indexed by (platform, channel, message) with lossless string IDs.
  *
  * Lookup misses (unknown, expired, wrong message) are safe no-ops by
  * contract: callers must never fall back to the automatic recall set.
  * Restart drops all records (process-local Maps), which safely disables
  * feedback for pre-restart messages. Sweeps run on event-driven access;
- * this module owns no timers.
+ * the send-race resolver alone uses a short, cleared deadline.
  */
 
 import { logDebug, logWarn } from "./logger.js";
+import { feedbackKey } from "./memory-operation-key.js";
 
 /** Where a feedback signal originates: automatic citation or explicit reaction. */
 export type FeedbackSource = "auto" | "explicit";
@@ -64,9 +65,10 @@ export function recordToolEvidence(
       if (!entry.ids.has(hit.memoryId)) entry.ids.set(hit.memoryId, hit.semanticRevision);
     }
   }
+  sweepToolEvidence(nowMs);
 }
 
-/** Drain one execution's evidence (single reader: answer publication). */
+/** Drain one execution's evidence after pipeline settlement. */
 export function takeToolEvidence(
   executionId: string | undefined,
   nowMs: number = Date.now(),
@@ -87,6 +89,25 @@ function sweepToolEvidence(nowMs: number): void {
     const ordered = [...toolEvidence.entries()].sort((a, b) => a[1].at - b[1].at);
     for (const [key] of ordered.slice(0, toolEvidence.size - MAX_TOOL_EXECUTIONS)) toolEvidence.delete(key);
   }
+}
+
+/** Snapshot for an incremental segment: later tool reads cannot change it. */
+export function peekToolEvidence(executionId: string | undefined): ReadonlyMap<number, number | undefined> {
+  sweepToolEvidence(Date.now());
+  return new Map(executionId ? toolEvidence.get(executionId)?.ids : undefined);
+}
+
+/** Only a complete, successful model-facing recall envelope supplies evidence. */
+export function recordDeliveredRecall(executionId: string, delivered: string): void {
+  let parsed: unknown;
+  try { parsed = JSON.parse(delivered); } catch { return; /* truncated/non-JSON output cannot establish complete evidence */ }
+  if (!parsed || typeof parsed !== "object" || "error" in parsed || !("hits" in parsed) || !Array.isArray(parsed.hits)) return;
+  const hits: ToolEvidenceHit[] = [];
+  for (const hit of parsed.hits) {
+    if (!hit || typeof hit !== "object" || !("memoryId" in hit) || typeof hit.memoryId !== "number") continue;
+    hits.push({ memoryId: hit.memoryId });
+  }
+  recordToolEvidence(executionId, hits);
 }
 
 // ── Support validation ────────────────────────────────────────────────────
@@ -153,15 +174,19 @@ export interface PublishAnswerInput {
 }
 
 const answerRecords = new Map<string, { record: AnswerRecord; at: number }>();
+// Receipts live only as long as their bounded answer records. All segments of
+// one execution share them, including pending/unknown writes. Daemon receipt
+// pruning or reconnects cannot turn a repeated reaction into another mutation.
+const answerFeedbackReceipts = new WeakMap<AnswerRecord, Map<string, Promise<FeedbackOutcome>>>();
 
 function answerKey(platform: string, channelId: string, messageId: string): string {
   return `${platform.length}:${platform}:${channelId.length}:${channelId}:${messageId}`;
 }
 
 /**
- * Publish one record per delivered answer; every delivered chunk aliases the
- * same record. Fully synchronous: callers publish immediately after the
- * platform send resolves, so no reaction can resolve before registration.
+ * Publish a segment's captured support as soon as its send is acknowledged.
+ * Chunk records share an execution identity for feedback deduplication.
+ * Reactions arriving before acknowledgement use the bounded send resolver.
  * Empty support publishes nothing (reactions then miss by contract).
  */
 export function publishAnswerRecord(input: PublishAnswerInput, nowMs: number = Date.now()): void {
@@ -177,10 +202,49 @@ export function publishAnswerRecord(input: PublishAnswerInput, nowMs: number = D
     createdAt: nowMs,
     messageIds: [...input.messageIds],
   };
+  const prior = [...answerRecords.values()].find(({ record: candidate }) =>
+    candidate.platform === record.platform && candidate.channelId === record.channelId &&
+    candidate.principal === record.principal && candidate.sessionId === record.sessionId &&
+    candidate.executionId === record.executionId)?.record;
+  answerFeedbackReceipts.set(record, (prior && answerFeedbackReceipts.get(prior)) || new Map());
   const entry = { record, at: nowMs };
   for (const messageId of input.messageIds) {
     answerRecords.set(answerKey(input.platform, input.channelId, messageId), entry);
   }
+  sweepAnswerRecords(nowMs);
+}
+
+// A platform can emit a reaction before its send promise returns the message
+// ID. Wait only for current sends in this channel, with a bounded deadline.
+const pendingAnswerSends = new Map<string, Set<Promise<void>>>();
+
+export function beginAnswerSend(platform: string, channelId: string): () => void {
+  const key = answerKey(platform, channelId, "");
+  let settle!: () => void;
+  const pending = new Promise<void>((resolve) => { settle = resolve; });
+  const sends = pendingAnswerSends.get(key) ?? new Set<Promise<void>>();
+  sends.add(pending);
+  pendingAnswerSends.set(key, sends);
+  return () => {
+    sends.delete(pending);
+    if (sends.size === 0) pendingAnswerSends.delete(key);
+    settle();
+  };
+}
+
+export async function resolveReactionAnswer(platform: string, channelId: string, messageId: string): Promise<AnswerRecord | undefined> {
+  const record = lookupAnswerRecord(platform, channelId, messageId);
+  if (record) return record;
+  const sends = pendingAnswerSends.get(answerKey(platform, channelId, ""));
+  if (!sends?.size) return undefined;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    await Promise.race([
+      Promise.all([...sends]),
+      new Promise<void>((resolve) => { timer = setTimeout(resolve, 5_000); timer.unref(); }),
+    ]);
+  } finally { clearTimeout(timer); }
+  return lookupAnswerRecord(platform, channelId, messageId);
 }
 
 /** Resolve a reaction target. Misses (unknown/expired) are safe no-ops. */
@@ -235,6 +299,30 @@ interface FeedbackRuntime {
   ): Promise<unknown>;
 }
 
+/** At most one explicit mutation attempt per answer, memory, and sign. */
+export async function recordReactionFeedback(
+  runtime: FeedbackRuntime,
+  record: AnswerRecord,
+  feedbackType: "cite" | "reject",
+): Promise<FeedbackOutcome> {
+  const receipts = answerFeedbackReceipts.get(record) ?? new Map<string, Promise<FeedbackOutcome>>();
+  answerFeedbackReceipts.set(record, receipts);
+  const combined: FeedbackOutcome = { applied: [], rejected: [], unknown: [] };
+  for (const memoryId of record.support) {
+    const operationKey = feedbackKey(record.platform, record.channelId, record.principal, record.executionId, memoryId, feedbackType, "explicit");
+    let receipt = receipts.get(operationKey);
+    if (!receipt) {
+      receipt = recordFeedbackBatch(runtime, record.principal, feedbackType, [{ memoryId, operationKey }]);
+      receipts.set(operationKey, receipt);
+    }
+    const outcome = await receipt;
+    combined.applied.push(...outcome.applied);
+    combined.rejected.push(...outcome.rejected);
+    combined.unknown.push(...outcome.unknown);
+  }
+  return combined;
+}
+
 const REJECT_PATTERNS = [/unauthorized/i, /forbidden/i, /owner/i, /permission/i, /no longer belong/i];
 
 /**
@@ -253,11 +341,13 @@ export async function recordFeedbackBatch(
   const unknown: number[] = [];
   for (const target of targets) {
     try {
-      await runtime.recordFeedback({ userId, memoryId: target.memoryId, feedbackType }, target.operationKey);
-      applied.push(target.memoryId);
+      const result = await runtime.recordFeedback({ userId, memoryId: target.memoryId, feedbackType }, target.operationKey);
+      if (result && typeof result === "object" && "ok" in result && result.ok === false) unknown.push(target.memoryId);
+      else applied.push(target.memoryId);
     } catch (err) {
+      const code = err && typeof err === "object" && "code" in err ? String(err.code) : undefined;
       const text = err instanceof Error ? `${err.name}: ${err.message}` : String(err);
-      if (REJECT_PATTERNS.some((re) => re.test(text))) rejected.push(target.memoryId);
+      if (code === "unauthorized" || code === "memory_unauthorized" || (!code && REJECT_PATTERNS.some((re) => re.test(text)))) rejected.push(target.memoryId);
       else unknown.push(target.memoryId);
     }
   }
@@ -289,7 +379,7 @@ export function isExecutionOverlapError(err: unknown): boolean {
   const name = "name" in err && typeof (err as { name: unknown }).name === "string"
     ? (err as { name: string }).name
     : "";
-  if (name === "SpinDispatchAdmissionError") return true;
+  if (name === "SpinDispatchAdmissionError") return "code" in err && err.code === "type_busy";
   const message = err instanceof Error ? err.message : String(err);
   return OVERLAP_PATTERNS.some((re) => re.test(message));
 }
