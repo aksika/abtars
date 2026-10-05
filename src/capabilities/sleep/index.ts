@@ -22,7 +22,17 @@ type SleepFailurePayload = {
   cause: string;
   detail?: string;
   commandFingerprint?: string;
+  /** #1912: normalized execution facts for abmind supervision. Validated
+   *  here so malformed host facts can never widen into a replay permit. */
+  failureClass?: "transient" | "permanent" | "cancelled" | "unavailable" | "unknown";
+  retryAfterMs?: number;
+  reachedModel?: boolean;
+  effects?: "absent" | "reconcilable" | "unknown";
+  reasonCode?: string;
 };
+
+const FAILURE_CLASSES: ReadonlySet<string> = new Set(["transient", "permanent", "cancelled", "unavailable", "unknown"]);
+const EXECUTION_EFFECTS: ReadonlySet<string> = new Set(["absent", "reconcilable", "unknown"]);
 
 /** Normalize provider/tool diagnostics before they cross the host boundary. */
 function boundedSleepFailure(input: unknown): SleepFailurePayload {
@@ -34,11 +44,54 @@ function boundedSleepFailure(input: unknown): SleepFailurePayload {
   const commandFingerprint = typeof raw["commandFingerprint"] === "string" && /^[0-9a-f]{16}$/i.test(raw["commandFingerprint"])
     ? raw["commandFingerprint"]
     : undefined;
+  const failureClass = typeof raw["failureClass"] === "string" && FAILURE_CLASSES.has(raw["failureClass"])
+    ? raw["failureClass"] as SleepFailurePayload["failureClass"]
+    : undefined;
+  const retryAfterMs = typeof raw["retryAfterMs"] === "number" && Number.isSafeInteger(raw["retryAfterMs"]) && raw["retryAfterMs"] > 0
+    ? Math.min(raw["retryAfterMs"], 3_600_000)
+    : undefined;
+  const reachedModel = typeof raw["reachedModel"] === "boolean" ? raw["reachedModel"] : undefined;
+  const effects = typeof raw["effects"] === "string" && EXECUTION_EFFECTS.has(raw["effects"])
+    ? raw["effects"] as SleepFailurePayload["effects"]
+    : undefined;
+  const reasonCode = typeof raw["reasonCode"] === "string" && raw["reasonCode"].length > 0
+    ? redactSecrets(raw["reasonCode"]).slice(0, 80)
+    : undefined;
   return {
     cause,
     ...(detail ? { detail } : {}),
     ...(commandFingerprint ? { commandFingerprint } : {}),
+    ...(failureClass ? { failureClass } : {}),
+    ...(retryAfterMs !== undefined ? { retryAfterMs } : {}),
+    ...(reachedModel !== undefined ? { reachedModel } : {}),
+    ...(effects ? { effects } : {}),
+    ...(reasonCode ? { reasonCode } : {}),
   };
+}
+
+/**
+ * #1912: host-side execution-failure classification. The pump normalizes
+ * provider-specific failures into bounded facts for broker fail() so abmind
+ * supervision can decide recovery in code. An arbitrary provider error is
+ * never proof of a justified blocker.
+ */
+function classifyHostFailure(message: string, opts?: { reachedModel?: boolean }): Pick<SleepFailurePayload, "failureClass" | "reachedModel" | "effects" | "reasonCode"> {
+  const msg = message.toLowerCase();
+  const has = (...needles: string[]): boolean => needles.some(n => msg.includes(n));
+  const reached = opts?.reachedModel;
+  // Completion calls return proposal text; durable writes happen only
+  // through validated revision-checked apply, so re-issue is reconcilable.
+  const effects = "reconcilable" as const;
+  if (has("cancelled", "abort", "cancelled before daemon start")) {
+    return { failureClass: "cancelled", ...(reached !== undefined ? { reachedModel: reached } : {}), effects };
+  }
+  if (has("401", "unauthorized", "unauthenticated", "forbidden", "403", "credit", "billing", "quota", "insufficient", "payment", "policy_rejected", "capability_mismatch", "permission denied")) {
+    return { failureClass: "permanent", ...(reached !== undefined ? { reachedModel: reached } : {}), effects, reasonCode: "auth-policy" };
+  }
+  if (has("429", "rate limit", "503", "502", "504", "overload", "temporarily", "try again", "timeout", "timed out", "deadline", "etime", "econn", "refused", "reset", "network", "socket hang up")) {
+    return { failureClass: "transient", ...(reached !== undefined ? { reachedModel: reached } : {}), effects };
+  }
+  return { failureClass: "unknown", ...(reached !== undefined ? { reachedModel: reached } : {}), effects: "unknown" };
 }
 
 import { writeSleepStatus } from "../../components/transport/bridge-lock-transport.js";
@@ -349,19 +402,30 @@ export function createSleepHandle(opts: SleepOpts): SleepHandle {
     return boundedSleepFailure({ cause: fallbackCode === "provider_timeout" ? "provider_timeout" : "unknown", detail });
   }
 
-  async function terminateOnFailure(
+  /**
+   * #1912: recoverable completion-failure settlement. Fences and quarantines
+   * an unsafe execution/session, settles that exact completion once with
+   * normalized facts, and — unless the run is over — keeps polling so
+   * abmind supervision can re-issue bounded further work on a healthy
+   * session. A fenced session is replaced lazily: the next spin allocates
+   * without the quarantined id. Returns "stop" only when polling itself
+   * must end (cancellation); every other outcome returns "continue".
+   */
+  async function settleCompletionFailure(
     leaseId: string,
     req: { completionId: string; runId: string; stepId: string; deadline: number },
     code: "provider_timeout" | "provider_failed",
     detail: string,
-    failureOverride?: SleepFailurePayload,
-  ): Promise<void> {
+    opts?: { fenceSession?: boolean; failureOverride?: SleepFailurePayload; stopPump?: boolean },
+  ): Promise<"continue" | "stop"> {
     const safeDetail = redactSecrets(detail).slice(0, 240);
-    logWarn("sleep", `Sleep provider failure (run=${req.runId} step=${req.stepId} lease=${leaseId}): ${safeDetail} — quarantining session, failing completion ${code}, stopping sleep`);
-    // Fence first, then give the broker failure RPC only the remaining
-    // absolute deadline. A dead daemon must not keep the local pump alive.
-    quarantineCurrentSession(code);
-    const failure = boundedSleepFailure(failureOverride ?? normalizeSleepFailure(new Error(detail), code));
+    if (opts?.fenceSession) {
+      // Fence first, then give the broker failure RPC only the remaining
+      // absolute deadline. A dead daemon must not keep the local pump alive.
+      quarantineCurrentSession(code);
+    }
+    const failure = boundedSleepFailure(opts?.failureOverride ?? normalizeSleepFailure(new Error(detail), code));
+    logWarn("sleep", `Sleep provider failure (run=${req.runId} step=${req.stepId} lease=${leaseId}): ${safeDetail} — ${opts?.fenceSession ? "quarantining session, " : ""}failing completion ${code}`);
     const failResult = await runUntilDeadline(
       () => (client.sleep.runtime as unknown as { fail: (a: string, b: string, c: string, d?: unknown) => Promise<unknown> }).fail(leaseId, req.completionId, code, failure),
       settlementDeadlineAt(req.deadline),
@@ -369,6 +433,7 @@ export function createSleepHandle(opts: SleepOpts): SleepHandle {
     if (failResult.kind !== "settled") {
       logWarn("sleep", `Runtime failure settlement did not complete before the deadline (run=${req.runId} step=${req.stepId})`);
     }
+    return opts?.stopPump === true ? "stop" : "continue";
   }
 
   async function providerPump(leaseId: string): Promise<void> {
@@ -405,8 +470,12 @@ export function createSleepHandle(opts: SleepOpts): SleepHandle {
         const providerDeadlineAt = req.deadline - SLEEP_PROVIDER_CLEANUP_HEADROOM_MS;
         const providerRemainingMs = providerDeadlineAt - Date.now();
         if (providerRemainingMs <= 0) {
-          await terminateOnFailure(leaseId, req, "provider_timeout", "provider window already exhausted");
-          break;
+          // No execution started — the session is healthy. Fail with
+          // transient facts and keep serving; supervision re-issues.
+          await settleCompletionFailure(leaseId, req, "provider_timeout", "provider window already exhausted", {
+            failureOverride: { cause: "provider_timeout", detail: "provider window already exhausted", failureClass: "transient", reachedModel: false, effects: "absent", reasonCode: "timeout" },
+          });
+          continue;
         }
 
         let spinResult: DeadlineRaceResult<import("../../components/spin-types.js").AwaitedSpinResult>;
@@ -431,18 +500,44 @@ export function createSleepHandle(opts: SleepOpts): SleepHandle {
             providerRemainingMs,
           );
         } catch (err) {
-          // spin() itself rejected before/while opening the transport —
-          // terminal for the logical step.
-          await terminateOnFailure(leaseId, req, "provider_failed", (err as Error).message, normalizeSleepFailure(err, "provider_failed"));
-          break;
+          // spin() itself rejected before any execution started under this
+          // session — the session is healthy, so it is kept. Fail with
+          // normalized facts and keep serving; supervision decides recovery.
+          if (abortController.signal.aborted) {
+            await settleCompletionFailure(leaseId, req, "provider_failed", (err as Error).message, {
+              fenceSession: true,
+              failureOverride: { cause: "aborted", detail: "sleep cancelled during provider execution", failureClass: "cancelled", reachedModel: false, effects: "unknown" },
+              stopPump: true,
+            });
+            break;
+          }
+          const facts = classifyHostFailure((err as Error).message, { reachedModel: false });
+          await settleCompletionFailure(leaseId, req, "provider_failed", (err as Error).message, {
+            failureOverride: { ...normalizeSleepFailure(err, "provider_failed"), ...facts },
+          });
+          continue;
         }
         if (spinResult.kind === "timed_out") {
-          await terminateOnFailure(leaseId, req, "provider_timeout", "deadline reached while awaiting the model", { cause: "provider_timeout", detail: "deadline reached while awaiting the model" });
-          break;
+          // The execution may still be live provider-side — fence the
+          // session (a replacement is allocated lazily on the next spin),
+          // fail once, and keep serving. A late result can never settle
+          // after fencing: the broker owns exact-completion settlement.
+          if (await settleCompletionFailure(leaseId, req, "provider_timeout", "deadline reached while awaiting the model", {
+            fenceSession: true,
+            failureOverride: { cause: "provider_timeout", detail: "deadline reached while awaiting the model", failureClass: "transient", effects: "unknown", reasonCode: "timeout" },
+          }) === "stop") break;
+          continue;
         }
         if (spinResult.kind === "failed") {
-          await terminateOnFailure(leaseId, req, "provider_failed", spinResult.error.message, normalizeSleepFailure(spinResult.error, "provider_failed"));
-          break;
+          // The execution finished with an error — nothing is pending, so
+          // the session is healthy and kept. Whether the model was reached
+          // is unknown from a rejection alone: fail with normalized facts
+          // and let supervision charge conservatively.
+          const facts = classifyHostFailure(spinResult.error.message);
+          await settleCompletionFailure(leaseId, req, "provider_failed", spinResult.error.message, {
+            failureOverride: { ...normalizeSleepFailure(spinResult.error, "provider_failed"), ...facts },
+          });
+          continue;
         }
         if (spinResult.value.sessionId && !nightSessionId) nightSessionId = spinResult.value.sessionId;
         // #1611: a transport terminal error with no valid semantic result
@@ -451,8 +546,14 @@ export function createSleepHandle(opts: SleepOpts): SleepHandle {
         // defensive check at this external boundary even though the typed
         // facade requires the field.
         if (spinResult.value.result === undefined) {
-          await terminateOnFailure(leaseId, req, "provider_failed", "spin settled without a semantic result", { cause: "invalid_response", detail: "spin settled without a semantic result" });
-          break;
+          // Indeterminate execution outcome — fence the session (a
+          // replacement allocates lazily), fail once, keep serving.
+          // Never complete(""), which would hide the provider failure.
+          await settleCompletionFailure(leaseId, req, "provider_failed", "spin settled without a semantic result", {
+            fenceSession: true,
+            failureOverride: { cause: "invalid_response", detail: "spin settled without a semantic result", failureClass: "unknown", effects: "unknown" },
+          });
+          continue;
         }
         // #1651 v2 narrows #1611: rejection, timeout and a missing result field
         // are still terminal (handled above). A turn that SETTLED with no
@@ -476,20 +577,27 @@ export function createSleepHandle(opts: SleepOpts): SleepHandle {
           settlementDeadlineAt(req.deadline),
         );
         if (completeResult.kind === "timed_out") {
-          await terminateOnFailure(leaseId, req, "provider_timeout", "completion settlement reached the broker deadline", { cause: "completion_settlement_failed", detail: "completion settlement reached the broker deadline" });
-          break;
+          // The execution finished; only broker reporting timed out. Its
+          // state is unknown — abmind reconciles via its deadline path — so
+          // the healthy session is kept and the pump keeps serving.
+          await settleCompletionFailure(leaseId, req, "provider_timeout", "completion settlement reached the broker deadline", {
+            failureOverride: { cause: "completion_settlement_failed", detail: "completion settlement reached the broker deadline", failureClass: "transient", reachedModel: true, effects: "reconcilable", reasonCode: "settlement" },
+          });
+          continue;
         }
         if (completeResult.kind === "failed") {
-          await terminateOnFailure(leaseId, req, "provider_failed", completeResult.error.message, normalizeSleepFailure(completeResult.error, "provider_failed"));
-          break;
+          await settleCompletionFailure(leaseId, req, "provider_failed", completeResult.error.message, {
+            failureOverride: { ...normalizeSleepFailure(completeResult.error, "provider_failed"), failureClass: "transient", reachedModel: true, effects: "reconcilable" },
+          });
+          continue;
         }
         if (completeResult.value.status !== "ok") {
-          // #1611: ok, invalid_completion, or a fail-RPC error all lead to
-          // pump shutdown — nothing authorizes polling for another completion.
-          const code = Date.now() >= req.deadline ? "provider_timeout" : "provider_failed";
-          quarantineCurrentSession(code);
-          logWarn("sleep", `Completion rejected (${completeResult.value.status}) for ${req.completionId} (run=${req.runId} step=${req.stepId} lease=${leaseId}) — quarantining session and stopping sleep`);
-          break;
+          // #1912: the broker already fenced our completion (stale or
+          // superseded) — failing the dead id again is noise. Our execution
+          // finished, the session is healthy, and abmind re-issues through
+          // supervision, so the pump keeps serving.
+          logWarn("sleep", `Completion rejected (${completeResult.value.status}) for ${req.completionId} (run=${req.runId} step=${req.stepId} lease=${leaseId}) — keeping session, continuing to poll`);
+          continue;
         }
       }
     } catch (err) {

@@ -112,7 +112,10 @@ export interface AbmindSleepRuntimeLike {
   open(providerInstanceId: string, idempotencyKey?: string, capabilities?: { proposalOnly?: boolean }): Promise<SleepStartResultLike & { leaseId?: string; expiresAt?: number }>;
   next(leaseId: string, waitMs?: number): Promise<SleepRuntimeNextLike>;
   complete(leaseId: string, completionId: string, text: string, outcomeOrKey?: string, idempotencyKey?: string): Promise<{ status: string }>;
-  fail(leaseId: string, completionId: string, code: string, failure?: { cause: string; detail?: string; commandFingerprint?: string }, idempotencyKey?: string): Promise<{ status: string }>;
+  /** #1912: `failure` may carry normalized execution facts (failureClass,
+   *  retryAfterMs, reachedModel, effects, reasonCode) for supervision.
+   *  Additive — older daemons ignore the fields they do not know. */
+  fail(leaseId: string, completionId: string, code: string, failure?: { cause: string; detail?: string; commandFingerprint?: string; failureClass?: string; retryAfterMs?: number; reachedModel?: boolean; effects?: string; reasonCode?: string }, idempotencyKey?: string): Promise<{ status: string }>;
   close(leaseId: string, idempotencyKey?: string): Promise<{ status: string }>;
 }
 
