@@ -29,6 +29,7 @@ import { join } from "node:path";
 import {
   HARNESS_HEARTBEAT_ENV,
   HARNESS_HEARTBEAT_STALE_MS,
+  isHeartbeatRetired,
   isHeartbeatStale,
 } from "./harness-liveness.ts";
 import {
@@ -71,34 +72,43 @@ const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms
 /**
  * Harness-liveness backstop (#1914): when the runner dies without cleanup,
  * its heartbeat file goes stale and orphaned fixtures exit on their own
- * instead of lingering with dead paths. The runner also retires the file
- * (deletes it) at scenario teardown, which reaps that scenario's strays
- * within one poll instead of one threshold. No lock/report markers are
- * written either way: nobody observes this exit, so it must read as a quiet
- * death, never as evidence. Exit 0 — the bridge did nothing wrong; its
- * supervisor vanished. A file absent at boot means no runner ever
- * supervised this process (selftests, direct spawns) and is exempt, not
- * stale — only a file that existed and then vanished counts as retired.
+ * instead of lingering with dead paths. The runner also retires the file at
+ * scenario teardown (tombstone content, not deletion), which reaps that
+ * scenario's strays within one poll. No lock/report markers are written
+ * either way: nobody observes this exit, so it must read as a quiet death,
+ * never as evidence. Exit 0 — the bridge did nothing wrong; its supervisor
+ * vanished. A file absent at boot means no runner ever supervised this
+ * process (selftests, direct spawns) and is exempt; a tombstoned file at
+ * boot means supervision already ended, so the process exits before
+ * claiming a generation or touching the lock. The tombstone (rather than
+ * deletion) is what keeps post-teardown respawns from being born exempt
+ * into immortality.
  */
-function harnessSupervisedAtBoot(): boolean {
+type HeartbeatStateAtBoot = "supervised" | "retired" | "unsupervised";
+
+function harnessStateAtBoot(): HeartbeatStateAtBoot {
   const path = process.env[HARNESS_HEARTBEAT_ENV];
-  if (!path) return false;
+  if (!path) return "unsupervised";
+  let content: string;
   try {
-    statSync(path);
-    return true;
+    content = readFileSync(path, "utf-8");
   } catch {
-    return false;
+    return "unsupervised";
   }
+  return isHeartbeatRetired(content) ? "retired" : "supervised";
 }
 
-function harnessGone(supervisedAtBoot: boolean): boolean {
-  if (!supervisedAtBoot) return false;
+function harnessGone(stateAtBoot: HeartbeatStateAtBoot): boolean {
+  if (stateAtBoot === "unsupervised") return false;
   const path = process.env[HARNESS_HEARTBEAT_ENV];
   if (!path) return false;
   try {
+    const content = readFileSync(path, "utf-8");
+    if (isHeartbeatRetired(content)) return true;
     return isHeartbeatStale(statSync(path).mtimeMs, Date.now(), HARNESS_HEARTBEAT_STALE_MS);
   } catch {
-    // Existed at boot, gone now: the runner retired it at teardown.
+    // Existed at boot, gone now: the file was removed out from under a
+    // supervised fixture — treat as retired.
     return true;
   }
 }
@@ -167,6 +177,13 @@ function recordExitAttempt(generation: number, code: number, accepted: boolean):
 }
 
 async function main(): Promise<void> {
+  if (harnessStateAtBoot() === "retired") {
+    // Born after supervision ended (e.g. respawned by an orphaned watchdog
+    // past teardown): exit before claiming a generation or touching the
+    // lock, leaving zero footprint.
+    process.stderr.write("[fixture-bridge] harness already gone — exiting\n");
+    process.exit(0);
+  }
   const directRaw = process.env.ABTARS_FIXTURE_DIRECT;
   const direct: FixtureMode | null = directRaw ? (JSON.parse(directRaw) as FixtureMode) : null;
   const control = readControl();
@@ -238,7 +255,7 @@ async function main(): Promise<void> {
   let lastLivePoll = 0;
   let reported = false;
   let liveExit: { code: number; at: number; staleReport: boolean } | null = null;
-  const supervisedAtBoot = harnessSupervisedAtBoot();
+  const bootHeartbeatState = harnessStateAtBoot();
 
   /**
    * Consume-and-clear protocol: capturing a live-exit command atomically
@@ -280,7 +297,7 @@ async function main(): Promise<void> {
         }
       }
       if (!ownsLock && mode.mode !== "non-owner") heartbeatEnabled = false;
-      if (harnessGone(supervisedAtBoot)) {
+      if (harnessGone(bootHeartbeatState)) {
         process.stderr.write("[fixture-bridge] harness gone — exiting\n");
         process.exit(0);
       }

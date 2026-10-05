@@ -7,7 +7,7 @@ import { afterAll, describe, expect, it } from "vitest";
 import { rmSync, unlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { SuiteBuilder } from "./build.ts";
-import { isHeartbeatStale, HARNESS_HEARTBEAT_STALE_MS } from "./harness-liveness.ts";
+import { isHeartbeatStale, isHeartbeatRetired, HARNESS_HEARTBEAT_STALE_MS, HARNESS_HEARTBEAT_RETIRED } from "./harness-liveness.ts";
 import { ProcessRegistry } from "./process-registry.ts";
 import {
   World,
@@ -37,6 +37,9 @@ describe("staleness predicate", () => {
     expect(isHeartbeatStale(now - 1000, now, HARNESS_HEARTBEAT_STALE_MS)).toBe(false);
     expect(isHeartbeatStale(now - HARNESS_HEARTBEAT_STALE_MS + 1000, now, HARNESS_HEARTBEAT_STALE_MS)).toBe(false);
     expect(isHeartbeatStale(now - HARNESS_HEARTBEAT_STALE_MS - 1, now, HARNESS_HEARTBEAT_STALE_MS)).toBe(true);
+    expect(isHeartbeatRetired(HARNESS_HEARTBEAT_RETIRED)).toBe(true);
+    expect(isHeartbeatRetired("live")).toBe(false);
+    expect(isHeartbeatRetired("")).toBe(false);
   });
 });
 
@@ -123,13 +126,43 @@ describe("stale-heartbeat fixture exit", () => {
       await new Promise((r) => setTimeout(r, 50));
     }
     expect(world.procSnapshot(pid)).not.toBeNull();
-    // Runner teardown retires the file: the supervised fixture must go.
-    unlinkSync(world.heartbeatFile);
+    // Runner teardown retires the file (tombstone, not deletion): the
+    // supervised fixture must go.
+    writeFileSync(world.heartbeatFile, HARNESS_HEARTBEAT_RETIRED);
     const stop = Date.now() + 10000;
     while (Date.now() < stop && world.procSnapshot(pid) !== null) {
       await new Promise((r) => setTimeout(r, 60));
     }
     expect(world.procSnapshot(pid)).toBeNull();
+    await registry.cleanupAll("selftest end").catch(() => undefined);
+  }, 30000);
+
+  it("a fixture born into a retired heartbeat exits without side effects", async () => {
+    const artifacts = resolve(acceptanceRoot(), "wd-acc-locktest-artifacts3");
+    const builder = new SuiteBuilder(REPO_ROOT, artifacts);
+    builder.prepare();
+    await builder.prebuild(["lifecycle"]);
+    const registry = new ProcessRegistry();
+    const world = new World("wd-acc-selftest", "bornretired", registry, builder, "lifecycle");
+    touched.push(() => {
+      world.releaseLock();
+      rmSync(world.root, { recursive: true, force: true });
+      rmSync(artifacts, { recursive: true, force: true });
+      unlinkSync(world.heartbeatFile);
+    });
+    // Supervision already ended before this fixture boots.
+    writeFileSync(world.heartbeatFile, HARNESS_HEARTBEAT_RETIRED);
+    const home = world.homeA();
+    world.setControl(home, { defaultMode: { mode: "healthy" } });
+    const pid = await world.plantBridge(home, { mode: "healthy" });
+    const stop = Date.now() + 10000;
+    while (Date.now() < stop && world.procSnapshot(pid) !== null) {
+      await new Promise((r) => setTimeout(r, 60));
+    }
+    expect(world.procSnapshot(pid)).toBeNull();
+    // Zero footprint: never claimed the lock or a generation slot.
+    expect(world.lock(home)).toBeNull();
+    expect(world.fixtureRegistryEntries(home)).toHaveLength(0);
     await registry.cleanupAll("selftest end").catch(() => undefined);
   }, 30000);
 });

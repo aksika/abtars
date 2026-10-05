@@ -36,7 +36,7 @@ import type { SuiteBuilder } from "./build.ts";
 import { pidAlive, processStartIdentityOf, procSnapshot, processCwd } from "./proc-observers.ts";
 import { HARNESS_HEARTBEAT_ENV } from "./harness-liveness.ts";
 
-export { HARNESS_HEARTBEAT_STALE_MS } from "./harness-liveness.ts";
+export { HARNESS_HEARTBEAT_STALE_MS, HARNESS_HEARTBEAT_RETIRED } from "./harness-liveness.ts";
 
 export const TIMELINE_CAP = 200;
 export const LOG_TAIL_LINES = 50;

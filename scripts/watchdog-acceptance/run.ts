@@ -12,7 +12,7 @@
  *   npm run test:watchdog:real -- --require-all-green       # epic gate
  */
 import { execFileSync } from "node:child_process";
-import { mkdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { ProcessRegistry } from "./process-registry.ts";
@@ -25,6 +25,7 @@ import {
   setDoctorBundle,
   startHarnessHeartbeat,
   touchHarnessHeartbeat,
+  HARNESS_HEARTBEAT_RETIRED,
 } from "./world.ts";
 import { PRESERVED_SCENARIOS } from "./scenarios/preserved.ts";
 import { DEFICIENCY_SCENARIOS } from "./scenarios/deficiencies.ts";
@@ -214,14 +215,16 @@ async function runScenario(
   } finally {
     // Retire this scenario's heartbeat (#1914): any fixture that outlived
     // teardown (notably watchdog-spawned ones the macOS sweep cannot see)
-    // observes the vanished file on its next poll and exits at once, instead
-    // of lingering into later scenarios. Skipped when keeping a failed world
-    // for debugging, so its strays stay inspectable.
+    // observes the tombstone on its next poll and exits at once, instead of
+    // lingering into later scenarios. A tombstone write (not deletion) so
+    // post-teardown respawns are born retired rather than born exempt.
+    // Skipped when keeping a failed world for debugging, so its strays stay
+    // inspectable.
     if (!(process.env.WD_ACC_KEEP === "1" && outcomeStatus !== "pass")) {
       try {
-        unlinkSync(world.heartbeatFile);
+        writeFileSync(world.heartbeatFile, HARNESS_HEARTBEAT_RETIRED);
       } catch {
-        // Already gone — nothing to retire
+        // Best effort: staleness remains as the backstop.
       }
     }
     activeHeartbeatFile = null;

@@ -23,3 +23,15 @@ export const HARNESS_HEARTBEAT_STALE_MS = 120_000;
 export function isHeartbeatStale(mtimeMs: number, nowMs: number, staleMs: number): boolean {
   return nowMs - mtimeMs > staleMs;
 }
+
+/**
+ * Tombstone content the runner writes at teardown retire. A missing file
+ * means never supervised (exempt); a retired file means supervision ended
+ * (exit) — this distinction is what keeps post-teardown respawns from being
+ * born exempt into immortality.
+ */
+export const HARNESS_HEARTBEAT_RETIRED = "retired";
+
+export function isHeartbeatRetired(content: string | null): boolean {
+  return content === HARNESS_HEARTBEAT_RETIRED;
+}
