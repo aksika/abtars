@@ -30,6 +30,7 @@ async function makeWorld(label: string): Promise<{ world: World; registry: Proce
     registry,
     cleanup: async () => {
       await registry.cleanupAll("selftest end").catch(() => undefined);
+      world.releaseLock();
       for (const h of world.knownHomes()) {
         for (const p of world.listLiveBridgesByHome(h)) {
           try { process.kill(p, "SIGKILL"); } catch { /* gone */ }

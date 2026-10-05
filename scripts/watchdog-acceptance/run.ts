@@ -17,7 +17,15 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { ProcessRegistry } from "./process-registry.ts";
 import { SuiteBuilder, PROFILE_NAMES } from "./build.ts";
-import { ScenarioFailure, World, TIMELINE_CAP, LOG_TAIL_LINES, setDoctorBundle } from "./world.ts";
+import {
+  ScenarioFailure,
+  World,
+  TIMELINE_CAP,
+  LOG_TAIL_LINES,
+  setDoctorBundle,
+  startHarnessHeartbeat,
+  touchHarnessHeartbeat,
+} from "./world.ts";
 import { PRESERVED_SCENARIOS } from "./scenarios/preserved.ts";
 import { DEFICIENCY_SCENARIOS } from "./scenarios/deficiencies.ts";
 import {
@@ -127,6 +135,10 @@ function installGlobalHandlers(): void {
 
 // ── Execution ───────────────────────────────────────────────────────────────
 
+// Heartbeat file of the currently running scenario, observed by the interval
+// toucher below. Serial execution means at most one is active at a time.
+let activeHeartbeatFile: string | null = null;
+
 interface ScenarioRunResult {
   row: ScoreboardRow;
   timeline: TimelineEntry[];
@@ -141,6 +153,12 @@ async function runScenario(
   const registry = new ProcessRegistry();
   liveRegistries.add(registry);
   const world = new World("abtars-wd-acc", def.id.toLowerCase(), registry, builder, def.profile);
+  // This scenario's heartbeat file is live from here until the finally below.
+  // The interval toucher (started in main) observes this variable; fixtures
+  // planted from now on watch the file and self-exit when it goes stale, so
+  // even a SIGKILLed runner cannot orphan them for longer than the threshold.
+  activeHeartbeatFile = world.heartbeatFile;
+  touchHarnessHeartbeat(world.heartbeatFile);
   const startedAt = Date.now();
   let failure: string | null = null;
   let outcomeStatus: "pass" | "fail" | "inconclusive" = "fail";
@@ -194,10 +212,12 @@ async function runScenario(
     failure = `[cleanup] ${err instanceof Error ? err.message : String(err)}${failure ? ` (prior: ${failure})` : ""}`;
     outcomeStatus = "inconclusive";
   } finally {
+    activeHeartbeatFile = null;
     for (const home of world.knownHomes()) {
       logTails[home] = world.watchdogLogLines(home, LOG_TAIL_LINES);
     }
     liveRegistries.delete(registry);
+    world.releaseLock();
     if (!(process.env.WD_ACC_KEEP === "1" && outcomeStatus !== "pass")) world.destroy();
   }
 
@@ -295,22 +315,31 @@ async function main(): Promise<number> {
   const rows: ScoreboardRow[] = [];
   const evidence: Array<ScenarioRunResult & { expect: unknown }> = [];
   process.stdout.write(`[suite ${opts.suite}] ${scenarios.length} real scenario(s), serial\n`);
-  for (const def of scenarios) {
-    const publicId = pub(def);
-    process.stdout.write(`[${publicId}] ${def.title} ... `);
-    const result = await runScenario(def, builder);
-    const expect = manifest.scenarios[def.id] ?? null;
-    const row: ScoreboardRow = {
-      ...result.row,
-      verdict: classifyOutcome(def.id, result.row.outcomeStatus, expect),
-      expect,
-    };
-    rows.push(row);
-    evidence.push({ ...result, row, expect });
-    process.stdout.write(`${row.verdict} (${(row.durationMs / 1000).toFixed(1)}s)\n`);
-    if (!opts.baseline && row.verdict !== "ok" && row.verdict !== "ok-known-fail") {
-      printEvidence(publicId, result);
+  // Liveness toucher for the whole suite run (#1914): one interval for all
+  // scenarios, observing activeHeartbeatFile. Stopping it (or dying) lets
+  // every planted and watchdog-spawned fixture self-exit past the threshold.
+  const stopHeartbeat = startHarnessHeartbeat(() => activeHeartbeatFile);
+  try {
+    for (const def of scenarios) {
+      const publicId = pub(def);
+      process.stdout.write(`[${publicId}] ${def.title} ... `);
+      const result = await runScenario(def, builder);
+      const expect = manifest.scenarios[def.id] ?? null;
+      const row: ScoreboardRow = {
+        ...result.row,
+        verdict: classifyOutcome(def.id, result.row.outcomeStatus, expect),
+        expect,
+      };
+      rows.push(row);
+      evidence.push({ ...result, row, expect });
+      process.stdout.write(`${row.verdict} (${(row.durationMs / 1000).toFixed(1)}s)\n`);
+      if (!opts.baseline && row.verdict !== "ok" && row.verdict !== "ok-known-fail") {
+        printEvidence(publicId, result);
+      }
     }
+  } finally {
+    stopHeartbeat();
+    activeHeartbeatFile = null;
   }
 
   writeFileSync(

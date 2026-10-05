@@ -8,19 +8,22 @@
  */
 import { execFileSync } from "node:child_process";
 import {
+  closeSync,
   cpSync,
   existsSync,
   mkdirSync,
-  mkdtempSync,
+  openSync,
   readFileSync,
   readdirSync,
   renameSync,
   rmSync,
   statSync,
   symlinkSync,
+  unlinkSync,
+  utimesSync,
   writeFileSync,
 } from "node:fs";
-import { tmpdir } from "node:os";
+import { homedir } from "node:os";
 import { join } from "node:path";
 import type {
   FixtureControlFile,
@@ -30,7 +33,10 @@ import type {
 } from "./contracts.ts";
 import type { ProcessRegistry } from "./process-registry.ts";
 import type { SuiteBuilder } from "./build.ts";
-import { procSnapshot, processCwd } from "./proc-observers.ts";
+import { pidAlive, processStartIdentityOf, procSnapshot, processCwd } from "./proc-observers.ts";
+import { HARNESS_HEARTBEAT_ENV } from "./harness-liveness.ts";
+
+export { HARNESS_HEARTBEAT_STALE_MS } from "./harness-liveness.ts";
 
 export const TIMELINE_CAP = 200;
 export const LOG_TAIL_LINES = 50;
@@ -47,6 +53,136 @@ export class ScenarioFailure extends Error {
 
 const POLL_YIELD_MS = 50;
 
+// ── Harness staging and liveness (#1914) ───────────────────────────────────
+//
+// Every scenario stages under one stable path so a leaked process keeps a
+// stable identity (macOS TCC decisions stick) and interrupted runs can be
+// attributed. Fixtures -- planted and watchdog-spawned alike -- receive the
+// per-scenario heartbeat path via ABTARS_HARNESS_HEARTBEAT and exit quietly
+// when it goes stale, so no sweep or platform enumeration is needed to reap
+// orphans. Production watchdog code is not involved on either side.
+// Threshold and staleness predicate live in ./harness-liveness.ts, shared
+// with the fixture bundle (which cannot import this module).
+
+
+/** Stable staging root for all harness worlds (runtime data per core.md). */
+export function acceptanceRoot(): string {
+  const root = join(homedir(), ".abtars", "acceptance");
+  mkdirSync(root, { recursive: true });
+  return root;
+}
+
+/** Per-scenario heartbeat file: no sharing across concurrent runners. */
+export function scenarioHeartbeatFile(parentDir: string, label: string): string {
+  return join(acceptanceRoot(), `${parentDir}-${label}.heartbeat`);
+}
+
+/** Lock path for a scenario (exported for selftests; runners use acquire/release). */
+export function scenarioLockPath(parentDir: string, label: string): string {
+  return scenarioLockFile(parentDir, label);
+}
+
+function scenarioLockFile(parentDir: string, label: string): string {
+  return join(acceptanceRoot(), `${parentDir}-${label}.lock`);
+}
+
+interface ScenarioLock {
+  pid: number;
+  startIdentity: string;
+}
+
+/**
+ * Fail-fast guard against two concurrent runners sharing one stable dir.
+ * A lock whose owner is dead (or unreadable) is a crashed-run leftover and
+ * is taken over; a live owner aborts with "already running". The residual
+ * TOCTOU window between two simultaneous starters is accepted: concurrent
+ * same-scenario runs are operator error, and the lock is a fail-fast aid,
+ * not a distributed mutex.
+ */
+export function acquireScenarioLock(parentDir: string, label: string): ScenarioLock {
+  const path = scenarioLockFile(parentDir, label);
+  const owner: ScenarioLock = { pid: process.pid, startIdentity: processStartIdentityOf(process.pid) };
+  for (let attempt = 0; attempt < 3; attempt++) {
+    try {
+      const fd = openSync(path, "wx");
+      try {
+        writeFileSync(fd, JSON.stringify(owner));
+      } finally {
+        closeSync(fd);
+      }
+      return owner;
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== "EEXIST") throw err;
+    }
+    let raw: string;
+    try {
+      raw = readFileSync(path, "utf-8");
+    } catch {
+      continue; // vanished under us — retry the exclusive create
+    }
+    let prior: ScenarioLock | null = null;
+    try {
+      const parsed = JSON.parse(raw) as Partial<ScenarioLock>;
+      if (typeof parsed.pid === "number" && typeof parsed.startIdentity === "string") {
+        prior = { pid: parsed.pid, startIdentity: parsed.startIdentity };
+      }
+    } catch {
+      prior = null; // torn write from a killed predecessor — take over below
+    }
+    if (prior !== null && pidAlive(prior.pid) && processStartIdentityOf(prior.pid) === prior.startIdentity) {
+      throw new ScenarioFailure(
+        `scenario ${label} is already running (pid ${prior.pid}) — refusing to share its staging dir`,
+        "setup",
+      );
+    }
+    try {
+      unlinkSync(path); // stale or torn lock from a dead run — take over and retry
+    } catch {
+      // Lost the race with a concurrent starter — retry the exclusive create
+    }
+  }
+  throw new ScenarioFailure(`could not acquire the staging lock for scenario ${label}`, "setup");
+}
+
+/** Release only our own lock; never remove a lock another runner now owns. */
+export function releaseScenarioLock(parentDir: string, label: string, owner: ScenarioLock): void {
+  const path = scenarioLockFile(parentDir, label);
+  try {
+    const parsed = JSON.parse(readFileSync(path, "utf-8")) as Partial<ScenarioLock>;
+    if (parsed.pid === owner.pid && parsed.startIdentity === owner.startIdentity) {
+      unlinkSync(path);
+    }
+  } catch {
+    // Already gone or foreign — leaving it alone is the safe move
+  }
+}
+
+/** Touch (creating) the heartbeat file so fixtures observe a live runner. */
+export function touchHarnessHeartbeat(path: string): void {
+  try {
+    const fd = openSync(path, "a");
+    closeSync(fd);
+    const now = new Date();
+    utimesSync(path, now, now);
+  } catch {
+    // Best effort: a missed touch ages the file toward stale, which fails
+    // safe (fixtures exit) rather than leaking.
+  }
+}
+
+/**
+ * Interval toucher for the active scenario's heartbeat file. Unref'd and
+ * cleared by the returned stopper so it never outlives the runner loop.
+ */
+export function startHarnessHeartbeat(getActive: () => string | null): () => void {
+  const timer = setInterval(() => {
+    const active = getActive();
+    if (active !== null) touchHarnessHeartbeat(active);
+  }, 1000);
+  timer.unref();
+  return () => clearInterval(timer);
+}
+
 interface WatchdogHandle {
   readonly pid: number;
   readonly exitCodeFile: string;
@@ -56,6 +192,11 @@ interface WatchdogHandle {
 export class World implements WorldApi {
   readonly root: string;
   readonly registry: ProcessRegistry;
+  /** Heartbeat file fixtures watch; the runner touches it while this world runs. */
+  readonly heartbeatFile: string;
+  private readonly lockOwner: ScenarioLock;
+  private readonly parentDir: string;
+  private readonly label: string;
   private readonly builder: SuiteBuilder;
   private readonly profileName: string;
   private readonly homes = new Map<string, string>();
@@ -64,11 +205,35 @@ export class World implements WorldApi {
   private readonly runStart = Date.now();
 
   constructor(parentDir: string, label: string, registry: ProcessRegistry, builder: SuiteBuilder, profileName: string) {
-    this.root = mkdtempSync(join(tmpdir(), `${parentDir}-${label}-`));
+    // Stable per-scenario staging (#1914): one scenario, one path, one TCC
+    // identity across runs. mkdtemp gave isolation for free; the lock plus
+    // empty-at-start below are its replacement.
+    this.parentDir = parentDir;
+    this.label = label;
+    this.root = join(acceptanceRoot(), `${parentDir}-${label}`);
+    mkdirSync(this.root, { recursive: true });
+    this.lockOwner = acquireScenarioLock(parentDir, label);
+    for (const entry of readdirSync(this.root)) {
+      rmSync(join(this.root, entry), { recursive: true, force: true });
+    }
+    // Fresh slate for liveness: a stale heartbeat file from a crashed run
+    // must not kill this run's fixtures, and selftest worlds (which run no
+    // toucher) rely on the file being absent to skip the liveness check.
+    try {
+      unlinkSync(scenarioHeartbeatFile(parentDir, label));
+    } catch {
+      // Absent already — the common case
+    }
+    this.heartbeatFile = scenarioHeartbeatFile(parentDir, label);
     this.registry = registry;
     this.builder = builder;
     this.profileName = profileName;
     this.timeline("world-created", this.root);
+  }
+
+  /** Release this world's staging lock (ownership-checked; safe in finally). */
+  releaseLock(): void {
+    releaseScenarioLock(this.parentDir, this.label, this.lockOwner);
   }
 
   // ── Homes ────────────────────────────────────────────────────────────────
@@ -178,7 +343,7 @@ exit "$rc"`;
       args: ["-c", wrapper, "wd-wrapper", script, exitCodeFile],
       role: "watchdog",
       home,
-      env: { ABTARS_HOME: home, ...extraEnv },
+      env: { ABTARS_HOME: home, ...extraEnv, [HARNESS_HEARTBEAT_ENV]: this.heartbeatFile },
       stdoutFile: stdioLog,
     });
     this.pushWatchdog(home, { pid, exitCodeFile, dogPidFile });
@@ -235,7 +400,11 @@ exit "$rc"`;
       role: "fixture",
       home,
       cwd: home,
-      env: { ABTARS_HOME: home, ABTARS_FIXTURE_DIRECT: JSON.stringify(mode) },
+      env: {
+        ABTARS_HOME: home,
+        ABTARS_FIXTURE_DIRECT: JSON.stringify(mode),
+        [HARNESS_HEARTBEAT_ENV]: this.heartbeatFile,
+      },
     });
     this.timeline("bridge-planted", `home=${basename(home)} pid=${pid} mode=${mode.mode}`);
     return pid;
@@ -254,7 +423,11 @@ exit "$rc"`;
       role: "fixture",
       home,
       cwd,
-      env: { ABTARS_HOME: home, ABTARS_FIXTURE_DIRECT: JSON.stringify(mode) },
+      env: {
+        ABTARS_HOME: home,
+        ABTARS_FIXTURE_DIRECT: JSON.stringify(mode),
+        [HARNESS_HEARTBEAT_ENV]: this.heartbeatFile,
+      },
     });
     this.timeline("bridge-planted-relative", `home=${basename(home)} cwd=${cwd} pid=${pid} mode=${mode.mode}`);
     return pid;

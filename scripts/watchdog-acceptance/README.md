@@ -127,6 +127,25 @@ migrate; relabelling alone never revises an expectation.
   every replacement declares an exact expected match count, and drift aborts
   setup before anything spawns. The repository tree is never modified.
 
+## Harness liveness (#1914)
+
+- **Stable staging.** Each scenario stages under one deterministic path,
+  `~/.abtars/acceptance/abtars-wd-acc-<scenario>/`, emptied at scenario
+  start. One scenario keeps one identity across runs, so a local macOS TCC
+  answer sticks instead of re-prompting per run. Headless runs are
+  unaffected (no TCC without a GUI session).
+- **Heartbeat backstop.** The runner touches a per-scenario heartbeat file
+  every second; every fixture (planted and watchdog-spawned) watches it
+  through `ABTARS_HARNESS_HEARTBEAT` and exits quietly when it goes stale
+  (threshold: 2 minutes). A SIGKILLed or crashed runner therefore cannot
+  orphan fixtures for longer than the threshold — no sweep, no platform
+  enumeration, no follow-up run required.
+- **Lockfile.** A per-scenario lockfile fails fast with "already running"
+  instead of sharing a staging dir; locks from dead runs are taken over,
+  never block.
+- Production watchdog code, timing, and service definitions are untouched
+  by all of the above.
+
 ## When to run this suite
 
 Append-only via `test:extended`. Changes touching any of these boundaries

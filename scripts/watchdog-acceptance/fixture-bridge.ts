@@ -24,8 +24,13 @@
  * heartbeat/termination flags are polled at a bounded cadence so the harness
  * can stop heartbeats without restarting the process (direct plants included).
  */
-import { appendFileSync, closeSync, mkdirSync, openSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { appendFileSync, closeSync, mkdirSync, openSync, readFileSync, renameSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import {
+  HARNESS_HEARTBEAT_ENV,
+  HARNESS_HEARTBEAT_STALE_MS,
+  isHeartbeatStale,
+} from "./harness-liveness.ts";
 import {
   initBridgeLock,
   updateLastHeartbeat,
@@ -62,6 +67,26 @@ interface ControlFile {
 
 const home = process.env.ABTARS_HOME ?? join(process.env.HOME ?? "", ".abtars");
 const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
+
+/**
+ * Harness-liveness backstop (#1914): when the runner dies without cleanup,
+ * its heartbeat file goes stale and orphaned fixtures exit on their own
+ * instead of lingering with dead paths. No lock/report markers are written:
+ * nobody observes this exit, so it must read as a quiet death, never as
+ * evidence. Exit 0 — the bridge did nothing wrong; its supervisor vanished.
+ * Absence of the file means no runner ever supervised this process
+ * (selftests, direct spawns) and is exempt, not stale.
+ */
+function harnessHeartbeatStale(): boolean {
+  const path = process.env[HARNESS_HEARTBEAT_ENV];
+  if (!path) return false;
+  try {
+    return isHeartbeatStale(statSync(path).mtimeMs, Date.now(), HARNESS_HEARTBEAT_STALE_MS);
+  } catch {
+    // No heartbeat file — unsupervised process, exempt (see above).
+    return false;
+  }
+}
 
 function readControl(): ControlFile | null {
   try {
@@ -239,6 +264,10 @@ async function main(): Promise<void> {
         }
       }
       if (!ownsLock && mode.mode !== "non-owner") heartbeatEnabled = false;
+      if (harnessHeartbeatStale()) {
+        process.stderr.write("[fixture-bridge] harness heartbeat stale — exiting\n");
+        process.exit(0);
+      }
     }
 
     switch (mode.mode) {
