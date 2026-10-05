@@ -147,28 +147,34 @@ describe("assistantMessageKey", () => {
 
 describe("feedbackKey", () => {
   it("differentiates cite vs reject on same message", () => {
-    const cite = feedbackKey("discord", "ch1", "user1", "msg1", 42, "cite");
-    const reject = feedbackKey("discord", "ch1", "user1", "msg1", 42, "reject");
+    const cite = feedbackKey("discord", "ch1", "user1", "msg1", 42, "cite", "explicit");
+    const reject = feedbackKey("discord", "ch1", "user1", "msg1", 42, "reject", "explicit");
     expect(cite).not.toBe(reject);
   });
 
+  it("differentiates automatic citation from explicit reaction", () => {
+    const auto = feedbackKey("telegram", "chat1", "user1", "msg1", 7, "cite", "auto");
+    const explicit = feedbackKey("telegram", "chat1", "user1", "msg1", 7, "cite", "explicit");
+    expect(auto).not.toBe(explicit);
+  });
+
   it("differentiates across memory IDs", () => {
-    const a = feedbackKey("discord", "ch1", "user1", "msg1", 1, "cite");
-    const b = feedbackKey("discord", "ch1", "user1", "msg1", 2, "cite");
+    const a = feedbackKey("discord", "ch1", "user1", "msg1", 1, "cite", "explicit");
+    const b = feedbackKey("discord", "ch1", "user1", "msg1", 2, "cite", "explicit");
     expect(a).not.toBe(b);
   });
 
   it("replays the same reaction deterministically", () => {
-    const a = feedbackKey("telegram", "chat1", "user1", "msg1", 7, "cite");
-    const b = feedbackKey("telegram", "chat1", "user1", "msg1", 7, "cite");
+    const a = feedbackKey("telegram", "chat1", "user1", "msg1", 7, "cite", "explicit");
+    const b = feedbackKey("telegram", "chat1", "user1", "msg1", 7, "cite", "explicit");
     expect(a).toBe(b);
   });
 
   it("throws for empty messageId", () => {
-    expect(() => feedbackKey("discord", "ch1", "user1", "", 1, "cite")).toThrow("non-empty");
+    expect(() => feedbackKey("discord", "ch1", "user1", "", 1, "cite", "explicit")).toThrow("non-empty");
   });
 
   it("throws for empty feedbackType", () => {
-    expect(() => feedbackKey("discord", "ch1", "user1", "msg1", 1, "")).toThrow("non-empty");
+    expect(() => feedbackKey("discord", "ch1", "user1", "msg1", 1, "", "explicit")).toThrow("non-empty");
   });
 });

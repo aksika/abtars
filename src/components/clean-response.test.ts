@@ -33,6 +33,23 @@ describe("cleanResponse", () => {
     expect(reactionEmoji).toBe("👋");
   });
 
+  it("extracts [SUPPORT: ids] and strips the marker", () => {
+    const raw = "Kedden! Ha kedd, akkor Belgium.\n[SUPPORT: 313, 1314]";
+    const { text, supportIds } = cleanResponse(raw);
+    expect(text).toBe("Kedden! Ha kedd, akkor Belgium.");
+    expect(supportIds).toEqual([313, 1314]);
+  });
+
+  it("deduplicates forged support IDs; validation happens downstream", () => {
+    const { text, supportIds } = cleanResponse("Answer. [SUPPORT: 7, 7, 999]");
+    expect(text).toBe("Answer.");
+    expect(supportIds).toEqual([7, 999]);
+  });
+
+  it("omits supportIds when no marker is present", () => {
+    expect(cleanResponse("Plain answer.").supportIds).toBeUndefined();
+  });
+
   it("detects [NO_REPLY]", () => {
     const { text, noReply } = cleanResponse("[NO_REPLY]");
     expect(text).toBe("");

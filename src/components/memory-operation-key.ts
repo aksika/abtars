@@ -122,10 +122,12 @@ export function assistantMessageKey(
 /**
  * Build a feedback-record operation key.
  *
- * Identity tuple: [platform, channelId, userId, messageId, memoryId, feedbackType]
- *
- * Includes feedbackType so independent cite/reject events on the same message
- * do not collide, but replaying the identical reaction safely replays.
+ * Identity tuple: [platform, channelId, userId, messageId, memoryId,
+ * feedbackType, source]. Source separates automatic citation from explicit
+ * reaction (#1913): the same positive signal through both paths is two
+ * independent events, never a replay. Includes feedbackType so independent
+ * cite/reject events on the same message do not collide, but replaying the
+ * identical reaction safely replays.
  */
 export function feedbackKey(
   platform: string,
@@ -134,12 +136,14 @@ export function feedbackKey(
   messageId: string,
   memoryId: number,
   feedbackType: string,
+  source: "auto" | "explicit",
 ): string {
   requireNonEmpty(platform, "platform");
   requireNonEmpty(channelId, "channelId");
   requireNonEmpty(userId, "userId");
   requireNonEmpty(messageId, "messageId");
   requireNonEmpty(feedbackType, "feedbackType");
+  requireNonEmpty(source, "source");
   return memoryOperationKey("feedback", [
     platform,
     channelId,
@@ -147,5 +151,6 @@ export function feedbackKey(
     messageId,
     String(memoryId),
     feedbackType,
+    source,
   ]);
 }

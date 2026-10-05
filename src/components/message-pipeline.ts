@@ -6,7 +6,7 @@
 
 import { logInfo, logWarn, logError, logDebug } from "./logger.js";
 import { logAndSwallow } from "./log-and-swallow.js";
-import { cleanResponse } from "./clean-response.js";
+import { cleanResponse, SUPPORT_STRIP_RE } from "./clean-response.js";
 import { loadUsers } from "./user-registry.js";
 import { ModelNotFoundError } from "./transport/acp-transport.js";
 import { DurableContextUnavailableError } from "./transport/pi-core-context.js";
@@ -15,6 +15,7 @@ import type { SttConfig } from "./stt.js";
 import { synthesizeSpeech, type TtsConfig } from "./tts.js";
 import { attemptMemoryMutation } from "./memory-runtime.js";
 import { assistantMessageKey, feedbackKey } from "./memory-operation-key.js";
+import { publishAnswerRecord, resolveAnswerSupport, takeToolEvidence } from "./answer-evidence.js";
 
 /** Retry a send operation on transient network errors. */
 import { retrySend } from "./pipeline/delivery-retry.js";
@@ -82,17 +83,36 @@ export async function settleDreamQuestion(
   }
 }
 
-// #824: Track which recalled memory IDs were active per agent message (for emoji feedback)
-// Map<platform_message_id_string, recalled_memory_ids[]> with 1h TTL
-// Keys are lossless string representations of platform message IDs (Discord snowflakes,
-// Telegram integers, etc.) — never use Number() to avoid precision loss.
-const recalledIdsPerMessage = new Map<string, number[]>();
-const RECALL_MAP_TTL = 60 * 60_000;
-setInterval(() => { /* prune entries older than TTL — best-effort, no timestamp tracking needed for small maps */ if (recalledIdsPerMessage.size > 200) recalledIdsPerMessage.clear(); }, RECALL_MAP_TTL);
-
-/** Look up recalled memory IDs for a given platform message (for reaction-based feedback). */
-export function getRecalledIdsForMessage(platformMsgId: string): number[] | undefined {
-  return recalledIdsPerMessage.get(platformMsgId);
+// #1913: publish one answer record for a delivered turn. All platform sends
+// already resolved, so registration strictly precedes any reaction lookup.
+// TUI turns are excluded (no reaction surface addresses them).
+function publishDeliveredAnswer(args: {
+  platform: string;
+  channelId: string;
+  userId: string;
+  sessionId: string;
+  executionId: string | undefined;
+  declared: readonly number[];
+  heuristic: readonly number[];
+  autoInjected: readonly number[];
+  messageIds: readonly (number | string)[];
+}): void {
+  if (args.platform === "tui" || args.messageIds.length === 0) return;
+  const support = resolveAnswerSupport({
+    declared: args.declared,
+    heuristic: args.heuristic,
+    autoInjected: args.autoInjected,
+    toolDelivered: takeToolEvidence(args.executionId),
+  });
+  publishAnswerRecord({
+    platform: args.platform,
+    channelId: args.channelId,
+    principal: args.userId,
+    sessionId: args.sessionId,
+    executionId: args.executionId ?? `${args.sessionId}-legacy`,
+    support,
+    messageIds: args.messageIds.map(String),
+  });
 }
 
 const STOPWORDS = new Set(["the","a","an","is","are","was","were","be","been",
@@ -359,6 +379,10 @@ export async function handleInboundMessage(
   let toolElapsedTimer: ReturnType<typeof setInterval> | undefined;
   let streamMsgId: number | string | undefined; // tool indicator message (editable)
   let assistantDurablyRecorded = false;
+  // #1913: platform message IDs carrying answer text this turn (pre-tool
+  // segments, terminal chunks). Every entry aliases one answer record so a
+  // reaction on any chunk resolves to the same validated support.
+  const deliveredAnswerIds: Array<number | string> = [];
   /** #1619: pipeline-owned incremental delivery controller (master/direct, non-TUI). */
   let incremental: import("./incremental-block-delivery.js").IncrementalBlockDeliveryController | null = null;
   try {
@@ -546,6 +570,8 @@ export async function handleInboundMessage(
         if (streamMsgId && adapter.editMessage) {
           try {
             await adapter.editMessage(channelId, streamMsgId, clean);
+            // The edited status message now carries answer text: alias it.
+            deliveredAnswerIds.push(streamMsgId);
             streamMsgId = undefined;
             incremental?.segmentDelivered(clean);
             sentAnyChunk = true;
@@ -553,7 +579,8 @@ export async function handleInboundMessage(
           } catch { /* fall through to a fresh send */ }
         }
         try {
-          await retrySend(() => adapter.sendMessage(channelId, clean, { threadId: msg.threadId }));
+          const sentId = await retrySend(() => adapter.sendMessage(channelId, clean, { threadId: msg.threadId }));
+          if (sentId !== undefined) deliveredAnswerIds.push(sentId);
           streamMsgId = undefined;
           incremental?.segmentDelivered(clean);
           sentAnyChunk = true;
@@ -633,7 +660,7 @@ export async function handleInboundMessage(
       reconciledResponse = reconciled;
     }
     const rawResponse = reconciledResponse;
-    const { text: cleanedText, reactionEmoji, noReply, topics } = cleanResponse(rawResponse);
+    const { text: cleanedText, reactionEmoji, noReply, topics, supportIds: declaredSupportIds } = cleanResponse(rawResponse);
     let userResponse = cleanedText;
     // #1724: a reaction-only turn is a chat control signal, never a
     // deliverable announcement payload — it must not settle as "sent".
@@ -693,7 +720,8 @@ export async function handleInboundMessage(
         for (const chunk of chunks) {
           const clean = chunk.replace(/\[TOPICS:\s*.+?\]/gi, "").replace(/\[REACT:.+?\]/gi, "").trim();
           if (clean) {
-            await retrySend(() => adapter.sendMessage(channelId, clean, { threadId: msg.threadId, deliveryCorrelation }));
+            const sentId = await retrySend(() => adapter.sendMessage(channelId, clean, { threadId: msg.threadId, deliveryCorrelation }));
+            if (sentId !== undefined) deliveredAnswerIds.push(sentId);
             sentAnyChunk = true;
           }
         }
@@ -729,7 +757,7 @@ export async function handleInboundMessage(
       settle(reactionOnly ? "unknown" : (sentAnyChunk ? "sent" : "not_sent"));
       if (isVoice && ttsConfig && adapter.sendVoice) {
         try {
-          const audio = await synthesizeSpeech(bootQuestionDelivered ? userResponse : cleanAnswer || response, ttsConfig);
+          const audio = await synthesizeSpeech(bootQuestionDelivered ? userResponse : (cleanAnswer || response).replace(SUPPORT_STRIP_RE, ""), ttsConfig);
           if (audio) await adapter.sendVoice(channelId, audio, { threadId: msg.threadId });
         } catch (err) { logAndSwallow(TAG, "TTS", err); }
       }
@@ -737,7 +765,16 @@ export async function handleInboundMessage(
       // #938: Update session metrics
       effectiveSession.messageCount = (effectiveSession.messageCount ?? 0) + 1;
       effectiveSession.contextPercent = transport.contextPercent >= 0 ? transport.contextPercent : undefined;
-      effectiveSession.toolCallCount = (effectiveSession.toolCallCount ?? 0) + (transport.toolCallsSucceeded ?? 0);
+      effectiveSession.toolCallCount = (effectiveSession.toolCallsSucceeded ?? 0) + (transport.toolCallsSucceeded ?? 0);
+      // #1913: publish the answer record for simple delivery (declared support
+      // only; no heuristic citation on this path). No record, no feedback.
+      publishDeliveredAnswer({
+        platform: msg.platform, channelId, userId,
+        sessionId: activeSessionId, executionId: deliveryCorrelation?.executionId,
+        declared: declaredSupportIds ?? [], heuristic: [],
+        autoInjected: recalledHits?.map((h) => h.id) ?? [],
+        messageIds: deliveredAnswerIds,
+      });
       return;
     }
 
@@ -791,6 +828,8 @@ export async function handleInboundMessage(
       if (clean) {
         await adapter.sendTyping?.(channelId, msg.threadId);
         lastSentMsgId = await retrySend(() => adapter.sendMessage(channelId, clean, { threadId: msg.threadId, deliveryCorrelation }));
+        // #1913: every delivered chunk aliases the same answer record.
+        if (lastSentMsgId !== undefined) deliveredAnswerIds.push(lastSentMsgId);
         sentAnyChunk = true;
       }
     }
@@ -856,7 +895,7 @@ export async function handleInboundMessage(
     if (isVoice && ttsConfig && !pSession.fullMode && adapter.sendVoice) {
       try {
         await adapter.sendTyping?.(channelId, msg.threadId);
-        const audio = await synthesizeSpeech(bootQuestionDelivered ? userResponse : cleanAnswer || response, ttsConfig);
+        const audio = await synthesizeSpeech(bootQuestionDelivered ? userResponse : (cleanAnswer || response).replace(SUPPORT_STRIP_RE, ""), ttsConfig);
         if (audio) {
           await adapter.sendVoice(channelId, audio, { threadId: msg.threadId });
           logInfo(TAG, `🔊 Voice reply sent (${audio.length} bytes)`);
@@ -881,15 +920,19 @@ export async function handleInboundMessage(
     effectiveSession.toolCallCount = (effectiveSession.toolCallCount ?? 0) + (transport.toolCallsSucceeded ?? 0);
 
     // --- #824: Citation detection — did the agent use the recalled memories? ---
+    // #1913: automatic citation keeps its own "auto" idempotency identity so
+    // an explicit reaction later is an independent event, never a replay.
+    let heuristicCitedIds: number[] = [];
     if (recalledHits && recalledHits.length > 0 && memoryConfig.memoryEnabled && deps.memoryRuntime?.state === "ready") {
       try {
         const mod = abmind();
         if (mod) {
           const { detectCitations } = mod;
           const citedIds = detectCitations(userResponse, recalledHits);
+          heuristicCitedIds = [...citedIds];
           for (const memoryId of citedIds) {
             const messageIdForFeedback = lastSentMsgId != null ? String(lastSentMsgId) : deliveryCorrelation?.executionId ?? `${activeSessionId}-${Date.now()}`;
-            const operationKey = feedbackKey(msg.platform, msg.channelId, userId, messageIdForFeedback, memoryId, "cite");
+            const operationKey = feedbackKey(msg.platform, msg.channelId, userId, messageIdForFeedback, memoryId, "cite", "auto");
             await attemptMemoryMutation({
               phase: "after_delivery",
               family: "feedback",
@@ -898,15 +941,23 @@ export async function handleInboundMessage(
             });
           }
           logDebug(TAG, `Citation: ${citedIds.length}/${recalledHits.length} recalled memories cited`);
-          // Track recalledIds for emoji reaction feedback (1h TTL)
-          if (lastSentMsgId != null) {
-            recalledIdsPerMessage.set(String(lastSentMsgId), recalledHits.map(h => h.id));
-          }
         }
       } catch (err) {
         logWarn(TAG, `Citation detection failed: ${err instanceof Error ? err.message : String(err)}`);
       }
     }
+
+    // #1913: publish the answer record binding every delivered chunk to the
+    // validated support (agent declaration plus heuristic citation, both
+    // checked against injected and tool-delivered evidence). No record means
+    // later reactions safely no-op instead of boosting unrelated recalls.
+    publishDeliveredAnswer({
+      platform: msg.platform, channelId, userId,
+      sessionId: activeSessionId, executionId: deliveryCorrelation?.executionId,
+      declared: declaredSupportIds ?? [], heuristic: heuristicCitedIds,
+      autoInjected: recalledHits?.map((h) => h.id) ?? [],
+      messageIds: deliveredAnswerIds,
+    });
 
     // --- AfterMessage hook ---
     if (hasHooks("AfterMessage")) {

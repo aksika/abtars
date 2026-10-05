@@ -30,6 +30,7 @@ const MAIN_NOTICE_REGISTRY: UserRegistry = {
   byUserId: new Map([["master", { userId: "master", role: "master", maxClass: 3, tools: ["all"], platforms: { telegram: 100 } }]]),
 };
 import { handleInboundMessage, submitTrustedInternalMessage, type PipelineDeps } from "./message-pipeline.js";
+import { lookupAnswerRecord } from "./answer-evidence.js";
 import type { PlatformAdapter, InboundMessage } from "../types/platform.js";
 import type { IKiroTransport } from "./transport/kiro-transport.js";
 import { Spin } from "./spin.js";
@@ -1183,5 +1184,93 @@ describe("session-start hydration lifecycle (#1776)", () => {
     const secondTurnPrompts = sendPrompt.mock.calls.slice(firstTurnPrompts.length).map((c: unknown[]) => String(c[1] ?? ""));
     expect(secondTurnPrompts.length).toBeGreaterThan(0);
     expect(secondTurnPrompts.some((p) => p.includes("HYDRATION-PROBE-1776"))).toBe(false);
+  });
+});
+
+describe("#1913 answer records", () => {
+  // Process-local answer store is shared: each test delivers to a unique
+  // platform message ID.
+  function streamingSession(): any {
+    return {
+      id: "test_A_01", userId: "master", platform: "telegram", chatId: 100,
+      delivery: "streaming", active: true, status: "ready",
+      idleTimeoutMs: 0, lastActiveAt: Date.now(), messageCount: 0, tokenCount: 0, toolCallCount: 0,
+      log: [], shortIndex: 1, showThinking: false,
+      busy: false, queue: [], fullMode: false, pendingStart: false, seen: true,
+      compacting: false, ctxWarned: false, compactFailures: 0, primingTerms: [], completions: [],
+      instructionQueue: [], steeringAccepting: false,
+    };
+  }
+
+  beforeEach(async () => {
+    setUserRegistryOverride(MASTER_REGISTRY);
+    const spinMod = await import("./spin.js");
+    vi.spyOn(spinMod.spin, "ensureSessionTransport").mockImplementation(async (session) => {
+      (session as { transport: unknown }).transport = currentTransport;
+    });
+    vi.spyOn(spinMod.spin, "getSessionById").mockImplementation(() => streamingSession());
+    vi.spyOn(spinMod.spin, "getActiveSession").mockImplementation(() => streamingSession());
+    vi.spyOn(spinMod.spin, "resolveSession").mockImplementation(async () => streamingSession());
+  });
+
+  // The transport of the currently running test (set by rig before the turn).
+  let currentTransport: unknown;
+
+  afterEach(() => {
+    setUserRegistryOverride(null);
+    vi.restoreAllMocks();
+  });
+
+  function rig(responseText: string, sentId: number, cited: number[]) {
+    const transport = mockTransport();
+    transport.contextPercent = -1;
+    currentTransport = transport;
+    (transport.sendPrompt as ReturnType<typeof vi.fn>).mockResolvedValue(responseText);
+    setUserRegistryOverride(MASTER_REGISTRY);
+    detectCitationsSpy.mockClear();
+    detectCitationsSpy.mockReturnValue(cited);
+    abmindReturn = { detectCitations: detectCitationsSpy, renderMemory: vi.fn().mockReturnValue("test memory") };
+    const adapter = mockAdapter({ sendMessage: vi.fn().mockResolvedValue(sentId) });
+    const deps = mockDeps(transport, {
+      memoryConfig: { memoryEnabled: true, memoryDir: "/tmp" },
+      memoryRuntime: {
+        state: "ready",
+        capabilities: new Set<string>(),
+        recall: vi.fn().mockResolvedValue({ hits: [{ memoryId: 1, content: "test memory", score: 0.95 }] }),
+        recordMessage: vi.fn().mockResolvedValue({}),
+        recordFeedback: vi.fn().mockResolvedValue({}),
+        assembleSessionContext: vi.fn().mockResolvedValue({}),
+        getRecentConversation: vi.fn().mockResolvedValue({ results: [] }),
+        getStatus: vi.fn().mockResolvedValue({}),
+        getCoreKnowledge: vi.fn().mockResolvedValue({ core: [] }),
+        embed: vi.fn().mockResolvedValue({}),
+        runMaintenance: vi.fn().mockResolvedValue({}),
+        close: vi.fn().mockResolvedValue(undefined),
+      } as any,
+    } as any);
+    return { adapter, deps };
+  }
+
+  it("publishes validated support for a declared answer", async () => {
+    const { adapter, deps } = rig("Kedden! [SUPPORT: 1]", 101, [1]);
+    await handleInboundMessage(makeMsg(), adapter, deps);
+    const record = lookupAnswerRecord("telegram", "100", "101");
+    expect(record?.support).toEqual([1]);
+    expect(record?.principal).toBe("master");
+    // The marker never reaches chat.
+    const sent = (adapter.sendMessage as ReturnType<typeof vi.fn>).mock.calls.map((c: unknown[]) => String(c[1] ?? ""));
+    expect(sent.join("\n")).not.toContain("[SUPPORT");
+  });
+
+  it("publishes nothing when support cannot be established", async () => {
+    const { adapter, deps } = rig("Plain answer.", 102, []);
+    await handleInboundMessage(makeMsg(), adapter, deps);
+    expect(lookupAnswerRecord("telegram", "100", "102")).toBeUndefined();
+  });
+
+  it("degrades forged declarations to the eligible subset", async () => {
+    const { adapter, deps } = rig("Answer. [SUPPORT: 1, 999]", 103, []);
+    await handleInboundMessage(makeMsg(), adapter, deps);
+    expect(lookupAnswerRecord("telegram", "100", "103")?.support).toEqual([1]);
   });
 });

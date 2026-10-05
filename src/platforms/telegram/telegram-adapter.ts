@@ -480,34 +480,42 @@ export class TelegramAdapter implements PlatformAdapter {
     logInfo(TAG, `Reaction ${emojis.join("")} from ${senderName} on msg ${reaction.message_id}`);
 
     const isAuthorized = this.securityGate.authorizeById(String(user.id));
-    const signal = formatReactionSignal(senderName, emojis);
     const chatId = reaction.chat.id;
     const route = routeReaction(isAuthorized, reaction.chat.type);
 
+    // #1913: feedback targets the delivered answer's validated support —
+    // never the automatic recall set, never a fallback. Misses (no record,
+    // actor mismatch, unscored emoji) skip mutation but keep chat signaling.
+    let feedbackSuffix = "";
     if (isAuthorized && this.deps.memoryRuntime.state === "ready") {
       const score = emojiToScore(emojis[0]!);
-      const resolvedUserId = loadUsers().byPlatformId.get(`telegram:${chatId}`)?.userId ?? "master";
-
-      // #824: Emoji reaction as recall quality feedback
-      const { getRecalledIdsForMessage } = await import("../../components/message-pipeline.js");
-      const recalledIds = getRecalledIdsForMessage(String(reaction.message_id));
-      if (recalledIds && recalledIds.length > 0 && score !== 0) {
+      if (score !== 0) {
         const feedbackType = score < 0 ? "reject" : "cite";
-        for (const memoryId of recalledIds) {
+        const { lookupAnswerRecord, recordFeedbackBatch, formatFeedbackOutcome } =
+          await import("../../components/answer-evidence.js");
+        const record = lookupAnswerRecord("telegram", String(chatId), String(reaction.message_id));
+        const actorUserId = loadUsers().byPlatformId.get(`telegram:${user.id}`)?.userId;
+        if (!record) {
+          logDebug(TAG, `No answer record for msg ${reaction.message_id} — reaction feedback no-op`);
+          feedbackSuffix = " (memory feedback: skipped, no answer record)";
+        } else if (!actorUserId || actorUserId !== record.principal) {
+          logDebug(TAG, `Reaction actor mismatch on msg ${reaction.message_id} — feedback denied`);
+          feedbackSuffix = " (memory feedback: denied, actor mismatch)";
+        } else {
           const { feedbackKey } = await import("../../components/memory-operation-key.js");
-          const { attemptMemoryMutation } = await import("../../components/memory-runtime.js");
-          const opKey = feedbackKey("telegram", String(chatId), resolvedUserId, String(reaction.message_id), memoryId, feedbackType);
-          await attemptMemoryMutation({
-            phase: "feedback",
-            family: "feedback",
-            operationKey: opKey,
-            run: () => this.deps.memoryRuntime.recordFeedback({ userId: resolvedUserId, memoryId, feedbackType }, opKey),
-          });
+          const targets = record.support.map((memoryId) => ({
+            memoryId,
+            operationKey: feedbackKey("telegram", String(chatId), record.principal, String(reaction.message_id), memoryId, feedbackType, "explicit"),
+          }));
+          const outcome = await recordFeedbackBatch(this.deps.memoryRuntime, record.principal, feedbackType, targets);
+          const summary = formatFeedbackOutcome(outcome);
+          logDebug(TAG, `Recall feedback for msg ${reaction.message_id}: ${summary} (emoji ${emojis[0]})`);
+          feedbackSuffix = ` (memory feedback: ${summary})`;
         }
-        const label = score < 0 ? "penalized" : "boosted";
-        logDebug(TAG, `Recall ${label}: ${recalledIds.length} memories (emoji ${emojis[0]})`);
       }
     }
+
+    const signal = formatReactionSignal(senderName, emojis) + feedbackSuffix;
 
     if (route === "discard") {
       logDebug(TAG, `Unauthorized reaction from user ${user.id}, discarding`);
@@ -527,6 +535,7 @@ export class TelegramAdapter implements PlatformAdapter {
         entry.queue.push({ msg: { userId: reactionUser, channelId: String(chatId), senderName, senderId: String(user.id), text: signal, messageId: reaction.message_id, platform: "telegram", timestamp: Date.now(), isGroup: false, isVoice: false }, adapter: this });
         logDebug(TAG, `Queued reaction signal for busy ${activeId} (${entry.queue.length} pending)`);
       } else {
+        const queuedMessage = { msg: { userId: reactionUser, channelId: String(chatId), senderName, senderId: String(user.id), text: signal, messageId: reaction.message_id, platform: "telegram", timestamp: Date.now(), isGroup: false, isVoice: false }, adapter: this };
         try {
           // #1271: reaction signal goes through spin() (model-call chokepoint)
           const { result: response } = await spin.spin({
@@ -545,7 +554,17 @@ export class TelegramAdapter implements PlatformAdapter {
             }
           }
         } catch (err) {
-          logError(TAG, `Failed to send reaction signal for chat ${chatId}`, err);
+          // #1913: a post-admission overlap means another execution owns the
+          // transport — queue behind it instead of starting concurrent work
+          // or silently losing the signal.
+          const { isExecutionOverlapError } = await import("../../components/answer-evidence.js");
+          const live = spin.getSessionById(activeId);
+          if (isExecutionOverlapError(err) && live) {
+            live.queue.push(queuedMessage);
+            logDebug(TAG, `Reaction signal queued after overlap on ${activeId} (${live.queue.length} pending)`);
+          } else {
+            logError(TAG, `Failed to send reaction signal for chat ${chatId}`, err);
+          }
         }
       }
     }

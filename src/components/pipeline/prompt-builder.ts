@@ -275,10 +275,17 @@ export async function buildPrompt(
             // comes from abmind's final ordering.
             const inject = selectInjectedHits(hits, recall.selection);
             // eslint-disable-next-line @typescript-eslint/no-explicit-any
-            const lines = inject.map((h: any) => abmind()?.renderMemory({
-              content_en: h.content,
-            }) ?? h.content);
-            const block = `[MEMORY CONTEXT — auto-recalled, do not repeat verbatim]\n${lines.join("\n")}\n[/MEMORY CONTEXT]`;
+            const lines = inject.map((h: any) => {
+              const rendered = abmind()?.renderMemory({
+                content_en: h.content,
+              }) ?? h.content;
+              // #1913: bind each injected line to its stable reference so the
+              // agent can declare which memories its answer relies on. The
+              // suffix is model-visible context only; citation matching reads
+              // the original hit content and is unaffected.
+              return typeof h.memoryId === "number" ? `${rendered} [#${h.memoryId}]` : rendered;
+            });
+            const block = `[MEMORY CONTEXT — auto-recalled, do not repeat verbatim]\n${lines.join("\n")}\n(Reference IDs are shown as [#id]; if your answer relies on them, end your reply with [SUPPORT: id, ...] listing only those IDs.)\n[/MEMORY CONTEXT]`;
             volatileContext.push({ kind: "recall", content: block });
             prompt = `${block}\n\n${prompt}`;
             // eslint-disable-next-line @typescript-eslint/no-explicit-any

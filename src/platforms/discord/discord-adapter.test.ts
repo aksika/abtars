@@ -257,6 +257,51 @@ describe("DiscordAdapter", () => {
       await capturedReactionHandler!(fakeReaction("❤️", "ch1", "555"), fakeUser("42"));
       expect(mockMemory.recordFeedback).not.toHaveBeenCalled();
     });
+
+    it("records explicit feedback only for the answer's support IDs (#1913)", async () => {
+      const recordFeedback = vi.fn().mockResolvedValue(undefined);
+      deps.memoryRuntime = { state: "ready", recordFeedback } as any;
+      adapter = new DiscordAdapter(makeConfig(), deps);
+      capturedReactionHandler = null;
+      await adapter.start();
+      const { publishAnswerRecord } = await import("../../components/answer-evidence.js");
+      const { feedbackKey } = await import("../../components/memory-operation-key.js");
+      publishAnswerRecord(
+        { platform: "discord", channelId: "ch9", principal: "master", sessionId: "s", executionId: "e", support: [7, 9], messageIds: ["901"] },
+        Date.now(),
+      );
+
+      await capturedReactionHandler!(fakeReaction("👍", "ch9", "901"), fakeUser("42"));
+
+      expect(recordFeedback).toHaveBeenCalledTimes(2);
+      expect(recordFeedback).toHaveBeenNthCalledWith(
+        1,
+        { userId: "master", memoryId: 7, feedbackType: "cite" },
+        feedbackKey("discord", "ch9", "master", "901", 7, "cite", "explicit"),
+      );
+      expect(recordFeedback).toHaveBeenNthCalledWith(
+        2,
+        { userId: "master", memoryId: 9, feedbackType: "cite" },
+        feedbackKey("discord", "ch9", "master", "901", 9, "cite", "explicit"),
+      );
+    });
+
+    it("denies feedback on actor mismatch (#1913)", async () => {
+      const recordFeedback = vi.fn().mockResolvedValue(undefined);
+      deps.memoryRuntime = { state: "ready", recordFeedback } as any;
+      adapter = new DiscordAdapter(makeConfig(), deps);
+      capturedReactionHandler = null;
+      await adapter.start();
+      const { publishAnswerRecord } = await import("../../components/answer-evidence.js");
+      publishAnswerRecord(
+        { platform: "discord", channelId: "ch9", principal: "someone-else", sessionId: "s", executionId: "e", support: [7], messageIds: ["902"] },
+        Date.now(),
+      );
+
+      await capturedReactionHandler!(fakeReaction("👍", "ch9", "902"), fakeUser("42"));
+
+      expect(recordFeedback).not.toHaveBeenCalled();
+    });
   });
 
   describe("unwired pipeline degraded route (#1831)", () => {

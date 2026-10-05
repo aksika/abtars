@@ -599,6 +599,13 @@ const memoryRecallTool: ToolDefinition = {
         limit: parseInt(stringValue(args["limit"] ?? "10"), 10),
         maxClassification,
       });
+      // #1913: retain memory IDs actually delivered to the agent for this
+      // execution. Answer attribution validates the agent's declared support
+      // against this host-observed set; failures here must never invent IDs.
+      try {
+        const { recordToolEvidence } = await import("../answer-evidence.js");
+        recordToolEvidence(context?.executionId, result.hits ?? []);
+      } catch (err) { logAndSwallow(TAG, "record tool evidence", err); }
       // #1837 — tool-path recall summary (the runtime boundary logs detail).
       logDebug(TAG, `memory_recall: user=${userId} limit=${stringValue(args["limit"] ?? "10")} maxClass=${maxClassification} keywords=${terms.length} query="${redactSecrets(terms.join(" ")).slice(0, 60)}"`);
       import("../metrics-collector.js").then(({ recordLatency }) => recordLatency("recall", Date.now() - t0)).catch(err => logAndSwallow(TAG, "record recall latency", err));

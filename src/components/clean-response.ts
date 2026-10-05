@@ -7,6 +7,12 @@ const REACT_RE = /\[REACT:(.+?)\]/;
 const NO_REPLY_RE = /\s*\[NO[-_]REPLY\]\s*/gi;
 const LANG_TAG_RE = /^\[lang:\w{2}\]\s*/i;
 const TOPICS_RE = /\[TOPICS:\s*(.+?)\]/i;
+// #1913: agent-declared answer support (memory IDs only). Parsed before
+// stripping; validated against host-observed evidence by the pipeline, so a
+// forged marker degrades to the eligible subset instead of authorizing writes.
+const SUPPORT_RE = /\[SUPPORT:\s*([\d\s,]+)\]/gi;
+/** Delivery-time strip for the support marker (segments, TTS inputs). */
+export const SUPPORT_STRIP_RE = /\s*\[SUPPORT:\s*[\d\s,]+\]\s*/gi;
 
 // Internal context markers — strip if model echoes them back
 const CONTEXT_BLOCK_RE = /\[CONTEXT[^\]]*\][\s\S]*?\[\/CONTEXT\]/gi;
@@ -26,6 +32,26 @@ export interface CleanedResponse {
   noReply: boolean;
   /** Keywords extracted from [TOPICS: kw1, kw2, kw3], if present. */
   topics?: string[];
+  /** Memory IDs declared via [SUPPORT: id, ...], if present. */
+  supportIds?: number[];
+}
+
+/** Extract declared support IDs (order-preserving, deduplicated, capped). */
+export function extractSupportIds(raw: string): number[] {
+  SUPPORT_RE.lastIndex = 0;
+  const out: number[] = [];
+  const seen = new Set<number>();
+  let match: RegExpExecArray | null;
+  while ((match = SUPPORT_RE.exec(raw)) !== null) {
+    for (const part of match[1]!.split(",")) {
+      const id = Number.parseInt(part.trim(), 10);
+      if (!Number.isInteger(id) || id <= 0 || id > 2147483647 || seen.has(id)) continue;
+      seen.add(id);
+      out.push(id);
+      if (out.length >= 20) return out;
+    }
+  }
+  return out;
 }
 
 /** Strip known LLM tags and echoed internal context from a response string. */
@@ -37,6 +63,7 @@ export function cleanResponse(raw: string): CleanedResponse {
   // Extract structured tags before stripping
   let reactionEmoji: string | undefined;
   let topics: string[] | undefined;
+  const supportIds = extractSupportIds(text);
   const reactMatch = text.match(REACT_RE);
   if (reactMatch) {
     reactionEmoji = reactMatch[1]!;
@@ -50,6 +77,7 @@ export function cleanResponse(raw: string): CleanedResponse {
 
   // Strip echoed internal context — model should never output these
   text = text
+    .replace(SUPPORT_STRIP_RE, "")
     .replace(CONTEXT_BLOCK_RE, "")
     .replace(MEMORY_BLOCK_RE, "")
     .replace(COMPACT_BLOCK_RE, "")
@@ -60,7 +88,7 @@ export function cleanResponse(raw: string): CleanedResponse {
     .replace(/\n{3,}/g, "\n\n")
     .trim();
 
-  return { text, reactionEmoji, noReply, topics };
+  return { text, reactionEmoji, noReply, topics, ...(supportIds.length > 0 ? { supportIds } : {}) };
 }
 
 /**

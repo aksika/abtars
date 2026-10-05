@@ -411,22 +411,28 @@ export class DiscordAdapter implements PlatformAdapter {
     const senderName = user.username || `id:${user.id}`;
     logInfo(TAG, `Reaction ${emoji} from ${senderName} on msg ${reaction.message.id}`);
 
-    // Emotion scoring on authorized reactions
+    // #1913: feedback targets the delivered answer's validated support —
+    // never the automatic recall set, never a fallback. Misses skip mutation.
     if (isAuthorized && this.deps.memoryRuntime.state === "ready") {
       const score = emojiToScore(emoji);
-      const resolvedUserId = loadUsers().byPlatformId.get("discord:" + user.id)?.userId ?? "unknown";
-      const recalledIds = (await import("../../components/message-pipeline.js")).getRecalledIdsForMessage(messageId);
-      if (recalledIds && score !== 0) {
-        for (const memoryId of recalledIds) {
-          const msgId = String(reaction.message.id);
-          const opKey = (await import("../../components/memory-operation-key.js")).feedbackKey("discord", channelId, resolvedUserId, msgId, memoryId, score < 0 ? "reject" : "cite");
-          const { attemptMemoryMutation } = await import("../../components/memory-runtime.js");
-          await attemptMemoryMutation({
-            phase: "feedback",
-            family: "feedback",
-            operationKey: opKey,
-            run: () => this.deps.memoryRuntime.recordFeedback({ userId: resolvedUserId, memoryId, feedbackType: score < 0 ? "reject" : "cite" }, opKey),
-          });
+      if (score !== 0) {
+        const feedbackType = score < 0 ? "reject" : "cite";
+        const { lookupAnswerRecord, recordFeedbackBatch, formatFeedbackOutcome } =
+          await import("../../components/answer-evidence.js");
+        const record = lookupAnswerRecord("discord", channelId, messageId);
+        const actorUserId = loadUsers().byPlatformId.get("discord:" + user.id)?.userId;
+        if (!record) {
+          logDebug(TAG, `No answer record for msg ${messageId} — reaction feedback no-op`);
+        } else if (!actorUserId || actorUserId !== record.principal) {
+          logDebug(TAG, `Reaction actor mismatch on msg ${messageId} — feedback denied`);
+        } else {
+          const { feedbackKey } = await import("../../components/memory-operation-key.js");
+          const targets = record.support.map((memoryId) => ({
+            memoryId,
+            operationKey: feedbackKey("discord", channelId, record.principal, messageId, memoryId, feedbackType, "explicit"),
+          }));
+          const outcome = await recordFeedbackBatch(this.deps.memoryRuntime, record.principal, feedbackType, targets);
+          logDebug(TAG, `Recall feedback for msg ${messageId}: ${formatFeedbackOutcome(outcome)} (emoji ${emoji})`);
         }
       }
     }
