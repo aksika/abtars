@@ -71,20 +71,35 @@ const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms
 /**
  * Harness-liveness backstop (#1914): when the runner dies without cleanup,
  * its heartbeat file goes stale and orphaned fixtures exit on their own
- * instead of lingering with dead paths. No lock/report markers are written:
- * nobody observes this exit, so it must read as a quiet death, never as
- * evidence. Exit 0 — the bridge did nothing wrong; its supervisor vanished.
- * Absence of the file means no runner ever supervised this process
- * (selftests, direct spawns) and is exempt, not stale.
+ * instead of lingering with dead paths. The runner also retires the file
+ * (deletes it) at scenario teardown, which reaps that scenario's strays
+ * within one poll instead of one threshold. No lock/report markers are
+ * written either way: nobody observes this exit, so it must read as a quiet
+ * death, never as evidence. Exit 0 — the bridge did nothing wrong; its
+ * supervisor vanished. A file absent at boot means no runner ever
+ * supervised this process (selftests, direct spawns) and is exempt, not
+ * stale — only a file that existed and then vanished counts as retired.
  */
-function harnessHeartbeatStale(): boolean {
+function harnessSupervisedAtBoot(): boolean {
+  const path = process.env[HARNESS_HEARTBEAT_ENV];
+  if (!path) return false;
+  try {
+    statSync(path);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function harnessGone(supervisedAtBoot: boolean): boolean {
+  if (!supervisedAtBoot) return false;
   const path = process.env[HARNESS_HEARTBEAT_ENV];
   if (!path) return false;
   try {
     return isHeartbeatStale(statSync(path).mtimeMs, Date.now(), HARNESS_HEARTBEAT_STALE_MS);
   } catch {
-    // No heartbeat file — unsupervised process, exempt (see above).
-    return false;
+    // Existed at boot, gone now: the runner retired it at teardown.
+    return true;
   }
 }
 
@@ -223,6 +238,7 @@ async function main(): Promise<void> {
   let lastLivePoll = 0;
   let reported = false;
   let liveExit: { code: number; at: number; staleReport: boolean } | null = null;
+  const supervisedAtBoot = harnessSupervisedAtBoot();
 
   /**
    * Consume-and-clear protocol: capturing a live-exit command atomically
@@ -264,8 +280,8 @@ async function main(): Promise<void> {
         }
       }
       if (!ownsLock && mode.mode !== "non-owner") heartbeatEnabled = false;
-      if (harnessHeartbeatStale()) {
-        process.stderr.write("[fixture-bridge] harness heartbeat stale — exiting\n");
+      if (harnessGone(supervisedAtBoot)) {
+        process.stderr.write("[fixture-bridge] harness gone — exiting\n");
         process.exit(0);
       }
     }

@@ -12,7 +12,7 @@
  *   npm run test:watchdog:real -- --require-all-green       # epic gate
  */
 import { execFileSync } from "node:child_process";
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { ProcessRegistry } from "./process-registry.ts";
@@ -212,6 +212,18 @@ async function runScenario(
     failure = `[cleanup] ${err instanceof Error ? err.message : String(err)}${failure ? ` (prior: ${failure})` : ""}`;
     outcomeStatus = "inconclusive";
   } finally {
+    // Retire this scenario's heartbeat (#1914): any fixture that outlived
+    // teardown (notably watchdog-spawned ones the macOS sweep cannot see)
+    // observes the vanished file on its next poll and exits at once, instead
+    // of lingering into later scenarios. Skipped when keeping a failed world
+    // for debugging, so its strays stay inspectable.
+    if (!(process.env.WD_ACC_KEEP === "1" && outcomeStatus !== "pass")) {
+      try {
+        unlinkSync(world.heartbeatFile);
+      } catch {
+        // Already gone — nothing to retire
+      }
+    }
     activeHeartbeatFile = null;
     for (const home of world.knownHomes()) {
       logTails[home] = world.watchdogLogLines(home, LOG_TAIL_LINES);

@@ -99,4 +99,37 @@ describe("stale-heartbeat fixture exit", () => {
     expect(world.procSnapshot(pid)).toBeNull();
     await registry.cleanupAll("selftest end").catch(() => undefined);
   }, 30000);
+
+  it("a fixture whose heartbeat file is retired mid-run exits at once", async () => {
+    const artifacts = resolve(acceptanceRoot(), "wd-acc-locktest-artifacts2");
+    const builder = new SuiteBuilder(REPO_ROOT, artifacts);
+    builder.prepare();
+    await builder.prebuild(["lifecycle"]);
+    const registry = new ProcessRegistry();
+    const world = new World("wd-acc-selftest", "retireexit", registry, builder, "lifecycle");
+    touched.push(() => {
+      world.releaseLock();
+      rmSync(world.root, { recursive: true, force: true });
+      rmSync(artifacts, { recursive: true, force: true });
+      unlinkSync(world.heartbeatFile);
+    });
+    // A live toucher holds the file fresh while the fixture boots supervised.
+    writeFileSync(world.heartbeatFile, "live");
+    const home = world.homeA();
+    world.setControl(home, { defaultMode: { mode: "healthy" } });
+    const pid = await world.plantBridge(home, { mode: "healthy" });
+    const deadline = Date.now() + 10000;
+    while (Date.now() < deadline && !world.lock(home)) {
+      await new Promise((r) => setTimeout(r, 50));
+    }
+    expect(world.procSnapshot(pid)).not.toBeNull();
+    // Runner teardown retires the file: the supervised fixture must go.
+    unlinkSync(world.heartbeatFile);
+    const stop = Date.now() + 10000;
+    while (Date.now() < stop && world.procSnapshot(pid) !== null) {
+      await new Promise((r) => setTimeout(r, 60));
+    }
+    expect(world.procSnapshot(pid)).toBeNull();
+    await registry.cleanupAll("selftest end").catch(() => undefined);
+  }, 30000);
 });
