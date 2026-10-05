@@ -530,7 +530,7 @@ function finalizeStoreQuota(
 
 const memoryRecallTool: ToolDefinition = {
   name: "memory_recall",
-  description: "Search memories by keyword or semantic query. Returns relevant stored memories.",
+  description: "Search memories by keyword or semantic query. Returns relevant stored memories. Verify one claim per call with focused keywords: a combined multi-claim query can bury individual facts, and a fact missing from one broad search is inconclusive, never proof it was never stored.",
   parameters: {
     type: "object",
     properties: {
