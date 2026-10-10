@@ -193,8 +193,9 @@ export function createHousekeepingTask(deps: HousekeepingDeps): HeartbeatTask {
     const store = new PiRunStore({ db: requireTaskDatabase(), sessionStorageRoot });
     const commands = store.cleanupOldCommands(7 * 24);
     const approvals = store.cleanupConsumedApprovals(7 * 24);
-    if (commands > 0 || approvals > 0) {
-      logInfo(TAG, `Pi telemetry: purged ${commands} commands, ${approvals} consumed approvals > 7d`);
+    const runs = store.cleanupOldRuns(7);
+    if (commands > 0 || approvals > 0 || runs > 0) {
+      logInfo(TAG, `Pi telemetry: purged ${commands} commands, ${approvals} consumed approvals, ${runs} terminal runs > 7d`);
     }
   }
 

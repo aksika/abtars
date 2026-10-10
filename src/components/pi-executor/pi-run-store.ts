@@ -3,7 +3,7 @@ import type { PiRunRecord, PiRunStatus, PiRunView, PiRunOrigin, PiPendingRequest
 import type { UiReplyOutcome } from "./types.js";
 import { MAX_PROGRESS_ENTRIES } from "./types.js";
 import type { TaskDatabase } from "../tasks/kanban-board.js";
-import { kanbanTransition, sqliteNow } from "../tasks/kanban-board.js";
+import { kanbanTransition, sqliteNow, KANBAN_TERMINAL_STATUSES } from "../tasks/kanban-board.js";
 import { completePendingRequestInTransaction, ensureRequestLedgerSchema } from "../pi-request-ledger.js";
 import { validatePersistedSession, type SessionProof } from "./config.js";
 import { PiWorkspaceClaimStore } from "./pi-workspace-claim-store.js";
@@ -1652,6 +1652,41 @@ export class PiRunStore {
    */
   cleanupConsumedApprovals(olderThanHours: number): number {
     return this.outbox.cleanupConsumedApprovals(olderThanHours);
+  }
+
+  /**
+   * #1919 — Prune terminal run telemetry older than the retention window so
+   * kanbanCleanup converges: pi_runs rows are otherwise never deleted and pin
+   * their cards through the card_id FK. Eligible only when the run is terminal,
+   * its linked card is terminal, and no outbox event for the run still awaits
+   * peer acknowledgement. Cascades to progress/events/commands/approvals/claims
+   * in one transaction (progress is FK-bound to pi_runs; the rest are
+   * unenforced run_id links). Returns the pruned run count.
+   */
+  cleanupOldRuns(olderThanDays = 7): number {
+    const cardPlaceholders = KANBAN_TERMINAL_STATUSES.map(() => "?").join(", ");
+    const eligible = this.db.prepare(
+      `SELECT r.id FROM pi_runs r
+       JOIN kanban_board c ON c.id = r.card_id
+       WHERE r.status IN ('completed', 'failed', 'cancelled', 'interrupted')
+         AND r.updated_at < datetime('now', '-' || ? || ' days')
+         AND c.status IN (${cardPlaceholders})
+         AND NOT EXISTS (
+           SELECT 1 FROM remote_pi_events e
+           WHERE e.run_id = r.id AND e.acknowledged_at IS NULL
+         )`
+    ).all(olderThanDays, ...KANBAN_TERMINAL_STATUSES) as Array<{ id: string }>;
+    if (eligible.length === 0) return 0;
+    const runIds = eligible.map(r => r.id);
+    const placeholders = runIds.map(() => "?").join(", ");
+    return this.db.transaction(() => {
+      this.db.prepare(`DELETE FROM pi_run_progress WHERE run_id IN (${placeholders})`).run(...runIds);
+      this.db.prepare(`DELETE FROM remote_pi_events WHERE run_id IN (${placeholders})`).run(...runIds);
+      this.db.prepare(`DELETE FROM remote_pi_commands WHERE run_id IN (${placeholders})`).run(...runIds);
+      this.db.prepare(`DELETE FROM remote_pi_approvals_consumed WHERE run_id IN (${placeholders})`).run(...runIds);
+      this.db.prepare(`DELETE FROM pi_workspace_claims WHERE run_id IN (${placeholders})`).run(...runIds);
+      return this.db.prepare(`DELETE FROM pi_runs WHERE id IN (${placeholders})`).run(...runIds).changes;
+    });
   }
 
   /**

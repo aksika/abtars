@@ -506,6 +506,59 @@ describe("PiRunStore — #1395 UI claim/restore/setPending", () => {
     });
   });
 
+  describe("cleanupOldRuns (#1919)", () => {
+    function seedAgedRun(store: PiRunStore, id: string, runStatus: string, cardStatus: string, cardId: number): void {
+      seedRun(store, { id, status: runStatus, cardId });
+      const db = (store as any).db as TaskDatabase;
+      db.prepare(`UPDATE kanban_board SET status = ? WHERE id = ?`).run(cardStatus, cardId);
+      db.prepare(`UPDATE pi_runs SET updated_at = datetime('now', '-10 days') WHERE id = ?`).run(id);
+    }
+
+    it("prunes an old terminal run with a terminal card and cascades to dependents", () => {
+      const store = makeStore();
+      store.getDb().exec("PRAGMA foreign_keys = ON");
+      const db = (store as any).db as TaskDatabase;
+      seedAgedRun(store, "old-run", "failed", "failed", 101);
+      db.prepare(`INSERT INTO pi_run_progress (run_id, kind, payload) VALUES ('old-run', 'log', 'x')`).run();
+      db.prepare(`INSERT INTO pi_workspace_claims (canonical_path, run_id, execution_generation, owner_kind, acquired_at)
+        VALUES ('/ws', 'old-run', 1, 'standalone', datetime('now'))`).run();
+      db.prepare(`INSERT INTO remote_pi_commands (origin_peer, command_id, run_id, payload_hash, state, created_at, updated_at)
+        VALUES ('peer1', 'c1', 'old-run', 'h', 'completed', datetime('now'), datetime('now'))`).run();
+      db.prepare(`INSERT INTO remote_pi_approvals_consumed (approval_id, run_id, origin_peer, command_id, consumed_at)
+        VALUES ('a1', 'old-run', 'peer1', 'c1', datetime('now'))`).run();
+
+      expect(store.cleanupOldRuns(7)).toBe(1);
+
+      expect(store.get("old-run")).toBeNull();
+      const leftovers = (table: string): number =>
+        (db.prepare(`SELECT COUNT(*) as cnt FROM ${table} WHERE run_id = 'old-run'`).get() as { cnt: number }).cnt;
+      expect(leftovers("pi_run_progress")).toBe(0);
+      expect(leftovers("remote_pi_commands")).toBe(0);
+      expect(leftovers("remote_pi_approvals_consumed")).toBe(0);
+      expect(leftovers("pi_workspace_claims")).toBe(0);
+    });
+
+    it("retains live, live-card, unacknowledged, and recent runs", () => {
+      const store = makeStore();
+      store.getDb().exec("PRAGMA foreign_keys = ON");
+      const db = (store as any).db as TaskDatabase;
+      seedAgedRun(store, "live-run", "awaiting_input", "running", 201);
+      seedAgedRun(store, "live-card-run", "failed", "running", 202);
+      seedAgedRun(store, "unacked-run", "failed", "failed", 203);
+      db.prepare(`INSERT INTO remote_pi_events (run_id, remote_card_id, generation, sequence, event_id,
+        content_sha256, origin_peer, origin_request_id, kind, projection_json, occurred_at)
+        VALUES ('unacked-run', 203, 1, 1, 'e1', 'h', 'peer1', 'req1', 'run_terminal', '{}', datetime('now'))`).run();
+      seedRun(store, { id: "recent-run", status: "failed", cardId: 204 });
+      db.prepare(`UPDATE kanban_board SET status = 'failed' WHERE id = 204`).run();
+
+      expect(store.cleanupOldRuns(7)).toBe(0);
+
+      for (const id of ["live-run", "live-card-run", "unacked-run", "recent-run"]) {
+        expect(store.get(id)).toBeDefined();
+      }
+    });
+  });
+
   describe("createSupervisedRun (#1638)", () => {
     function ensureCard(store: PiRunStore, cardId: number): void {
       const db = (store as any).db as TaskDatabase;
