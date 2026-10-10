@@ -1098,8 +1098,48 @@ export function kanbanCleanup(olderThanDays = 7): number {
     const ids = doomed.map(r => r.id);
     if (ids.length === 0) return 0;
     const placeholders = ids.map(() => "?").join(", ");
-    d.prepare(`DELETE FROM kanban_card_transitions WHERE card_id IN (${placeholders})`).run(...ids);
-    return d.prepare(`DELETE FROM kanban_board WHERE id IN (${placeholders})`).run(...ids).changes;
+    // #1918: production enforces PRAGMA foreign_keys = ON (phase-pi-executor),
+    // so a single-statement purge aborts with FOREIGN KEY constraint failed
+    // while any doomed row is still referenced. pi_runs rows are never pruned
+    // (only outbox commands/approvals are) and a doomed parent with live
+    // children must keep its link — retain both, purge the rest leaf-first
+    // so immediate self-FK checks on parent_id pass.
+    const piRunsExists = d.prepare(
+      `SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'pi_runs'`
+    ).get() !== undefined;
+    const referenced = new Set(
+      (piRunsExists
+        ? (d.prepare(
+            `SELECT DISTINCT card_id AS id FROM pi_runs WHERE card_id IN (${placeholders})`
+          ).all(...ids) as Array<{ id: number }>)
+        : []
+      ).map(r => r.id),
+    );
+    const liveChildParents = new Set(
+      (d.prepare(
+        `SELECT DISTINCT parent_id AS id FROM kanban_board
+         WHERE parent_id IN (${placeholders}) AND id NOT IN (${placeholders})`
+      ).all(...ids, ...ids) as Array<{ id: number }>).map(r => r.id),
+    );
+    const purgable = ids.filter(id => !referenced.has(id) && !liveChildParents.has(id));
+    let purged = 0;
+    if (purgable.length > 0) {
+      const ph = purgable.map(() => "?").join(", ");
+      d.prepare(`DELETE FROM kanban_card_transitions WHERE card_id IN (${ph})`).run(...purgable);
+      for (;;) {
+        const res = d.prepare(
+          `DELETE FROM kanban_board WHERE id IN (${ph})
+           AND id NOT IN (SELECT parent_id FROM kanban_board WHERE parent_id IS NOT NULL)`
+        ).run(...purgable) as { changes: number };
+        purged += res.changes;
+        if (res.changes === 0) break;
+      }
+    }
+    const retained = ids.length - purged;
+    if (retained > 0) {
+      logDebug("kanban", `cleanup retains ${retained} of ${ids.length} terminal cards (pi_runs-linked or live-child parents)`);
+    }
+    return purged;
   })();
 }
 

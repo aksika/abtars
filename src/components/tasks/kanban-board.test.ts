@@ -192,6 +192,40 @@ describe("kanban-board", () => {
     expect(mod.kanbanList("*")).toHaveLength(2);
   });
 
+  it("kanbanCleanup retains pi_runs-linked and live-child parents under FK enforcement (#1918)", () => {
+    // Production enforces PRAGMA foreign_keys = ON (phase-pi-executor) —
+    // the old single-statement purge aborted here with FOREIGN KEY failed.
+    mod._kanbanExecForTest("PRAGMA foreign_keys = ON");
+    mod._kanbanExecForTest(
+      "CREATE TABLE pi_runs (id TEXT PRIMARY KEY, card_id INTEGER UNIQUE NOT NULL REFERENCES kanban_board(id))",
+    );
+
+    const lone = mod.kanbanEnqueue("Old lone", "task");
+    const linked = mod.kanbanEnqueue("Old linked", "task");
+    const parent = mod.kanbanEnqueue("Old parent", "task");
+    const child = mod.kanbanEnqueue("Old child", "task");
+    const liveParent = mod.kanbanEnqueue("Old live-parent", "task");
+    const liveChild = mod.kanbanEnqueue("Live child", "task");
+    for (const id of [lone, linked, parent, child, liveParent]) {
+      mod.kanbanRunning(id);
+      mod.kanbanComplete(id, null, "x");
+    }
+    mod.kanbanRunning(liveChild);
+    mod._kanbanExecForTest("UPDATE kanban_board SET parent_id = ? WHERE id = ?", [parent, child]);
+    mod._kanbanExecForTest("UPDATE kanban_board SET parent_id = ? WHERE id = ?", [liveParent, liveChild]);
+    mod._kanbanExecForTest(
+      "UPDATE kanban_board SET completed_at = datetime('now', '-10 days') WHERE id IN (?, ?, ?, ?, ?)",
+      [lone, linked, parent, child, liveParent],
+    );
+    mod._kanbanExecForTest("INSERT INTO pi_runs (id, card_id) VALUES ('run-1', ?)", [linked]);
+
+    expect(mod.kanbanCleanup(7)).toBe(3);
+    const remaining = mod.kanbanList("*").map(c => c.id).sort((a, b) => a - b);
+    expect(remaining).toEqual([linked, liveParent, liveChild].sort((a, b) => a - b));
+    // Retained links stay intact: pi_runs row and live child's parent survive.
+    expect(mod.kanbanGetCard(liveChild)!.parent_id).toBe(liveParent);
+  });
+
   it("enqueue with options sets priority, labels, type", () => {
     mod.kanbanEnqueue("Rich card", "user", undefined, {
       priority: "HIGH",
