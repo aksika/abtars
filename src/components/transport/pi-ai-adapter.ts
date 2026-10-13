@@ -17,7 +17,7 @@
  *     message carries "API error <status>" so sendWithPolicy's existing
  *     parseErrorStatus/classifyError/parseRetryAfter classify them unchanged.
  *
- * Contracts verified against @earendil-works/pi-ai@~0.85.1 via devDependency.
+ * Contracts verified against @earendil-works/pi-ai@~1.2.0 via devDependency.
  */
 
 import type {
@@ -31,7 +31,9 @@ import type {
   ImageContent,
   ToolCall,
   Tool,
+  JsonObject,
   Context,
+  TranscriptContext,
   Message,
   UserMessage,
   ToolResultMessage,
@@ -165,6 +167,8 @@ export interface PiAiModule {
   createProvider(input: CreateProviderOptions): Provider;
   /** #1745: overflow predicate — the one ErrorKind an HTTP status cannot express. */
   isContextOverflow(message: AssistantMessage, contextWindow?: number): boolean;
+  /** #1921: Pi 0.86+ folds systemPrompt/tools into the transcript before streaming. */
+  normalizeContext(context: Context): TranscriptContext;
 }
 
 // ─── error tagging ──────────────────────────────────────────────────────────
@@ -347,8 +351,15 @@ function toPiUserContent(content: string | ContentPart[] | null): string | (Text
   return parts;
 }
 
-function parseArgsObject(argsStr: string): Record<string, unknown> {
-  try { return JSON.parse(argsStr) as Record<string, unknown>; } catch { return {}; }
+function parseArgsObject(argsStr: string): JsonObject {
+  // #1921: Pi 0.86 restricts ToolCall.arguments to JSON-compatible values.
+  // JSON.parse can only produce JsonValue trees, so a plain-object guard plus
+  // cast is sound; non-object payloads fall to {} exactly as before.
+  try {
+    const parsed: unknown = JSON.parse(argsStr);
+    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) return parsed as JsonObject;
+    return {};
+  } catch { return {}; }
 }
 
 const ZERO_USAGE: Usage = {
@@ -473,7 +484,7 @@ export async function createPiAiAssistantStream(
     api: { stream: apiMod.stream, streamSimple: apiMod.streamSimple },
   });
   return {
-    stream: provider.streamSimple(model, context, {
+    stream: provider.streamSimple(model, pi.normalizeContext(context), {
       ...options,
       apiKey: candidate.apiKey,
       signal,

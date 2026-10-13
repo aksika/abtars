@@ -307,6 +307,11 @@ function wrapEventStream(source: AsyncGenerator<AssistantMessageEvent>, fallback
 }
 
 export function createPiStreamFn(options: AbtarsPiStreamFnOptions): StreamFn {
+  // #1921: Pi 0.86+ calls StreamFn with a TranscriptContext (systemPrompt/tools
+  // already folded into the leading system message); abtars-internal callers
+  // pass Context. TranscriptContext flows through the Context-typed plumbing
+  // below and is normalized idempotently in createPiAiAssistantStream via the
+  // loaded pi module — no second transcript is built and no prompt is dropped.
   return (model: Model<Api>, context: Context, fnOptions: SimpleStreamOptions = {}): AssistantMessageEventStream => {
     // #1748: the session-level cache identity is merged here once so every
     // attempt (including candidate rotation) carries the same identity. The

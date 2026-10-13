@@ -17,7 +17,7 @@ import { ModelHealthRegistry } from "./model-health-registry.js";
 import type { PiInstallation, PiModuleSpecifier, PiInstallationState } from "../pi-installation.js";
 import type { PiRuntimeContractDependencies } from "./pi-runtime-contract.js";
 
-const PINNED_INSTALL_COMMAND = "npm i -g '@earendil-works/pi-coding-agent@~0.85.1'";
+const PINNED_INSTALL_COMMAND = "npm i -g '@earendil-works/pi-coding-agent@~1.2.0'";
 
 function makeInstallation(version = "0.84.0"): PiInstallation {
   return {
@@ -45,7 +45,7 @@ function makeAgentCoreModule(): Record<string, unknown> {
 }
 
 function makeAiModule(): Record<string, unknown> {
-  return { createProvider: vi.fn() };
+  return { createProvider: vi.fn(), normalizeContext: vi.fn() };
 }
 
 function makeApiModule(): Record<string, unknown> {
@@ -176,6 +176,21 @@ describe("validatePiRuntimeContract (#1573)", () => {
     expect(contractError.message).toContain(PINNED_INSTALL_COMMAND);
   });
 
+  it("rejects a pi-ai module without callable normalizeContext", async () => {
+    const boundary = makeDependencies({
+      modules: {
+        "@earendil-works/pi-agent-core": makeAgentCoreModule(),
+        "@earendil-works/pi-ai": { createProvider: vi.fn(), normalizeContext: "not-a-function" },
+      },
+    });
+    const error = await validatePiRuntimeContract([], contractDeps(boundary)).catch((err: unknown) => err);
+    const contractError = error as PiRuntimeContractError;
+    expect(contractError.component).toBe("pi-ai");
+    expect(contractError.capability).toBe("normalizeContext");
+    expect(contractError.message).toContain("missing normalizeContext");
+    expect(contractError.message).toContain(PINNED_INSTALL_COMMAND);
+  });
+
   it("rejects each api family missing stream or streamSimple with its family component", async () => {
     const boundary = makeDependencies({
       modules: {
@@ -216,7 +231,7 @@ describe("validatePiRuntimeContract (#1573)", () => {
         "@earendil-works/pi-agent-core": {
           Agent: class FakeAgent { subscribe(): void { subscribe(); } prompt(): void {} steer(): void {} followUp(): void {} clearAllQueues(): void {} abort(): void {} waitForIdle(): void {} },
         },
-        "@earendil-works/pi-ai": { createProvider },
+        "@earendil-works/pi-ai": { createProvider, normalizeContext: vi.fn() },
         "@earendil-works/pi-ai/api/openai-completions": { stream, streamSimple },
         "@earendil-works/pi-ai/api/anthropic-messages": { stream, streamSimple },
       },
@@ -252,7 +267,7 @@ describe("validatePiRuntimeContract (#1573)", () => {
     const boundary = makeDependencies({
       modules: {
         "@earendil-works/pi-agent-core": makeAgentCoreModule(),
-        "@earendil-works/pi-ai": { createProvider: vi.fn(), clampThinkingLevel },
+        "@earendil-works/pi-ai": { createProvider: vi.fn(), clampThinkingLevel, normalizeContext: vi.fn() },
         "@earendil-works/pi-ai/api/openai-completions": makeApiModule(),
       },
     });

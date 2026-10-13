@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import type { Model, Api } from "@earendil-works/pi-ai";
+import { normalizeContext } from "@earendil-works/pi-ai";
 import { createPiStreamFn } from "./pi-stream-fn.js";
 import { FallbackPolicy } from "./fallback-policy.js";
 import { ModelHealthRegistry } from "./model-health-registry.js";
@@ -78,7 +79,7 @@ describe("pi-stream-fn → createPiAiAssistantStream boundary", () => {
     });
     // Awaited: StreamFn allows async implementations; abtars' is sync and
     // await is identity there. Keeps the boundary honest about both shapes.
-    const stream = await streamFn(makeModel(), { messages: [] }, {});
+    const stream = await streamFn(makeModel(), normalizeContext({ messages: [] }), {});
     for await (const _ev of stream) { /* consume */ }
 
     expect(vi.mocked(createPiAiAssistantStream)).toHaveBeenCalledTimes(1);
@@ -93,7 +94,7 @@ describe("pi-stream-fn → createPiAiAssistantStream boundary", () => {
       policy: anthropicPolicy, executionId: "exec_2",
       providerRequestIdFactory: () => "no-anthropic-id",
     });
-    const stream2 = await streamFn(makeModel({ id: "claude", api: "anthropic-messages" }), { messages: [] }, {});
+    const stream2 = await streamFn(makeModel({ id: "claude", api: "anthropic-messages" }), normalizeContext({ messages: [] }), {});
     for await (const _ev of stream2) { /* consume */ }
 
     expect(vi.mocked(createPiAiAssistantStream)).toHaveBeenCalledTimes(1);

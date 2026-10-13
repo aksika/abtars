@@ -154,6 +154,15 @@ export async function validatePiRuntimeContract(
     );
   }
 
+  // #1921: Pi 0.86+ requires TranscriptContext stream inputs; the adapter
+  // normalizes through the loaded root module, so probe it like createProvider.
+  if (typeof (aiModule as Record<string, unknown>).normalizeContext !== "function") {
+    throw new PiRuntimeContractError(
+      contractMessage(installation.version, "pi-ai", "normalizeContext", "missing"),
+      { component: "pi-ai", capability: "normalizeContext", installationVersion: installation.version },
+    );
+  }
+
   // #1746: retain clamp population from the pi-ai root module already loaded
   // here. buildTransport() populates it before construction, including the
   // /reset path; this call also covers transports initialized outside that

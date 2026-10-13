@@ -15,7 +15,7 @@
  *   - Precedence (C1): pi wins ONLY when fully resolvable — warmed ∧ provider maps (C2) ∧
  *     getModel() hits. Custom gateways / ollama / kiro never resolve → always models.json.
  *
- * Contracts verified against @earendil-works/pi-ai@~0.85.1 via devDependency.
+ * Contracts verified against @earendil-works/pi-ai@~1.2.0 via devDependency.
  */
 
 import type { Models } from "@earendil-works/pi-ai";
@@ -29,7 +29,7 @@ const TAG = "pi-catalog";
 /** pi-ai's built-in provider ids (KnownProvider). abtars provider names map by identity. */
 const KNOWN_PI_PROVIDERS = new Set<string>([
   "amazon-bedrock", "ant-ling", "anthropic", "google", "google-vertex", "openai",
-  "azure-openai-responses", "openai-codex", "nvidia", "deepseek", "github-copilot", "xai",
+  "azure", "openai-codex", "nvidia", "deepseek", "github-copilot", "xai",
   "groq", "cerebras", "openrouter", "vercel-ai-gateway", "zai", "zai-coding-cn", "mistral",
   "minimax", "minimax-cn", "moonshotai", "moonshotai-cn", "huggingface", "fireworks",
   "together", "baseten", "opencode", "opencode-go", "kimi-coding", "cloudflare-workers-ai",

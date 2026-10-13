@@ -9,6 +9,7 @@
 
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import type { Model, Api, AssistantMessageEvent } from "@earendil-works/pi-ai";
+import { normalizeContext } from "@earendil-works/pi-ai";
 import { createPiStreamFn } from "./pi-stream-fn.js";
 import { FallbackPolicy } from "./fallback-policy.js";
 import { ModelHealthRegistry } from "./model-health-registry.js";
@@ -115,7 +116,7 @@ describe("pi-stream-fn → Pi-managed dispatch (#1757)", () => {
     vi.mocked(streamPiManaged).mockResolvedValue(fakeStream([doneEvent()]) as never);
     const policy = new FallbackPolicy([makeCandidate()], registry);
     const streamFn = createPiStreamFn({ policy, executionId: "pi-1" });
-    const events = await consume(await streamFn(makeModel(), { messages: [] }, {}));
+    const events = await consume(await streamFn(makeModel(), normalizeContext({ messages: [] }), {}));
     expect(events.at(-1)?.type).toBe("done");
     expect(vi.mocked(streamPiManaged)).toHaveBeenCalledTimes(1);
     expect(vi.mocked(createPiAiAssistantStream)).not.toHaveBeenCalled();
@@ -131,7 +132,7 @@ describe("pi-stream-fn → Pi-managed dispatch (#1757)", () => {
     vi.mocked(streamPiManaged).mockResolvedValue(fakeStream([authErrorEvent()]) as never);
     const policy = new FallbackPolicy([makeCandidate()], registry);
     const streamFn = createPiStreamFn({ policy, executionId: "pi-2" });
-    const events = await consume(await streamFn(makeModel(), { messages: [] }, {}));
+    const events = await consume(await streamFn(makeModel(), normalizeContext({ messages: [] }), {}));
     expect(events.at(-1)?.type).toBe("error");
     expect(registry.shouldSkip("m", "https://pi.test/v1")).toBe(true);
     expect(vi.mocked(createPiAiAssistantStream)).not.toHaveBeenCalled();
@@ -145,7 +146,7 @@ describe("pi-stream-fn → Pi-managed dispatch (#1757)", () => {
     const keyed: ModelCandidate = { ...makeCandidate(), authSource: undefined, apiKey: "k" };
     const policy = new FallbackPolicy([keyed], registry);
     const streamFn = createPiStreamFn({ policy, executionId: "pi-3" });
-    const events = await consume(await streamFn(makeModel(), { messages: [] }, {}));
+    const events = await consume(await streamFn(makeModel(), normalizeContext({ messages: [] }), {}));
     expect(events.at(-1)?.type).toBe("done");
     expect(vi.mocked(streamPiManaged)).not.toHaveBeenCalled();
     expect(vi.mocked(createPiAiAssistantStream)).toHaveBeenCalledTimes(1);

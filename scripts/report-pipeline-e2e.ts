@@ -647,7 +647,11 @@ async function main(): Promise<void> {
     });
     const started = Date.now();
     const events: any[] = [];
-    const stream = await streamFn(acceptanceModel, { messages: [] }, {});
+    // #1921: StreamFn takes Pi's TranscriptContext since 0.86 — normalize the
+    // fixture context through the devDependency copy, as other checkpoints do
+    // with direct pi imports.
+    const { normalizeContext } = await import("@earendil-works/pi-ai");
+    const stream = await streamFn(acceptanceModel, normalizeContext({ messages: [] }), {});
     for await (const ev of stream) events.push(ev);
     const elapsed = Date.now() - started;
     const terminal = events.at(-1);

@@ -3,7 +3,8 @@
 // package's own contract tests.
 
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import type { Model, Api, Context } from "@earendil-works/pi-ai";
+import type { Model, Api } from "@earendil-works/pi-ai";
+import { normalizeContext } from "@earendil-works/pi-ai";
 import { createPiStreamFn } from "./pi-stream-fn.js";
 import { FallbackPolicy } from "./fallback-policy.js";
 import { ModelHealthRegistry } from "./model-health-registry.js";
@@ -13,6 +14,11 @@ import type { SimpleStreamOptions } from "./pi-core-types.js";
 function makeRegistry() {
   return new ModelHealthRegistry();
 }
+
+// #1921: StreamFn takes Pi's TranscriptContext since 0.86. The attempt
+// factories below ignore context, so every call site shares one normalized
+// empty transcript.
+const emptyTranscript = () => normalizeContext({ messages: [] });
 
 function makeCandidate(overrides?: Partial<ModelCandidate>): ModelCandidate {
   return {
@@ -88,7 +94,7 @@ describe("createPiStreamFn", () => {
       createPiAiAttempt: vi.fn().mockRejectedValue(new Error("provider unavailable")),
     });
     const events: any[] = [];
-    for await (const event of await streamFn(model, { messages: [] })) events.push(event);
+    for await (const event of await streamFn(model, emptyTranscript())) events.push(event);
     expect(events.at(-1)?.type).toBe("error");
     expect(events.at(-1)?.error?.stopReason).toBe("error");
     expect(events.at(-1)?.error?.errorMessage).toBeTruthy();
@@ -102,7 +108,7 @@ describe("createPiStreamFn", () => {
 
     const attemptFactory = vi.fn().mockResolvedValue(fakeStream);
     const streamFn = createPiStreamFn({ policy, executionId: "test", createPiAiAttempt: attemptFactory });
-    const ctx: Context = { systemPrompt: "You are a bot.", messages: [{ role: "user", content: "hi", timestamp: 0 }] };
+    const ctx = normalizeContext({ systemPrompt: "You are a bot.", messages: [{ role: "user", content: "hi", timestamp: 0 }] });
     const opts: SimpleStreamOptions = {};
 
     const stream = await streamFn(makeModel(), ctx, opts);
@@ -125,7 +131,7 @@ describe("createPiStreamFn", () => {
     ]));
 
     const stream = await createPiStreamFn({ policy: metadataPolicy, executionId: "test", createPiAiAttempt: attemptFactory })(
-      makeModel(), { messages: [] }, {},
+      makeModel(), emptyTranscript(), {},
     );
     for await (const _event of stream) { /* consume */ }
 
@@ -147,7 +153,7 @@ describe("createPiStreamFn", () => {
       ]));
 
     const streamFn = createPiStreamFn({ policy: failPolicy, executionId: "test", createPiAiAttempt: attemptFactory });
-    const ctx: Context = { systemPrompt: "", messages: [{ role: "user", content: "hi", timestamp: 0 }] };
+    const ctx = normalizeContext({ systemPrompt: "", messages: [{ role: "user", content: "hi", timestamp: 0 }] });
     const opts: SimpleStreamOptions = {};
 
     const stream = await streamFn(makeModel(), ctx, opts);
@@ -172,7 +178,7 @@ describe("createPiStreamFn", () => {
       ]));
     const streamFn = createPiStreamFn({ policy: rotatedPolicy, executionId: "rotation-fallback", createPiAiAttempt: attemptFactory });
     const events: any[] = [];
-    for await (const event of await streamFn(makeModel(), { messages: [] })) events.push(event);
+    for await (const event of await streamFn(makeModel(), emptyTranscript())) events.push(event);
 
     expect(attemptFactory.mock.calls.map((call) => (call[0] as ModelCandidate).model)).toEqual(["second", "first"]);
     expect(events.some((event) => event.type === "done" && event.message?.content === "recovered")).toBe(true);
@@ -202,7 +208,7 @@ describe("createPiStreamFn", () => {
     });
 
     const streamFn = createPiStreamFn({ policy: failPolicy, executionId: "test", createPiAiAttempt: attemptFactory });
-    const ctx: Context = { systemPrompt: "", messages: [{ role: "user", content: "hi", timestamp: 0 }] };
+    const ctx = normalizeContext({ systemPrompt: "", messages: [{ role: "user", content: "hi", timestamp: 0 }] });
     const opts: SimpleStreamOptions = {};
 
     const stream = await streamFn(makeModel(), ctx, opts);
@@ -217,7 +223,7 @@ describe("createPiStreamFn", () => {
   it("returns error stream on total exhaustion", async () => {
     const attemptFactory = vi.fn().mockRejectedValue(new Error("API error 500"));
     const streamFn = createPiStreamFn({ policy, executionId: "test", createPiAiAttempt: attemptFactory });
-    const ctx = { systemPrompt: "", messages: [] };
+    const ctx = emptyTranscript();
     const opts: SimpleStreamOptions = {};
 
     const stream = await streamFn(makeModel(), ctx, opts);
@@ -237,7 +243,7 @@ describe("createPiStreamFn", () => {
     });
 
     const streamFn = createPiStreamFn({ policy, executionId: "test", createPiAiAttempt: attemptFactory });
-    const ctx = { systemPrompt: "", messages: [] };
+    const ctx = emptyTranscript();
     const opts: SimpleStreamOptions = { signal: controller.signal };
 
     const stream = await streamFn(makeModel(), ctx, opts);
@@ -261,7 +267,7 @@ describe("createPiStreamFn", () => {
 
     const streamFn = createPiStreamFn({ policy, executionId: "test", createPiAiAttempt: attemptFactory });
     const events: any[] = [];
-    for await (const event of await streamFn(makeModel(), { messages: [] }, { signal: controller.signal })) events.push(event);
+    for await (const event of await streamFn(makeModel(), emptyTranscript(), { signal: controller.signal })) events.push(event);
 
     expect(events.some((e) => e.type === "error")).toBe(true);
     expect((events.find((e) => e.type === "error")?.error as { stopReason?: string } | undefined)?.stopReason).toBe("aborted");
@@ -297,7 +303,7 @@ describe("createPiStreamFn", () => {
       providerInactivityTimeoutMs: 20,
     });
     const events: any[] = [];
-    for await (const event of await streamFn(makeModel(), { messages: [] }, {})) events.push(event);
+    for await (const event of await streamFn(makeModel(), emptyTranscript(), {})) events.push(event);
 
     expect(attemptFactory).toHaveBeenCalledTimes(2);
     expect(firstSignal?.aborted).toBe(true);
@@ -324,7 +330,7 @@ describe("createPiStreamFn", () => {
       providerInactivityTimeoutMs: 20,
     });
     const events: any[] = [];
-    for await (const event of await streamFn(makeModel(), { messages: [] }, {})) events.push(event);
+    for await (const event of await streamFn(makeModel(), emptyTranscript(), {})) events.push(event);
 
     expect(attemptFactory).toHaveBeenCalledTimes(2);
     expect(firstSignal?.aborted).toBe(true);
@@ -364,7 +370,7 @@ describe("createPiStreamFn", () => {
       telemetry: mockTelemetry,
     });
     const events: any[] = [];
-    for await (const event of await streamFn(makeModel(), { messages: [] }, {})) events.push(event);
+    for await (const event of await streamFn(makeModel(), emptyTranscript(), {})) events.push(event);
 
     expect(events.some((event) => event.type === "done" && event.message?.content === "fallback")).toBe(true);
     // Exactly one terminal record per started request: stuck timeout + fallback success.
@@ -417,7 +423,7 @@ describe("createPiStreamFn", () => {
       telemetry: mockTelemetry,
     });
     const events: any[] = [];
-    for await (const event of await streamFn(makeModel(), { messages: [] }, {})) events.push(event);
+    for await (const event of await streamFn(makeModel(), emptyTranscript(), {})) events.push(event);
 
     expect(events.some((event) => event.type === "done" && event.message?.content === "fallback")).toBe(true);
     rejectLate?.(new Error("late provider failure"));
@@ -450,7 +456,7 @@ describe("createPiStreamFn", () => {
       providerInactivityTimeoutMs: 20,
     });
     const events: any[] = [];
-    for await (const event of await streamFn(makeModel(), { messages: [] }, {})) events.push(event);
+    for await (const event of await streamFn(makeModel(), emptyTranscript(), {})) events.push(event);
 
     expect(attemptFactory).toHaveBeenCalledTimes(1);
     expect(events.some((event) => event.type === "text_delta" && event.delta === "partial")).toBe(true);
@@ -475,7 +481,7 @@ describe("createPiStreamFn", () => {
       providerRequestIdFactory: requestIdFactory,
     });
     const opts: SimpleStreamOptions = { headers: { "x-client-request-id": "stale-session-value" } };
-    for await (const _ev of await streamFn(makeModel({ api: "openai-completions" }), { messages: [] }, opts)) { /* consume */ }
+    for await (const _ev of await streamFn(makeModel({ api: "openai-completions" }), emptyTranscript(), opts)) { /* consume */ }
 
     const passedOptions = attemptFactory.mock.calls[0]?.[3] as SimpleStreamOptions;
     expect(passedOptions?.headers?.["x-client-request-id"]).toBe("gen-req-1");
@@ -498,8 +504,8 @@ describe("createPiStreamFn", () => {
       policy, createPiAiAttempt: attemptFactory, executionId: "exec_1",
       providerRequestIdFactory: requestIdFactory,
     });
-    for await (const _ev of await streamFn(makeModel({ api: "openai-completions" }), { messages: [] }, {})) { /* consume */ }
-    for await (const _ev of await streamFn(makeModel({ api: "openai-completions" }), { messages: [] }, {})) { /* consume */ }
+    for await (const _ev of await streamFn(makeModel({ api: "openai-completions" }), emptyTranscript(), {})) { /* consume */ }
+    for await (const _ev of await streamFn(makeModel({ api: "openai-completions" }), emptyTranscript(), {})) { /* consume */ }
     expect(ids).toHaveLength(2);
     expect(ids[0]).not.toBe(ids[1]);
   });
@@ -521,7 +527,7 @@ describe("createPiStreamFn", () => {
       policy, createPiAiAttempt: attemptFactory, executionId: "exec_1",
       providerRequestIdFactory: requestIdFactory,
     });
-    for await (const _ev of await streamFn(makeModel({ api: "openai-completions" }), { messages: [] }, {})) { /* consume */ }
+    for await (const _ev of await streamFn(makeModel({ api: "openai-completions" }), emptyTranscript(), {})) { /* consume */ }
 
     // Two IDs: one for the conflict attempt, one for the retry
     expect(ids).toHaveLength(2);
@@ -546,7 +552,7 @@ describe("createPiStreamFn", () => {
       sessionId: "cache-affinity-session",
       headers: { "x-custom": "custom-value" },
     };
-    for await (const _ev of await streamFn(makeModel({ api: "openai-completions" }), { messages: [] }, opts)) { /* consume */ }
+    for await (const _ev of await streamFn(makeModel({ api: "openai-completions" }), emptyTranscript(), opts)) { /* consume */ }
 
     const passedOptions = attemptFactory.mock.calls[0]?.[3] as SimpleStreamOptions;
     expect(passedOptions?.sessionId).toBe("cache-affinity-session");
@@ -566,7 +572,7 @@ describe("createPiStreamFn", () => {
       providerRequestIdFactory: () => "gen-id",
     });
     const opts: SimpleStreamOptions = {};
-    for await (const _ev of await streamFn(makeModel({ id: "claude", api: "anthropic-messages" }), { messages: [] }, opts)) { /* consume */ }
+    for await (const _ev of await streamFn(makeModel({ id: "claude", api: "anthropic-messages" }), emptyTranscript(), opts)) { /* consume */ }
 
     const passedOptions = attemptFactory.mock.calls[0]?.[3] as SimpleStreamOptions;
     expect(passedOptions?.headers?.["x-client-request-id"]).toBeUndefined();
@@ -583,7 +589,7 @@ describe("createPiStreamFn", () => {
       policy, createPiAiAttempt: attemptFactory, executionId: "exec_1",
       cacheIdentity: "cache-id-1", cacheRetention: "short",
     });
-    for await (const _ev of await streamFn(makeModel({ api: "openai-completions" }), { messages: [] }, {})) { /* consume */ }
+    for await (const _ev of await streamFn(makeModel({ api: "openai-completions" }), emptyTranscript(), {})) { /* consume */ }
 
     const passedOptions = attemptFactory.mock.calls[0]?.[3] as SimpleStreamOptions;
     expect(passedOptions?.sessionId).toBe("cache-id-1");
@@ -604,7 +610,7 @@ describe("createPiStreamFn", () => {
       policy: rotationPolicy, createPiAiAttempt: attemptFactory, executionId: "exec_1",
       cacheIdentity: "rotation-stable-id",
     });
-    for await (const _ev of await streamFn(makeModel({ api: "openai-completions" }), { messages: [] }, {})) { /* consume */ }
+    for await (const _ev of await streamFn(makeModel({ api: "openai-completions" }), emptyTranscript(), {})) { /* consume */ }
 
     expect(attemptFactory).toHaveBeenCalledTimes(2);
     const opts1 = attemptFactory.mock.calls[0]?.[3] as SimpleStreamOptions;
@@ -627,7 +633,7 @@ describe("createPiStreamFn", () => {
       policy: rotationPolicy, createPiAiAttempt: attemptFactory, executionId: "exec_1",
       cacheIdentity: "rotation-stable-id", cacheRetention: "short",
     });
-    for await (const _ev of await streamFn(makeModel(), { messages: [] }, {})) { /* consume */ }
+    for await (const _ev of await streamFn(makeModel(), emptyTranscript(), {})) { /* consume */ }
 
     const opts1 = attemptFactory.mock.calls[0]?.[3] as SimpleStreamOptions;
     const opts2 = attemptFactory.mock.calls[1]?.[3] as SimpleStreamOptions;
@@ -658,7 +664,7 @@ describe("createPiStreamFn", () => {
       providerRequestIdFactory: requestIdFactory,
       cacheIdentity: "rotation-stable-id",
     });
-    for await (const _ev of await streamFn(makeModel({ api: "openai-completions" }), { messages: [] }, {})) { /* consume */ }
+    for await (const _ev of await streamFn(makeModel({ api: "openai-completions" }), emptyTranscript(), {})) { /* consume */ }
 
     const opts1 = attemptFactory.mock.calls[0]?.[3] as SimpleStreamOptions;
     const opts2 = attemptFactory.mock.calls[1]?.[3] as SimpleStreamOptions;
@@ -684,7 +690,7 @@ describe("createPiStreamFn", () => {
       providerRequestIdFactory: () => "fresh-id",
     });
     const events: any[] = [];
-    for await (const ev of await streamFn(makeModel({ api: "openai-completions" }), { messages: [] }, {})) events.push(ev);
+    for await (const ev of await streamFn(makeModel({ api: "openai-completions" }), emptyTranscript(), {})) events.push(ev);
 
     expect(attemptFactory).toHaveBeenCalledTimes(2);
     expect(events.some((e) => e.type === "text_delta")).toBe(true);
@@ -706,7 +712,7 @@ describe("createPiStreamFn", () => {
       providerRequestIdFactory: () => "fresh-id",
     });
     const events: any[] = [];
-    for await (const ev of await streamFn(makeModel({ api: "openai-completions" }), { messages: [] }, {})) events.push(ev);
+    for await (const ev of await streamFn(makeModel({ api: "openai-completions" }), emptyTranscript(), {})) events.push(ev);
 
     expect(attemptFactory).toHaveBeenCalledTimes(2);
     expect(events.some((e) => e.type === "text_delta")).toBe(true);
@@ -722,7 +728,7 @@ describe("createPiStreamFn", () => {
       providerRequestIdFactory: () => "fresh-id",
     });
     const events: any[] = [];
-    for await (const ev of await streamFn(makeModel({ api: "openai-completions" }), { messages: [] }, {})) events.push(ev);
+    for await (const ev of await streamFn(makeModel({ api: "openai-completions" }), emptyTranscript(), {})) events.push(ev);
 
     // Called twice: original attempt + retry attempt (both fail)
     expect(attemptFactory).toHaveBeenCalledTimes(2);
@@ -741,7 +747,7 @@ describe("createPiStreamFn", () => {
       providerRequestIdFactory: () => "fresh-id",
     });
     const events: any[] = [];
-    for await (const ev of await streamFn(makeModel({ api: "openai-completions" }), { messages: [] }, {})) events.push(ev);
+    for await (const ev of await streamFn(makeModel({ api: "openai-completions" }), emptyTranscript(), {})) events.push(ev);
 
     // Only one attempt — no retry after commit
     expect(attemptFactory).toHaveBeenCalledTimes(1);
@@ -767,7 +773,7 @@ describe("createPiStreamFn", () => {
       providerRequestIdFactory: () => "fresh-id",
     });
     const events: any[] = [];
-    for await (const ev of await streamFn(makeModel({ api: "openai-completions" }), { messages: [] }, {})) events.push(ev);
+    for await (const ev of await streamFn(makeModel({ api: "openai-completions" }), emptyTranscript(), {})) events.push(ev);
 
     // Two calls for first candidate (conflict + recovery failure) + one for second (success)
     expect(attemptFactory).toHaveBeenCalledTimes(3);
@@ -800,7 +806,7 @@ describe("createPiStreamFn", () => {
       providerRequestIdFactory: () => "fresh-id",
       telemetry: mockTelemetry,
     });
-    for await (const _ev of await streamFn(makeModel({ api: "openai-completions" }), { messages: [] }, {})) { /* consume */ }
+    for await (const _ev of await streamFn(makeModel({ api: "openai-completions" }), emptyTranscript(), {})) { /* consume */ }
 
     // Two telemetry calls: one failure (conflict), one success (recovery)
     expect(mockTelemetry.beginProviderCall).toHaveBeenCalledTimes(2);
@@ -820,7 +826,7 @@ describe("createPiStreamFn", () => {
       policy, createPiAiAttempt: attemptFactory, executionId: "exec_1",
       providerRequestIdFactory: () => "fresh-id",
     });
-    for await (const _ev of await streamFn(makeModel({ api: "openai-completions" }), { messages: [] }, {})) { /* consume */ }
+    for await (const _ev of await streamFn(makeModel({ api: "openai-completions" }), emptyTranscript(), {})) { /* consume */ }
 
     // The candidate should NOT be excluded (recordError was not called for the conflict)
     expect(policy.excludedKeys.size).toBe(0);
@@ -835,7 +841,7 @@ describe("createPiStreamFn", () => {
       policy, createPiAiAttempt: attemptFactory, executionId: "exec_1",
       providerRequestIdFactory: () => "fresh-id",
     });
-    for await (const _ev of await streamFn(makeModel({ api: "openai-completions" }), { messages: [] }, {})) { /* consume */ }
+    for await (const _ev of await streamFn(makeModel({ api: "openai-completions" }), emptyTranscript(), {})) { /* consume */ }
 
     // The candidate IS excluded after the recovery attempt fails (one recordError)
     expect(policy.excludedKeys.size).toBe(1);
@@ -849,7 +855,7 @@ describe("createPiStreamFn", () => {
   ])("records credits (not transient) for Pi-AI 402 format: %s", async (message) => {
     const attemptFactory = vi.fn().mockRejectedValue(new Error(message));
     const streamFn = createPiStreamFn({ policy, executionId: "exec_1", createPiAiAttempt: attemptFactory });
-    for await (const _ev of await streamFn(makeModel({ api: "openai-completions" }), { messages: [] }, {})) { /* consume */ }
+    for await (const _ev of await streamFn(makeModel({ api: "openai-completions" }), emptyTranscript(), {})) { /* consume */ }
 
     expect(registry.isCreditFailed("test-model", "https://api.test/v1")).toBe(true);
     expect(policy.excludedKeys.has("test-model@https://api.test/v1")).toBe(true);
@@ -860,7 +866,7 @@ describe("createPiStreamFn", () => {
       { type: "error", reason: "error", error: { role: "assistant", content: [], stopReason: "error", errorMessage: "API error 402: credits exhausted", usage: { input: 0, output: 0 } } },
     ]));
     const streamFn = createPiStreamFn({ policy, executionId: "exec_1", createPiAiAttempt: attemptFactory });
-    for await (const _ev of await streamFn(makeModel({ api: "openai-completions" }), { messages: [] }, {})) { /* consume */ }
+    for await (const _ev of await streamFn(makeModel({ api: "openai-completions" }), emptyTranscript(), {})) { /* consume */ }
 
     expect(registry.isCreditFailed("test-model", "https://api.test/v1")).toBe(true);
   });
@@ -868,7 +874,7 @@ describe("createPiStreamFn", () => {
   it("records transient (not credits) for a 500 error", async () => {
     const attemptFactory = vi.fn().mockRejectedValue(new Error("API error 500: server failure"));
     const streamFn = createPiStreamFn({ policy, executionId: "exec_1", createPiAiAttempt: attemptFactory });
-    for await (const _ev of await streamFn(makeModel({ api: "openai-completions" }), { messages: [] }, {})) { /* consume */ }
+    for await (const _ev of await streamFn(makeModel({ api: "openai-completions" }), emptyTranscript(), {})) { /* consume */ }
 
     expect(registry.isCreditFailed("test-model", "https://api.test/v1")).toBe(false);
     expect(registry.getBucketLevel("test-model", "https://api.test/v1")).toBeGreaterThan(0);
@@ -878,7 +884,7 @@ describe("createPiStreamFn", () => {
     vi.useFakeTimers();
     const attemptFactory = vi.fn().mockRejectedValue(new Error('API error 429: rate limited {"retry_after": 60}'));
     const streamFn = createPiStreamFn({ policy, executionId: "exec_1", createPiAiAttempt: attemptFactory });
-    for await (const _ev of await streamFn(makeModel({ api: "openai-completions" }), { messages: [] }, {})) { /* consume */ }
+    for await (const _ev of await streamFn(makeModel({ api: "openai-completions" }), emptyTranscript(), {})) { /* consume */ }
 
     expect(registry.shouldSkip("test-model", "https://api.test/v1")).toBe(true);
     vi.advanceTimersByTime(61_000);
@@ -905,7 +911,7 @@ describe("createPiStreamFn", () => {
       { type: "error", reason: "error", error: { role: "assistant", content: [], stopReason: "error", errorMessage: "This model's maximum context length is 128000 tokens. However, your messages resulted in 129000 tokens", usage: { input: 0, output: 0 } } },
     );
     const streamFn = createPiStreamFn({ policy, executionId: "exec_1", createPiAiAttempt: vi.fn().mockResolvedValue(fakePi) });
-    for await (const _ev of await streamFn(makeModel({ api: "openai-completions", contextWindow: 128000 }), { messages: [] }, {})) { /* consume */ }
+    for await (const _ev of await streamFn(makeModel({ api: "openai-completions", contextWindow: 128000 }), emptyTranscript(), {})) { /* consume */ }
 
     // The predicate receives the AssistantMessage (not a stringified error) and
     // the model's context window — the evidence the seam used to discard.
@@ -927,7 +933,7 @@ describe("createPiStreamFn", () => {
     );
     const attemptFactory = vi.fn().mockResolvedValue(fakePi);
     const streamFn = createPiStreamFn({ policy: candidatePolicy, executionId: "exec_1", createPiAiAttempt: attemptFactory });
-    for await (const _ev of await streamFn(makeModel({ api: "openai-completions", contextWindow: 128_000 }), { messages: [] }, {})) { /* consume */ }
+    for await (const _ev of await streamFn(makeModel({ api: "openai-completions", contextWindow: 128_000 }), emptyTranscript(), {})) { /* consume */ }
 
     expect(attemptFactory.mock.calls[0]?.[1]).toMatchObject({ contextWindow: 64_000 });
     expect(fakePi.pi.isContextOverflow).toHaveBeenCalledWith(
@@ -943,7 +949,7 @@ describe("createPiStreamFn", () => {
       { type: "error", reason: "error", error: { role: "assistant", content: [], stopReason: "error", errorMessage: "prompt is too long: 200000 tokens > 128000 maximum", usage: { input: 0, output: 0 } } },
     );
     const streamFn = createPiStreamFn({ policy, executionId: "exec_1", createPiAiAttempt: vi.fn().mockResolvedValue(fakePi) });
-    for await (const _ev of await streamFn(makeModel({ api: "openai-completions" }), { messages: [] }, {})) { /* consume */ }
+    for await (const _ev of await streamFn(makeModel({ api: "openai-completions" }), emptyTranscript(), {})) { /* consume */ }
 
     expect(registry.getBucketLevel("test-model", "https://api.test/v1")).toBe(0);
   });
@@ -955,7 +961,7 @@ describe("createPiStreamFn", () => {
       { type: "error", reason: "error", error: { role: "assistant", content: [], stopReason: "error", errorMessage: "API error 402: insufficient credits — token limit exceeded", usage: { input: 0, output: 0 } } },
     );
     const streamFn = createPiStreamFn({ policy, executionId: "exec_1", createPiAiAttempt: vi.fn().mockResolvedValue(fakePi) });
-    for await (const _ev of await streamFn(makeModel({ api: "openai-completions" }), { messages: [] }, {})) { /* consume */ }
+    for await (const _ev of await streamFn(makeModel({ api: "openai-completions" }), emptyTranscript(), {})) { /* consume */ }
 
     expect(registry.isCreditFailed("test-model", "https://api.test/v1")).toBe(true);
     expect(registry.getBucketLevel("test-model", "https://api.test/v1")).toBe(100);
@@ -967,7 +973,7 @@ describe("createPiStreamFn", () => {
       { type: "error", reason: "error", error: { role: "assistant", content: [], stopReason: "error", errorMessage: 'API error 429: token limit reached {"retry_after": 60}', usage: { input: 0, output: 0 } } },
     );
     const streamFn = createPiStreamFn({ policy, executionId: "exec_1", createPiAiAttempt: vi.fn().mockResolvedValue(fakePi) });
-    for await (const _ev of await streamFn(makeModel({ api: "openai-completions" }), { messages: [] }, {})) { /* consume */ }
+    for await (const _ev of await streamFn(makeModel({ api: "openai-completions" }), emptyTranscript(), {})) { /* consume */ }
 
     // rate_limit fills 0.5 and arms the retry-after cooldown — not context_exceeded.
     expect(registry.getBucketLevel("test-model", "https://api.test/v1")).toBe(50);
@@ -981,7 +987,7 @@ describe("createPiStreamFn", () => {
       { type: "error", reason: "error", error: { role: "assistant", content: [], stopReason: "error", errorMessage: "Provider finish_reason: content_filter", usage: { input: 0, output: 0 } } },
     );
     const streamFn = createPiStreamFn({ policy, executionId: "exec_1", createPiAiAttempt: vi.fn().mockResolvedValue(fakePi) });
-    for await (const _ev of await streamFn(makeModel({ api: "openai-completions" }), { messages: [] }, {})) { /* consume */ }
+    for await (const _ev of await streamFn(makeModel({ api: "openai-completions" }), emptyTranscript(), {})) { /* consume */ }
 
     expect(registry.getBucketLevel("test-model", "https://api.test/v1")).toBeGreaterThan(0);
     expect(registry.isCreditFailed("test-model", "https://api.test/v1")).toBe(false);
@@ -1004,7 +1010,7 @@ describe("createPiStreamFn", () => {
       createPiAiAttempt: attemptFactory, onTerminalFailure,
     });
     const events: any[] = [];
-    for await (const ev of await streamFn(makeModel({ api: "openai-completions" }), { messages: [] }, {})) events.push(ev);
+    for await (const ev of await streamFn(makeModel({ api: "openai-completions" }), emptyTranscript(), {})) events.push(ev);
 
     expect(attemptFactory).not.toHaveBeenCalled();
     expect(onTerminalFailure).toHaveBeenCalledTimes(1);
@@ -1028,7 +1034,7 @@ describe("createPiStreamFn", () => {
       policy: exhaustionPolicy, executionId: "exec_1",
       createPiAiAttempt: attemptFactory, onTerminalFailure,
     });
-    for await (const _ev of await streamFn(makeModel({ api: "openai-completions" }), { messages: [] }, {})) { /* consume */ }
+    for await (const _ev of await streamFn(makeModel({ api: "openai-completions" }), emptyTranscript(), {})) { /* consume */ }
 
     expect(attemptFactory).toHaveBeenCalledTimes(1);
     expect(attemptFactory.mock.calls[0]?.[0]).toMatchObject({ model: "second" });
@@ -1050,7 +1056,7 @@ describe("createPiStreamFn", () => {
       policy: mixedPolicy, executionId: "exec_1",
       createPiAiAttempt: attemptFactory, onTerminalFailure,
     });
-    for await (const _ev of await streamFn(makeModel({ api: "openai-completions" }), { messages: [] }, {})) { /* consume */ }
+    for await (const _ev of await streamFn(makeModel({ api: "openai-completions" }), emptyTranscript(), {})) { /* consume */ }
 
     expect(onTerminalFailure).toHaveBeenCalledTimes(1);
     expect(onTerminalFailure).toHaveBeenCalledWith(expect.objectContaining({
@@ -1076,7 +1082,7 @@ describe("createPiStreamFn", () => {
       createPiAiAttempt: attemptFactory, onTerminalFailure,
     });
     const events: any[] = [];
-    for await (const ev of await streamFn(makeModel({ api: "openai-completions" }), { messages: [] }, {})) events.push(ev);
+    for await (const ev of await streamFn(makeModel({ api: "openai-completions" }), emptyTranscript(), {})) events.push(ev);
 
     expect(attemptFactory).toHaveBeenCalledTimes(1);
     expect(attemptFactory.mock.calls[0]?.[0]).toMatchObject({ model: "second" });
@@ -1095,7 +1101,7 @@ describe("createPiStreamFn", () => {
     const overflowEvent = { type: "error", reason: "error", error: { role: "assistant", content: [], stopReason: "error", errorMessage: "This model's maximum context length is 128000 tokens", usage: { input: 0, output: 0 } } };
     const attemptFactory = vi.fn().mockResolvedValue(overflowAttempt(() => true, overflowEvent));
     const streamFn = createPiStreamFn({ policy: overflowPolicy, executionId: "exec_1", createPiAiAttempt: attemptFactory, onTerminalFailure });
-    for await (const _ev of await streamFn(makeModel({ api: "openai-completions" }), { messages: [] }, {})) { /* consume */ }
+    for await (const _ev of await streamFn(makeModel({ api: "openai-completions" }), emptyTranscript(), {})) { /* consume */ }
 
     expect(attemptFactory).toHaveBeenCalledTimes(2);
     expect(onTerminalFailure).toHaveBeenCalledTimes(1);
@@ -1117,7 +1123,7 @@ describe("createPiStreamFn", () => {
       .mockResolvedValueOnce(overflowAttempt(() => true, overflowEvent))
       .mockRejectedValueOnce(new Error("API error 401: invalid credentials"));
     const streamFn = createPiStreamFn({ policy: mixedPolicy, executionId: "exec_1", createPiAiAttempt: attemptFactory, onTerminalFailure });
-    for await (const _ev of await streamFn(makeModel({ api: "openai-completions" }), { messages: [] }, {})) { /* consume */ }
+    for await (const _ev of await streamFn(makeModel({ api: "openai-completions" }), emptyTranscript(), {})) { /* consume */ }
 
     expect(attemptFactory).toHaveBeenCalledTimes(2);
     expect(onTerminalFailure).toHaveBeenCalledTimes(1);
@@ -1137,7 +1143,7 @@ describe("createPiStreamFn", () => {
 
     const onTerminalFailure = vi.fn();
     const streamFn = createPiStreamFn({ policy: creditsPolicy, executionId: "exec_1", onTerminalFailure });
-    for await (const _ev of await streamFn(makeModel({ api: "openai-completions" }), { messages: [] }, {})) { /* consume */ }
+    for await (const _ev of await streamFn(makeModel({ api: "openai-completions" }), emptyTranscript(), {})) { /* consume */ }
 
     expect(onTerminalFailure).toHaveBeenCalledTimes(1);
     expect(onTerminalFailure).toHaveBeenCalledWith(expect.objectContaining({ code: "credits_exhausted" }));
@@ -1152,7 +1158,7 @@ describe("createPiStreamFn", () => {
       return overflowAttempt(() => true, overflowEvent);
     });
     const streamFn = createPiStreamFn({ policy, executionId: "exec_1", createPiAiAttempt: attemptFactory, onTerminalFailure });
-    for await (const _ev of await streamFn(makeModel({ api: "openai-completions" }), { messages: [] }, { signal: controller.signal })) { /* consume */ }
+    for await (const _ev of await streamFn(makeModel({ api: "openai-completions" }), emptyTranscript(), { signal: controller.signal })) { /* consume */ }
 
     expect(onTerminalFailure).not.toHaveBeenCalled();
   });
@@ -1172,7 +1178,7 @@ describe("createPiStreamFn", () => {
       createPiAiAttempt: attemptFactory, onTerminalFailure,
     });
     const events: any[] = [];
-    for await (const ev of await streamFn(makeModel({ api: "openai-completions" }), { messages: [] }, {})) events.push(ev);
+    for await (const ev of await streamFn(makeModel({ api: "openai-completions" }), emptyTranscript(), {})) events.push(ev);
 
     expect(attemptFactory).not.toHaveBeenCalled();
     expect(onTerminalFailure).toHaveBeenCalledTimes(1);
@@ -1199,7 +1205,7 @@ describe("createPiStreamFn", () => {
       policy: transientPolicy, executionId: "exec_1",
       createPiAiAttempt: attemptFactory, onTerminalFailure,
     });
-    for await (const _ev of await streamFn(makeModel({ api: "openai-completions" }), { messages: [] }, {})) { /* consume */ }
+    for await (const _ev of await streamFn(makeModel({ api: "openai-completions" }), emptyTranscript(), {})) { /* consume */ }
 
     expect(attemptFactory).toHaveBeenCalledTimes(2);
     expect(onTerminalFailure).toHaveBeenCalledTimes(1);
