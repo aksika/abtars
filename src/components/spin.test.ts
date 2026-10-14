@@ -305,6 +305,31 @@ describe("Spin — unified session router (#943)", () => {
       spin.greetSession(session, 111, "aksika", adapter);
       expect(adapter.injectMessage).not.toHaveBeenCalled();
     });
+
+    it("boot greeting fires despite messageCount > 0 (in-process restart)", () => {
+      const session = spin.getActiveSession("aksika", "telegram");
+      session.transport = mockTransport();
+      session.messageCount = 5;
+      const adapter = { injectMessage: vi.fn() };
+      spin.greetSession(session, 111, "aksika", adapter, undefined, true);
+      expect(adapter.injectMessage).toHaveBeenCalledWith(expect.objectContaining({
+        text: expect.stringContaining("[SESSION START]"),
+      }));
+    });
+
+    it("resetBootGreeting re-arms the automatic greeting after a boot", () => {
+      const adapter = { injectMessage: vi.fn() };
+      spin.registerMasterSession({ userId: "aksika", chatId: 111, platform: "telegram", transport: mockTransport() });
+      spin.setGreetingAdapter(adapter);
+      expect(adapter.injectMessage).toHaveBeenCalledTimes(1);
+      // Second boot without reset stays silent (the reported bug).
+      spin.setGreetingAdapter(adapter);
+      expect(adapter.injectMessage).toHaveBeenCalledTimes(1);
+      // Re-arming fires exactly one more greeting.
+      spin.resetBootGreeting();
+      spin.setGreetingAdapter(adapter);
+      expect(adapter.injectMessage).toHaveBeenCalledTimes(2);
+    });
   });
 
   describe("killSession (#1501)", () => {

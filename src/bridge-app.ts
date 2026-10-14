@@ -229,6 +229,14 @@ export async function startBridge(): Promise<number> {
   ctx.isSleepActive = (): boolean => ctx.sleepHandle?.isActive === true;
   ctx.requestShutdownWithCode = (code: number) => bridge.requestShutdown(code);
 
+  // Every BRIDGE START (first boot or in-process restart) arms exactly one
+  // automatic boot greeting: the Spin singleton outlives restarts, so a stale
+  // sent-flag would otherwise suppress it silently.
+  {
+    const { spin } = await import("./components/spin.js");
+    spin.resetBootGreeting();
+  }
+
   // Run boot graph — all phases execute in dependency order (#944)
   await bootGraph(BOOT_NODES, ctx);
 

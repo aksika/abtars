@@ -373,6 +373,19 @@ export class Spin {
       : null;
   }
 
+  /**
+   * Re-arm the automatic boot greeting for a bridge (re)start. The Spin
+   * singleton outlives in-process restarts (main.ts loop), so without this
+   * the stale sent-flag — and possibly a stale preloaded question — would
+   * silently suppress every greeting after the first boot. Called once per
+   * startBridge before the boot graph; the pipelineDeps phase preloads a
+   * fresh question afterwards. Never touches sessions or transports.
+   */
+  resetBootGreeting(): void {
+    this._greetingSent = false;
+    this._bootGreetingQuestion = null;
+  }
+
   registerMasterSession(opts: { userId: string; chatId: number; platform: string; transport: IKiroTransport }): void {
     const session = this.getActiveSession(opts.userId, opts.platform);
     session.transport = opts.transport;
@@ -435,7 +448,7 @@ export class Spin {
     // The closure created by greetSession owns the immutable retry copy. Do
     // not retain the pending question on Spin after the first boot injection.
     this._bootGreetingQuestion = null;
-    this.greetSession(session, chatId, userId, undefined, dreamQuestion);
+    this.greetSession(session, chatId, userId, undefined, dreamQuestion, true);
   }
 
   /** Inject a greeting into an interactive session (A/C only). */
@@ -445,10 +458,13 @@ export class Spin {
     userId: string,
     adapter?: { injectMessage: (msg: any) => void },
     dreamQuestion?: { id: string; text: string },
+    boot = false,
   ): void {
     const type = sessionType(session);
     if (type !== "A" && type !== "C") return;
-    if (session.messageCount > 0) return;
+    // Boot greetings fire on every bridge (re)start even when the surviving
+    // in-process session already counts messages; direct calls keep the guard.
+    if (!boot && session.messageCount > 0) return;
     const a = adapter ?? this._greetingAdapter;
     if (!a) return;
 
