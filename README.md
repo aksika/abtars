@@ -75,7 +75,6 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for workflow and conventions.
 
 ## Community
 
-- **Discord:** [Join](https://discord.gg/pj2qbWJT8)
 - **GitHub:** [aksika/abtars](https://github.com/aksika/abtars) · [aksika/abmind](https://github.com/aksika/abmind)
 
 ## License
