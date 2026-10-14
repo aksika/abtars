@@ -17,6 +17,18 @@ Pi's agent core and provider engine power the API model route. abTARS manages me
 
 Messages enter through Telegram, Discord, or the terminal interface and are handled by abTARS. On the API route, Pi runs the model and tool loop; abTARS supplies the session context and available tools. With ACP, abTARS connects to a compatible agent CLI instead. When abmind is installed and configured, it provides persistent memory independently of the Pi runtime.
 
+### What abTARS adds over Pi
+
+Pi supplies the generic engine: the per-turn agent and tool loop,
+provider streaming with tool-call handling, reasoning-level clamping,
+cache session semantics, and context-overflow detection. abTARS supplies
+everything product-specific around it: sessions and message delivery,
+tool definitions with per-execution filtering and in-process execution,
+permission and sandbox policy around every call, turn safety and loop
+guards, provider selection with health tracking and fallback, durable
+context projection, usage and cost telemetry, scheduled work, process
+supervision, peer coordination, and the Pi-free ACP and emergency paths.
+
 The Pi runtime is required for the API route and Pi coding features. The standard installer sets it up. abmind is installed separately when you want its memory features.
 
 ## Requirements
