@@ -9,6 +9,20 @@ abTARS is a personal agent built around [Pi](https://github.com/earendil-works/p
 - **abTARS services** — platform adapters, sessions, tools and permissions, provider selection and fallback, and scheduled tasks.
 - **Optional memory** — [abmind](https://github.com/aksika/abmind) is installed separately and discovered at runtime. abTARS can also run without it.
 
+## What abTARS adds over Pi
+
+Pi supplies the generic engine: the per-turn agent and tool loop,
+provider streaming with tool-call handling, reasoning-level clamping,
+cache session semantics, and context-overflow detection. abTARS supplies
+everything product-specific around it: sessions and message delivery,
+tool definitions with per-execution filtering and in-process execution,
+permission and sandbox policy around every call, turn safety and loop
+guards, provider selection with health tracking and fallback, durable
+context projection, usage and cost telemetry, scheduled work, process
+supervision, peer coordination, and the Pi-free ACP and emergency paths.
+
+New to abTARS? Start with [What is abTARS](/abtars/why).
+
 ## Features
 
 - Chat through Telegram or Discord, or enable and use the local terminal interface.
