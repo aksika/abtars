@@ -37,6 +37,5 @@ See the [installation guide](/abtars/install) to get started.
 
 ## Community
 
-- [Discord](https://discord.gg/pj2qbWJT8)
 - [GitHub: abTARS](https://github.com/aksika/abtars)
 - [GitHub: abmind](https://github.com/aksika/abmind)
