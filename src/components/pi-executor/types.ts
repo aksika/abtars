@@ -139,7 +139,13 @@ export type ExecutionTarget =
 export const MAX_GOAL_CHARS = 4000;
 export const MAX_PROGRESS_ENTRIES = 50;
 export const MAX_PROGRESS_BYTES = 32 * 1024;
-export const MAX_RPC_LINE_BYTES = 16 * 1024;
+// Single JSONL record bound for the supervised Pi RPC stream (#1406).
+// Sized for Pi 1.2's enriched model catalog: get_available_models returns
+// full Model objects (~600B each with pricing/context metadata), so 33
+// models already exceed the old 16 KiB and a dropped response hangs the
+// worker start on the 30s command timeout (2026-10-15 daily-ai/finance).
+// Still a hard bound — a runaway child cannot grow the accumulator past it.
+export const MAX_RPC_LINE_BYTES = 256 * 1024;
 export const MAX_STDERR_BYTES = 4 * 1024;
 export const MAX_SUMMARY_CHARS = 1000;
 export const MAX_ERROR_CHARS = 500;
