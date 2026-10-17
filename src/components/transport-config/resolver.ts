@@ -128,10 +128,11 @@ export function getEnvFallback(): EnvFallback {
   if (transport === "api") {
     // #1827: opencode (Zen free) is the shipped default; openrouter stays for
     // existing operators, ollama remains the local catch-all.
+    // Pi 1.3 moved Zen to the inference endpoints; zen/v1 now 404s.
     provider.endpoint = providerName === "openrouter"
       ? "https://openrouter.ai/api/v1"
       : providerName === "opencode"
-        ? "https://opencode.ai/zen/v1"
+        ? "https://opencode.ai/inference/v1"
         : "http://localhost:11434/v1";
     if (providerName === "openrouter") provider.apiKeyEnv = "OPENROUTER_API_KEY";
   }

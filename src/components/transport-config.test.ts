@@ -99,7 +99,7 @@ describe("getEnvFallback", () => {
       if (origModel !== undefined) process.env["DEFAULT_MODEL"] = origModel; else delete process.env["DEFAULT_MODEL"];
     }
   });
-  it("resolves the opencode Zen endpoint for the shipped default (#1827)", () => {
+  it("resolves the opencode inference endpoint for the shipped default (#1827, Pi 1.3)", () => {
     const origProvider = process.env["DEFAULT_PROVIDER"];
     const origModel = process.env["DEFAULT_MODEL"];
     process.env["DEFAULT_PROVIDER"] = "opencode";
@@ -107,7 +107,7 @@ describe("getEnvFallback", () => {
     try {
       const fb = getEnvFallback();
       expect(fb.providerName).toBe("opencode");
-      expect(fb.provider.endpoint).toBe("https://opencode.ai/zen/v1");
+      expect(fb.provider.endpoint).toBe("https://opencode.ai/inference/v1");
     } finally {
       if (origProvider !== undefined) process.env["DEFAULT_PROVIDER"] = origProvider; else delete process.env["DEFAULT_PROVIDER"];
       if (origModel !== undefined) process.env["DEFAULT_MODEL"] = origModel; else delete process.env["DEFAULT_MODEL"];

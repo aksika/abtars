@@ -89,7 +89,7 @@ const ONBOARD_PROVIDER_CONFIG: Record<ProviderChoice, Record<string, unknown>> =
   ollama: { transport: "api", endpoint: "http://localhost:11434/v1" },
   kiro: { transport: "acp", cli: "kiro-cli" },
   gemini: { transport: "acp", cli: "gemini" },
-  opencode: { transport: "api", endpoint: "https://opencode.ai/zen/v1" },
+  opencode: { transport: "api", endpoint: "https://opencode.ai/inference/v1" },
 };
 
 /**

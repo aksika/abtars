@@ -238,7 +238,7 @@ describe("streamPiManaged (#1757)", () => {
   it("adds opencode session attribution from the shared session id only", async () => {
     const seen: unknown[] = [];
     setPiRuntimeForTest(fakeRuntime({
-      getModel: () => ({ id: "m", provider: "opencode-go", baseUrl: "https://opencode.ai/zen/go/v1", reasoning: true }),
+      getModel: () => ({ id: "m", provider: "opencode-go", baseUrl: "https://opencode.ai/inference/go/v1", reasoning: true }),
       streamSimple: (...args: unknown[]) => { seen.push(args); return { fake: "stream" }; },
     }));
     await streamPiManaged(

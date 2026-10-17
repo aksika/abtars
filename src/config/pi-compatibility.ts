@@ -1,9 +1,9 @@
 export const PI_COMPATIBILITY = {
   packageName: "@earendil-works/pi-coding-agent",
   /** The Pi version abtars is built and tested against. Single source of truth. */
-  pinnedVersion: "1.2.0",
+  pinnedVersion: "1.3.0",
   /** npm spec used for every abtars-driven Pi install. Patch releases accepted. */
-  pinnedRange: "~1.2.0",
+  pinnedRange: "~1.3.0",
   nestedPackages: {
     ai: "@earendil-works/pi-ai",
     tui: "@earendil-works/pi-tui",

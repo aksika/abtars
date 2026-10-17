@@ -17,7 +17,7 @@
  *     message carries "API error <status>" so sendWithPolicy's existing
  *     parseErrorStatus/classifyError/parseRetryAfter classify them unchanged.
  *
- * Contracts verified against @earendil-works/pi-ai@~1.2.0 via devDependency.
+ * Contracts verified against @earendil-works/pi-ai@~1.3.0 via devDependency.
  */
 
 import type {
