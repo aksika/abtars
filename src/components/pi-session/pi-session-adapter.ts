@@ -1,6 +1,7 @@
 import { closeSync, existsSync, lstatSync, mkdirSync, openSync, readFileSync, readdirSync, readSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { randomUUID } from "node:crypto";
 import { join } from "node:path";
+import { isPathWithinRoot } from "../workspace-paths.js";
 import { logWarn } from "../logger.js";
 import {
   isValidPiConversationId,
@@ -28,6 +29,8 @@ export interface PiSessionManagerShape {
   getSessionId(): string;
   getSessionFile(): string | undefined;
   getSessionDir(): string;
+  /** Optional synchronous history append used by reconstruction seeding. */
+  appendMessage?: (message: unknown) => string;
 }
 
 export interface PiSessionManagerCtor {
@@ -56,6 +59,8 @@ export interface PiConversationHandle {
   canonicalFile: string | null;
   generation: number;
   admissionOpen: boolean;
+  /** Live Pi SessionManager instance backing this handle. */
+  session: PiSessionManagerShape;
 }
 
 export interface PiCancelResult {
@@ -213,9 +218,9 @@ export function openPiConversation(
       // Missing or corrupt files are closed/quarantined, never silently adopted.
       throw new Error(`owned conversation file failed verification (${verified.reason})`);
     }
-    sessionManager.open(verified.canonicalFile, binding.sessionDir, binding.canonicalWorkspace);
+    const session = sessionManager.open(verified.canonicalFile, binding.sessionDir, binding.canonicalWorkspace);
     registerConversation(stateRoot, binding, verified.canonicalFile);
-    return { binding, canonicalFile: verified.canonicalFile, generation: 1, admissionOpen: true };
+    return { binding, canonicalFile: verified.canonicalFile, generation: 1, admissionOpen: true, session };
   }
   const created = sessionManager.create(binding.canonicalWorkspace, binding.sessionDir, { id: binding.conversationId });
   if (created.getSessionId() !== binding.conversationId) {
@@ -232,10 +237,10 @@ export function openPiConversation(
       throw new Error(`new conversation file failed verification (${verified.reason})`);
     }
     registerConversation(stateRoot, binding, verified.canonicalFile);
-    return { binding, canonicalFile: verified.canonicalFile, generation: 1, admissionOpen: true };
+    return { binding, canonicalFile: verified.canonicalFile, generation: 1, admissionOpen: true, session: created };
   }
   registerConversation(stateRoot, binding, null);
-  return { binding, canonicalFile: null, generation: 1, admissionOpen: true };
+  return { binding, canonicalFile: null, generation: 1, admissionOpen: true, session: created };
 }
 
 /**
@@ -285,7 +290,159 @@ export function forkPiConversation(
     throw new Error("forked conversation failed verification (header mismatch)");
   }
   registerConversation(stateRoot, successor, forkedFile);
-  return { binding: successor, canonicalFile: forkedFile, generation: 1, admissionOpen: true };
+  return { binding: successor, canonicalFile: forkedFile, generation: 1, admissionOpen: true, session: forked };
+}
+
+/** Owned-file status for recovery decisions. */
+export type PiOwnedFileStatus = "intact" | "missing" | "corrupt" | "ambiguous";
+
+export interface PiOwnedFileInspection {
+  status: PiOwnedFileStatus;
+  canonicalFile: string | null;
+  reason?: string;
+}
+
+/**
+ * Inspect one owned conversation file without adopting it. Exact-ID
+ * discovery plus the same claimant/header/containment checks as open; a
+ * corrupt or missing result never opens the file.
+ */
+export function inspectOwnedConversationFile(
+  sessionManager: PiSessionManagerCtor,
+  stateRoot: string,
+  binding: PiConversationBinding,
+): PiOwnedFileInspection {
+  if (!isValidPiConversationId(binding.conversationId)) {
+    return { status: "corrupt", canonicalFile: null, reason: "invalid conversation id" };
+  }
+  try {
+    assertOwnerClear(stateRoot, binding);
+  } catch (err) {
+    return {
+      status: "corrupt",
+      canonicalFile: null,
+      reason: err instanceof Error ? err.message : "conversation ownership unavailable",
+    };
+  }
+  ensurePartitionDir(binding.sessionDir);
+  const recorded = loadRegistry(stateRoot).conversations[binding.conversationId]?.canonicalFile ?? null;
+  const found = sessionManager.findById(binding.canonicalWorkspace, binding.conversationId, binding.sessionDir);
+  if (found === undefined) {
+    if (recorded !== null && existsSync(recorded)) {
+      let recordedStat: ReturnType<typeof lstatSync>;
+      try {
+        recordedStat = lstatSync(recorded);
+      } catch {
+        return { status: "missing", canonicalFile: null };
+      }
+      if (!recordedStat.isSymbolicLink() && recordedStat.isFile() && readPiSessionHeaderId(recorded) !== binding.conversationId) {
+        return {
+          status: "corrupt",
+          canonicalFile: recorded,
+          reason: "registered file header does not match conversation id",
+        };
+      }
+    }
+    return { status: "missing", canonicalFile: null };
+  }
+  const claimants = findClaimants(binding.sessionDir, binding.conversationId);
+  if (claimants.length !== 1 || claimants[0] !== found) {
+    return {
+      status: "ambiguous",
+      canonicalFile: found,
+      reason: "ambiguous duplicate conversation files for one id",
+    };
+  }
+  const verified = verifyOwned(stateRoot, binding, found);
+  if (!verified.ok) {
+    return { status: "corrupt", canonicalFile: found, reason: verified.reason };
+  }
+  return { status: "intact", canonicalFile: verified.canonicalFile };
+}
+
+/**
+ * Quarantine a corrupt owned file without overwriting source data. The file
+ * is renamed beside its partition path, and the registry is cleared so the
+ * next open treats the predecessor as missing. The caller allocates and
+ * readies a successor before retiring the predecessor.
+ */
+export function quarantineOwnedConversationFile(
+  stateRoot: string,
+  binding: PiConversationBinding,
+  canonicalFile: string,
+): string {
+  if (!isPathWithinRoot(stateRoot, canonicalFile)) {
+    throw new Error("refusing to quarantine a file outside the authorized root");
+  }
+  if (!isPathWithinRoot(binding.sessionDir, canonicalFile)) {
+    throw new Error("refusing to quarantine a file outside the authorized partition");
+  }
+  let linkStat: ReturnType<typeof lstatSync>;
+  try {
+    linkStat = lstatSync(canonicalFile);
+  } catch {
+    throw new Error("conversation file disappeared before quarantine");
+  }
+  if (linkStat.isSymbolicLink() || !linkStat.isFile()) {
+    throw new Error("refusing to quarantine a non-regular conversation file");
+  }
+  const quarantinedFile = `${canonicalFile}.quarantined`;
+  if (existsSync(quarantinedFile)) {
+    throw new Error("conversation quarantine target already exists");
+  }
+  renameSync(canonicalFile, quarantinedFile);
+  registerConversation(stateRoot, binding, null);
+  return quarantinedFile;
+}
+
+/**
+ * Find an unfinished recovery successor for a predecessor. A crash between
+ * successor allocation and retirement must resume the same successor, not
+ * mint another fresh ID and reseed history again.
+ */
+export function findRecoverySuccessor(
+  stateRoot: string,
+  predecessor: PiConversationBinding,
+): PiConversationBinding | null {
+  const registry = loadRegistry(stateRoot);
+  const matches = Object.entries(registry.conversations).filter(
+    ([, record]) => record.predecessorId === predecessor.conversationId && record.erasedAt === undefined,
+  );
+  if (matches.length === 0) return null;
+  if (matches.length > 1) {
+    throw new Error("multiple recovery successors exist for one predecessor");
+  }
+  const [conversationId, record] = matches[0]!;
+  if (!record.sessionDir) {
+    throw new Error("recovery successor has no session directory");
+  }
+  const roles: readonly string[] = [
+    "main",
+    "orc",
+    "worker",
+    "browsing",
+    "coding",
+    "task",
+    "peer",
+    "dreamy",
+    "healer",
+    "maintenance",
+    "skill-isolated",
+  ];
+  if (!roles.includes(record.role)) {
+    throw new Error("recovery successor has an unsupported role");
+  }
+  return {
+    conversationId,
+    principal: record.principal,
+    platform: record.platform,
+    role: record.role as PiConversationBinding["role"],
+    workspaceAlias: predecessor.workspaceAlias,
+    canonicalWorkspace: record.canonicalWorkspace,
+    memoryScope: predecessor.memoryScope,
+    sessionDir: record.sessionDir,
+    predecessorId: predecessor.conversationId,
+  };
 }
 
 /** Close per-execution steering admission before cancellation. */
