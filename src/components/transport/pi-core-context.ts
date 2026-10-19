@@ -20,7 +20,8 @@ export type DurableContextUnavailableReason =
   | "provider_rejected"
   | "malformed_response"
   | "cursor_unavailable"
-  | "identity_unavailable";
+  | "identity_unavailable"
+  | "hydration_failed";
 
 /** #1527: durable projection failures are execution errors, never degraded success. */
 export class DurableContextUnavailableError extends Error {

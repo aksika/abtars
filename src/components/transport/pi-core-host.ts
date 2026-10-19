@@ -6,12 +6,17 @@ import { markDelivered, markConsumed, failAfterDelivery } from "../session-instr
 import type { InstructionQueueHolder } from "../session-instruction-queue.js";
 import { DurableContextUnavailableError } from "./pi-core-context.js";
 import type { PiCoreContextProjection, TransformOptions } from "./pi-core-context.js";
+import { PiSoulGate } from "../pi-session/pi-soul-gate.js";
 import type { PiExecutionContextSeed } from "./pi-port.js";
 import type { PiExecutionSafetyController } from "./pi-core-safety.js";
 import type { OutputObserver } from "../session-output-feed.js";
 import type { ExecutionTelemetryScope } from "../execution-telemetry.js";
 
 const TAG = "pi-core-host";
+
+/** #1932: hydration marker for the soul gate. The gate stores it opaquely;
+ *  admission, not content, is what the gate decides. */
+const SOUL_HYDRATED = { hydrated: true };
 
 export type PiCoreHostState = "created" | "running" | "aborting" | "settling" | "settled";
 
@@ -77,6 +82,9 @@ export class PiCoreExecutionHost {
   private outstandingLeases: Map<string, OutstandingLease> = new Map();
   private opts: PiCoreExecutionHostOptions;
   private outputObserver?: OutputObserver;
+  /** #1932: hydration gate for durable requests. Begins pending at start;
+   *  cancellation closes it so late transforms cannot admit another request. */
+  private readonly soulGate = new PiSoulGate();
   private _generation: number;
   private static _hostCounter = 0;
   /**
@@ -128,6 +136,12 @@ export class PiCoreExecutionHost {
       throw new Error(`Cannot start host in state ${this.state}`);
     }
 
+    // #1932: every session creation/replacement/resume begins
+    // hydration-pending. Hosts are per-execution and re-project durable
+    // context on every transform, so a post-compaction turn naturally
+    // rehydrates on its new host; no separate restoration flag exists.
+    this.soulGate.beginSession();
+
     const systemPrompt = this.opts.contextProjection
       ? this.opts.contextProjection.buildSystemPromptFromSeed()
       : this.opts.initialState.systemPrompt;
@@ -170,6 +184,26 @@ export class PiCoreExecutionHost {
       const result = await this.opts.contextProjection.transform(cleanMessages, transformOptions);
       if (this.outputObserver && result.contextDegraded) {
         this.notifyOutput(() => this.outputObserver?.end?.("error"));
+      }
+      // #1932: hydration gate — durable mode only. Ephemeral and
+      // memory-disabled sessions never acquire private context and bypass
+      // the gate unchanged, as does teardown (aborted signal): cancellation
+      // must never throw a new error out of the transform path. A durable
+      // projection failure with no safe baseline would call the provider
+      // context-blind; fail closed with a bounded unavailable result
+      // instead (R4). Baseline-backed degraded turns keep existing
+      // behavior: clean but possibly stale, explicitly flagged.
+      if (this.opts.seed.source.mode === "durable" && !signal?.aborted) {
+        if (result.contextDegraded && this.opts.contextProjection.safeBaseline === null) {
+          throw new DurableContextUnavailableError("hydration_failed");
+        }
+        if (!this.settled && this.state === "running") {
+          this.soulGate.completeHydration(SOUL_HYDRATED, 1, 1);
+        }
+        const decision = this.soulGate.checkRequest(1, { abmindAvailable: true, archiveAcknowledged: true });
+        if (!decision.admit) {
+          throw new DurableContextUnavailableError("hydration_failed");
+        }
       }
       return result.messages;
     };
@@ -387,6 +421,9 @@ export class PiCoreExecutionHost {
    *  resolves. Cleanup continues in background with 5-second bound. */
   cancel(): void {
     if (this.state === "settled") return;
+    // #1932: close admission so a late transform cannot admit another
+    // request after cancellation.
+    this.soulGate.cancel();
     if (this.state === "created") {
       this.terminalResolve("cancelled");
       this.settle("cancelled");

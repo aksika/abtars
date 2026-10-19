@@ -766,3 +766,161 @@ describe("#1619 host reasoning/context wiring", () => {
     await startPromise;
   });
 });
+
+describe("soul-gate hydration (#1932)", () => {
+  function durableSeed(executionId: string, sessionKey: string) {
+    return {
+      source: {
+        mode: "durable" as const,
+        sessionKey,
+        beforeMessageId: 1,
+        maxContext: 128000,
+        userId: "u1",
+      },
+      executionId,
+      currentTurn: createCurrentTurnMessage("hello", executionId, sessionKey),
+      volatileBlocks: [] as Array<{ kind: string; content: string }>,
+    };
+  }
+
+  function fakeProjection(
+    result: { messages: Array<Record<string, unknown>>; contextDegraded: boolean },
+    baseline: ReadonlyArray<Record<string, unknown>> | null,
+  ) {
+    return {
+      buildSystemPromptFromSeed: () => "system",
+      transform: vi.fn(async () => result),
+      get safeBaseline() {
+        return baseline;
+      },
+    } as never;
+  }
+
+  function capturingCore() {
+    const captured: Array<Record<string, unknown>> = [];
+    let resolvePrompt: (() => void) | null = null;
+    const Fake = class {
+      constructor(opts: unknown) {
+        captured.push(opts as Record<string, unknown>);
+      }
+      subscribe = () => () => {};
+      prompt = vi.fn(() => new Promise<void>((resolve) => { resolvePrompt = resolve; }));
+      clearAllQueues = vi.fn();
+      abort = vi.fn();
+      waitForIdle = vi.fn(async () => {});
+    } as unknown as PiAgentCoreModule["Agent"];
+    return {
+      loaded: {
+        module: { Agent: Fake } as PiAgentCoreModule,
+        installation: {
+          executable: "/usr/bin/pi",
+          packageRoot: "/usr/lib/pi",
+          version: "1.3.0",
+          source: "path",
+          pinStatus: "at-pin",
+          moduleRoots: { ai: "", tui: "", agentCore: "" },
+        },
+      },
+      captured,
+      resolvePrompt: () => { resolvePrompt?.(); },
+    };
+  }
+
+  type TransformFn = (messages: Array<Record<string, unknown>>, signal?: AbortSignal) => Promise<Array<Record<string, unknown>>>;
+
+  function ephemeralSeed(executionId: string, sessionId: string) {
+    return {
+      source: { mode: "ephemeral" as const, sessionKey: sessionId },
+      executionId,
+      currentTurn: createCurrentTurnMessage("hello", executionId, sessionId),
+      volatileBlocks: [] as Array<{ kind: string; content: string }>,
+    };
+  }
+
+  async function startedHost(
+    seed: ReturnType<typeof durableSeed> | ReturnType<typeof ephemeralSeed>,
+    projection: ReturnType<typeof fakeProjection>,
+  ) {
+    const { loaded, captured, resolvePrompt } = capturingCore();
+    const host = new PiCoreExecutionHost({
+      seed,
+      initialState: { systemPrompt: "You are a helpful assistant.", model: makeTestModel() },
+      streamFn: vi.fn() as unknown as StreamFn,
+      contextProjection: projection,
+    });
+    const startPromise = host.start(loaded).catch(() => {});
+    await new Promise((r) => setTimeout(r, 5));
+    const transform = (captured[0] as { transformContext: TransformFn }).transformContext;
+    return { host, transform, resolvePrompt, startPromise };
+  }
+
+  it("admits a fresh durable projection and stays hydrated", async () => {
+    const fresh = [{ role: "user", content: "hi" }];
+    const { host, transform, resolvePrompt, startPromise } = await startedHost(
+      durableSeed("exec_1", "session_1"),
+      fakeProjection({ messages: fresh, contextDegraded: false }, null),
+    );
+    expect(host.state).toBe("running");
+    await expect(transform([], undefined)).resolves.toEqual(fresh);
+    await expect(transform([], undefined)).resolves.toEqual(fresh);
+    resolvePrompt();
+    await startPromise;
+  });
+
+  it("denies a context-blind degraded durable projection", async () => {
+    const { transform, resolvePrompt, startPromise } = await startedHost(
+      durableSeed("exec_2", "session_2"),
+      fakeProjection({ messages: [{ role: "user", content: "suffix only" }], contextDegraded: true }, null),
+    );
+    try {
+      await transform([], undefined);
+      expect.unreachable("context-blind durable projection must not admit");
+    } catch (err) {
+      expect(err).toBeInstanceOf(DurableContextUnavailableError);
+      expect((err as DurableContextUnavailableError).reason).toBe("hydration_failed");
+    }
+    resolvePrompt();
+    await startPromise;
+  });
+
+  it("preserves baseline-backed degraded turns", async () => {
+    const baseline = [{ role: "user", content: "clean history" }];
+    const { transform, resolvePrompt, startPromise } = await startedHost(
+      durableSeed("exec_3", "session_3"),
+      fakeProjection({ messages: [...baseline, { role: "user", content: "suffix" }], contextDegraded: true }, baseline),
+    );
+    const messages = await transform([], undefined);
+    expect(messages.length).toBe(2);
+    resolvePrompt();
+    await startPromise;
+  });
+
+  it("leaves ephemeral projection failures on the existing fallback path", async () => {
+    const { transform, resolvePrompt, startPromise } = await startedHost(
+      ephemeralSeed("exec_4", "session_4"),
+      fakeProjection({ messages: [{ role: "user", content: "suffix only" }], contextDegraded: true }, null),
+    );
+    await expect(transform([], undefined)).resolves.toEqual([{ role: "user", content: "suffix only" }]);
+    resolvePrompt();
+    await startPromise;
+  });
+
+  it("denies late transforms after cancellation", async () => {
+    const fresh = [{ role: "user", content: "hi" }];
+    const { host, transform, resolvePrompt, startPromise } = await startedHost(
+      durableSeed("exec_5", "session_5"),
+      fakeProjection({ messages: fresh, contextDegraded: false }, null),
+    );
+    await expect(transform([], undefined)).resolves.toEqual(fresh);
+    host.cancel();
+    try {
+      await transform([], undefined);
+      expect.unreachable("cancelled host must not admit another request");
+    } catch (err) {
+      expect(err).toBeInstanceOf(DurableContextUnavailableError);
+      expect((err as DurableContextUnavailableError).reason).toBe("hydration_failed");
+    }
+    resolvePrompt();
+    await startPromise;
+  });
+});
