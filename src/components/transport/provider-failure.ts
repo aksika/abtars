@@ -15,7 +15,12 @@
  * appear here or in any downstream consumer.
  */
 
-export const TERMINAL_FAILURE_CODES = ["credits_exhausted", "context_overflow", "all_candidates_failed"] as const;
+export const TERMINAL_FAILURE_CODES = [
+  "credits_exhausted",
+  "context_overflow",
+  "all_candidates_failed",
+  "provider_unavailable",
+] as const;
 export type TerminalFailureCode = (typeof TERMINAL_FAILURE_CODES)[number];
 
 export interface ProviderTerminalFailure {
@@ -58,4 +63,11 @@ export function isContextOverflowFailure(err: unknown): boolean {
  * those keep their exact codes above. */
 export function isAllCandidatesFailed(err: unknown): boolean {
   return isProviderExecutionError(err) && err.failure.code === "all_candidates_failed";
+}
+
+/** #1932: every allowed selection is inside its availability cooldown.
+ * Distinct from all_candidates_failed: no provider request was sent —
+ * dispatch was suppressed before the boundary. */
+export function isProviderUnavailable(err: unknown): boolean {
+  return isProviderExecutionError(err) && err.failure.code === "provider_unavailable";
 }

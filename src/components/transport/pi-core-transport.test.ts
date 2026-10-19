@@ -7,9 +7,14 @@
 // Real-Pi integration coverage stays deferred: requires a full Pi installation.
 
 import assert from "node:assert";
+import { mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, it, expect, vi, beforeEach, beforeAll } from "vitest";
 import { clampThinkingLevel } from "@earendil-works/pi-ai";
 import { PiCoreTransport, extractAssistantText } from "./pi-core-transport.js";
+import { isProviderUnavailable } from "./provider-failure.js";
+import { saveAvailabilityMemo } from "../pi-session/provider-availability-memo.js";
 import type { AbtarsPiStreamFnOptions } from "./pi-stream-fn.js";
 import type { StreamFn } from "./pi-core-types.js";
 import { ensurePiThinkingClamp } from "./pi-ai-adapter.js";
@@ -85,6 +90,58 @@ describe("PiCoreTransport", () => {
   it("starts uninitialized", () => {
     const t = makeTransport();
     expect(t.isReady).toBe(false);
+  });
+
+  describe("availability admission (#1932)", () => {
+    it("suppresses dispatch while every allowed selection cools down", async () => {
+      mockCreatePiStreamFn.mockClear();
+      const memoStateDir = mkdtempSync(join(tmpdir(), "pi-memo-admit-"));
+      saveAvailabilityMemo(memoStateDir, [{
+        authNamespace: "abtars:test-provider",
+        provider: "test-provider",
+        endpoint: "https://api.test/v1",
+        modelScope: "test-model",
+        reason: "rate-limit",
+        observedAt: Date.now(),
+        unusableUntil: Date.now() + 5 * 60 * 1000,
+      }]);
+      const registry = new ModelHealthRegistry();
+      const transport = new PiCoreTransport({
+        role: "main",
+        systemPrompt: "You are a helpful assistant.",
+        candidates: makeCandidates(),
+        healthRegistry: registry,
+        sandboxPolicy: { allowedTools: ["*"], allowedRead: ["*"], allowedWrite: ["*"], canExecuteBash: true },
+        memoStateDir,
+      });
+
+      await expect(transport.sendPrompt("test-session", "hello")).rejects.toSatisfy((err: unknown) => {
+        if (!isProviderUnavailable(err)) return false;
+        return (err as Error).message.includes("cooling down");
+      });
+      expect(mockCreatePiStreamFn).not.toHaveBeenCalled();
+    });
+
+    it("dispatches when the memo is empty", async () => {
+      mockCreatePiStreamFn.mockClear();
+      const memoStateDir = mkdtempSync(join(tmpdir(), "pi-memo-admit-"));
+      const registry = new ModelHealthRegistry();
+      const transport = new PiCoreTransport({
+        role: "main",
+        systemPrompt: "You are a helpful assistant.",
+        candidates: makeCandidates(),
+        healthRegistry: registry,
+        sandboxPolicy: { allowedTools: ["*"], allowedRead: ["*"], allowedWrite: ["*"], canExecuteBash: true },
+        memoStateDir,
+      });
+      mockCreatePiStreamFn.mockClear();
+      // The host is never reached here: Pi installation resolves absent in
+      // this file, so the test only asserts the preflight lets dispatch
+      // through to stream-fn construction. A full dispatch is covered by
+      // the Pi production lanes.
+      await expect(transport.sendPrompt("test-session", "hello")).rejects.toThrow(PiCoreContractError);
+      expect(mockCreatePiStreamFn).toHaveBeenCalled();
+    });
   });
 
   it("initialize sets isReady", async () => {

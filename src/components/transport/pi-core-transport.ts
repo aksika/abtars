@@ -22,6 +22,8 @@ import { PiCoreToolExecutionError, buildTerminalDiagnostic, shouldThrowAfterTool
 import type { ToolFailureDiagnosticV1 } from "./tool-failure-diagnostic.js";
 import { ProviderExecutionError } from "./provider-failure.js";
 import type { ProviderTerminalFailure } from "./provider-failure.js";
+import { admitPiSelection } from "../pi-session/pi-availability-admission.js";
+import { loadAvailabilityMemo } from "../pi-session/provider-availability-memo.js";
 
 const TAG = "pi-core-transport";
 
@@ -58,6 +60,9 @@ export interface PiCoreTransportOptions {
   contextProvider?: DurableContextProviderHolder;
   /** #1552: late-bound memory-tool dependencies holder (runtime + quota). */
   memoryToolDeps?: import("../memory-store-quota.js").MemoryToolDependenciesHolder;
+  /** #1932: state directory for the durable provider-availability memo.
+   *  Absent → the shared abtars state dir. Tests inject an isolated dir. */
+  memoStateDir?: string;
   maxPromptRounds?: number;
   maxCandidateRounds?: number;
   /** #1748: cache-identity scope. Main (absent) derives from the Spin session
@@ -149,6 +154,8 @@ export class PiCoreTransport implements IKiroTransport {
   private cacheRetention: import("@earendil-works/pi-ai").CacheRetention;
   /** #1748: subagent cache-identity scope (agent role name). */
   private cacheScope?: string;
+  /** #1932: memo state dir for availability admission. */
+  private memoStateDir: string;
 
   constructor(opts: PiCoreTransportOptions) {
     this.config = { candidates: opts.candidates, systemPrompt: opts.systemPrompt, role: opts.role };
@@ -158,6 +165,8 @@ export class PiCoreTransport implements IKiroTransport {
     this._contextProvider = opts.contextProvider ?? { current: null };
     this._memoryToolDeps = opts.memoryToolDeps ?? { current: null };
     this.cacheScope = opts.cacheScope;
+    // #1932: shared availability memo location; tests inject isolation.
+    this.memoStateDir = opts.memoStateDir ?? join(abtarsHome(), "state");
     // #1748: "short" is pinned explicitly — pi's default today, made abtars's
     // own so a future pi uplift that changes the default cannot silently
     // change the shipped behavior. "long" is per-provider opt-in only.
@@ -393,6 +402,34 @@ export class PiCoreTransport implements IKiroTransport {
       if (durableIntent.mode === "durable" && !callerUserId) {
         logDebug(TAG, "durable intent without caller identity — rejecting before provider boundary");
         throw new DurableContextUnavailableError("identity_unavailable");
+      }
+
+      // #1932: suppress dispatch while every allowed selection cools down.
+      // Best-effort read — an unreadable memo admits, and the provider still
+      // enforces its own errors. A uniform block throws the typed
+      // unavailable failure before model selection, stream construction, Pi
+      // loading, host construction, fallback, or any provider request, so
+      // scheduled work settles visibly instead of retrying known-dead
+      // providers. No credential values or provider names in the message.
+      if (this.config.candidates.length > 0) {
+        const memoVerdict = admitPiSelection(
+          this.config.candidates.map((candidate) => ({
+            authNamespace: `${candidate.authSource ?? "abtars"}:${candidate.provider}`,
+            provider: candidate.provider,
+            endpoint: candidate.endpoint,
+            modelScope: candidate.model,
+          })),
+          loadAvailabilityMemo(this.memoStateDir).entries,
+          Date.now(),
+        );
+        if (!memoVerdict.admit) {
+          throw new ProviderExecutionError({
+            code: "provider_unavailable",
+            retryable: false,
+            attemptedCandidates: this.config.candidates.length,
+            message: `All configured providers are cooling down; retry after ${new Date(memoVerdict.retryAt).toISOString()}`,
+          });
+        }
       }
 
       // Use provided executionId or allocate a new one
