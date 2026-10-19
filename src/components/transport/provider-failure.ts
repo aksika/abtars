@@ -1,7 +1,7 @@
 /**
  * provider-failure.ts — #1297: provider-neutral terminal failure contract.
  *
- * The Pi transport carries provider failure classification (model health kinds,
+ * The Pi transport classifies provider failures (model health kinds,
  * status/message parsing) at the adapter boundary. When an execution ends with
  * every configured candidate blocked by the SAME provider-neutral cause, the
  * stream boundary reports that structured terminal failure; other genuine
@@ -22,6 +22,14 @@ export const TERMINAL_FAILURE_CODES = [
   "provider_unavailable",
 ] as const;
 export type TerminalFailureCode = (typeof TERMINAL_FAILURE_CODES)[number];
+
+/**
+ * #1932: single-interpreter error taxonomy for the Pi route. Status/message
+ * classification lives here — never in a health bucket, rotation policy, or
+ * downstream consumer. The durable availability memo and the terminal
+ * failure codes above are the only readers.
+ */
+export type ErrorKind = "rate_limit" | "credits" | "auth" | "transient" | "weak" | "empty" | "truncated" | "context_exceeded";
 
 export interface ProviderTerminalFailure {
   /** Stable machine-readable cause. Consumers branch on this exact code. */
@@ -74,4 +82,24 @@ export function isAllCandidatesFailed(err: unknown): boolean {
  * dispatch was suppressed before the boundary. */
 export function isProviderUnavailable(err: unknown): err is ProviderExecutionError {
   return isProviderExecutionError(err) && err.failure.code === "provider_unavailable";
+}
+
+/** #1753: quota/billing exhaustion is sticky regardless of how the transport
+ *  reported it. The candidate cannot succeed until the account is topped up, so
+ *  a drainable rate_limit (0.5 fill, ~17min) or transient bucket retries it
+ *  forever. Status is gated to 429/402/0 — 0 covers an unparseable status from
+ *  parseErrorStatus — so an unrelated 5xx that merely mentions billing is not
+ *  promoted to a sticky verdict. String set mirrors pi-ai's private
+ *  NON_RETRYABLE_PROVIDER_LIMIT_ERROR_PATTERN (packages/ai/src/utils/retry.ts:7). */
+const QUOTA_EXHAUSTED =
+  /insufficient_quota|quota exceeded|out of budget|billing|available balance|monthly usage limit reached|GoUsageLimitError|FreeUsageLimitError/i;
+
+/** Classify HTTP status to error kind. */
+export function classifyError(status: number, message?: string): ErrorKind {
+  if ((status === 429 || status === 402 || status === 0) && message && QUOTA_EXHAUSTED.test(message)) return "credits";
+  if (status === 402 && message?.toLowerCase().includes("credit")) return "credits";
+  if (status === 429 || status === 402) return "rate_limit";
+  if (status === 404 && message && /image input|No endpoints found/i.test(message)) return "transient";
+  if (status === 401 || status === 403 || status === 404) return "auth";
+  return "transient";
 }

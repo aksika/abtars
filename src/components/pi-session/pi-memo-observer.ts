@@ -1,4 +1,4 @@
-import type { ErrorKind } from "../transport/model-health-registry.js";
+import type { ErrorKind } from "../transport/provider-failure.js";
 import {
   loadAvailabilityMemo,
   saveAvailabilityMemo,
