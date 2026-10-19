@@ -397,7 +397,9 @@ export class PiCoreTransport implements IKiroTransport {
       const callerUserId = context?.userId;
       if (durableIntent.mode === "required_unavailable") {
         logDebug(TAG, "durable intent required_unavailable — rejecting before provider boundary");
-        throw new DurableContextUnavailableError("cursor_unavailable");
+        // #1932: propagate the intent's reason instead of masking every
+        // pre-provider failure as cursor_unavailable.
+        throw new DurableContextUnavailableError(durableIntent.reason);
       }
       if (durableIntent.mode === "durable" && !callerUserId) {
         logDebug(TAG, "durable intent without caller identity — rejecting before provider boundary");

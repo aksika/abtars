@@ -502,7 +502,9 @@ describe("PiCoreTransport", () => {
       durableContextIntent: { mode: "required_unavailable", reason: "record_failed" },
     });
     await expect(promise).rejects.toBeInstanceOf(DurableContextUnavailableError);
-    await expect(promise).rejects.toMatchObject({ reason: "cursor_unavailable" });
+    // #1932: the preflight propagates the intent's reason instead of
+    // masking every pre-provider failure as cursor_unavailable.
+    await expect(promise).rejects.toMatchObject({ reason: "record_failed" });
     expect((t as unknown as Record<string, unknown>).activeHost).toBeNull();
   });
 

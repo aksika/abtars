@@ -1009,6 +1009,27 @@ describe("citation detection (#1270)", () => {
       expect(outbox.peek("test_A_01")?.operationKey).toEqual(expect.any(String));
     });
 
+    it("does not hold unrecordable empty replies from aborted turns (#1932)", async () => {
+      // Regression: an aborted turn records nothing (the store drops
+      // empty content by policy). Holding that "gap" would fail every
+      // later turn closed, since no retry could ever confirm it.
+      transport.sendPrompt = vi.fn().mockResolvedValue("") as any;
+      const recordMessage = vi.fn(async (input: { content: string }) =>
+        (typeof input.content === "string" && input.content.trim() ? { id: 7 } : { id: null }),
+      );
+      const outbox = new PiArchiveOutbox();
+      const adapter = mockAdapter();
+      const deps = mockDeps(transport, {
+        memoryConfig: { memoryEnabled: true, memoryDir: "/tmp" },
+        memoryRuntime: mockMemoryRuntime({ recordMessage }),
+        archiveOutbox: outbox,
+      } as any);
+
+      await handleInboundMessage(makeMsg({ messageId: 14 }), adapter, deps);
+
+      expect(outbox.has("test_A_01")).toBe(false);
+    });
+
     it("clears a pre-existing obligation when the terminal write confirms (#1932)", async () => {
       transport.sendPrompt = vi.fn().mockResolvedValue("done text") as any;
       const recordMessage = vi.fn().mockResolvedValue({ id: 7 });

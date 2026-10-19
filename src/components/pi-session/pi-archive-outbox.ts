@@ -29,6 +29,21 @@ export interface PendingArchiveRecord {
   operationKey: string;
 }
 
+/**
+ * Mirrors the abmind store's deliberate drop rules (message-store.ts):
+ * empty content, [NO_REPLY]/connection-test markers, and long assistant
+ * bracket/brace blobs are never recorded by policy. Those are not archive
+ * gaps — noting them would wedge the session, since no retry could ever
+ * confirm them. Everything else is recordable: a missing durable id for
+ * recordable content is a real gap that must fail the next turn closed.
+ */
+export function isRecordableTerminalContent(content: string, role: "assistant"): boolean {
+  if (!content.trim()) return false;
+  if (/\[NO_REPLY\]|connection test/i.test(content)) return false;
+  if (role === "assistant" && /^\s*[\[{]/.test(content) && content.length > 200) return false;
+  return true;
+}
+
 export type ArchiveRecordFn = (input: {
   role: "assistant";
   content: string;
@@ -45,6 +60,9 @@ export class PiArchiveOutbox {
 
   /** Hold a required terminal write until it is durably confirmed. */
   note(record: PendingArchiveRecord): void {
+    // Policy-dropped content is not an archive gap: the store would reject
+    // it again on every retry, so holding it would wedge the session.
+    if (!isRecordableTerminalContent(record.content, record.role)) return;
     if (!this.pending.has(record.sessionId) && this.pending.size >= MAX_PENDING_SESSIONS) {
       const oldest = this.pending.keys().next();
       if (!oldest.done) {

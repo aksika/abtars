@@ -53,6 +53,15 @@ describe("pi-archive-outbox", () => {
     expect(outbox.size).toBe(1);
   });
 
+  it("never holds content the archive policy deliberately drops", () => {
+    const outbox = new PiArchiveOutbox();
+    outbox.note({ ...record("1_A_01"), content: "   " });
+    outbox.note({ ...record("1_A_02"), content: "[NO_REPLY] done" });
+    outbox.note({ ...record("1_A_03"), content: "[" + "x".repeat(300) });
+    expect(outbox.size).toBe(0);
+    expect(outbox.has("1_A_01")).toBe(false);
+  });
+
   it("bounds unacknowledged sessions with loud oldest-first eviction", () => {
     const outbox = new PiArchiveOutbox();
     for (let i = 0; i < 256; i++) outbox.note(record(`s_${i}`, `op-${i}`));
