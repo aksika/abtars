@@ -959,6 +959,36 @@ describe("citation detection (#1270)", () => {
       expect(assistantCalls).toHaveLength(0);
     });
 
+    it("reports a bounded cooling-down reason when the provider is unavailable (#1932)", async () => {
+      const retryAt = Date.now() + 60_000;
+      transport.sendPrompt = vi.fn().mockRejectedValue(new ProviderExecutionError({
+        code: "provider_unavailable",
+        retryable: false,
+        attemptedCandidates: 2,
+        message: "All configured providers are cooling down",
+        retryAt,
+      })) as any;
+      const recordMessage = vi.fn().mockResolvedValue({ id: 1 });
+      const adapter = mockAdapter();
+      const deps = mockDeps(transport, {
+        memoryConfig: { memoryEnabled: true, memoryDir: "/tmp" },
+        memoryRuntime: mockMemoryRuntime({ recordMessage }),
+      } as any);
+
+      await handleInboundMessage(makeMsg({ messageId: 14 }), adapter, deps);
+
+      expect(adapter.sendMessage).toHaveBeenCalledWith(
+        expect.anything(),
+        expect.stringContaining("cooling down"),
+        expect.anything(),
+      );
+      expect(adapter.sendMessage).toHaveBeenCalledWith(
+        expect.anything(),
+        expect.stringContaining(new Date(retryAt).toISOString()),
+        expect.anything(),
+      );
+    });
+
     it("holds the terminal payload in the outbox when its archive write fails (#1932)", async () => {
       transport.sendPrompt = vi.fn().mockResolvedValue("done text") as any;
       const recordMessage = vi.fn(async (input: { role: string }) =>
