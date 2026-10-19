@@ -23,6 +23,7 @@ import { PiRuntimeHost } from "./pi-runtime-host.js";
 import type { PiExecutorConfig } from "./config.js";
 import { resolveAndValidateWorkspace, validatePersistedSession } from "./config.js";
 import { mintPiConversationId, resolvePiConversationDir } from "../pi-session/pi-conversation-identity.js";
+import { eraseCodingSessionFiles } from "./pi-session-retention.js";
 import { SupervisedPiRpcClient, type PiAgentEvent } from "./pi-rpc-client.js";
 import { projectPiEvent } from "./pi-event-projection.js";
 import type { RpcExtensionUIRequest } from "@earendil-works/pi-coding-agent";
@@ -546,6 +547,37 @@ export class PiCodingSessionService {
     } catch { /* best effort */ }
     logInfo(TAG, `Coding session ${sessionId} ended (transcript preserved)`);
     return true;
+  }
+
+  /**
+   * `/coding erase` — explicit erasure of an ended session's owned Pi files.
+   * Only ended sessions qualify; active/resumable work is never touched.
+   * Removes adapter-registered files (recovery successors, quarantine) and
+   * the row's own proven transcript file, then clears the row's file pointer
+   * so resume reports session_missing instead of a dangling path. Delivery
+   * and workflow metadata stay with their existing owners.
+   */
+  eraseSessionFiles(sessionId: string, ownerPrincipal: string): { ok: true; removed: string[] } | { ok: false; reason: string } {
+    const rec = this.authorize(sessionId, ownerPrincipal);
+    if (!rec) return { ok: false, reason: "Coding session not found." };
+    if (rec.state !== "ended") {
+      return { ok: false, reason: "Only ended sessions can be erased — end it first with /coding end." };
+    }
+    if (this.live.get(sessionId) || this.nativeHandoffs.get(sessionId)) {
+      return { ok: false, reason: "A live turn still holds this session." };
+    }
+    const removed = eraseCodingSessionFiles({
+      sessionStorageRoot: this.deps.config.sessionStorageRoot,
+      piSessionId: rec.piSessionId,
+      piSessionFile: rec.piSessionFile,
+    });
+    if (rec.piSessionFile && removed.includes(rec.piSessionFile)) {
+      this.deps.store.casTransition(sessionId, "ended", "ended", {
+        piSessionFile: null,
+        resumeCapability: "session_missing",
+      }, rec.runtimeGeneration);
+    }
+    return { ok: true, removed };
   }
 
   /**

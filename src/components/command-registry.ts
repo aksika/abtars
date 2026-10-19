@@ -435,6 +435,7 @@ export const COMMAND_DEFINITIONS: readonly CommandDefinition[] = [
       "/coding status — List coding sessions",
       "/coding off — Leave coding mode",
       "/coding end — End coding session (transcript preserved)",
+      "/coding erase — Erase an ended session's Pi files",
     ],
   },
   {

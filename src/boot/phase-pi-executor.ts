@@ -100,6 +100,22 @@ export async function phasePiExecutor(ctx: BootCtx): Promise<void> {
     // capabilities and clear stale leases/claims.
     codingService.reconcileOnBoot();
 
+    // #1932 R8 — bounded retention sweep over adapter-registered
+    // conversations and terminal RPC session files. Best-effort and never
+    // throwing: retention must not break boot.
+    try {
+      const { sweepPiSessionsAtBoot } = await import("../components/pi-executor/pi-session-retention.js");
+      const report = sweepPiSessionsAtBoot({
+        sessionStorageRoot: config.sessionStorageRoot,
+        codingStore,
+        runStore: store,
+      });
+      const pruned = [...report.registryRemoved, ...report.rpcRemoved];
+      if (pruned.length > 0) logInfo(TAG, `Session retention pruned ${pruned.length} ended file(s)`);
+    } catch (err) {
+      logWarn(TAG, `Session retention sweep skipped: ${err instanceof Error ? err.message : String(err)}`);
+    }
+
     setCodingRouteService(codingService);
     setCodingCommandService(codingService);
     ctx.sessionManager!.setCodingSessionTeardown((sessionId) => {

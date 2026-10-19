@@ -26,6 +26,7 @@ const svc = {
   activate: vi.fn(),
   deactivate: vi.fn(),
   endSession: vi.fn(),
+  eraseSessionFiles: vi.fn(),
 };
 
 beforeEach(() => {
@@ -118,6 +119,23 @@ describe("/coding #1635", () => {
     await handleCoding("/coding end", ctx);
     expect(svc.endSession).toHaveBeenCalledWith("coding-1", "usr-1");
     expect(replies.join("\n")).toContain("transcript preserved");
+  });
+
+  it("erase removes an ended session's files and reports the count (#1932 R8)", async () => {
+    svc.listForOwner.mockReturnValue([{ sessionId: "coding-1", workspaceAlias: "repo-a", state: "ended" }]);
+    svc.eraseSessionFiles.mockReturnValue({ ok: true, removed: ["/state/f.jsonl"] });
+    const { ctx, replies } = makeCtx();
+    await handleCoding("/coding erase coding-1", ctx);
+    expect(svc.eraseSessionFiles).toHaveBeenCalledWith("coding-1", "usr-1");
+    expect(replies.join("\n")).toContain("Erased 1 session file(s)");
+  });
+
+  it("erase surfaces the refusal reason", async () => {
+    svc.listForOwner.mockReturnValue([{ sessionId: "coding-1", workspaceAlias: "repo-a", state: "idle" }]);
+    svc.eraseSessionFiles.mockReturnValue({ ok: false, reason: "Only ended sessions can be erased." });
+    const { ctx, replies } = makeCtx();
+    await handleCoding("/coding erase coding-1", ctx);
+    expect(replies.join("\n")).toContain("Only ended sessions can be erased");
   });
 
   it("with no sessions at all, suggests /coding new", async () => {

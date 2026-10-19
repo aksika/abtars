@@ -16,7 +16,8 @@ export type { PiConversationBinding, PiConversationParams };
 
 const TAG = "pi-session-adapter";
 const REGISTRY_FILENAME = "pi-conversations-v1.json";
-const ENDED_RETENTION_MS = 7 * 24 * 60 * 60 * 1000;
+/** Seven-day ended-session retention, shared with the executor row-driven sweep. */
+export const ENDED_RETENTION_MS = 7 * 24 * 60 * 60 * 1000;
 const DEFAULT_IDLE_TIMEOUT_MS = 5_000;
 const HEADER_READ_MAX_BYTES = 64 * 1024;
 

@@ -185,6 +185,14 @@ export class PiCodingSessionStore {
     return row ? this.rowToRecord(row) : null;
   }
 
+  /** #1932 — all rows with session-file identity for retention. The R8
+   *  sweep filters by state itself; the store stays a dumb row source. */
+  listSessionFiles(): PiCodingSessionRecord[] {
+    return (this.db.prepare(
+      `SELECT * FROM pi_coding_sessions`
+    ).all() as Record<string, unknown>[]).map(r => this.rowToRecord(r));
+  }
+
   /** #1635 — rows in live states (a live process may have existed at crash
    * time). Used by boot reconciliation to mark them interrupted. */
   listLive(): PiCodingSessionRecord[] {

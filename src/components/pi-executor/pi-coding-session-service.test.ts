@@ -10,7 +10,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { createRequire } from "node:module";
 import { join } from "node:path";
 import { tmpdir, homedir } from "node:os";
-import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync, existsSync } from "node:fs";
 import { spawn, spawnSync } from "node:child_process";
 import { PiCodingSessionStore } from "./pi-coding-session-store.js";
 import { PiWorkspaceClaimStore } from "./pi-workspace-claim-store.js";
@@ -493,6 +493,37 @@ describe("PiCodingSessionService #1635 — turn lifecycle", () => {
     expect(rec.state).toBe("ended");
     expect(h.spin.ended).toContain(sessionId);
     expect(h.service.listForOwner("usr-1")).toHaveLength(0);
+  });
+
+  it("eraseSessionFiles removes the proven file of an ended session and clears the pointer (#1932 R8)", async () => {
+    const h = harness;
+    const sessionId = createSession(h);
+    const savedFile = writeSession(h.root, "erase.jsonl", "sess-erase");
+    fake.FakeClient.defaultState = { sessionId: "sess-erase", sessionFile: savedFile, isStreaming: false, isCompacting: false };
+    await h.service.startTurn({ sessionId, text: "go", ownerPrincipal: "usr-1", leaseOwner: "tg:1" });
+    const client = fake.FakeClient.instances[0]!;
+    client.emitEvent(agentEnd());
+    await vi.waitFor(() => {
+      expect(h.store.get(sessionId)!.state).toBe("idle");
+    });
+    expect(h.service.endSession(sessionId, "usr-1")).toBe(true);
+
+    const result = h.service.eraseSessionFiles(sessionId, "usr-1");
+    expect(result).toEqual({ ok: true, removed: [savedFile] });
+    expect(existsSync(savedFile)).toBe(false);
+    const rec = h.store.get(sessionId)!;
+    expect(rec.piSessionFile).toBeFalsy();
+    expect(rec.resumeCapability).toBe("session_missing");
+  });
+
+  it("eraseSessionFiles refuses live sessions and strangers (#1932 R8)", async () => {
+    const h = harness;
+    const sessionId = createSession(h);
+    const live = h.service.eraseSessionFiles(sessionId, "usr-1");
+    expect(live.ok).toBe(false);
+
+    const stranger = h.service.eraseSessionFiles(sessionId, "usr-2");
+    expect(stranger).toEqual({ ok: false, reason: "Coding session not found." });
   });
 
   it("active end waits for Pi teardown before ending the envelope", async () => {

@@ -92,7 +92,20 @@ export async function handleCoding(text: string, ctx: CodingCommandContext): Pro
       return true;
     }
 
-    await ctx.reply("Usage: /coding | /coding new <alias> | /coding status | /coding off | /coding resume | /coding end");
+    if (args === "erase" || args.startsWith("erase ")) {
+      const target = args.replace(/^erase\s*/i, "").trim();
+      const sessions = svc.listForOwner(ctx.userId);
+      const sessionId = target || sessions[0]?.sessionId;
+      if (!sessionId) { await ctx.reply("No coding session to erase."); return true; }
+      const result = svc.eraseSessionFiles(sessionId, ctx.userId);
+      if (!result.ok) { await ctx.reply(result.reason); return true; }
+      await ctx.reply(result.removed.length > 0
+        ? `Erased ${result.removed.length} session file(s). Delivery and workflow records are untouched.`
+        : "Nothing to erase — no owned session files remain (retention may already have pruned them).");
+      return true;
+    }
+
+    await ctx.reply("Usage: /coding | /coding new <alias> | /coding status | /coding off | /coding resume | /coding end | /coding erase");
     return true;
   } catch (err) {
     await ctx.reply(`Error: ${err instanceof Error ? err.message : String(err)}`);
