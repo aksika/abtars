@@ -264,6 +264,45 @@ describe("PiCodingSessionService #1635 — turn lifecycle", () => {
     expect(h.claims.list()).toHaveLength(0);
   });
 
+  it("initial turns launch with an abtars-minted ID in the partitioned dir; resume keeps the flat root", async () => {
+    const h = harness;
+    const sessionId = createSession(h);
+    const createdFile = writeSession(h.root, "created.jsonl", "pi-created");
+    fake.FakeClient.defaultState = { sessionId: "pi-created", sessionFile: createdFile, isStreaming: false, isCompacting: false };
+
+    const first = await h.service.startTurn({ sessionId, text: "first", ownerPrincipal: "usr-1", leaseOwner: "tg:1" });
+    expect(first.kind).toBe("started");
+    const firstLaunch = fake.FakeClient.instances[0]!.calls.find((c) => c.method === "launch")!;
+    const firstArgs = firstLaunch.args[1] as readonly string[];
+    const dirIndex = firstArgs.indexOf("--session-dir");
+    expect(dirIndex).toBeGreaterThan(-1);
+    const sessionDir = firstArgs[dirIndex + 1] as string;
+    // Partitioned under the storage root with the coding role segment — never the flat root.
+    expect(sessionDir.startsWith(h.root)).toBe(true);
+    expect(sessionDir).toContain("/coding/");
+    expect(sessionDir).not.toBe(h.root);
+    expect(firstArgs).toContain("--session-id");
+    const conversationId = firstArgs[firstArgs.indexOf("--session-id") + 1] as string;
+    expect(conversationId).toMatch(/^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$/);
+
+    const client = fake.FakeClient.instances[0]!;
+    client.emitEvent(agentEnd());
+    await vi.waitFor(() => {
+      expect(h.store.get(sessionId)!.state).toBe("idle");
+    });
+
+    // Resume launches keep the legacy flat root and switch to the proven file.
+    fake.FakeClient.defaultState = { sessionId: "pi-created", sessionFile: createdFile, isStreaming: false, isCompacting: false };
+    const second = await h.service.startTurn({ sessionId, text: "second", ownerPrincipal: "usr-1", leaseOwner: "tg:1" });
+    expect(second.kind).toBe("started");
+    const secondLaunch = fake.FakeClient.instances[1]!.calls.find((c) => c.method === "launch")!;
+    const secondArgs = secondLaunch.args[1] as readonly string[];
+    expect(secondArgs.slice(secondArgs.indexOf("--session-dir"), secondArgs.indexOf("--session-dir") + 2))
+      .toEqual(["--session-dir", h.root]);
+    expect(secondArgs).not.toContain("--session-id");
+    expect(fake.FakeClient.instances[1]!.switches).toContain(createdFile);
+  });
+
   it("a mid-turn message becomes follow_up on the same process", async () => {
     const h = harness;
     const sessionId = createSession(h);

@@ -23,6 +23,7 @@ import { PiWorkspaceClaimStore } from "./pi-workspace-claim-store.js";
 import { PiRuntimeHost } from "./pi-runtime-host.js";
 import type { PiExecutorConfig } from "./config.js";
 import { resolveAndValidateWorkspace, validatePersistedSession } from "./config.js";
+import { mintPiConversationId } from "../pi-session/pi-conversation-identity.js";
 import { SupervisedPiRpcClient, type PiAgentEvent } from "./pi-rpc-client.js";
 import { projectPiEvent } from "./pi-event-projection.js";
 import type { RpcExtensionUIRequest } from "@earendil-works/pi-coding-agent";
@@ -332,7 +333,7 @@ export class PiCodingSessionService {
       return { kind: "error", reason: "Failed to start the turn" };
     }
 
-    const turn = await this.launchTurn(rec, generation, ws.canonicalPath);
+    const turn = await this.launchTurn(rec, generation, ws.canonicalPath, intent);
     if (!turn.ok) return { kind: "error", reason: turn.reason };
 
     const owned = turn.owned!;
@@ -488,7 +489,7 @@ export class PiCodingSessionService {
       return { ok: false, message: "Failed to start compaction" };
     }
 
-    const turn = await this.launchTurn(rec, generation, ws.canonicalPath);
+    const turn = await this.launchTurn(rec, generation, ws.canonicalPath, intent);
     if (!turn.ok) {
       return { ok: false, message: turn.reason };
     }
@@ -1181,9 +1182,16 @@ export class PiCodingSessionService {
     rec: PiCodingSessionRecord,
     generation: number,
     canonicalPath: string,
+    intent: "initial" | "resume",
   ): Promise<{ ok: true; owned: OwnedTurn } | { ok: false; reason: string }> {
     let launched: Awaited<ReturnType<PiRuntimeHost["launch"]>>;
     try {
+      // #1932 — initial turns mint the abtars-owned conversation ID and
+      // launch directly into its partitioned directory (R1-R2). Resume
+      // launches keep the legacy flat root: the proven file may predate
+      // partitioning and resolveIdentity switches to it explicitly. The
+      // post-launch proof adopts whatever Pi reports, so a Pi that ignored
+      // --session-id behaves exactly as today.
       launched = await this.deps.host.launch({
         workspaceAlias: rec.workspaceAlias,
         envIdentity: {
@@ -1192,6 +1200,9 @@ export class PiCodingSessionService {
           executionGeneration: generation,
         },
         memoryMode: rec.memoryMode,
+        ...(intent === "initial"
+          ? { ownedSession: { role: "coding" as const, conversationId: mintPiConversationId() } }
+          : {}),
       });
     } catch (err) {
       this.deps.claims.releaseForGeneration({ ownerId: rec.sessionId, generation });
