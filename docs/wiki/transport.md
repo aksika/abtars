@@ -66,7 +66,7 @@ After changing the route, use /reset to apply the new transport. Route-specific 
 
 ## Fallbacks
 
-Each route can have an ordered fallbacks list. abTARS evaluates candidates using its provider health policy and tries a compatible configured candidate when the current model fails. Pi supplies API provider execution; abTARS owns candidate selection and fallback policy.
+Each route can have an ordered fallbacks list. It is used for boot-time model selection, the ACP route's try-next-model loop, and operator display — not for Pi dispatch. A Pi conversation always uses its single configured model; when it fails, the failure is classified once, observed in the durable availability memo, and surfaced as a typed terminal error instead of an in-turn model switch. Pi supplies API provider execution; abTARS owns the configured selection and availability admission.
 
 ## Emergency route
 
@@ -74,7 +74,7 @@ The hailMary setting describes an ACP provider used by /emergency. It is a separ
 
 ## Health policy
 
-The optional healthPolicy object tunes provider health scoring and cooldowns. Defaults are applied when fields are omitted. See the configuration shipped with your installation for the current defaults.
+The retired `healthPolicy` object is accepted but inert: provider health buckets, rotation, and automatic demotion no longer exist. Availability is tracked in the durable memo (`provider-availability-v1.json` under the abtars state dir); see [Resilience](/abtars/resilience). Defaults are applied when fields are omitted. See the configuration shipped with your installation for the current defaults.
 
 ## Switching models
 

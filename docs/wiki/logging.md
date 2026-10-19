@@ -7,7 +7,7 @@ Set via `LOG_LEVEL` in `~/.abtars/config/.env`. Default: `low`.
 | Level | What you'll see |
 |-------|-----------------|
 | `off` | Silent — nothing logged |
-| `low` | Info + warnings + errors: boot phases, message delivery, tool calls, deploys, fallback activations, failures |
+| `low` | Info + warnings + errors: boot phases, message delivery, tool calls, deploys, availability cooldowns, failures |
 | `debug` | Low + verbose: prompt routing, session resolution, token counts, recall content, full payloads |
 | `trace` | Debug + swallowed errors: every silent catch, failed probes, harmless timeouts |
 

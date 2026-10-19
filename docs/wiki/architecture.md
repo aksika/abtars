@@ -8,7 +8,7 @@ The message pipeline handles commands, access checks, sessions, prompt construct
 
 ## Execution routes
 
-- The pi-ai route uses Pi's agent core and provider engine for API model requests and tool execution. abTARS selects the route, assigns models, and manages configured fallback candidates.
+- The pi-ai route uses Pi's agent core and provider engine for API model requests and tool execution. abTARS selects the route, assigns the single configured model per conversation, and gates dispatch on provider availability.
 - The ACP route connects to an ACP-compatible agent CLI. It runs independently of Pi.
 
 See [Transport Configuration](/abtars/transport) and [Pi Integration](/abtars/pi).

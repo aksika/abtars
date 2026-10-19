@@ -1,6 +1,6 @@
 # Resilience
 
-abTARS combines process supervision, provider fallback, and release recovery. These mechanisms address different failure types.
+abTARS combines process supervision, provider availability memory, and release recovery. These mechanisms address different failure types.
 
 ## Process recovery
 
@@ -8,9 +8,9 @@ The bridge heartbeat, external watchdog, and operating-system service manager fo
 
 See [Process Supervision](/abtars/supervision) for the layer responsibilities and lifecycle commands.
 
-## Provider fallback
+## Provider availability
 
-Each route can have an ordered list of fallback candidates in transport.json. When a model request fails, abTARS evaluates the next configured candidate using its provider health policy. Provider support and authentication must be configured for each candidate.
+Each Pi conversation dispatches exactly its configured model — there is no in-turn fallback chain, rotation, or health-scored candidate switching. When a provider fails, the failure is classified once, recorded in a durable availability memo, and surfaced as a typed terminal error. While every configured selection cools down, new turns are suppressed with a bounded reason and the memo's retry time; `/models health reset` clears all cooldowns immediately. Provider support and authentication must be configured for the candidate. The ACP route keeps its own try-next-model loop, and boot-time model selection still walks the configured list to find a working primary.
 
 ## Update and rollback behavior
 

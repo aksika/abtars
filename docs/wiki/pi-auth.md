@@ -49,8 +49,9 @@ Behavior notes:
 - A missing login, unknown model, or failed refresh produces an actionable
   error naming the Pi remediation — the bridge never borrows another
   candidate's credential and never silently falls back to a keyless call.
-- Pi-managed auth failures count as auth failures: the model is demoted and
-  the next fallback candidate is tried, same as an expired API key.
+- Pi-managed auth failures count as auth failures: the failure is observed
+  provider-wide in the availability memo and the turn ends with a typed
+  terminal error, same as an expired API key.
 - The ACP route is untouched — it keeps using its own CLI credentials or
   abtars secrets. Pi's credential store is never an ACP credential source.
 - `/model` shows Pi-managed entries as such, and `/model doctor` reports

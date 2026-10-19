@@ -31,10 +31,10 @@ For a route or model change that requires a new transport session, use /reset.
 |---------|--------|
 | /models restore | Restore the previous transport configuration |
 | /models default | Restore the shipped default transport configuration |
-| /models health reset | Clear model health penalties |
+| /models health reset | Clear provider availability cooldowns |
 
 ## Provider and model configuration
 
-The pi-ai route uses Pi for API model execution. Provider entries, route assignments, fallback candidates, and model metadata are configured separately. Use [Add a Custom API Provider](./custom-pi-providers.md) to add a provider or model, and [Provider Authentication](./pi-auth.md) to choose how it authenticates.
+The pi-ai route uses Pi for API model execution. Provider entries, route assignments, and model metadata are configured separately. Route fallback lists are retained for boot-time selection, ACP dispatch, and display — Pi dispatch itself always uses the single configured model. Use [Add a Custom API Provider](./custom-pi-providers.md) to add a provider or model, and [Provider Authentication](./pi-auth.md) to choose how it authenticates.
 
 ACP-compatible command-line agents are configured on the ACP route and use their own CLI authentication.

@@ -24,7 +24,7 @@ All commands work on Telegram and Discord unless noted otherwise.
 | `/models list [provider]` | List providers or models on a provider |
 | `/models restore` | Undo last model/provider switch |
 | `/models default` | Factory reset (transport.default.json) |
-| `/models health reset` | Reset model health buckets |
+| `/models health reset` | Clear provider availability cooldowns |
 | `/models emergency` | Activate the emergency ACP fast path (hailMary) |
 | `/emergency` | Shortcut for `/models emergency` |
 

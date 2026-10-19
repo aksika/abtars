@@ -168,17 +168,20 @@ export async function handleModels(text: string, ctx: CommandContext): Promise<b
     return true;
   }
 
-  // /models health reset / primary / reset — reset model health buckets
+  // /models health reset — explicit reset of the durable provider
+  // availability memo (#1932 R6): clears every cooldown so the next turn
+  // dispatches normally. Entries also expire on their own; a successful
+  // turn clears only its own namespace.
   if (arg === "health reset" || arg === "primary" || arg === "reset") {
-    const t = ctx.transport as unknown as {
-      policy?: { registry: { resetAll: () => void } };
-    };
-    if (t.policy?.registry) {
-      t.policy.registry.resetAll();
-      await ctx.reply("Model health reset — all models available (sticky credits/auth cleared).");
-    } else {
-      await ctx.reply("No fallback policy configured.");
+    const { abtarsHome } = await import("../../paths.js");
+    const { join } = await import("node:path");
+    const { rmSync } = await import("node:fs");
+    try {
+      rmSync(join(abtarsHome(), "state", "provider-availability-v1.json"), { force: true });
+    } catch {
+      // Best effort — an absent or locked memo already admits everything.
     }
+    await ctx.reply("Availability cooldowns cleared — all configured providers available.");
     return true;
   }
 
