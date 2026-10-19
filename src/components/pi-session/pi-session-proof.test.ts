@@ -10,6 +10,7 @@ import {
   allocatePiBinding,
   openPiConversation,
   forkPiConversation,
+  seedWriterForSessionManager,
   type PiSessionManagerCtor,
 } from "./pi-session-adapter.js";
 import { allocatePiSuccessor } from "./pi-conversation-identity.js";
@@ -48,11 +49,11 @@ describe("pi-session real-SDK proof (R1-R2)", () => {
 
     // Real SDK flush: create plus one user message persists the file.
     // Custom-only entries stay in memory by SDK design, so the seed is a
-    // real user turn.
+    // real user turn written through the production seed writer.
     const direct = SessionManager.create(workspace, binding.sessionDir, { id: binding.conversationId });
-    direct.appendMessage({
+    seedWriterForSessionManager(direct).appendSeed({
       role: "user",
-      content: [{ type: "text", text: "proof-seed-history" }],
+      text: "proof-seed-history",
       timestamp: Date.now(),
     });
 

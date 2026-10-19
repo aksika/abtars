@@ -9,9 +9,12 @@ import {
   erasePiConversation,
   forkPiConversation,
   isTerminalPiEvent,
+  loadPiReseedProgress,
   mapPiEventType,
   markPiConversationEnded,
   openPiConversation,
+  savePiReseedProgress,
+  seedWriterForSessionManager,
   sweepPiRetention,
   type PiAgentSessionShape,
   type PiSessionManagerCtor,
@@ -315,8 +318,31 @@ describe("pi-session-adapter", () => {
     expect(existsSync(oldFile)).toBe(false);
   });
 
-  it("erases owned files without touching standalone sessions", () => {
-    const root = mkdtempSync(join(tmpdir(), "pi-adapter-"));
+  it("persists reconstruction progress across restarts", () => {
+    const state = mkdtempSync(join(tmpdir(), "pi-state-"));
+    const ws = mkdtempSync(join(tmpdir(), "pi-ws-"));
+    const { manager } = makeSessionManager();
+    const binding = allocatePiBinding(state, bindingParams(ws));
+    openPiConversation(manager, state, binding);
+    expect(loadPiReseedProgress(state, "unknown-id")).toEqual({ seeded: 0, currentAdmitted: false });
+
+    savePiReseedProgress(state, binding.conversationId, { seeded: 2, currentAdmitted: true });
+    expect(loadPiReseedProgress(state, binding.conversationId)).toEqual({ seeded: 2, currentAdmitted: true });
+  });
+
+  it("seeds archive context as ordinary turns through the public append API", () => {
+    const appended: Array<{ role: string; content: Array<{ text: string }>; timestamp: number }> = [];
+    const writer = seedWriterForSessionManager({
+      appendMessage: (message) => {
+        appended.push({ role: message.role, content: message.content, timestamp: message.timestamp });
+        return "entry-id";
+      },
+    });
+    writer.appendSeed({ role: "user", text: "seed", timestamp: 7 });
+    expect(appended).toEqual([{ role: "user", content: [{ type: "text", text: "seed" }], timestamp: 7 }]);
+  });
+
+  it("erases owned files without touching standalone sessions", () => {    const root = mkdtempSync(join(tmpdir(), "pi-adapter-"));
     const ws = mkdtempSync(join(tmpdir(), "pi-ws-"));
     const state = root;
     const standalone = join(root, "standalone.jsonl");

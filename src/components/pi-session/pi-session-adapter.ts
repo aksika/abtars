@@ -354,6 +354,12 @@ interface PiConversationRecord {
   canonicalWorkspace: string;
   predecessorId?: string;
   endedAt?: number;
+  reseed?: PiReseedProgress;
+}
+
+export interface PiReseedProgress {
+  seeded: number;
+  currentAdmitted: boolean;
 }
 
 interface PiConversationRegistry {
@@ -424,6 +430,59 @@ export function markPiConversationEnded(stateRoot: string, conversationId: strin
   if (!record) return;
   record.endedAt = now;
   saveRegistry(stateRoot, registry);
+}
+
+/**
+ * Registry-backed reconstruction progress: the seed boundary and current
+ * input admission survive a crash in the owned registry, so a retried
+ * reconstruction after restart skips already-seeded history and never
+ * replays the current input.
+ */
+export function loadPiReseedProgress(stateRoot: string, conversationId: string): PiReseedProgress {
+  const registry = loadRegistry(stateRoot);
+  return registry.conversations[conversationId]?.reseed ?? { seeded: 0, currentAdmitted: false };
+}
+
+export function savePiReseedProgress(stateRoot: string, conversationId: string, progress: PiReseedProgress): void {
+  const registry = loadRegistry(stateRoot);
+  const record = registry.conversations[conversationId];
+  if (!record) return;
+  record.reseed = { ...progress };
+  saveRegistry(stateRoot, registry);
+}
+
+/** Minimal structural append surface of a Pi SessionManager instance. */
+export interface PiArchiveSeedTarget {
+  appendMessage(message: {
+    role: "user" | "assistant";
+    content: Array<{ type: "text"; text: string }>;
+    timestamp: number;
+  }): string;
+}
+
+export interface PiSeedMessageInput {
+  role: "user" | "assistant";
+  text: string;
+  timestamp: number;
+}
+
+/**
+ * Wrap a Pi SessionManager instance as a reconstruction seed writer.
+ * Archive context enters as ordinary user/assistant turns through the
+ * public append API; no private entry rewriting, no tool replay.
+ */
+export function seedWriterForSessionManager(instance: PiArchiveSeedTarget): {
+  appendSeed: (message: PiSeedMessageInput) => void;
+} {
+  return {
+    appendSeed: (message: PiSeedMessageInput) => {
+      instance.appendMessage({
+        role: message.role,
+        content: [{ type: "text", text: message.text }],
+        timestamp: message.timestamp,
+      });
+    },
+  };
 }
 
 export interface PiRetentionReport {
