@@ -8,7 +8,9 @@ import type { PiExecutorConfig } from "./config.js";
 import { resolveWorkerOrcExtensionPath, WORKER_ORC_EXTENSION_PROTOCOL } from "./worker-orc-extension.js";
 import type { SupervisedPiCommunicationPort } from "./supervised-pi-communication.js";
 import { validatePersistedSession, type SessionProof } from "./config.js";
+import { mintPiConversationId, type PiConversationRole } from "../pi-session/pi-conversation-identity.js";
 import { PiRuntimeHost } from "./pi-runtime-host.js";
+import type { PiRunOrigin } from "./types.js";
 import type { PiRunRecord, PiRunStatus, PiPendingRequestType, PiUiReply, PendingUiClaim, ResumeCapability } from "./types.js";
 import { captureGitEvidence, computeChangedFilesSummary } from "./evidence.js";
 import { nerve } from "../nerve.js";
@@ -25,6 +27,26 @@ export type EndExternalSession = (
 
 /** Bounded live-state probe before graceful interruption. */
 const INTERRUPT_PROBE_MS = 2_000;
+
+/**
+ * #1932 — origin-to-role for owned RPC launch identity. The role only
+ * selects the partitioned session directory; memory behavior stays on the
+ * existing memoryMode/env path. Unknown origins return null and keep the
+ * legacy flat launch — never a fabricated role binding (R3).
+ */
+function piRunOriginRole(origin: PiRunOrigin): PiConversationRole | null {
+  switch (origin) {
+    case "supervised":
+    case "agent":
+      return "worker";
+    case "user":
+      return "task";
+    case "peer":
+      return "peer";
+    default:
+      return null;
+  }
+}
 
 /**
  * #1804 — supervised Pi readiness budget. Pi's availability list is a
@@ -537,6 +559,16 @@ export class PiExecutor {
 
     // #1635 — spawn through the shared runtime host (canonical workspace
     // resolution, args/trust/env construction, process launch).
+    // #1932 — first launch mints the abtars-owned conversation ID and
+    // launches into its partitioned directory (R1-R2). Generations with an
+    // existing Pi session keep the legacy flat root: the known file may
+    // predate partitioning and the resume path switches to it explicitly.
+    // The post-launch proof adopts whatever Pi reports, so a Pi that
+    // ignored --session-id behaves exactly as today.
+    const originRole = piRunOriginRole(run.origin);
+    const ownedSession = !run.piSessionId && originRole
+      ? { role: originRole, conversationId: mintPiConversationId() }
+      : undefined;
     const launched = await this.host.launch({
       workspaceAlias: run.workspaceAlias,
       envIdentity: {
@@ -545,6 +577,7 @@ export class PiExecutor {
         executionGeneration: gen,
       },
       extensionPaths,
+      ownedSession,
     });
     if (!launched.ok) {
       await this._settleAndCleanupGen(run.id, gen, ["starting"], "failed", { error: launched.error });

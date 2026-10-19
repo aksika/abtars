@@ -252,6 +252,51 @@ describe("PiExecutor #1647 — start state machine", () => {
     expect(run.resumeCapability).toBe("session_missing");
   });
 
+  it("initial user generation launches with an abtars-minted ID in the task partition", async () => {
+    const h = harness;
+    const savedFile = writeSession(h.root, "owned.jsonl", "owned-1");
+    const { runId } = createClaimedRun(h, "owned launch");
+    fake.FakeClient.defaultState = { sessionId: "owned-1", sessionFile: savedFile, isStreaming: false, isCompacting: false };
+
+    const result = await h.executor.startWithClaim(runId, 1, "c-1");
+    expect(result).toBe("started");
+    const client = fake.FakeClient.instances[0]!;
+    const launchCall = client.calls.find((c) => c.method === "launch")!;
+    const args = launchCall.args[1] as readonly string[];
+    const sessionDir = args[args.indexOf("--session-dir") + 1] as string;
+    // Origin "user" → task partition under the storage root, never the flat root.
+    expect(sessionDir.startsWith(h.root)).toBe(true);
+    expect(sessionDir).toContain("/task/");
+    expect(sessionDir).not.toBe(h.root);
+    expect(args).toContain("--session-id");
+    const conversationId = args[args.indexOf("--session-id") + 1] as string;
+    expect(conversationId).toMatch(/^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$/);
+    // Adoption path unchanged: the run records whatever Pi reported.
+    expect(runRecord(h, runId).piSessionId).toBe("owned-1");
+  });
+
+  it("initial supervised generation launches in the worker partition", async () => {
+    const h = harness;
+    const savedFile = writeSession(h.root, "sup-owned.jsonl", "sup-owned-1");
+    const runId = "sup-owned";
+    h.db.prepare(`INSERT OR IGNORE INTO kanban_board (id, title, source, status, type) VALUES (?, ?, 'agent', 'running', 'W')`).run(9141, "w-card");
+    h.db.prepare(`INSERT INTO pi_runs (id, card_id, workspace_alias, operational_goal, owner_principal_id,
+      origin, execution_generation, generation_intent, current_session_id, status)
+      VALUES (?, ?, 'repo-a', 'sup goal', 'usr-1', 'supervised', 1, 'initial', 'c-sup', 'starting')`).run(runId, 9141);
+    fake.FakeClient.defaultState = { sessionId: "sup-owned-1", sessionFile: savedFile, isStreaming: false, isCompacting: false, model: { provider: "test-provider", id: "model-x" } };
+
+    const result = await h.executor.startWithClaim(runId, 1, "c-sup");
+    expect(result).toBe("started");
+    const client = fake.FakeClient.instances[0]!;
+    const launchCall = client.calls.find((c) => c.method === "launch")!;
+    const args = launchCall.args[1] as readonly string[];
+    const sessionDir = args[args.indexOf("--session-dir") + 1] as string;
+    expect(sessionDir.startsWith(h.root)).toBe(true);
+    expect(sessionDir).toContain("/worker/");
+    expect(sessionDir).not.toBe(h.root);
+    expect(args).toContain("--session-id");
+  });
+
   it("resume switches the saved file, verifies identity, persists the SAVED tuple, and sends one continuation — never the goal", async () => {
     const h = harness;
     const savedFile = writeSession(h.root, "saved.jsonl", "sess-saved");
@@ -297,6 +342,28 @@ describe("PiExecutor #1647 — start state machine", () => {
     expect(run.status).toBe("failed");
     // The exact generation's C session is closed on the failed resume.
     expect(h.ended.some(e => e.runId === runId && e.generation === 2 && e.sessionId === "c-2")).toBe(true);
+  });
+
+  it("a resume generation keeps the flat root without --session-id", async () => {
+    const h = harness;
+    const savedFile = writeSession(h.root, "res-flat.jsonl", "sess-flat");
+    const runId = "res-flat";
+    seedResumeRun(h, runId, 9123, "sess-flat", savedFile);
+    fake.FakeClient.defaultState = { sessionId: "fresh-process", sessionFile: undefined, isStreaming: false, isCompacting: false };
+    fake.FakeClient.onSwitch = (_file, client) => {
+      client.state = { sessionId: "sess-flat", sessionFile: savedFile, isStreaming: false, isCompacting: false };
+    };
+
+    const result = await h.executor.startWithClaim(runId, 2, "c-2");
+    expect(result).toBe("started");
+    const client = fake.FakeClient.instances[0]!;
+    expect(client.switches).toEqual([savedFile]);
+    const launchCall = client.calls.find((c) => c.method === "launch")!;
+    const args = launchCall.args[1] as readonly string[];
+    // Known file may predate partitioning: flat root, proven-file switch, no minted ID.
+    expect(args.slice(args.indexOf("--session-dir"), args.indexOf("--session-dir") + 2))
+      .toEqual(["--session-dir", h.root]);
+    expect(args).not.toContain("--session-id");
   });
 
   it("a resume with an identity mismatch after switch settles failed with no continuation", async () => {
