@@ -1,0 +1,421 @@
+import { closeSync, existsSync, mkdirSync, openSync, readFileSync, readSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { randomUUID } from "node:crypto";
+import { dirname, join } from "node:path";
+import { logWarn } from "../logger.js";
+import {
+  isValidPiConversationId,
+  mintPiConversationId,
+  resolvePiConversationDir,
+  resolvePiConversationFile,
+  verifyPiConversationFile,
+  type PiConversationBinding,
+  type PiConversationRole,
+  type PiMemoryScope,
+} from "./pi-conversation-identity.js";
+
+const TAG = "pi-session-adapter";
+const REGISTRY_FILENAME = "pi-conversations-v1.json";
+const ENDED_RETENTION_MS = 7 * 24 * 60 * 60 * 1000;
+const DEFAULT_IDLE_TIMEOUT_MS = 5_000;
+const HEADER_READ_MAX_BYTES = 64 * 1024;
+
+/**
+ * Structural Pi SDK surface used by the adapter. Production code loads the
+ * real module through installed-Pi discovery (never a static runtime import,
+ * enforced by check-pi-boundary); tests inject fakes.
+ */
+export interface PiSessionManagerCtor {
+  create(cwd: string, sessionDir?: string, options?: { id?: string; parentSession?: string }): unknown;
+  open(path: string, sessionDir?: string, cwdOverride?: string): unknown;
+  findById(cwd: string, id: string, sessionDir?: string): string | undefined;
+  forkFrom(sourcePath: string, targetCwd: string, sessionDir?: string, options?: { id?: string }): unknown;
+}
+
+/** Minimal AgentSession surface: queue drain, abort, idle, subscriptions. */
+export interface PiAgentSessionShape {
+  clearQueue(): { steering: string[]; followUp: string[] };
+  abort(): Promise<void>;
+  waitForIdle(): Promise<void>;
+  on(event: string, handler: (event: { type: string }) => void): () => void;
+}
+
+export interface PiConversationParams {
+  principal: string;
+  platform: string;
+  role: PiConversationRole;
+  workspaceAlias: string;
+  canonicalWorkspace: string;
+  memoryScope: PiMemoryScope;
+}
+
+export interface PiConversationHandle {
+  binding: PiConversationBinding;
+  canonicalFile: string;
+  generation: number;
+  admissionOpen: boolean;
+}
+
+export interface PiCancelResult {
+  drainedSteering: string[];
+  drainedFollowUp: string[];
+  settled: boolean;
+}
+
+/** agent_settled ends model activity; agent_end can precede automatic recovery. */
+export type PiMappedEvent = "terminal" | "recovery" | "progress" | "ignored";
+
+export function mapPiEventType(type: string): PiMappedEvent {
+  if (type === "agent_settled") return "terminal";
+  if (type === "agent_end") return "recovery";
+  if (type === "session_compact" || type === "session_compact_failed" || type === "compaction_start" || type === "compaction_end") {
+    return "progress";
+  }
+  return "ignored";
+}
+
+export function isTerminalPiEvent(type: string): boolean {
+  return mapPiEventType(type) === "terminal";
+}
+
+/** Bounded, content-free header read: first JSONL record id or null. */
+export function readPiSessionHeaderId(canonicalFile: string): string | null {
+  let fd: number;
+  try {
+    fd = openSync(canonicalFile, "r");
+  } catch {
+    return null;
+  }
+  try {
+    const buf = Buffer.alloc(HEADER_READ_MAX_BYTES);
+    const bytesRead = readSync(fd, buf, 0, buf.length, 0);
+    const data = bytesRead < buf.length ? buf.subarray(0, bytesRead) : buf;
+    const newline = data.indexOf(0x0a);
+    if (newline === -1) return null;
+    const line = data.subarray(0, newline).toString("utf-8").trim();
+    if (!line) return null;
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(line) as unknown;
+    } catch {
+      return null;
+    }
+    if (parsed === null || typeof parsed !== "object") return null;
+    const header = parsed as { type?: unknown; id?: unknown };
+    if (header.type !== "session" || typeof header.id !== "string" || header.id.length === 0) return null;
+    return header.id;
+  } catch {
+    return null;
+  } finally {
+    try { closeSync(fd); } catch { /* ignore */ }
+  }
+}
+
+export function allocatePiBinding(
+  stateRoot: string,
+  params: PiConversationParams,
+): PiConversationBinding {
+  const conversationId = mintPiConversationId();
+  const sessionDir = resolvePiConversationDir(stateRoot, params.principal, params.role, params.canonicalWorkspace);
+  return {
+    conversationId,
+    principal: params.principal,
+    platform: params.platform,
+    role: params.role,
+    workspaceAlias: params.workspaceAlias,
+    canonicalWorkspace: params.canonicalWorkspace,
+    memoryScope: params.memoryScope,
+    sessionDir,
+  };
+}
+
+function ensurePartitionDir(sessionDir: string): void {
+  mkdirSync(sessionDir, { recursive: true, mode: 0o700 });
+}
+
+function verifyOwned(
+  stateRoot: string,
+  binding: PiConversationBinding,
+): { ok: true; canonicalFile: string } | { ok: false; reason: string } {
+  const verified = verifyPiConversationFile(stateRoot, binding.sessionDir, binding.conversationId, readPiSessionHeaderId);
+  if (!verified.ok) return verified;
+  return { ok: true, canonicalFile: verified.canonicalFile };
+}
+
+/**
+ * Open an intact conversation under its existing ID, or create it with the
+ * abtars-minted ID when absent. Exact-ID lookup only: never a global
+ * latest-session scan or an unscoped suffix search.
+ */
+export function openPiConversation(
+  sessionManager: PiSessionManagerCtor,
+  stateRoot: string,
+  binding: PiConversationBinding,
+): PiConversationHandle {
+  if (!isValidPiConversationId(binding.conversationId)) {
+    throw new Error("refusing to open conversation with invalid id");
+  }
+  ensurePartitionDir(binding.sessionDir);
+  const found = sessionManager.findById(binding.canonicalWorkspace, binding.conversationId, binding.sessionDir);
+  if (found !== undefined) {
+    const verified = verifyOwned(stateRoot, binding);
+    if (!verified.ok) {
+      // Missing or corrupt files are closed/quarantined, never silentlyadopted.
+      throw new Error(`owned conversation file failed verification (${verified.reason})`);
+    }
+    sessionManager.open(verified.canonicalFile, binding.sessionDir, binding.canonicalWorkspace);
+    registerConversation(stateRoot, binding, verified.canonicalFile);
+    return { binding, canonicalFile: verified.canonicalFile, generation: 1, admissionOpen: true };
+  }
+  sessionManager.create(binding.canonicalWorkspace, binding.sessionDir, { id: binding.conversationId });
+  const expectedFile = resolvePiConversationFile(binding.sessionDir, binding.conversationId);
+  registerConversation(stateRoot, binding, expectedFile);
+  return { binding, canonicalFile: expectedFile, generation: 1, admissionOpen: true };
+}
+
+/**
+ * Fork through abtars allocation first: the successor binding (fresh ID,
+ * predecessor lineage) must exist before any Pi fork call, so native or
+ * extension forks cannot create addressable unregistered conversations.
+ */
+export function forkPiConversation(
+  sessionManager: PiSessionManagerCtor,
+  stateRoot: string,
+  source: PiConversationHandle,
+  successor: PiConversationBinding,
+): PiConversationHandle {
+  if (successor.predecessorId !== source.binding.conversationId) {
+    throw new Error("fork successor must carry the source conversation as predecessor");
+  }
+  const verified = verifyOwned(stateRoot, source.binding);
+  if (!verified.ok) {
+    throw new Error(`cannot fork from unverified source (${verified.reason})`);
+  }
+  ensurePartitionDir(successor.sessionDir);
+  sessionManager.forkFrom(verified.canonicalFile, successor.canonicalWorkspace, successor.sessionDir, {
+    id: successor.conversationId,
+  });
+  const forked = verifyOwned(stateRoot, successor);
+  if (!forked.ok) {
+    throw new Error(`forked conversation failed verification (${forked.reason})`);
+  }
+  registerConversation(stateRoot, successor, forked.canonicalFile);
+  return { binding: successor, canonicalFile: forked.canonicalFile, generation: 1, admissionOpen: true };
+}
+
+/** Close per-execution steering admission before cancellation. */
+export function closePiAdmission(handle: PiConversationHandle): void {
+  handle.admissionOpen = false;
+}
+
+/**
+ * Cancel under the closed gate: drain both Pi queues explicitly (abort
+ * alone does not clear steering/follow-up), abort active work, then await
+ * logical idleness within the existing cleanup bound. Late submissions
+ * stay fenced by the caller's execution generation. Abort failures
+ * propagate; an idle timeout reports settled:false instead of throwing.
+ */
+export async function cancelPiConversation(
+  session: PiAgentSessionShape,
+  handle: PiConversationHandle,
+  idleTimeoutMs: number = DEFAULT_IDLE_TIMEOUT_MS,
+): Promise<PiCancelResult> {
+  closePiAdmission(handle);
+  const drained = session.clearQueue();
+  await session.abort();
+  const settled = await waitForPiIdle(session, idleTimeoutMs);
+  return { drainedSteering: drained.steering, drainedFollowUp: drained.followUp, settled };
+}
+
+async function waitForPiIdle(session: PiAgentSessionShape, timeoutMs: number): Promise<boolean> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  let idleWon = false;
+  try {
+    await Promise.race([
+      session.waitForIdle().then(() => {
+        idleWon = true;
+      }),
+      new Promise<void>((resolve) => {
+        timer = setTimeout(resolve, timeoutMs);
+      }),
+    ]);
+    return idleWon;
+  } catch {
+    return false;
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+  }
+}
+
+/**
+ * Bind observers to the replacement instance before it can run; the caller
+ * holds the returned unbind and detaches the old subscription first.
+ */
+export function bindPiObservers(
+  session: PiAgentSessionShape,
+  onEvent: (type: string) => void,
+): () => void {
+  const unbinds = [
+    session.on("agent_settled", (event) => onEvent(event.type)),
+    session.on("agent_end", (event) => onEvent(event.type)),
+    session.on("session_compact", (event) => onEvent(event.type)),
+  ];
+  return () => {
+    for (const unbind of unbinds) unbind();
+  };
+}
+
+// ── Owned-conversation registry, retention, and erasure ──
+
+interface PiConversationRegistry {
+  version: 1;
+  conversations: Record<string, {
+    sessionDir: string;
+    canonicalFile: string;
+    principal: string;
+    platform: string;
+    role: string;
+    canonicalWorkspace: string;
+    predecessorId?: string;
+    endedAt?: number;
+  }>;
+}
+
+function registryPath(stateRoot: string): string {
+  return join(stateRoot, REGISTRY_FILENAME);
+}
+
+function loadRegistry(stateRoot: string): PiConversationRegistry {
+  const path = registryPath(stateRoot);
+  if (!existsSync(path)) return { version: 1, conversations: {} };
+  try {
+    const parsed = JSON.parse(readFileSync(path, "utf-8")) as PiConversationRegistry;
+    if (parsed.version !== 1 || parsed.conversations === null || typeof parsed.conversations !== "object") {
+      logWarn(TAG, "conversation registry has unsupported shape; using empty registry");
+      return { version: 1, conversations: {} };
+    }
+    return parsed;
+  } catch {
+    logWarn(TAG, "conversation registry unreadable; using empty registry");
+    return { version: 1, conversations: {} };
+  }
+}
+
+function saveRegistry(stateRoot: string, registry: PiConversationRegistry): void {
+  mkdirSync(stateRoot, { recursive: true, mode: 0o700 });
+  const path = registryPath(stateRoot);
+  const tmp = `${path}.${randomUUID()}.tmp`;
+  writeFileSync(tmp, JSON.stringify(registry), { mode: 0o600 });
+  renameSync(tmp, path);
+}
+
+function registerConversation(stateRoot: string, binding: PiConversationBinding, canonicalFile: string): void {
+  const registry = loadRegistry(stateRoot);
+  registry.conversations[binding.conversationId] = {
+    sessionDir: binding.sessionDir,
+    canonicalFile,
+    principal: binding.principal,
+    platform: binding.platform,
+    role: binding.role,
+    canonicalWorkspace: binding.canonicalWorkspace,
+    predecessorId: binding.predecessorId,
+  };
+  saveRegistry(stateRoot, registry);
+}
+
+/** Mark a conversation ended; retention sweep only prunes ended sessions. */
+export function markPiConversationEnded(stateRoot: string, conversationId: string, now: number): void {
+  const registry = loadRegistry(stateRoot);
+  const record = registry.conversations[conversationId];
+  if (!record) return;
+  record.endedAt = now;
+  saveRegistry(stateRoot, registry);
+}
+
+export interface PiRetentionReport {
+  removed: string[];
+  kept: string[];
+}
+
+/**
+ * Seven-day ended-session retention over registered abtars-owned files
+ * only. Never sweeps standalone Pi session directories. Preserves live
+ * writers, resumable active work (isActive), and delivery-referenced
+ * conversations regardless of age. Event-driven: the caller invokes this
+ * at session lifecycle/startup boundaries.
+ */
+export function sweepPiRetention(
+  stateRoot: string,
+  now: number,
+  isActive: (conversationId: string) => boolean,
+): PiRetentionReport {
+  const registry = loadRegistry(stateRoot);
+  const removed: string[] = [];
+  const kept: string[] = [];
+  let changed = false;
+  for (const [conversationId, record] of Object.entries(registry.conversations)) {
+    if (record.endedAt === undefined || now - record.endedAt < ENDED_RETENTION_MS) {
+      kept.push(conversationId);
+      continue;
+    }
+    if (isActive(conversationId)) {
+      kept.push(conversationId);
+      continue;
+    }
+    if (!record.canonicalFile.startsWith(join(stateRoot, ""))) {
+      // Not abtars-owned: never delete, keep the record for inspection.
+      logWarn(TAG, `retention skipped non-owned record for "${conversationId}"`);
+      kept.push(conversationId);
+      continue;
+    }
+    removeOwnedFiles(record.canonicalFile);
+    removed.push(conversationId);
+    delete registry.conversations[conversationId];
+    changed = true;
+  }
+  if (changed) saveRegistry(stateRoot, registry);
+  return { removed, kept };
+}
+
+function removeOwnedFiles(canonicalFile: string): void {
+  for (const candidate of [canonicalFile, `${canonicalFile}.quarantined`]) {
+    try {
+      if (existsSync(candidate) && statSync(candidate).isFile()) rmSync(candidate);
+    } catch {
+      // Best-effort file removal: the registry entry is already dropped so
+      // a later sweep retries; never throw out of retention.
+      logWarn(TAG, `retention could not remove "${dirname(candidate)}" entry`);
+    }
+  }
+}
+
+export interface PiErasureReport {
+  removedFiles: string[];
+}
+
+/**
+ * Explicit session erasure: removes owned files and derivatives/quarantine
+ * without touching standalone Pi sessions. Content-free workflow/delivery
+ * metadata stays with its existing owners; only the registry entry drops.
+ */
+export function erasePiConversation(stateRoot: string, conversationId: string): PiErasureReport {
+  const registry = loadRegistry(stateRoot);
+  const record = registry.conversations[conversationId];
+  if (!record) return { removedFiles: [] };
+  if (!record.canonicalFile.startsWith(join(stateRoot, ""))) {
+    throw new Error("refusing to erase a conversation outside the owned root");
+  }
+  const removedFiles: string[] = [];
+  for (const candidate of [record.canonicalFile, `${record.canonicalFile}.quarantined`]) {
+    try {
+      if (existsSync(candidate) && statSync(candidate).isFile()) {
+        rmSync(candidate);
+        removedFiles.push(candidate);
+      }
+    } catch {
+      logWarn(TAG, "erasure could not remove an owned file");
+    }
+  }
+  delete registry.conversations[conversationId];
+  saveRegistry(stateRoot, registry);
+  return { removedFiles };
+}
