@@ -4,12 +4,12 @@
  * scripted. The bridge recalls through the owned contract over a built
  * serving generation, declares support with source-safe C2 refs, and
  * reactions resolve through the same answer-evidence path as production.
- * Cite/reject feedback has no new-model landing surface yet (see backlog
- * #1936); this journey proves support tracking and marker hygiene, not
- * legacy cited_count bumps.
+ * The cite/reject feedback operation was retired (#1928 A13): reactions
+ * resolve and log the delivered answer they target, without claiming a
+ * learning write. This journey proves support tracking and marker hygiene.
  */
 import { describe, it, expect, vi } from "vitest";
-import { AbmindService, type AbmindMethod, type AbmindRequestV1, type ServiceCallContext } from "abmind";
+import { AbmindService, type AbmindMethod, type AbmindRequestV1, type OwnedRecallPacket, type ServiceCallContext } from "abmind";
 import { createHarness, memoryDb, type IntegrationHarness } from "./harness.js";
 import { createDisabledRuntime, type AbtarsMemoryRuntime } from "../../components/memory-runtime.js";
 import { handleInboundMessage, type PipelineDeps } from "../../components/message-pipeline.js";
@@ -46,7 +46,8 @@ function session(): ManagedSession {
     delivery: "streaming", active: true, status: "ready", idleTimeoutMs: 0,
     lastActiveAt: Date.now(), messageCount: 0, tokenCount: 0, toolCallCount: 0,
     log: [], shortIndex: 1, showThinking: false, busy: false, queue: [], fullMode: false,
-    pendingStart: false, seen: true, compactFailures: 0, ctxWarned: false, condensing: false, steeringAccepting: false };
+    pendingStart: false, seen: true, compactFailures: 0, ctxWarned: false, steeringAccepting: false,
+    compacting: false, primingTerms: [], completions: [], instructionQueue: [] };
 }
 
 const JOKE_EN = "Tuesday means Belgium as an inside joke";
@@ -67,7 +68,8 @@ describe("#1913 composed answer reaction journey (owned refs)", () => {
         memoryType: "fact", emotionScore: 0,
       });
       expect(stored.stored).toBe(true);
-      const memId = stored.memoryId!;
+      if (!stored.stored) throw new Error("setup store failed");
+      const memId = stored.memoryId;
       const { buildRecallProjection } = await import("abmind");
       expect(buildRecallProjection(db, "u1", { verifiedBackup: true }).ok).toBe(true);
 
@@ -83,7 +85,7 @@ describe("#1913 composed answer reaction journey (owned refs)", () => {
           contract: "owned-v1", profile, identity: { principal: "u1" },
           ...(profile === "recall_fast" ? { rawTurn: text } : { query: { text } }),
           capacity: { maxItems: 10 },
-        }) as Promise<{ items: Array<{ ref: { kind: string; layer?: string; recordId?: number; owner?: string }; excerpt: string }>; text: string; status: string }>;
+        }) as Promise<OwnedRecallPacket>;
       const runtime: AbtarsMemoryRuntime = {
         ...createDisabledRuntime(), state: "ready", capabilities: new Set(["recall", "recordMessage"]), supports: () => true,
         recall: async (input) => {
@@ -102,7 +104,6 @@ describe("#1913 composed answer reaction journey (owned refs)", () => {
           };
         },
         recordMessage: async () => ({ id: null }),
-        recordFeedback: async () => ({ ok: true }),
       };
       const transport: IKiroTransport = { initialize: async () => {}, sendPrompt: async () => "", resetSession: async () => {},
         sendInterrupt: async () => {}, destroy: () => {}, transportCommands: [], isReady: true,
@@ -153,8 +154,8 @@ describe("#1913 composed answer reaction journey (owned refs)", () => {
           message_id: messageId, date: 1, old_reaction: [], new_reaction: [{ type: "emoji", emoji: "👍" }] } };
         await chat.update!(update);
       }
-      // Support survives concurrent reactions across chunks (backlog #1936
-      // tracks the missing new-model feedback landing surface).
+      // Support survives concurrent reactions across chunks; tracking is
+      // resolution-only and never claims a learning outcome.
       expect(lookupAnswerRecord("telegram", "42", "501")?.support).toEqual([`db:durable:${memId}:u1:1`]);
       expect(chat.send.mock.calls.map((args) => args[1]).join(" ")).not.toContain("SUPPORT");
     } finally {

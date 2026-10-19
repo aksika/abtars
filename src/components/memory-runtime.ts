@@ -21,7 +21,6 @@ export type MemoryRuntimeCapability =
   | "instantStore"
   | "editMemory"
   | "rebuildFts"
-  | "feedback"
   | "coreKnowledge"
   | "status"
   | "durableContext"
@@ -283,16 +282,6 @@ export interface CoreKnowledgeInput {
 
 export type CoreKnowledgeResult = string;
 
-export interface FeedbackInput {
-  userId: string;
-  memoryId: number;
-  feedbackType: "cite" | "reject";
-}
-
-export interface FeedbackResult {
-  ok: boolean;
-}
-
 export interface MaintenanceInput {
   operation: "integrity" | "fts_rebuild" | "wal_checkpoint";
 }
@@ -545,7 +534,6 @@ export interface AbtarsMemoryRuntime {
   /** Read daemon-owned sleep lifecycle state for operator status commands. */
   getSleepStatus(): Promise<SleepStatusLike>;
   getCoreKnowledge(input: CoreKnowledgeInput): Promise<CoreKnowledgeResult>;
-  recordFeedback(input: FeedbackInput, operationKey: string): Promise<FeedbackResult>;
   embed(input: EmbeddingInput): Promise<EmbeddingResult>;
   runMaintenance(input: MaintenanceInput): Promise<MaintenanceResult>;
   instantStore(input: InstantStoreInput): Promise<InstantStoreResult>;
@@ -603,7 +591,6 @@ function projectCapabilities(client: AbmindClientLike): Set<MemoryRuntimeCapabil
   if (methods.has("private.instantStore") && features["private_write"] === "true" && revisionContract) result.add("instantStore");
   if (methods.has("private.edit") && features["private_write"] === "true" && revisionContract) result.add("editMemory");
   if (methods.has("private.rebuildFts") && features["private_write"] === "true") result.add("rebuildFts");
-  if (methods.has("private.recordFeedback")) result.add("feedback");
   if (methods.has("private.getCoreKnowledge")) result.add("coreKnowledge");
   if (methods.has("private.getRuntimeStatus")) result.add("status");
   if (methods.has("private.projectConversationContext") && features["private_read"] === "true") result.add("durableContext");
@@ -943,11 +930,6 @@ export function createClientRuntime(client: AbmindClientLike): AbtarsMemoryRunti
 
     async getCoreKnowledge(input: CoreKnowledgeInput): Promise<CoreKnowledgeResult> {
       return (await pm.getCoreKnowledge(input)) as CoreKnowledgeResult;
-    },
-
-    async recordFeedback(input: FeedbackInput, operationKey: string): Promise<FeedbackResult> {
-      await pm.recordFeedback(input, operationKey);
-      return { ok: true };
     },
 
     async embed(input: EmbeddingInput): Promise<EmbeddingResult> {
@@ -1315,7 +1297,6 @@ export function createDisabledRuntime(): AbtarsMemoryRuntime {
     getStatus: async () => { unavailable("getStatus"); return { totalMessages: 0, extractedMemories: 0, extractedByType: {}, consolidationFiles: { daily: 0, weekly: 0, quarterly: 0 }, ingestedDocuments: 0, preservedKeywords: 0, dbSizeBytes: 0, rejectedByScanner: 0, memoryTest: false }; },
     getSleepStatus: async () => { unavailable("getSleepStatus"); return { state: "idle" }; },
     getCoreKnowledge: async () => { unavailable("getCoreKnowledge"); return ""; },
-    recordFeedback: async () => { unavailable("recordFeedback"); return { ok: false }; },
     embed: async () => { unavailable("embed"); return { vectors: [], model: "" }; },
     runMaintenance: async () => { unavailable("runMaintenance"); return { ok: false, summary: "Memory disabled" }; },
     instantStore: async () => { unavailable("instantStore"); return { stored: false, memoriesCount: 0, code: "memory_unavailable", message: "Memory is disabled", requestId: "", retryable: false, action: "stop" as const, stage: "pre_dispatch" as const }; },
@@ -1352,7 +1333,6 @@ export function createUnavailableRuntime(): AbtarsMemoryRuntime {
     getStatus: async () => { unavailable("getStatus"); return { totalMessages: 0, extractedMemories: 0, extractedByType: {}, consolidationFiles: { daily: 0, weekly: 0, quarterly: 0 }, ingestedDocuments: 0, preservedKeywords: 0, dbSizeBytes: 0, rejectedByScanner: 0, memoryTest: false }; },
     getSleepStatus: async () => { unavailable("getSleepStatus"); return { state: "idle" }; },
     getCoreKnowledge: async () => { unavailable("getCoreKnowledge"); return ""; },
-    recordFeedback: async () => { unavailable("recordFeedback"); return { ok: false }; },
     embed: async () => { unavailable("embed"); return { vectors: [], model: "" }; },
     runMaintenance: async () => { unavailable("runMaintenance"); return { ok: false, summary: "Memory disabled" }; },
     instantStore: async () => { unavailable("instantStore"); return { stored: false, memoriesCount: 0, code: "memory_unavailable", message: "Memory unavailable", requestId: "", retryable: false, action: "stop" as const, stage: "pre_dispatch" as const }; },
@@ -1379,7 +1359,7 @@ function emptySoulBundle(): SessionSoulBundle {
 
 // ── Memory mutation isolation ─────────────────────────────────────────────
 
-export type MemoryWritePhase = "before_model" | "after_delivery" | "feedback";
+export type MemoryWritePhase = "before_model" | "after_delivery";
 
 /**
  * Attempt a memory mutation with safe isolation: catches typed abmind errors,

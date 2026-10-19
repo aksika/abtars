@@ -1,8 +1,7 @@
 /**
  * answer-evidence.ts — #1913 execution evidence and answer records.
  *
- * Reaction feedback must target the delivered answer's supporting memories,
- * not every automatic-recall candidate. This module owns both halves:
+ * Delivery tracking only (#1928 A13 retired the cite/reject feedback write):
  *
  * - Tool evidence: memory IDs actually delivered to the agent by successful
  *   `memory_recall` calls, keyed by Spin execution. Automatic injection joins
@@ -12,16 +11,9 @@
  *
  * Lookup misses (unknown, expired, wrong message) are safe no-ops by
  * contract: callers must never fall back to the automatic recall set.
- * Restart drops all records (process-local Maps), which safely disables
- * feedback for pre-restart messages. Sweeps run on event-driven access;
- * the send-race resolver alone uses a short, cleared deadline.
+ * Restart drops all records (process-local Maps). Sweeps run on event-driven
+ * access; the send-race resolver alone uses a short, cleared deadline.
  */
-
-import { logDebug, logWarn } from "./logger.js";
-import { feedbackKey } from "./memory-operation-key.js";
-
-/** Where a feedback signal originates: automatic citation or explicit reaction. */
-export type FeedbackSource = "auto" | "explicit";
 
 // ── Bounds ────────────────────────────────────────────────────────────────
 
@@ -174,10 +166,6 @@ export interface PublishAnswerInput {
 }
 
 const answerRecords = new Map<string, { record: AnswerRecord; at: number }>();
-// Receipts live only as long as their bounded answer records. All segments of
-// one execution share them, including pending/unknown writes. Daemon receipt
-// pruning or reconnects cannot turn a repeated reaction into another mutation.
-const answerFeedbackReceipts = new WeakMap<AnswerRecord, Map<string, Promise<FeedbackOutcome>>>();
 
 function answerKey(platform: string, channelId: string, messageId: string): string {
   return `${platform.length}:${platform}:${channelId.length}:${channelId}:${messageId}`;
@@ -185,9 +173,9 @@ function answerKey(platform: string, channelId: string, messageId: string): stri
 
 /**
  * Publish a segment's captured support as soon as its send is acknowledged.
- * Chunk records share an execution identity for feedback deduplication.
- * Reactions arriving before acknowledgement use the bounded send resolver.
- * Empty support publishes nothing (reactions then miss by contract).
+ * Chunk records share an execution identity. Reactions arriving before
+ * acknowledgement use the bounded send resolver. Empty support publishes
+ * nothing (reactions then miss by contract).
  */
 export function publishAnswerRecord(input: PublishAnswerInput, nowMs: number = Date.now()): void {
   if (input.messageIds.length === 0 || input.support.length === 0) return;
@@ -202,11 +190,6 @@ export function publishAnswerRecord(input: PublishAnswerInput, nowMs: number = D
     createdAt: nowMs,
     messageIds: [...input.messageIds],
   };
-  const prior = [...answerRecords.values()].find(({ record: candidate }) =>
-    candidate.platform === record.platform && candidate.channelId === record.channelId &&
-    candidate.principal === record.principal && candidate.sessionId === record.sessionId &&
-    candidate.executionId === record.executionId)?.record;
-  answerFeedbackReceipts.set(record, (prior && answerFeedbackReceipts.get(prior)) || new Map());
   const entry = { record, at: nowMs };
   for (const messageId of input.messageIds) {
     answerRecords.set(answerKey(input.platform, input.channelId, messageId), entry);
@@ -277,109 +260,6 @@ function sweepAnswerRecords(nowMs: number): void {
     const ordered = [...answerRecords.entries()].sort((a, b) => a[1].at - b[1].at);
     for (const [key] of ordered.slice(0, answerRecords.size - MAX_ANSWER_RECORDS)) answerRecords.delete(key);
   }
-}
-
-// ── Feedback outcomes ─────────────────────────────────────────────────────
-
-export interface FeedbackOutcome {
-  readonly applied: string[];
-  readonly rejected: string[];
-  readonly unknown: string[];
-}
-
-export interface FeedbackTarget {
-  /** Owner ref key. Only `db:` refs resolve to a numeric record feedback target. */
-  readonly ref: string;
-  readonly operationKey: string;
-}
-
-interface FeedbackRuntime {
-  recordFeedback(
-    input: { userId: string; memoryId: number; feedbackType: "cite" | "reject" },
-    operationKey: string,
-  ): Promise<unknown>;
-}
-
-/** At most one explicit mutation attempt per answer, memory, and sign. */
-export async function recordReactionFeedback(
-  runtime: FeedbackRuntime,
-  record: AnswerRecord,
-  feedbackType: "cite" | "reject",
-): Promise<FeedbackOutcome> {
-  const receipts = answerFeedbackReceipts.get(record) ?? new Map<string, Promise<FeedbackOutcome>>();
-  answerFeedbackReceipts.set(record, receipts);
-  const combined: FeedbackOutcome = { applied: [], rejected: [], unknown: [] };
-  for (const ref of record.support) {
-    const operationKey = feedbackKey(record.platform, record.channelId, record.principal, record.executionId, ref, feedbackType, "explicit");
-    let receipt = receipts.get(operationKey);
-    if (!receipt) {
-      receipt = recordFeedbackBatch(runtime, record.principal, feedbackType, [{ ref, operationKey }]);
-      receipts.set(operationKey, receipt);
-    }
-    const outcome = await receipt;
-    combined.applied.push(...outcome.applied);
-    combined.rejected.push(...outcome.rejected);
-    combined.unknown.push(...outcome.unknown);
-  }
-  return combined;
-}
-
-const REJECT_PATTERNS = [/unauthorized/i, /forbidden/i, /owner/i, /permission/i, /no longer belong/i];
-
-/**
- * Attempt one feedback write per target under its own idempotency identity.
- * Never retries: rejected stays rejected, unknown is reported (never
- * reissued under a new key). Bounded diagnostics only — no memory content.
- * Only `db:` refs resolve to the numeric record feedback target; artifact and
- * graph evidence cannot be addressed and report unknown without a call.
- */
-export function feedbackRecordId(ref: string): number | undefined {
-  const match = /^db:(?:durable|episode|raw):(\d+):[^:]+:[^:]+$/.exec(ref);
-  if (!match?.[1]) return undefined;
-  const id = Number(match[1]);
-  return Number.isSafeInteger(id) && id > 0 ? id : undefined;
-}
-export async function recordFeedbackBatch(
-  runtime: FeedbackRuntime,
-  userId: string,
-  feedbackType: "cite" | "reject",
-  targets: readonly FeedbackTarget[],
-): Promise<FeedbackOutcome> {
-  const applied: string[] = [];
-  const rejected: string[] = [];
-  const unknown: string[] = [];
-  for (const target of targets) {
-    const memoryId = feedbackRecordId(target.ref);
-    if (memoryId === undefined) {
-      unknown.push(target.ref);
-      continue;
-    }
-    try {
-      const result = await runtime.recordFeedback({ userId, memoryId, feedbackType }, target.operationKey);
-      if (result && typeof result === "object" && "ok" in result && result.ok === false) unknown.push(target.ref);
-      else applied.push(target.ref);
-    } catch (err) {
-      const code = err && typeof err === "object" && "code" in err ? String(err.code) : undefined;
-      const text = err instanceof Error ? `${err.name}: ${err.message}` : String(err);
-      if (code === "unauthorized" || code === "memory_unauthorized" || (!code && REJECT_PATTERNS.some((re) => re.test(text)))) rejected.push(target.ref);
-      else unknown.push(target.ref);
-    }
-  }
-  if (rejected.length > 0 || unknown.length > 0) {
-    logWarn("answer-evidence", `feedback partial: applied=${applied.length} rejected=${rejected.length} unknown=${unknown.length} type=${feedbackType}`);
-  } else {
-    logDebug("answer-evidence", `feedback applied: ${applied.length} memories (${feedbackType})`);
-  }
-  return { applied, rejected, unknown };
-}
-
-/** Terse machine-readable outcome for reaction signals, so model-generated
- *  acknowledgements cannot claim a failed write succeeded. */
-export function formatFeedbackOutcome(outcome: FeedbackOutcome): string {
-  const parts = [`${outcome.applied.length} applied`];
-  if (outcome.rejected.length > 0) parts.push(`${outcome.rejected.length} rejected`);
-  if (outcome.unknown.length > 0) parts.push(`${outcome.unknown.length} unknown`);
-  return parts.join(", ");
 }
 
 // ── Overlap detection ─────────────────────────────────────────────────────

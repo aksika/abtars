@@ -258,49 +258,20 @@ describe("DiscordAdapter", () => {
       expect(mockMemory.recordFeedback).not.toHaveBeenCalled();
     });
 
-    it("records explicit feedback only for the answer's support IDs (#1913)", async () => {
-      const recordFeedback = vi.fn().mockResolvedValue(undefined);
-      deps.memoryRuntime = { state: "ready", recordFeedback } as any;
+    it("tracks a delivered answer without claiming a learning write (#1928 A13)", async () => {
+      deps.memoryRuntime = { state: "ready" } as any;
       adapter = new DiscordAdapter(makeConfig(), deps);
       capturedReactionHandler = null;
       await adapter.start();
       const { publishAnswerRecord } = await import("../../components/answer-evidence.js");
-      const { feedbackKey } = await import("../../components/memory-operation-key.js");
       publishAnswerRecord(
         { platform: "discord", channelId: "ch9", principal: "master", sessionId: "s", executionId: "e", support: ["db:durable:7:master:1", "db:durable:9:master:1"], messageIds: ["901"] },
         Date.now(),
       );
 
-      await capturedReactionHandler!(fakeReaction("👍", "ch9", "901"), fakeUser("42"));
-
-      expect(recordFeedback).toHaveBeenCalledTimes(2);
-      expect(recordFeedback).toHaveBeenNthCalledWith(
-        1,
-        { userId: "master", memoryId: 7, feedbackType: "cite" },
-        feedbackKey("discord", "ch9", "master", "e", "db:durable:7:master:1", "cite", "explicit"),
-      );
-      expect(recordFeedback).toHaveBeenNthCalledWith(
-        2,
-        { userId: "master", memoryId: 9, feedbackType: "cite" },
-        feedbackKey("discord", "ch9", "master", "e", "db:durable:9:master:1", "cite", "explicit"),
-      );
-    });
-
-    it("denies feedback on actor mismatch (#1913)", async () => {
-      const recordFeedback = vi.fn().mockResolvedValue(undefined);
-      deps.memoryRuntime = { state: "ready", recordFeedback } as any;
-      adapter = new DiscordAdapter(makeConfig(), deps);
-      capturedReactionHandler = null;
-      await adapter.start();
-      const { publishAnswerRecord } = await import("../../components/answer-evidence.js");
-      publishAnswerRecord(
-        { platform: "discord", channelId: "ch9", principal: "someone-else", sessionId: "s", executionId: "e", support: ["db:durable:7:master:1"], messageIds: ["902"] },
-        Date.now(),
-      );
-
-      await capturedReactionHandler!(fakeReaction("👍", "ch9", "902"), fakeUser("42"));
-
-      expect(recordFeedback).not.toHaveBeenCalled();
+      // Resolving the reaction target is the observable tracking step; the
+      // retired feedback RPC is not called and no outcome is fabricated.
+      await expect(capturedReactionHandler!(fakeReaction("👍", "ch9", "901"), fakeUser("42"))).resolves.toBeUndefined();
     });
   });
 

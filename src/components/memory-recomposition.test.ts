@@ -25,7 +25,7 @@ function makeReadyRuntime(overrides: Partial<AbtarsMemoryRuntime> = {}): AbtarsM
     routeSnapshot: { version: 1, state: "ready", generation: 7, retryEligible: 0, terminalUnknown: 0 },
     supports: vi.fn(() => true),
     recordMessage: vi.fn(async () => ({ id: 42 })),
-    recall: vi.fn(async () => ({ hits: [], context: "" })),
+    recall: vi.fn(async () => ({ hits: [], context: "", status: "empty" })),
     assembleSessionContext: vi.fn(async () => ({
       wakeUp: "",
       recall: "",
@@ -41,7 +41,6 @@ function makeReadyRuntime(overrides: Partial<AbtarsMemoryRuntime> = {}): AbtarsM
     })),
     getSleepStatus: vi.fn(async () => ({ state: "idle" as const })),
     getCoreKnowledge: vi.fn(async () => ""),
-    recordFeedback: vi.fn(async () => ({ ok: true })),
     embed: vi.fn(async () => ({ vectors: [], model: "m" })),
     runMaintenance: vi.fn(async () => ({ ok: true, summary: "ok" })),
     instantStore: vi.fn(async () => ({ stored: true as const, memoriesCount: 1, memoryId: 5, semanticRevision: 1 })),
@@ -71,7 +70,7 @@ describe("RecomposableMemoryRuntime — stable reference across upgrade (#1706)"
     expect(rt.state).toBe("unavailable");
     expect(rt.supports("recall")).toBe(false);
     expect(rt.capabilities.size).toBe(0);
-    await expect(rt.recall({ query: "q", userId: "u", limit: 1 })).rejects.toThrow(/unavailable/i);
+    await expect(rt.recall({ query: "q", userId: "u", profile: "recall_fast", limit: 1 })).rejects.toThrow(/unavailable/i);
     expect(rt.compositionDiagnostics).toEqual({ state: "idle", attempts: 0 });
   });
 
@@ -102,7 +101,7 @@ describe("RecomposableMemoryRuntime — stable reference across upgrade (#1706)"
     await rt.recordMessage({ userId: "u", sessionId: "s", role: "user", content: "hi", timestamp: Date.now() }, "op-1");
     expect(ready.recordMessage).toHaveBeenCalledTimes(1);
 
-    await rt.recall({ query: "q", userId: "u", limit: 5 });
+    await rt.recall({ query: "q", userId: "u", profile: "recall_fast", limit: 5 });
     expect(ready.recall).toHaveBeenCalledTimes(1);
 
     // Nested object captured BEFORE upgrade still reaches the ready runtime.
@@ -136,7 +135,7 @@ describe("RecomposableMemoryRuntime — stable reference across upgrade (#1706)"
     expect(controller.upgrade(first)).toBe(true);
     expect(controller.upgrade(second)).toBe(false);
 
-    await controller.runtime.recall({ query: "q", userId: "u", limit: 1 });
+    await controller.runtime.recall({ query: "q", userId: "u", profile: "recall_fast", limit: 1 });
     expect(first.recall).toHaveBeenCalledTimes(1);
     expect(second.recall).not.toHaveBeenCalled();
     expect(second.close).not.toHaveBeenCalled(); // disposal is the caller's job

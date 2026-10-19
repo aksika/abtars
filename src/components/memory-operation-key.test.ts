@@ -4,7 +4,6 @@ import {
   inboundExecutionKey,
   inboundMessageKey,
   assistantMessageKey,
-  feedbackKey,
 } from "./memory-operation-key.js";
 
 describe("memoryOperationKey", () => {
@@ -16,8 +15,8 @@ describe("memoryOperationKey", () => {
 
   it("produces different keys for different families with the same identity", () => {
     const inbound = memoryOperationKey("inbound", ["discord", "ch1", "", "user1", "12345"]);
-    const feedback = memoryOperationKey("feedback", ["discord", "ch1", "", "user1", "12345"]);
-    expect(inbound).not.toBe(feedback);
+    const assistant = memoryOperationKey("assistant", ["discord", "ch1", "", "user1", "12345"]);
+    expect(inbound).not.toBe(assistant);
   });
 
   it("produces different keys for different identity components", () => {
@@ -145,36 +144,3 @@ describe("assistantMessageKey", () => {
   });
 });
 
-describe("feedbackKey", () => {
-  it("differentiates cite vs reject on same message", () => {
-    const cite = feedbackKey("discord", "ch1", "user1", "msg1", "db:durable:42:u1:aaa", "cite", "explicit");
-    const reject = feedbackKey("discord", "ch1", "user1", "msg1", "db:durable:42:u1:aaa", "reject", "explicit");
-    expect(cite).not.toBe(reject);
-  });
-
-  it("differentiates automatic citation from explicit reaction", () => {
-    const auto = feedbackKey("telegram", "chat1", "user1", "msg1", "db:durable:7:u1:aaa", "cite", "auto");
-    const explicit = feedbackKey("telegram", "chat1", "user1", "msg1", "db:durable:7:u1:aaa", "cite", "explicit");
-    expect(auto).not.toBe(explicit);
-  });
-
-  it("differentiates across memory IDs", () => {
-    const a = feedbackKey("discord", "ch1", "user1", "msg1", "db:durable:1:u1:aaa", "cite", "explicit");
-    const b = feedbackKey("discord", "ch1", "user1", "msg1", "db:durable:2:u1:aaa", "cite", "explicit");
-    expect(a).not.toBe(b);
-  });
-
-  it("replays the same reaction deterministically", () => {
-    const a = feedbackKey("telegram", "chat1", "user1", "msg1", "db:durable:7:u1:aaa", "cite", "explicit");
-    const b = feedbackKey("telegram", "chat1", "user1", "msg1", "db:durable:7:u1:aaa", "cite", "explicit");
-    expect(a).toBe(b);
-  });
-
-  it("throws for empty messageId", () => {
-    expect(() => feedbackKey("discord", "ch1", "user1", "", 1, "cite", "explicit")).toThrow("non-empty");
-  });
-
-  it("throws for empty feedbackType", () => {
-    expect(() => feedbackKey("discord", "ch1", "user1", "msg1", "db:durable:1:u1:aaa", "", "explicit")).toThrow("non-empty");
-  });
-});

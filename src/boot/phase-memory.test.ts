@@ -51,7 +51,7 @@ function fakeClient(overrides: Record<string, unknown> = {}): any {
   return {
     capabilities: {
       version: 1,
-      methods: ["private.recall", "private.recordMessage", "private.instantStore", "private.edit", "private.recordFeedback", "private.getCoreKnowledge", "private.getRuntimeStatus", "private.rebuildFts"],
+      methods: ["private.recall", "private.recordMessage", "private.instantStore", "private.edit", "private.getCoreKnowledge", "private.getRuntimeStatus", "private.rebuildFts"],
       features: { private_read: "true", private_write: "true", private_mutation_contract: "revision-v1" },
     },
     privateMemory: {},

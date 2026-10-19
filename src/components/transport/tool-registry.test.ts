@@ -304,7 +304,7 @@ describe("memory tools with runtime wired (#1507)", () => {
     const client = mockAbmindClient({
       methods: [
         "private.recall", "private.recordMessage", "private.instantStore", "private.edit",
-        "private.rebuildFts", "private.recordFeedback", "private.getCoreKnowledge", "private.getRuntimeStatus",
+        "private.rebuildFts", "private.getCoreKnowledge", "private.getRuntimeStatus",
       ],
       features: { private_read: "true", private_write: "false" },
     });
@@ -360,7 +360,7 @@ describe("memory tools with runtime wired (#1507)", () => {
     const client = mockAbmindClient({
       methods: [
         "private.recall", "private.recordMessage", "private.instantStore", "private.edit",
-        "private.rebuildFts", "private.recordFeedback", "private.getCoreKnowledge", "private.getRuntimeStatus",
+        "private.rebuildFts", "private.getCoreKnowledge", "private.getRuntimeStatus",
       ],
       features: { private_read: "true", private_write: "true", private_mutation_contract: "revision-v1" },
     });
@@ -412,7 +412,7 @@ describe("memory tools with runtime wired (#1507)", () => {
       client = mockAbmindClient({
         methods: [
           "private.recall", "private.recordMessage", "private.instantStore", "private.edit",
-          "private.rebuildFts", "private.recordFeedback", "private.getCoreKnowledge", "private.getRuntimeStatus",
+          "private.rebuildFts", "private.getCoreKnowledge", "private.getRuntimeStatus",
         ],
         features: { private_read: "true", private_write: "true", private_mutation_contract: "revision-v1" },
       });
@@ -823,10 +823,10 @@ describe("memory_recall peer clearance cap (#1790)", () => {
     setUserRegistryOverride(null);
   });
 
-  function lastRecallRequest(): Record<string, unknown> {
+  function lastRecallRequest(): unknown {
     const calls = vi.mocked(client.privateMemory.recall).mock.calls;
     expect(calls.length).toBeGreaterThan(0);
-    return calls[calls.length - 1]![0] as Record<string, unknown>;
+    return calls[calls.length - 1]![0];
   }
 
   async function recallAs(userId: string, args: Record<string, unknown> = { query: "q" }) {
@@ -912,10 +912,10 @@ describe("memory_recall keyword contract (#1928)", () => {
     return { userId: "master-1", sessionType: "A" as const, memoryToolDeps: holder };
   }
 
-  function lastRecallRequest(): Record<string, unknown> {
+  function lastRecallRequest(): unknown {
     const calls = client.privateMemory.recall.mock.calls;
     expect(calls.length).toBeGreaterThan(0);
-    return calls[calls.length - 1]![0] as Record<string, unknown>;
+    return calls[calls.length - 1]![0];
   }
 
   it("keyword-only calls work without query and cross verbatim as the explicit anchor", async () => {

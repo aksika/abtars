@@ -812,21 +812,17 @@ describe("citation detection (#1270)", () => {
   });
 
   it("calls detectCitations from lazy module when memoryConfig.memoryEnabled is true", async () => {
-    const recordFeedback = vi.fn().mockResolvedValue({});
     const adapter = mockAdapter();
     const deps = mockDeps(transport, {
-      memory: { bumpCitedCount: vi.fn(), recordMessage: vi.fn() } as any,
       memoryConfig: { memoryEnabled: true, memoryDir: "/tmp" },
-      memoryRuntime: mockMemoryRuntime({ recordFeedback }),
+      memoryRuntime: mockMemoryRuntime({}),
     } as any);
 
     await handleInboundMessage(makeMsg(), adapter, deps);
 
+    // Heuristic citation still feeds delivery tracking. The cite/reject
+    // feedback write is retired (#1928 A13), so no mutation is attempted.
     expect(detectCitationsSpy).toHaveBeenCalledWith("Hello from Kiro!", [{ id: 1, contentEn: "test memory" }]);
-    expect(recordFeedback).toHaveBeenCalledWith(
-      expect.objectContaining({ memoryId: 1, feedbackType: "cite" }),
-      expect.any(String),
-    );
   });
 
   it("skips citation detection when abmind() returns null even if memoryEnabled is true", async () => {

@@ -15,9 +15,6 @@ import {
   resolveAnswerSupport,
   publishAnswerRecord,
   lookupAnswerRecord,
-  recordFeedbackBatch,
-  recordReactionFeedback,
-  formatFeedbackOutcome,
   isExecutionOverlapError,
   ANSWER_RECORD_TTL_MS,
 } from "./answer-evidence.js";
@@ -79,28 +76,6 @@ describe("#1928 answer evidence (owner ref keys)", () => {
     expect(lookupAnswerRecord("telegram", "chat1", "m9", 1_001)).toBeUndefined();
   });
 
-  it("separates applied, rejected, and unknown feedback per target", async () => {
-    const runtime = {
-      recordFeedback: async (input: { memoryId: number }) => {
-        if (input.memoryId === 1) return undefined;
-        if (input.memoryId === 2) throw Object.assign(new Error("Memory no longer belongs to the user"), { code: "unauthorized" });
-        throw new Error("socket hang up");
-      },
-    };
-    const outcome = await recordFeedbackBatch(runtime, "user1", "cite", [
-      { ref: "db:durable:1:u1:aaa", operationKey: "k1" },
-      { ref: "db:durable:2:u1:bbb", operationKey: "k2" },
-      { ref: "db:durable:3:u1:ccc", operationKey: "k3" },
-      { ref: "artifact:u1:summaries/daily.md:abc", operationKey: "k4" },
-    ]);
-    expect(outcome).toEqual({
-      applied: ["db:durable:1:u1:aaa"],
-      rejected: ["db:durable:2:u1:bbb"],
-      unknown: ["db:durable:3:u1:ccc", "artifact:u1:summaries/daily.md:abc"],
-    });
-    expect(formatFeedbackOutcome(outcome)).toBe("1 applied, 1 rejected, 2 unknown");
-  });
-
   it("detects execution overlap without matching ordinary failures", () => {
     expect(isExecutionOverlapError(new Error("Pi execution already active — overlapping sendPrompt rejected"))).toBe(true);
     expect(isExecutionOverlapError(Object.assign(new Error("busy"), { name: "SpinDispatchAdmissionError", code: "type_busy" }))).toBe(true);
@@ -128,29 +103,4 @@ describe("#1913 review regressions", () => {
     expect([...takeToolEvidence("complete-exec")]).toEqual(["db:durable:22:u1:abc"]);
   });
 
-  it("does not report explicit false or structured authorization errors as applied", async () => {
-    const runtime = { recordFeedback: async (input: { memoryId: number }) => {
-      if (input.memoryId === 1) return { ok: false };
-      throw Object.assign(new Error("Denied"), { code: "unauthorized" });
-    } };
-    expect(await recordFeedbackBatch(runtime, "u", "cite", [
-      { ref: "db:durable:1:u1:aaa", operationKey: "false" }, { ref: "db:durable:2:u1:bbb", operationKey: "denied" },
-    ])).toEqual({ applied: [], rejected: ["db:durable:2:u1:bbb"], unknown: ["db:durable:1:u1:aaa"] });
-  });
-
-  it("retains unknown outcomes across concurrent reactions and separate chunk records", async () => {
-    const common = { platform: "telegram", channelId: "unknown-chat", principal: "u", sessionId: "s", executionId: "unknown-exec", support: ["db:durable:1:u:aaa"] };
-    publishAnswerRecord({ ...common, messageIds: ["a"] });
-    publishAnswerRecord({ ...common, messageIds: ["b"] });
-    let attempts = 0;
-    const runtime = { recordFeedback: async () => { attempts++; throw new Error("lost response"); } };
-    const first = lookupAnswerRecord("telegram", "unknown-chat", "a")!;
-    const second = lookupAnswerRecord("telegram", "unknown-chat", "b")!;
-    const outcomes = await Promise.all([recordReactionFeedback(runtime, first, "cite"), recordReactionFeedback(runtime, second, "cite")]);
-    expect(outcomes).toEqual([
-      { applied: [], rejected: [], unknown: ["db:durable:1:u:aaa"] },
-      { applied: [], rejected: [], unknown: ["db:durable:1:u:aaa"] },
-    ]);
-    expect(attempts).toBe(1);
-  });
 });

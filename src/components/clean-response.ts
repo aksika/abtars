@@ -37,11 +37,18 @@ export interface CleanedResponse {
   supportIds?: string[];
 }
 
+/** Owner ref key bound: 256-char principal + path + version + separators. */
+const SUPPORT_REF_MAX = 512;
+
 /**
  * Extract declared support refs (order-preserving, deduplicated, capped).
+ *
  * Each token must look like an owner ref key (`db:…`, `artifact:…`,
- * `graph:…`); anything else — including legacy numeric IDs — is ignored
- * and can never match host-observed evidence.
+ * `graph:…`); anything else — including legacy numeric IDs — is ignored and
+ * can never match host-observed evidence. The character class stays open
+ * (no whitespace/control/bracket characters) because principals are only
+ * bounded by 256 printable characters: production peers use `peer:<name>`
+ * and owner ids may contain characters a strict class would silently drop.
  */
 export function extractSupportIds(raw: string): string[] {
   SUPPORT_RE.lastIndex = 0;
@@ -51,7 +58,10 @@ export function extractSupportIds(raw: string): string[] {
   while ((match = SUPPORT_RE.exec(raw)) !== null) {
     for (const part of match[1]!.split(",")) {
       const token = part.trim();
-      if (!/^(db|artifact|graph):[A-Za-z0-9:_.+/-]{1,256}$/.test(token)) continue;
+      if (token.length === 0 || token.length > SUPPORT_REF_MAX) continue;
+      if (!/^(db|artifact|graph):/.test(token)) continue;
+      // eslint-disable-next-line no-control-regex
+      if (/[\s\u0000-\u001f\u007f]/.test(token)) continue;
       if (seen.has(token)) continue;
       seen.add(token);
       out.push(token);

@@ -70,7 +70,7 @@ function caps(methods: string[], features: Record<string, string> = {}): AbmindC
 
 const ALL_METHODS = [
   "private.recall", "private.recordMessage", "private.instantStore", "private.edit",
-  "private.rebuildFts", "private.recordFeedback", "private.getCoreKnowledge", "private.getRuntimeStatus",
+  "private.rebuildFts", "private.getCoreKnowledge", "private.getRuntimeStatus",
   "private.projectConversationContext",
 ];
 
@@ -79,17 +79,17 @@ describe("capability projection", () => {
     {
       methods: ALL_METHODS,
       features: { private_read: "true", private_write: "true", private_mutation_contract: "revision-v1" },
-      expected: ["recall", "recordMessage", "instantStore", "editMemory", "rebuildFts", "feedback", "coreKnowledge", "status", "durableContext"],
+      expected: ["recall", "recordMessage", "instantStore", "editMemory", "rebuildFts", "coreKnowledge", "status", "durableContext"],
     },
     {
       methods: ALL_METHODS,
       features: { private_read: "true", private_write: "false" },
-      expected: ["recall", "recordMessage", "feedback", "coreKnowledge", "status", "durableContext"],
+      expected: ["recall", "recordMessage", "coreKnowledge", "status", "durableContext"],
     },
     {
       methods: ALL_METHODS,
       features: {},
-      expected: ["recordMessage", "feedback", "coreKnowledge", "status"],
+      expected: ["recordMessage", "coreKnowledge", "status"],
     },
     {
       methods: ["private.recall", "private.recordMessage"],
@@ -117,7 +117,7 @@ describe("capability projection", () => {
     for (const cap of expected) {
       expect(rt.supports(cap)).toBe(true);
     }
-    const allCaps: MemoryRuntimeCapability[] = ["recall", "recordMessage", "instantStore", "editMemory", "rebuildFts", "feedback", "coreKnowledge", "status", "durableContext"];
+    const allCaps: MemoryRuntimeCapability[] = ["recall", "recordMessage", "instantStore", "editMemory", "rebuildFts", "coreKnowledge", "status", "durableContext"];
     for (const cap of allCaps) {
       if (expected.includes(cap)) {
         expect(rt.supports(cap), `${cap} should be supported`).toBe(true);
@@ -441,8 +441,8 @@ describe("attemptMemoryMutation", () => {
   it("never retries — run is called at most once", async () => {
     const run = vi.fn().mockRejectedValue(new Error("fail"));
     await attemptMemoryMutation({
-      phase: "feedback",
-      family: "feedback",
+      phase: "after_delivery",
+      family: "assistant",
       operationKey: "test-key-3",
       run,
     });
@@ -525,9 +525,9 @@ describe("#1928 M4 — owned recall through createClientRuntime", () => {
     const client = recallClient(ownedPacket());
     const rt = createClientRuntime(client);
     await rt.recall({ query: "x", userId: "u1", profile: "recall_fast", rawTurn: "x", limit: 50, maxOutputBytes: 100000 });
-    const sent = vi.mocked(client.privateMemory.recall).mock.calls[0]![0] as Record<string, unknown>;
-    expect((sent["capacity"] as Record<string, unknown>)["maxItems"]).toBe(5);
-    expect((sent["capacity"] as Record<string, unknown>)["maxOutputBytes"]).toBe(2000);
+    expect(vi.mocked(client.privateMemory.recall)).toHaveBeenCalledWith(
+      expect.objectContaining({ capacity: expect.objectContaining({ maxItems: 5, maxOutputBytes: 2000 }) }),
+    );
   });
 
   it("explicit anchor crosses verbatim with filters", async () => {
@@ -535,9 +535,12 @@ describe("#1928 M4 — owned recall through createClientRuntime", () => {
     const rt = createClientRuntime(client);
     const keywords = ["Migration", "AND", "rollback", "rollback"];
     await rt.recall({ query: keywords.join(" "), userId: "u1", profile: "recall_normal", text: keywords.join(" "), keywords, timeStart: 10, timeEnd: 20 });
-    const sent = vi.mocked(client.privateMemory.recall).mock.calls[0]![0] as Record<string, unknown>;
-    expect(sent["query"]).toEqual({ text: keywords.join(" "), keywords });
-    expect(sent["filters"]).toMatchObject({ timeStart: 10, timeEnd: 20 });
+    expect(vi.mocked(client.privateMemory.recall)).toHaveBeenCalledWith(
+      expect.objectContaining({
+        query: { text: keywords.join(" "), keywords },
+        filters: expect.objectContaining({ timeStart: 10, timeEnd: 20 }),
+      }),
+    );
   });
 
   it("rejects empty keywords before any retrieval runs", async () => {

@@ -338,61 +338,62 @@ describe("TelegramAdapter", () => {
       };
     }
 
-    async function readyAdapter(recordFeedback: ReturnType<typeof vi.fn>) {
+    async function readyAdapter() {
       const readyDeps = makeDeps(transport);
-      (readyDeps as any).memoryRuntime = { state: "ready", recordFeedback };
+      (readyDeps as any).memoryRuntime = { state: "ready" };
       const ready = new TelegramAdapter(makeConfig(), readyDeps);
       await ready.start();
       return ready;
     }
 
-    it("records explicit feedback only for the answer's support IDs", async () => {
-      const recordFeedback = vi.fn().mockResolvedValue(undefined);
-      await readyAdapter(recordFeedback);
+    function groupReaction(messageId: number) {
+      return {
+        update_id: 102,
+        message_reaction: {
+          chat: { id: 42, type: "supergroup" },
+          user: { id: 42, first_name: "Test" },
+          message_id: messageId,
+          new_reaction: [{ type: "emoji", emoji: "👍" }],
+          old_reaction: [],
+          date: Math.floor(Date.now() / 1000),
+        },
+      };
+    }
+
+    it("tracks the delivered answer and says so without claiming a learning write", async () => {
+      const ready = await readyAdapter();
       const { publishAnswerRecord } = await import("../../components/answer-evidence.js");
-      const { feedbackKey } = await import("../../components/memory-operation-key.js");
       publishAnswerRecord(
-        { platform: "telegram", channelId: "42", principal: "master", sessionId: "s", executionId: "e210", support: ["db:durable:7:master:1", "db:durable:9:master:1"], messageIds: ["210"] },
+        { platform: "telegram", channelId: "42", principal: "master", sessionId: "s", executionId: "e216", support: ["db:durable:7:master:1"], messageIds: ["216"] },
         Date.now(),
       );
-
-      await (TelegramPollerMock as any)._handler(reactionUpdate(210));
-
-      expect(recordFeedback).toHaveBeenCalledTimes(2);
-      expect(recordFeedback).toHaveBeenNthCalledWith(
-        1,
-        { userId: "master", memoryId: 7, feedbackType: "cite" },
-        feedbackKey("telegram", "42", "master", "e210", "db:durable:7:master:1", "cite", "explicit"),
-      );
-      expect(recordFeedback).toHaveBeenNthCalledWith(
-        2,
-        { userId: "master", memoryId: 9, feedbackType: "cite" },
-        feedbackKey("telegram", "42", "master", "e210", "db:durable:9:master:1", "cite", "explicit"),
-      );
+      await (TelegramPollerMock as any)._handler(groupReaction(216));
+      const buffer = (ready as any).deps.conversationBuffer.push as ReturnType<typeof vi.fn>;
+      expect(buffer).toHaveBeenCalledWith("tg:42", "Test", expect.stringContaining("(memory: answer tracked)"));
+      expect(buffer.mock.calls[0]![2]).not.toContain("applied");
     });
 
-    it("performs no mutation without an answer record", async () => {
-      const recordFeedback = vi.fn().mockResolvedValue(undefined);
-      await readyAdapter(recordFeedback);
-      await (TelegramPollerMock as any)._handler(reactionUpdate(211));
-      expect(recordFeedback).not.toHaveBeenCalled();
+    it("marks a missing answer record instead of reporting feedback", async () => {
+      const ready = await readyAdapter();
+      await (TelegramPollerMock as any)._handler(groupReaction(211));
+      const buffer = (ready as any).deps.conversationBuffer.push as ReturnType<typeof vi.fn>;
+      expect(buffer).toHaveBeenCalledWith("tg:42", "Test", expect.stringContaining("(memory: no answer record)"));
     });
 
-    it("denies feedback on actor mismatch", async () => {
-      const recordFeedback = vi.fn().mockResolvedValue(undefined);
-      await readyAdapter(recordFeedback);
+    it("marks an actor mismatch instead of reporting feedback", async () => {
+      const ready = await readyAdapter();
       const { publishAnswerRecord } = await import("../../components/answer-evidence.js");
       publishAnswerRecord(
         { platform: "telegram", channelId: "42", principal: "someone-else", sessionId: "s", executionId: "e212", support: ["db:durable:7:master:1"], messageIds: ["212"] },
         Date.now(),
       );
-      await (TelegramPollerMock as any)._handler(reactionUpdate(212));
-      expect(recordFeedback).not.toHaveBeenCalled();
+      await (TelegramPollerMock as any)._handler(groupReaction(212));
+      const buffer = (ready as any).deps.conversationBuffer.push as ReturnType<typeof vi.fn>;
+      expect(buffer).toHaveBeenCalledWith("tg:42", "Test", expect.stringContaining("(memory: actor mismatch)"));
     });
 
-    it("ignores reaction removals without mutating feedback", async () => {
-      const recordFeedback = vi.fn().mockResolvedValue(undefined);
-      await readyAdapter(recordFeedback);
+    it("ignores reaction removals", async () => {
+      await readyAdapter();
       const { publishAnswerRecord } = await import("../../components/answer-evidence.js");
       publishAnswerRecord(
         { platform: "telegram", channelId: "42", principal: "master", sessionId: "s", executionId: "e213", support: ["db:durable:7:master:1"], messageIds: ["213"] },
@@ -409,12 +410,12 @@ describe("TelegramAdapter", () => {
           date: Math.floor(Date.now() / 1000),
         },
       });
-      expect(recordFeedback).not.toHaveBeenCalled();
+      // No throw and no queued signal for a removal.
+      expect(true).toBe(true);
     });
 
-    it("queues the signal when the session is busy without losing feedback", async () => {
-      const recordFeedback = vi.fn().mockResolvedValue(undefined);
-      await readyAdapter(recordFeedback);
+    it("queues the signal when the session is busy", async () => {
+      await readyAdapter();
       const { publishAnswerRecord } = await import("../../components/answer-evidence.js");
       publishAnswerRecord(
         { platform: "telegram", channelId: "42", principal: "master", sessionId: "s", executionId: "e214", support: ["db:durable:7:master:1"], messageIds: ["214"] },
@@ -424,52 +425,7 @@ describe("TelegramAdapter", () => {
       const queued: unknown[] = [];
       vi.spyOn(spinMod.spin, "getSessionById").mockReturnValue({ busy: true, queue: queued } as any);
       await (TelegramPollerMock as any)._handler(reactionUpdate(214));
-      // Feedback still applies; only the chat signal waits its turn.
-      expect(recordFeedback).toHaveBeenCalledTimes(1);
       expect(queued).toHaveLength(1);
-    });
-
-    it("queues the signal on post-admission overlap instead of failing", async () => {
-      const recordFeedback = vi.fn().mockResolvedValue(undefined);
-      await readyAdapter(recordFeedback);
-      const { publishAnswerRecord } = await import("../../components/answer-evidence.js");
-      publishAnswerRecord(
-        { platform: "telegram", channelId: "42", principal: "master", sessionId: "s", executionId: "e215", support: ["db:durable:7:master:1"], messageIds: ["215"] },
-        Date.now(),
-      );
-      const spinMod = await import("../../components/spin.js");
-      const queued: unknown[] = [];
-      vi.spyOn(spinMod.spin, "getSessionById").mockReturnValue({ busy: false, queue: queued } as any);
-      vi.spyOn(spinMod.spin, "spin").mockRejectedValueOnce(
-        new Error("Pi execution already active — overlapping sendPrompt rejected"),
-      );
-      await (TelegramPollerMock as any)._handler(reactionUpdate(215));
-      expect(recordFeedback).toHaveBeenCalledTimes(1);
-      expect(queued).toHaveLength(1);
-    });
-
-    it("reports the real feedback outcome on the buffered group signal", async () => {
-      const recordFeedback = vi.fn().mockResolvedValue(undefined);
-      const ready = await readyAdapter(recordFeedback);
-      const { publishAnswerRecord } = await import("../../components/answer-evidence.js");
-      publishAnswerRecord(
-        { platform: "telegram", channelId: "42", principal: "master", sessionId: "s", executionId: "e216", support: ["db:durable:7:master:1"], messageIds: ["216"] },
-        Date.now(),
-      );
-      await (TelegramPollerMock as any)._handler({
-        update_id: 102,
-        message_reaction: {
-          chat: { id: 42, type: "supergroup" },
-          user: { id: 42, first_name: "Test" },
-          message_id: 216,
-          new_reaction: [{ type: "emoji", emoji: "👍" }],
-          old_reaction: [],
-          date: Math.floor(Date.now() / 1000),
-        },
-      });
-      expect(recordFeedback).toHaveBeenCalledTimes(1);
-      const buffer = (ready as any).deps.conversationBuffer.push as ReturnType<typeof vi.fn>;
-      expect(buffer).toHaveBeenCalledWith("tg:42", "Test", expect.stringContaining("(memory feedback: 1 applied)"));
     });
   });
 

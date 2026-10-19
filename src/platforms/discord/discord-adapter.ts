@@ -13,7 +13,6 @@ import { ResponseFormatter } from "../../components/response-formatter.js";
 import { formatReactionSignal } from "../../components/reactions.js";
 
 export const DISCORD_CAPABILITIES: PlatformCapabilities = { voice: false, reactions: true, typing: true, threads: true };
-import { emojiToScore } from "../../utils/emoji-score.js";
 import { logInfo, logWarn, logDebug } from "../../components/logger.js";
 import { logAndSwallow } from "../../components/log-and-swallow.js";
 import { getEnv } from "../../components/env-schema.js";
@@ -411,24 +410,19 @@ export class DiscordAdapter implements PlatformAdapter {
     const senderName = user.username || `id:${user.id}`;
     logInfo(TAG, `Reaction ${emoji} from ${senderName} on msg ${reaction.message.id}`);
 
-    // #1913: feedback targets the delivered answer's validated support —
-    // never the automatic recall set, never a fallback. Misses skip mutation.
+    // #1928 A13: reactions track which delivered answer they target. The
+    // cite/reject feedback write was retired; nothing is claimed about
+    // learning, and misses stay no-ops.
     if (isAuthorized && this.deps.memoryRuntime.state === "ready") {
-      const score = emojiToScore(emoji);
-      if (score !== 0) {
-        const feedbackType = score < 0 ? "reject" : "cite";
-        const { resolveReactionAnswer, recordReactionFeedback, formatFeedbackOutcome } =
-          await import("../../components/answer-evidence.js");
-        const record = await resolveReactionAnswer("discord", channelId, messageId);
-        const actorUserId = loadUsers().byPlatformId.get("discord:" + user.id)?.userId;
-        if (!record) {
-          logDebug(TAG, `No answer record for msg ${messageId} — reaction feedback no-op`);
-        } else if (!actorUserId || actorUserId !== record.principal) {
-          logDebug(TAG, `Reaction actor mismatch on msg ${messageId} — feedback denied`);
-        } else {
-          const outcome = await recordReactionFeedback(this.deps.memoryRuntime, record, feedbackType);
-          logDebug(TAG, `Recall feedback for msg ${messageId}: ${formatFeedbackOutcome(outcome)} (emoji ${emoji})`);
-        }
+      const { resolveReactionAnswer } = await import("../../components/answer-evidence.js");
+      const record = await resolveReactionAnswer("discord", channelId, messageId);
+      const actorUserId = loadUsers().byPlatformId.get("discord:" + user.id)?.userId;
+      if (!record) {
+        logDebug(TAG, `Reaction on msg ${messageId} — no delivered answer record (no-op)`);
+      } else if (!actorUserId || actorUserId !== record.principal) {
+        logDebug(TAG, `Reaction actor mismatch on msg ${messageId} — tracking denied`);
+      } else {
+        logDebug(TAG, `Reaction on msg ${messageId} — answer tracked (emoji ${emoji}, ${record.support.length} ref(s))`);
       }
     }
 

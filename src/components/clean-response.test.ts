@@ -102,4 +102,19 @@ describe("#1928 support metadata validation (owner ref keys)", () => {
     const cleaned = cleanResponse("[SUPPORT: artifact:u1:summaries/d.md:abc, graph:path:db:x, artifact:u1:summaries/d.md:abc]");
     expect(cleaned.supportIds).toEqual(["artifact:u1:summaries/d.md:abc", "graph:path:db:x"]);
   });
+
+  it("accepts colon-bearing and long principals instead of silently dropping them", () => {
+    // Production principals include `peer:<name>`; the marker parser must not
+    // be stricter than the identity charset or a valid declaration is lost.
+    const peerRef = "db:durable:9:peer:plain:0f1e2d";
+    const longOwner = "x".repeat(300);
+    const longRef = `db:durable:12:${longOwner}:aa`;
+    const cleaned = cleanResponse(`Answer. [SUPPORT: ${peerRef}, ${longRef}]`);
+    expect(cleaned.supportIds).toEqual([peerRef, longRef]);
+  });
+
+  it("still rejects tokens that cannot be a ref key", () => {
+    const cleaned = cleanResponse("[SUPPORT: db:durable:12:u1:aa bb, 313, artifact, db-durable-1]");
+    expect(cleaned.supportIds).toBeUndefined();
+  });
 });

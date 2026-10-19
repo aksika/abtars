@@ -1,10 +1,11 @@
 import { describe, it, expect, vi } from "vitest";
 import { MemorySearchController } from "./memory-search-controller.js";
+import type { AbtarsMemoryRuntime } from "./memory-runtime.js";
 
 function makeController() {
-  const runtime = {
+  const runtime: Pick<AbtarsMemoryRuntime, "recall"> = {
     recall: vi.fn(async () => ({
-      hits: [{ ref: "db:durable:1:master:1", kind: "db", content: "puppy info", date: "2026-01-01" }],
+      hits: [{ ref: "db:durable:1:master:1", kind: "db" as const, content: "puppy info", date: "2026-01-01" }],
       context: "[1] (db:durable:1:master:1) puppy info",
       status: "evidence",
     })),

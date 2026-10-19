@@ -15,7 +15,6 @@ import { formatReactionSignal, routeReaction } from "../../components/reactions.
 import { cleanResponse } from "../../components/clean-response.js";
 
 export const TELEGRAM_CAPABILITIES: PlatformCapabilities = { voice: true, reactions: true, typing: true, threads: true };
-import { emojiToScore } from "../../utils/emoji-score.js";
 import { logInfo, logWarn, logError, logDebug } from "../../components/logger.js";
 import { logAndSwallow } from "../../components/log-and-swallow.js";
 import { handleInboundMessage, resetAndPrepare, type PipelineDeps } from "../../components/message-pipeline.js";
@@ -483,30 +482,23 @@ export class TelegramAdapter implements PlatformAdapter {
     const chatId = reaction.chat.id;
     const route = routeReaction(isAuthorized, reaction.chat.type);
 
-    // #1913: feedback targets the delivered answer's validated support —
-    // never the automatic recall set, never a fallback. Misses (no record,
-    // actor mismatch, unscored emoji) skip mutation but keep chat signaling.
+    // #1928 A13: reactions track which delivered answer they target. The
+    // cite/reject feedback write was retired, so the suffix reports tracking
+    // only — never a learning outcome.
     let feedbackSuffix = "";
     if (isAuthorized && this.deps.memoryRuntime.state === "ready") {
-      const score = emojiToScore(emojis[0]!);
-      if (score !== 0) {
-        const feedbackType = score < 0 ? "reject" : "cite";
-        const { resolveReactionAnswer, recordReactionFeedback, formatFeedbackOutcome } =
-          await import("../../components/answer-evidence.js");
-        const record = await resolveReactionAnswer("telegram", String(chatId), String(reaction.message_id));
-        const actorUserId = loadUsers().byPlatformId.get(`telegram:${user.id}`)?.userId;
-        if (!record) {
-          logDebug(TAG, `No answer record for msg ${reaction.message_id} — reaction feedback no-op`);
-          feedbackSuffix = " (memory feedback: skipped, no answer record)";
-        } else if (!actorUserId || actorUserId !== record.principal) {
-          logDebug(TAG, `Reaction actor mismatch on msg ${reaction.message_id} — feedback denied`);
-          feedbackSuffix = " (memory feedback: denied, actor mismatch)";
-        } else {
-          const outcome = await recordReactionFeedback(this.deps.memoryRuntime, record, feedbackType);
-          const summary = formatFeedbackOutcome(outcome);
-          logDebug(TAG, `Recall feedback for msg ${reaction.message_id}: ${summary} (emoji ${emojis[0]})`);
-          feedbackSuffix = ` (memory feedback: ${summary})`;
-        }
+      const { resolveReactionAnswer } = await import("../../components/answer-evidence.js");
+      const record = await resolveReactionAnswer("telegram", String(chatId), String(reaction.message_id));
+      const actorUserId = loadUsers().byPlatformId.get(`telegram:${user.id}`)?.userId;
+      if (!record) {
+        logDebug(TAG, `Reaction on msg ${reaction.message_id} — no delivered answer record (no-op)`);
+        feedbackSuffix = " (memory: no answer record)";
+      } else if (!actorUserId || actorUserId !== record.principal) {
+        logDebug(TAG, `Reaction actor mismatch on msg ${reaction.message_id} — tracking denied`);
+        feedbackSuffix = " (memory: actor mismatch)";
+      } else {
+        logDebug(TAG, `Reaction on msg ${reaction.message_id} — answer tracked (${record.support.length} ref(s))`);
+        feedbackSuffix = " (memory: answer tracked)";
       }
     }
 

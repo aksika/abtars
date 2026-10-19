@@ -16,8 +16,8 @@ import type { SttConfig } from "./stt.js";
 import { synthesizeSpeech, type TtsConfig } from "./tts.js";
 import { attemptMemoryMutation } from "./memory-runtime.js";
 import { sharedArchiveOutbox, type PiArchiveOutbox } from "./pi-session/pi-archive-outbox.js";
-import { assistantMessageKey, feedbackKey } from "./memory-operation-key.js";
-import { beginAnswerSend, publishAnswerRecord, resolveAnswerSupport, peekToolEvidence, takeToolEvidence, recordFeedbackBatch } from "./answer-evidence.js";
+import { assistantMessageKey } from "./memory-operation-key.js";
+import { beginAnswerSend, publishAnswerRecord, resolveAnswerSupport, peekToolEvidence, takeToolEvidence } from "./answer-evidence.js";
 
 /** Retry a send operation on transient network errors. */
 import { retrySend } from "./pipeline/delivery-retry.js";
@@ -354,7 +354,6 @@ export async function handleInboundMessage(
   let assistantDurablyRecorded = false;
   let evidenceExecutionId: string | undefined;
   const deliveryFallbackId = randomUUID();
-  let settleAnswerFeedback: (() => Promise<void>) | undefined;
   /** #1619: pipeline-owned incremental delivery controller (master/direct, non-TUI). */
   let incremental: import("./incremental-block-delivery.js").IncrementalBlockDeliveryController | null = null;
   try {
@@ -385,7 +384,6 @@ export async function handleInboundMessage(
 
     // Capture support at each text segment's boundary. Later reads must never
     // ground text already delivered; successful chunks survive later failures.
-    const citedDeliveredIds = new Set<string>();
     const answerIdentity = (): string => evidenceExecutionId ?? pSession.activeExecutionId ?? deliveryFallbackId;
     const supportFor = (answerText: string, declared: readonly string[]): string[] => {
       if (!memoryConfig.memoryEnabled || deps.memoryRuntime?.state !== "ready") return [];
@@ -414,17 +412,9 @@ export async function handleInboundMessage(
           publishAnswerRecord({ platform: msg.platform, channelId, principal: userId,
             sessionId: activeSessionId, executionId, support, messageIds: [String(sentId)] });
         }
-        for (const id of support) citedDeliveredIds.add(id);
         return sentId;
       } finally { finishSend(); }
     };
-    settleAnswerFeedback = async () => {
-      if (!memoryConfig.memoryEnabled || deps.memoryRuntime?.state !== "ready") return;
-      const targets = [...citedDeliveredIds].map((ref) => ({ ref,
-        operationKey: feedbackKey(msg.platform, channelId, userId, answerIdentity(), ref, "cite", "auto") }));
-      await recordFeedbackBatch(deps.memoryRuntime, userId, "cite", targets);
-    };
-
     let prompt = builtPrompt;
     if (bootstrapPrefix) {
       prompt = `${bootstrapPrefix}\n\n${prompt}`;
@@ -1045,7 +1035,6 @@ export async function handleInboundMessage(
       if (notifyUser) await adapter.sendMessage(channelId, `❌ ${reason}`, { threadId: msg.threadId }).catch(err => logAndSwallow(TAG, "adapter call", err));
     }
   } finally {
-    await settleAnswerFeedback?.();
     takeToolEvidence(evidenceExecutionId);
     clearInterval(typingInterval);
     clearTimeout(typingTtlTimer);
