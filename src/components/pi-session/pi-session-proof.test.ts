@@ -67,6 +67,32 @@ describe("pi-session real-SDK proof (R1-R2)", () => {
     expect(forkedText).toContain("proof-seed-history");
   });
 
+  it("continues one worker conversation across attempts with role isolation", () => {
+    const stateRoot = mkdtempSync(join(tmpdir(), "pi-proof-"));
+    const workspace = makeWorkspace();
+    const main = allocatePiBinding(stateRoot, params(workspace, "user-1", "main"));
+    const worker = allocatePiBinding(stateRoot, params(workspace, "user-1", "worker"));
+    expect(main.sessionDir).not.toBe(worker.sessionDir);
+
+    openPiConversation(realSessionManager, stateRoot, main);
+    openPiConversation(realSessionManager, stateRoot, worker);
+
+    const direct = SessionManager.create(workspace, worker.sessionDir, { id: worker.conversationId });
+    direct.appendMessage({
+      role: "user",
+      content: [{ type: "text", text: "worker attempt evidence" }],
+      timestamp: Date.now(),
+    });
+
+    const attempt2 = openPiConversation(realSessionManager, stateRoot, worker);
+    const attempt3 = openPiConversation(realSessionManager, stateRoot, worker);
+    expect(attempt2.canonicalFile).not.toBeNull();
+    expect(attempt3.canonicalFile).toBe(attempt2.canonicalFile);
+
+    const hijack = { ...main, conversationId: worker.conversationId };
+    expect(() => openPiConversation(realSessionManager, stateRoot, hijack)).toThrow(/different principal or role/);
+  });
+
   it("isolates principals into separate partitions", () => {
     const stateRoot = mkdtempSync(join(tmpdir(), "pi-proof-"));
     const workspace = makeWorkspace();

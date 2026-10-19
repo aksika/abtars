@@ -193,6 +193,7 @@ export function openPiConversation(
   if (!isValidPiConversationId(binding.conversationId)) {
     throw new Error("refusing to open conversation with invalid id");
   }
+  assertOwnerClear(stateRoot, binding);
   ensurePartitionDir(binding.sessionDir);
   const found = sessionManager.findById(binding.canonicalWorkspace, binding.conversationId, binding.sessionDir);
   if (found !== undefined) {
@@ -246,6 +247,7 @@ export function forkPiConversation(
   if (successor.predecessorId !== source.binding.conversationId) {
     throw new Error("fork successor must carry the source conversation as predecessor");
   }
+  assertOwnerClear(stateRoot, successor);
   if (source.canonicalFile === null) {
     throw new Error("cannot fork a source with no persisted history yet");
   }
@@ -385,6 +387,20 @@ function saveRegistry(stateRoot: string, registry: PiConversationRegistry): void
   const tmp = `${path}.${randomUUID()}.tmp`;
   writeFileSync(tmp, JSON.stringify(registry), { mode: 0o600 });
   renameSync(tmp, path);
+}
+
+/**
+ * Cross-principal/role denial: a conversation ID owned by one
+ * principal/platform/role is never addressable under another. Same-owner
+ * reopen is the normal path and passes.
+ */
+function assertOwnerClear(stateRoot: string, binding: PiConversationBinding): void {
+  const registry = loadRegistry(stateRoot);
+  const record = registry.conversations[binding.conversationId];
+  if (!record) return;
+  if (record.principal !== binding.principal || record.platform !== binding.platform || record.role !== binding.role) {
+    throw new Error("conversation id is owned by a different principal or role");
+  }
 }
 
 function registerConversation(stateRoot: string, binding: PiConversationBinding, canonicalFile: string | null): void {

@@ -163,6 +163,44 @@ describe("pi-session-adapter", () => {
     expect(readFileSync(impostor, "utf-8")).toContain("impostor");
   });
 
+  it("denies cross-principal and cross-role access to an owned conversation", () => {
+    const stateRoot = mkdtempSync(join(tmpdir(), "pi-adapter-"));
+    const workspace = mkdtempSync(join(tmpdir(), "pi-ws-"));
+    const { manager } = makeSessionManager();
+    const binding = allocatePiBinding(stateRoot, bindingParams(workspace));
+    openPiConversation(manager, stateRoot, binding);
+
+    const otherPrincipal = allocatePiBinding(
+      stateRoot,
+      { ...bindingParams(workspace), principal: "user-2" },
+    );
+    const hijackPrincipal = { ...otherPrincipal, conversationId: binding.conversationId };
+    expect(() => openPiConversation(manager, stateRoot, hijackPrincipal)).toThrow(/different principal or role/);
+
+    const otherRole = allocatePiBinding(stateRoot, { ...bindingParams(workspace), role: "main" });
+    const hijackRole = { ...otherRole, conversationId: binding.conversationId };
+    expect(() => openPiConversation(manager, stateRoot, hijackRole)).toThrow(/different principal or role/);
+  });
+
+  it("denies forks that reuse an id owned by another principal", () => {
+    const stateRoot = mkdtempSync(join(tmpdir(), "pi-adapter-"));
+    const workspace = mkdtempSync(join(tmpdir(), "pi-ws-"));
+    const { manager, flush } = makeSessionManager();
+    const sourceBinding = allocatePiBinding(stateRoot, bindingParams(workspace));
+    openPiConversation(manager, stateRoot, sourceBinding);
+    flush(sourceBinding.conversationId, sourceBinding.sessionDir);
+    const source = openPiConversation(manager, stateRoot, sourceBinding);
+
+    const taken = allocatePiBinding(stateRoot, bindingParams(workspace));
+    openPiConversation(manager, stateRoot, taken);
+    const rogue = {
+      ...allocatePiBinding(stateRoot, { ...bindingParams(workspace), principal: "user-2" }),
+      conversationId: taken.conversationId,
+      predecessorId: source.binding.conversationId,
+    };
+    expect(() => forkPiConversation(manager, stateRoot, source, rogue)).toThrow(/different principal or role/);
+  });
+
   it("forks flushed history only through a preallocated successor", () => {
     const stateRoot = mkdtempSync(join(tmpdir(), "pi-adapter-"));
     const workspace = mkdtempSync(join(tmpdir(), "pi-ws-"));
