@@ -349,8 +349,7 @@ describe("buildTerminalDiagnostic (#1595 Finance-Daily regression)", () => {
   // The Finance-Daily trace: one malformed `2>&` bash command (shell_syntax_error)
   // followed by ~20 continued turns, ending at prompt_round_limit (25). The
   // final diagnostic must lead with the terminal cause and keep the stale bash
-  // failure as supporting context only — never present it as the primary reason
-  // and never claim candidate_exhausted for a run that continued past rotation.
+  // failure as supporting context only — never present it as the primary reason.
   const staleBashFailure: ToolFailureDiagnosticV1 = {
     version: 1,
     execution_id: "exec_1",
@@ -384,10 +383,10 @@ describe("buildTerminalDiagnostic (#1595 Finance-Daily regression)", () => {
     expect(rendered).not.toContain("candidate_exhausted:true");
   });
 
-  it("sets candidate_exhausted only when the terminal incident is candidate_round_limit", () => {
-    const d = buildTerminalDiagnostic("exec_1", { type: "candidate_round_limit" }, staleBashFailure);
-    expect(d.reason).toBe("candidate_round_limit");
-    expect(d.candidate_exhausted).toBe(true);
+  it("never reports candidate_exhausted from a safety termination", () => {
+    const d = buildTerminalDiagnostic("exec_1", { type: "prompt_round_limit" }, staleBashFailure);
+    expect(d.reason).toBe("prompt_round_limit");
+    expect(d.candidate_exhausted).toBe(false);
     expect(d.last_tool_failure?.tool).toBe("execute_bash");
   });
 

@@ -412,11 +412,8 @@ async function main(): Promise<void> {
   await checkpoint("M18", "Tool registry has expected entries", "execution", "tools array non-empty", async () => {
     const { createPiAgentTools } = await import("../src/components/transport/pi-core-tools.js");
     const { createPiExecutionSafetyController } = await import("../src/components/transport/pi-core-safety.js");
-    const { FallbackPolicy } = await import("../src/components/transport/fallback-policy.js");
-    const { ModelHealthRegistry } = await import("../src/components/transport/model-health-registry.js");
     const { buildPolicy } = await import("../src/components/tool-sandbox.js");
-    const policy = new FallbackPolicy([], new ModelHealthRegistry());
-    const tools = createPiAgentTools({ executionId: "acceptance-tools", userId: "acceptance", sandboxPolicy: buildPolicy("owner"), safety: createPiExecutionSafetyController(policy) });
+    const tools = createPiAgentTools({ executionId: "acceptance-tools", userId: "acceptance", sandboxPolicy: buildPolicy("owner"), safety: createPiExecutionSafetyController() });
     if (tools.length === 0) return `Pi tool adapter produced no tools`;
     if (tools.some(tool => !tool.name || tool.executionMode !== "sequential")) return `Pi tool adapter returned malformed tool`;
     return { observed: `real Pi tool adapter constructed ${tools.length} registered tools`, evidence: [`tool_count=${tools.length}`, "execution_mode=sequential"] };
@@ -461,10 +458,7 @@ async function main(): Promise<void> {
 
   await checkpoint("M23", "Prompt-wide termination via tool-round limit", "execution", "maxToolRounds configurable", async () => {
     const { createPiExecutionSafetyController } = await import("../src/components/transport/pi-core-safety.js");
-    const { FallbackPolicy } = await import("../src/components/transport/fallback-policy.js");
-    const { ModelHealthRegistry } = await import("../src/components/transport/model-health-registry.js");
-    const policy = new FallbackPolicy([], new ModelHealthRegistry());
-    const safety = createPiExecutionSafetyController(policy, { maxPromptRounds: 2, maxCandidateRounds: 2 });
+    const safety = createPiExecutionSafetyController({ maxPromptRounds: 2 });
     const first = safety.beginProviderTurn("acceptance-model@deterministic");
     const second = safety.beginProviderTurn("acceptance-model@deterministic");
     const terminal = safety.beginProviderTurn("acceptance-model@deterministic");

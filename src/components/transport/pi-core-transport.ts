@@ -64,7 +64,6 @@ export interface PiCoreTransportOptions {
    *  Absent → the shared abtars state dir. Tests inject an isolated dir. */
   memoStateDir?: string;
   maxPromptRounds?: number;
-  maxCandidateRounds?: number;
   /** #1748: cache-identity scope. Main (absent) derives from the Spin session
    *  key at first sendPrompt; subagents pass the agent role name (all workers
    *  of one role share a system prompt, so a role-stable identity lets
@@ -102,7 +101,6 @@ export class PiCoreTransport implements IKiroTransport {
   private sandboxPolicy: SandboxPolicy;
   private session?: PiCoreTransportOptions["session"];
   private maxPromptRounds?: number;
-  private maxCandidateRounds?: number;
   private maxToolRoundsOverride: number | null = null;
   private timeoutOverrideMs: number | null = null;
   private activeHost: PiCoreExecutionHost | null = null;
@@ -172,7 +170,6 @@ export class PiCoreTransport implements IKiroTransport {
     // change the shipped behavior. "long" is per-provider opt-in only.
     this.cacheRetention = opts.cacheRetention ?? "short";
     this.maxPromptRounds = opts.maxPromptRounds;
-    this.maxCandidateRounds = opts.maxCandidateRounds;
     this.policy = new FallbackPolicy(opts.candidates, opts.healthRegistry);
     // #1619: baseline from the primary candidate's effort-style config; a
     // transport without one starts at Pi's truthful headless baseline.
@@ -459,13 +456,11 @@ export class PiCoreTransport implements IKiroTransport {
         if (!candidate) return undefined;
         return this.resolveModel(candidate, Boolean(image)).model;
       };
-      const safety = createPiExecutionSafetyController(this.policy, {
+      const safety = createPiExecutionSafetyController({
         // #1680: the intent-policy prompt bound overrides transport defaults
         // when the caller carries it (contract authoring keeps its narrow
         // 3-round ceiling; execution turns keep the wide bound).
         maxPromptRounds: context?.maxPromptRounds ?? this.maxToolRoundsOverride ?? this.maxPromptRounds,
-        maxCandidateRounds: this.maxCandidateRounds,
-        modelForCandidate,
       });
 
       // Build current-turn marker with image content
@@ -609,20 +604,6 @@ export class PiCoreTransport implements IKiroTransport {
           candidateModelFn: modelForCandidate,
         },
         outputObserver,
-        // #1619: pair every safety-selected replacement model with a fresh
-        // effective thinking level derived from the session's requested effort.
-        resolveThinkingLevelForModel: (model) => {
-          const candidate = this.config.candidates.find(
-            (item) => candidateKey(item.model, item.endpoint) === candidateKey(model.id, model.baseUrl ?? model.provider),
-          ) ?? this.config.candidates.find((item) => item.model === model.id);
-          const source = candidate ?? {
-            model: model.id,
-            provider: model.provider ?? "unknown",
-            endpoint: model.baseUrl ?? "",
-            maxContext: this.currentContextWindow ?? this.config.candidates[0]?.maxContext ?? 128000,
-          };
-          return this.resolveModel(source, Boolean(image)).effective;
-        },
         onEvent: async (event) => {
           if (event.type === "tool_execution_start") {
             this.onToolCallStart?.(event.toolName);

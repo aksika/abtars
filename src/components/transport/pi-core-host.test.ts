@@ -17,8 +17,7 @@ import { PiCoreExecutionHost } from "./pi-core-host.js";
 import { PiCoreContextProjection, DurableContextUnavailableError } from "./pi-core-context.js";
 import { PiArchiveOutbox } from "../pi-session/pi-archive-outbox.js";
 import { createCurrentTurnMessage } from "./pi-core-types.js";
-import type { LoadedPiAgentCore, PiAgent, AgentEvent, StreamFn, PiAgentCoreModule, ModelApi } from "./pi-core-types.js";
-import type { PiExecutionSafetyController } from "./pi-core-safety.js";
+import type { LoadedPiAgentCore, PiAgent, AgentEvent, StreamFn, PiAgentCoreModule } from "./pi-core-types.js";
 import type { Model, Api } from "@earendil-works/pi-ai";
 import type { InstructionLease } from "../spin-types.js";
 
@@ -36,33 +35,6 @@ function makeTestModel(overrides?: Partial<Model<Api>>): Model<Api> {
     contextWindow: 4096,
     maxTokens: 128,
     ...overrides,
-  };
-}
-
-// Complete safety-controller fake: the two resolver tests only exercise
-// prepareNextTurn, but the interface requires every member — stub the rest
-// with inert values instead of laundering a partial object through never.
-function makeFakeSafety(
-  prepareNextTurn: PiExecutionSafetyController["prepareNextTurn"],
-): PiExecutionSafetyController {
-  return {
-    promptRoundsUsed: 1,
-    maxPromptRounds: 25,
-    activeCandidateKey: "test-key",
-    beforeTool: () => ({ decision: "execute" }),
-    afterTool: () => ({ decision: "execute" }),
-    beginProviderTurn: () => ({ decision: "continue" }),
-    prepareNextTurn,
-    requestPause: () => {},
-    requestStop: (_reason: string) => {},
-    recordClassifiedStoreLiteral: (_literal: string) => {},
-    scrubClassifiedLiterals: (messages) => messages,
-    incident: null,
-    lastTerminalIncident: null,
-    paused: false,
-    stopped: false,
-    correctiveAdmitted: false,
-    terminalSafetyFailure: false,
   };
 }
 
@@ -754,32 +726,14 @@ describe("#1619 host reasoning/context wiring", () => {
     await startPromise;
   });
 
-  it("pairs a safety replacement model with a fresh thinking level via the resolver", async () => {
+  it("never produces a next-turn model update: the single candidate serves every turn (#1932)", async () => {
     const { loaded, captured, resolvePrompt } = makeCapturingCore();
-    const safety = makeFakeSafety(() => ({ model: makeTestModel({ id: "alt-model" }) }));
-    const host = new PiCoreExecutionHost({
-      ...localOpts,
-      safety,
-      resolveThinkingLevelForModel: (model: ModelApi) => (model.id === "alt-model" ? "high" : "off"),
-    });
-    const startPromise = host.start(loaded).catch(() => {});
-    await new Promise((r) => setTimeout(r, 5));
-    const agentOpts = captured[0] as { prepareNextTurnWithContext?: (ctx: unknown) => Promise<unknown> };
-    const paired = await agentOpts.prepareNextTurnWithContext!({ context: { messages: [], systemPrompt: "" } });
-    expect(paired).toMatchObject({ model: { id: "alt-model" }, thinkingLevel: "high" });
-    resolvePrompt();
-    await startPromise;
-  });
-
-  it("rejects a replacement model when no thinking-level resolver is supplied (contract error)", async () => {
-    const { loaded, captured, resolvePrompt } = makeCapturingCore();
-    const safety = makeFakeSafety(() => ({ model: makeTestModel({ id: "alt-model" }) }));
-    const host = new PiCoreExecutionHost({ ...localOpts, safety });
+    const host = new PiCoreExecutionHost(localOpts);
     const startPromise = host.start(loaded).catch(() => {});
     await new Promise((r) => setTimeout(r, 5));
     const agentOpts = captured[0] as { prepareNextTurnWithContext?: (ctx: unknown) => Promise<unknown> };
     await expect(agentOpts.prepareNextTurnWithContext!({ context: { messages: [], systemPrompt: "" } }))
-      .rejects.toThrow(/requires resolveThinkingLevelForModel/);
+      .resolves.toBeUndefined();
     resolvePrompt();
     await startPromise;
   });

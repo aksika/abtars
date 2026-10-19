@@ -313,7 +313,8 @@ export async function buildTransport(ctx: BootCtx): Promise<PhaseResult> {
       healthRegistry: ctx.modelHealthRegistry,
       sandboxPolicy: { allowedTools: ["*"], allowedRead: ["*"], allowedWrite: ["*"], canExecuteBash: true },
       maxPromptRounds: tc?.maxToolRounds,
-      maxCandidateRounds: tc?.maxFallbackToolRounds,
+      // #1932: candidate rotation is retired — the single configured
+      // candidate serves every turn, so maxFallbackToolRounds is inert.
       // #1748: per-provider cache-retention preference (absent → "short").
       cacheRetention: resolved.provider.cacheRetention,
       // #1527: late-bound holder — memory negotiates in parallel; the

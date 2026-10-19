@@ -181,7 +181,8 @@ export async function createSubagentTransport(role: SubagentRole, registry?: imp
       healthRegistry: registry ?? new ModelHealthRegistry(),
       sandboxPolicy: { allowedTools: ["*"], allowedRead: ["*"], allowedWrite: ["*"], canExecuteBash: true },
       maxPromptRounds: tc?.maxToolRounds,
-      maxCandidateRounds: tc?.maxFallbackToolRounds,
+      // #1932: candidate rotation is retired — the single configured
+      // candidate serves every turn, so maxFallbackToolRounds is inert.
       // #1748: subagent cache scope = agent role name (all workers of one role
       // share a system prompt, so repeated spawns can reuse the cached prefix).
       cacheScope: agentName,

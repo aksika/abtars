@@ -51,8 +51,6 @@ export interface PiCoreExecutionHostOptions {
   contextProjection?: PiCoreContextProjection;
   transformOptions?: TransformOptions;
   outputObserver?: OutputObserver;
-  /** #1619: derive the effective thinking level for a replacement model. */
-  resolveThinkingLevelForModel?: (model: ModelApi) => import("./kiro-transport.js").ReasoningEffort;
   /** #1932: archive-outbox consulted for admission. Defaults to the shared
    *  live-process instance; tests inject an isolated one. */
   archiveOutbox?: PiArchiveOutbox;
@@ -245,32 +243,9 @@ export class PiCoreExecutionHost {
         return undefined;
       },
       afterToolCall: async () => undefined,
-      prepareNextTurnWithContext: async (ctx, signal): Promise<AgentLoopTurnUpdate | undefined> => {
-        if (!this.opts.safety) return undefined;
-        if (signal?.aborted) return undefined;
-        const candidateKey = this.opts.transformOptions?.candidateKeyFn?.() ?? this.executionId;
-        const update = this.opts.safety.prepareNextTurn({
-          candidateKey,
-          roundsUsed: this.opts.safety.promptRoundsUsed,
-          maxRounds: this.opts.safety.maxPromptRounds,
-          incident: this.opts.safety.incident,
-          context: ctx.context,
-          modelForCandidate: this.opts.transformOptions?.candidateModelFn,
-        });
-        // #1619: a replacement model without a paired thinking level is a
-        // contract error — the next request must carry a recomputed effective
-        // level, never silently fall back to the previous candidate's.
-        if (update && update.model) {
-          if (!this.opts.resolveThinkingLevelForModel) {
-            throw new Error("PiCoreExecutionHost: replacement model requires resolveThinkingLevelForModel");
-          }
-          return {
-            ...update,
-            thinkingLevel: this.opts.resolveThinkingLevelForModel(update.model),
-          };
-        }
-        return update;
-      },
+      // #1932: no model replacement exists — the single configured candidate
+      // serves every turn, so there is never a next-turn update to compute.
+      prepareNextTurnWithContext: async (): Promise<AgentLoopTurnUpdate | undefined> => undefined,
     };
 
     try {

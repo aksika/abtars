@@ -360,11 +360,9 @@ export function buildSafetyDiagnostic(
   executionId: string,
   incident: { type: BehaviorIncidentType; toolName?: string },
 ): ToolFailureDiagnosticV1 {
-  const reason = incident.type === "candidate_round_limit"
-    ? "candidate_round_limit"
-    : incident.type === "prompt_round_limit"
-      ? "prompt_round_limit"
-      : "unknown";
+  const reason = incident.type === "prompt_round_limit"
+    ? "prompt_round_limit"
+    : "unknown";
   return {
     version: 1,
     execution_id: executionId,
@@ -373,7 +371,7 @@ export function buildSafetyDiagnostic(
     timed_out: false,
     aborted: false,
     safety_incident: incident.type,
-    candidate_exhausted: incident.type === "candidate_round_limit",
+    candidate_exhausted: false,
   };
 }
 
@@ -391,9 +389,7 @@ export function summarizeToolFailure(d: ToolFailureDiagnosticV1): NonNullable<To
 /**
  * #1595: assemble the final diagnostic when a run ended empty after a safety
  * termination. The terminal cause ALWAYS leads; a prior tool failure is
- * supporting context only (`last_tool_failure`), and candidate_exhausted is
- * never reported unless the terminal incident actually is candidate_round_limit
- * (a run that continued past rotation must not claim exhaustion).
+ * supporting context only (`last_tool_failure`).
  */
 export function buildTerminalDiagnostic(
   executionId: string,
