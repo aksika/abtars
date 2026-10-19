@@ -12,6 +12,7 @@ import {
   resolvePiModuleUrl,
 } from "./pi-installation.js";
 import type { PiInstallation, PiModuleSpecifier } from "./pi-installation.js";
+import { PI_COMPATIBILITY } from "../config/pi-compatibility.js";
 
 const loadPiConfigMock = vi.hoisted(() => vi.fn(() => null));
 
@@ -84,7 +85,9 @@ describe("resolveNestedPackageRoot", () => {
 
 describe("resolvePiInstallation", () => {
   it("uses package metadata without launching the Pi executable", () => {
-    const { bin, packageRoot } = piInstallationFixture("0.85.1");
+    // Fixture tracks the compatibility pin: anything below it is
+    // below-minimum by design, not compatible.
+    const { bin, packageRoot } = piInstallationFixture(PI_COMPATIBILITY.pinnedVersion);
     const originalPath = process.env.PATH;
     process.env.PATH = bin;
     try {
@@ -93,7 +96,7 @@ describe("resolvePiInstallation", () => {
         state: "compatible",
         installation: {
           packageRoot,
-          version: "0.85.1",
+          version: PI_COMPATIBILITY.pinnedVersion,
         },
       });
     } finally {

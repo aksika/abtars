@@ -76,6 +76,7 @@ import { buildTransport, rebuildTransport, phaseTransport } from "./phase-transp
 import { createBootCtx, type BootCtx } from "./context.js";
 import { PiCoreTransport } from "../components/transport/pi-core-transport.js";
 import { PiRuntimeContractError, validatePiRuntimeContract } from "../components/transport/pi-runtime-contract.js";
+import { formatPiPinnedInstallCommand } from "../config/pi-compatibility.js";
 import * as piAiAdapter from "../components/transport/pi-ai-adapter.js";
 import type { IKiroTransport } from "../components/transport/kiro-transport.js";
 
@@ -165,7 +166,7 @@ describe("transport readiness contract (#1573)", () => {
     expect(error).toBeInstanceOf(PiRuntimeContractError);
     const contractError = error as PiRuntimeContractError;
     expect(contractError.component).toBe("pi-ai");
-    expect(contractError.remediationCommand).toBe("npm i -g '@earendil-works/pi-coding-agent@~0.85.1'");
+    expect(contractError.remediationCommand).toBe(formatPiPinnedInstallCommand());
     expect(ctx.transport).toBeNull();
   });
 

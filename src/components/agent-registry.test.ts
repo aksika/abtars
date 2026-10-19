@@ -37,6 +37,17 @@ vi.mock("./env-schema.js", () => ({
 vi.mock("./transport/acp-transport.js", () => ({ AcpTransport: mockAcpTransport }));
 vi.mock("./config.js", () => ({ loadAndValidateConfig: mockLoadAndValidateConfig }));
 
+// The runtime contract probe needs a compatible Pi installation in the
+// environment; construction, candidate policy, and holder capture do not.
+// Stub only the probe so these tests prove the real factory path hermetically.
+vi.mock("./transport/pi-runtime-contract.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("./transport/pi-runtime-contract.js")>();
+  return {
+    ...actual,
+    validatePiRuntimeContract: vi.fn(async () => {}),
+  };
+});
+
 const { createSubagentTransport } = await import("./agent-registry.js");
 const { PiCoreTransport } = await import("./transport/pi-core-transport.js");
 

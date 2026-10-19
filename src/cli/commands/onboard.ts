@@ -97,9 +97,11 @@ const ONBOARD_PROVIDER_CONFIG: Record<ProviderChoice, Record<string, unknown>> =
  * model, or API key — the operator installs pi via deps and adjusts the model
  * via /model afterwards. Realtime (non-batch) variant: batch queueing latency
  * would hit every user-visible turn, and batch lacks max_completion_tokens.
+ * Tracks the rank-1 openrouter luna entry in templates/config/models.json;
+ * the catalog sync dropped openai/gpt-6-luna, which no longer validates.
  */
 const SHIPPED_DEFAULT_PROVIDER: ProviderChoice = 'openrouter';
-const SHIPPED_DEFAULT_MODEL = 'openai/gpt-6-luna';
+const SHIPPED_DEFAULT_MODEL = 'openai/gpt-5.6-luna';
 
 interface WizardAnswers {
   readonly installMode: "simple" | "daemon";

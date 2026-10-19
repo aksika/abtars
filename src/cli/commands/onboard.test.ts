@@ -105,14 +105,14 @@ describe('onboard command (non-interactive)', () => {
       telegramToken: '123:secret',
       telegramChatId: '4242',
       defaultProvider: 'openrouter',
-      defaultModel: 'openai/gpt-6-luna',
+      defaultModel: 'openai/gpt-5.6-luna',
       force: false,
     });
     expect(code).toBe(0);
     const env = await readFile(join(fakeHome, 'config', '.env'), 'utf-8');
     expect(env).toMatch(/MAIN_CHAT_ID=4242/);
     expect(env).toMatch(/DEFAULT_PROVIDER=openrouter/);
-    expect(env).toMatch(/DEFAULT_MODEL=openai\/gpt-6-luna/);
+    expect(env).toMatch(/DEFAULT_MODEL=openai\/gpt-5.6-luna/);
     expect(env).not.toMatch(/DISCORD_A2A_CHANNEL_ID=/);
     // Secrets go to secret/ dir
     const { readSecret } = await import('../../components/secrets.js');
@@ -133,7 +133,7 @@ describe('onboard command (non-interactive)', () => {
     expect(code).toBe(0);
     const env = await readFile(join(fakeHome, 'config', '.env'), 'utf-8');
     expect(env).toMatch(/DEFAULT_PROVIDER=openrouter/);
-    expect(env).toMatch(/DEFAULT_MODEL=openai\/gpt-6-luna/);
+    expect(env).toMatch(/DEFAULT_MODEL=openai\/gpt-5.6-luna/);
     const transport = JSON.parse(await readFile(join(fakeHome, 'config', 'transport.json'), 'utf-8')) as Record<string, unknown>;
     const result = validateTransportConfig(transport);
     expect(result.ok).toBe(true);
@@ -143,7 +143,7 @@ describe('onboard command (non-interactive)', () => {
     );
     const agents = (transport.routes as Record<string, { agents: Record<string, { provider: string; model: string }> }>)['pi-ai']!.agents;
     for (const role of ['main', 'dreamy', 'browsie', 'cody']) {
-      expect(agents[role]).toMatchObject({ provider: 'openrouter', model: 'openai/gpt-6-luna' });
+      expect(agents[role]).toMatchObject({ provider: 'openrouter', model: 'openai/gpt-5.6-luna' });
     }
   });
 
@@ -181,7 +181,7 @@ describe('onboard command (non-interactive)', () => {
       telegramToken: '999:aa',
       telegramChatId: '1',
       defaultProvider: 'openrouter',
-      defaultModel: 'openai/gpt-6-luna',
+      defaultModel: 'openai/gpt-5.6-luna',
       force: true,
     });
     expect(code).toBe(0);
@@ -204,7 +204,7 @@ describe('onboard command (non-interactive)', () => {
       telegramToken: '1:a',
       telegramChatId: '1',
       defaultProvider: 'openrouter',
-      defaultModel: 'openai/gpt-6-luna',
+      defaultModel: 'openai/gpt-5.6-luna',
       force: false,
     });
     // Second run without --force refuses (env already has owned keys)
