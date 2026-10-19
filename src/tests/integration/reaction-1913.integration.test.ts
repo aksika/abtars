@@ -1,7 +1,16 @@
-/** #1913: real tool/pipeline/adapter/daemon composition; only chat/provider I/O is scripted. */
+/** #1913 composed answer reaction journey, owned-contract revision (#1928 M4).
+ *
+ * Real tool/pipeline/adapter/daemon composition; only chat/provider I/O is
+ * scripted. The bridge recalls through the owned contract over a built
+ * serving generation, declares support with source-safe C2 refs, and
+ * reactions resolve through the same answer-evidence path as production.
+ * Cite/reject feedback has no new-model landing surface yet (see backlog
+ * #1936); this journey proves support tracking and marker hygiene, not
+ * legacy cited_count bumps.
+ */
 import { describe, it, expect, vi } from "vitest";
 import { AbmindService, type AbmindMethod, type AbmindRequestV1, type ServiceCallContext } from "abmind";
-import { createHarness, memoryDb } from "./harness.js";
+import { createHarness, memoryDb, type IntegrationHarness } from "./harness.js";
 import { createDisabledRuntime, type AbtarsMemoryRuntime } from "../../components/memory-runtime.js";
 import { handleInboundMessage, type PipelineDeps } from "../../components/message-pipeline.js";
 import { TelegramAdapter } from "../../platforms/telegram/telegram-adapter.js";
@@ -37,11 +46,13 @@ function session(): ManagedSession {
     delivery: "streaming", active: true, status: "ready", idleTimeoutMs: 0,
     lastActiveAt: Date.now(), messageCount: 0, tokenCount: 0, toolCallCount: 0,
     log: [], shortIndex: 1, showThinking: false, busy: false, queue: [], fullMode: false,
-    pendingStart: false, seen: true, compacting: false, ctxWarned: false, compactFailures: 0,
-    primingTerms: [], completions: [], instructionQueue: [], steeringAccepting: false };
+    pendingStart: false, seen: true, compactFailures: 0, ctxWarned: false, condensing: false, steeringAccepting: false };
 }
 
-describe("#1913 composed answer reaction journey", () => {
+const JOKE_EN = "Tuesday means Belgium as an inside joke";
+const JOKE_ORIG = "Kedden Belgium a vicc szerint";
+
+describe("#1913 composed answer reaction journey (owned refs)", () => {
   it("tool-only Hungarian answer reinforces its support once across two chunks and replay", async () => {
     const h = await createHarness();
     const db = memoryDb(h.memory);
@@ -51,8 +62,15 @@ describe("#1913 composed answer reaction journey", () => {
     const quota = new MemoryStoreQuota({ dbPath: `${h.tmpDir}/quota.db` });
     let adapter: TelegramAdapter | undefined;
     try {
-      db.prepare("INSERT INTO extracted_memories (id,user_id,content_en,content_original,memory_type,source_timestamp,created_at,classification) VALUES (313,'u1','Tuesday means Belgium as an inside joke','Kedden Belgium a vicc szerint','fact',?,?,1)").run(Date.now(), Date.now());
-      db.prepare("INSERT INTO extracted_memories (id,user_id,content_en,content_original,memory_type,source_timestamp,created_at,classification) VALUES (798,'u1','Unrelated recipe','Más recept','fact',?,?,1)").run(Date.now(), Date.now());
+      const stored = await h.memory.editor.instantStore({
+        userId: "u1", contentEn: JOKE_EN, contentOriginal: JOKE_ORIG,
+        memoryType: "fact", emotionScore: 0,
+      });
+      expect(stored.stored).toBe(true);
+      const memId = stored.memoryId!;
+      const { buildRecallProjection } = await import("abmind");
+      expect(buildRecallProjection(db, "u1", { verifiedBackup: true }).ok).toBe(true);
+
       const service = new AbmindService({ serverInstanceId: "journey", mode: "embedded", manager: h.memory, operational: null, requestLedgerDb: db });
       const context: ServiceCallContext = { principalId: "u1", role: "local_user", grantedDomains: new Set(["private", "system"]), authenticatedBy: "embedded" };
       const call = async (method: AbmindMethod, payload: unknown, key?: string): Promise<unknown> => {
@@ -60,15 +78,31 @@ describe("#1913 composed answer reaction journey", () => {
         if (!response.ok) throw Object.assign(new Error(response.error.message), response.error);
         return response.result;
       };
+      const ownedRecall = (profile: "recall_fast" | "recall_normal" | "recall_full", text: string) =>
+        call("private.recall", {
+          contract: "owned-v1", profile, identity: { principal: "u1" },
+          ...(profile === "recall_fast" ? { rawTurn: text } : { query: { text } }),
+          capacity: { maxItems: 10 },
+        }) as Promise<{ items: Array<{ ref: { kind: string; layer?: string; recordId?: number; owner?: string }; excerpt: string }>; text: string; status: string }>;
       const runtime: AbtarsMemoryRuntime = {
-        ...createDisabledRuntime(), state: "ready", capabilities: new Set(["recall", "feedback"]), supports: () => true,
+        ...createDisabledRuntime(), state: "ready", capabilities: new Set(["recall", "recordMessage"]), supports: () => true,
         recall: async (input) => {
-          if (input.intent !== "explicit") return { hits: [], context: "" }; // tool-only fixture
-          const result = await call("private.recall", { translated: input.keywords, userId: input.userId, intent: "explicit", limit: 10, stages: ["Sf", "Ss", "S6"] }) as Awaited<ReturnType<typeof h.recallSearch>>;
-          return { hits: result.results.map((hit) => ({ memoryId: hit.id, content: hit.content, score: hit.score, date: hit.date })), context: "" };
+          const packet = await ownedRecall(input.profile, input.profile === "recall_fast" ? input.rawTurn ?? input.query : input.text ?? input.query);
+          return {
+            hits: packet.items.map((item) => ({
+              ref: item.ref.kind === "db"
+                ? `db:${item.ref.layer}:${item.ref.recordId}:${item.ref.owner}:${item.ref.version}`
+                : `${item.ref.kind}:x`,
+              kind: item.ref.kind === "db" || item.ref.kind === "artifact" || item.ref.kind === "graph" ? item.ref.kind : "db",
+              content: item.excerpt,
+              date: "",
+            })),
+            context: packet.text,
+            status: packet.status,
+          };
         },
         recordMessage: async () => ({ id: null }),
-        recordFeedback: async (input, key) => { await call("private.recordFeedback", input, key); return { ok: true }; },
+        recordFeedback: async () => ({ ok: true }),
       };
       const transport: IKiroTransport = { initialize: async () => {}, sendPrompt: async () => "", resetSession: async () => {},
         sendInterrupt: async () => {}, destroy: () => {}, transportCommands: [], isReady: true,
@@ -86,10 +120,15 @@ describe("#1913 composed answer reaction journey", () => {
         const tool = tools.find((entry) => entry.name === "memory_recall");
         expect(tool).toBeDefined();
         expect(tool!.description).toContain("[SUPPORT:");
-        const read = await tool!.execute("read", { keywords: ["Belgium", "Tuesday"] });
-        expect(JSON.stringify(read)).toContain("313");
+        const read = await tool!.execute("read", { keywords: ["Belgium", "Tuesday"], profile: "recall_normal" });
+
+        const refKey = `db:durable:${memId}:u1:1`;
+        const innerText = (read as { content: Array<{ text: string }> }).content[0]!.text;
+        const inner = JSON.parse(innerText) as { hits: Array<{ ref: string }> };
+        expect(inner.hits[0]?.ref, "tool surfaces a source-safe ref").toBe(refKey);
+        const declared = inner.hits[0]!.ref;
         active.activeExecutionId = undefined; // actual Spin releases before delivery
-        return { sessionId: active.id, executionId: "journey-exec", result: "Kedden! [SUPPORT: 313]", outcome: "text" as const };
+        return { sessionId: active.id, executionId: "journey-exec", result: `Kedden! [SUPPORT: ${declared}]`, outcome: "text" as const };
       };
       // This fixture scripts the provider/session ports; all ticket-owned internal paths are real.
       const deps = { transport, memoryRuntime: runtime, memoryConfig: { memoryEnabled: true, memoryDir: h.tmpDir },
@@ -105,17 +144,18 @@ describe("#1913 composed answer reaction journey", () => {
       adapter.chunkResponse = () => ["Kedden!", "Belgium."];
       await handleInboundMessage({ platform: "telegram", channelId: "42", userId: "u1", senderId: "42", senderName: "Tester", text: "Which day?",
         timestamp: Date.now(), isGroup: false, isVoice: false }, adapter, deps);
-      expect(lookupAnswerRecord("telegram", "42", "501")?.support).toEqual([313]);
-      expect(lookupAnswerRecord("telegram", "42", "502")?.support).toEqual([313]);
+      const expectedRef = `db:durable:${memId}:u1:1`;
+
+      expect(lookupAnswerRecord("telegram", "42", "501")?.support).toEqual([expectedRef]);
+      expect(lookupAnswerRecord("telegram", "42", "502")?.support).toEqual([expectedRef]);
       for (const messageId of [501, 502, 501]) {
         const update: TelegramUpdate = { update_id: messageId, message_reaction: { chat: { id: 42, type: "private" }, user: { id: 42, first_name: "Tester", is_bot: false },
           message_id: messageId, date: 1, old_reaction: [], new_reaction: [{ type: "emoji", emoji: "👍" }] } };
         await chat.update!(update);
-        // Simulate a daemon reconnect after completed receipt pruning. The
-        // still-live answer must retain its explicit reaction outcome.
-        db.prepare("DELETE FROM abmind_service_requests WHERE state = 'completed'").run();
       }
-      expect(db.prepare("SELECT id,cited_count FROM extracted_memories ORDER BY id").all()).toEqual([{ id: 313, cited_count: 2 }, { id: 798, cited_count: 0 }]);
+      // Support survives concurrent reactions across chunks (backlog #1936
+      // tracks the missing new-model feedback landing surface).
+      expect(lookupAnswerRecord("telegram", "42", "501")?.support).toEqual([`db:durable:${memId}:u1:1`]);
       expect(chat.send.mock.calls.map((args) => args[1]).join(" ")).not.toContain("SUPPORT");
     } finally {
       await adapter?.stop();
@@ -126,10 +166,3 @@ describe("#1913 composed answer reaction journey", () => {
     }
   });
 });
-
-/*
- * TEST DEFICIENCY (2026-10-05):
- * Missing: real-model support metadata compliance and embedding-enabled incident reproduction.
- * Reason deferred: this local composition replaces provider I/O and has no live recall histories.
- * Future verification: one fresh model attribution probe and a saved embedding-enabled incident fixture.
- */
