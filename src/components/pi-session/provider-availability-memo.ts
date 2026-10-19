@@ -45,14 +45,21 @@ export function isMemoBlocked(entry: ProviderAvailabilityEntry, now: number): bo
   return now < entry.unusableUntil;
 }
 
+/**
+ * Scope matching for admission and observation replacement. Dimensions
+ * present on the stored entry constrain it; dimensions absent from the
+ * entry make it namespace/provider-wide evidence that applies downward.
+ * Model-specific evidence never applies upward: an entry scoped to one
+ * model does not block an unscoped selection or a sibling model.
+ */
 export function memoScopeMatches(
   entry: ProviderAvailabilityEntry,
   query: { authNamespace: string; provider: string; endpoint?: string; modelScope?: string },
 ): boolean {
   if (entry.authNamespace !== query.authNamespace) return false;
   if (entry.provider !== query.provider) return false;
-  if (query.endpoint !== undefined && entry.endpoint !== query.endpoint) return false;
-  if (query.modelScope !== undefined && entry.modelScope !== query.modelScope) return false;
+  if (entry.endpoint !== undefined && entry.endpoint !== query.endpoint) return false;
+  if (entry.modelScope !== undefined && entry.modelScope !== query.modelScope) return false;
   return true;
 }
 
