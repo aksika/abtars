@@ -115,4 +115,58 @@ describe("PiRuntimeHost --session-dir (#1755)", () => {
     expect(rpcPair).toEqual(tuiPair);
     expect(buildSessionDirArgs(config)).toEqual(["--session-dir", sessionStorageRoot]);
   });
+
+  it("owned session launch carries the partitioned dir plus the exact conversation ID", async () => {
+    const config: PiExecutorConfig = {
+      enabled: true,
+      command: "fake-pi",
+      fixedArgs: [],
+      workspaceAliases: { "repo-a": { path: wsPath } },
+      allowedEnv: [],
+      maxConcurrent: 1,
+      maxWallClockMs: 60000,
+      abortGraceMs: 5000,
+      projectTrust: "never",
+      sessionStorageRoot: "/state/pi",
+    };
+    const host = new PiRuntimeHost(config);
+    const result = await host.launch({
+      workspaceAlias: "repo-a",
+      envIdentity: { id: "r1", ownerPrincipalId: "u1", executionGeneration: 1 },
+      ownedSession: { role: "worker", conversationId: "conv-1" },
+    });
+    expect(result.ok).toBe(true);
+    const args = fake.FakeClient.lastArgs as string[];
+    const dirIndex = args.indexOf("--session-dir");
+    expect(args).toContain("--session-id");
+    expect(args[args.indexOf("--session-id") + 1]).toBe("conv-1");
+    // The partitioned dir stays inside the configured root and out of the flat root file.
+    const sessionDir = args[dirIndex + 1] as string;
+    expect(sessionDir.startsWith("/state/pi/")).toBe(true);
+    expect(sessionDir).toContain("/worker/");
+    expect(sessionDir).not.toBe("/state/pi");
+  });
+
+  it("invalid owned session fails the launch closed without spawning flat", async () => {
+    const config: PiExecutorConfig = {
+      enabled: true,
+      command: "fake-pi",
+      fixedArgs: [],
+      workspaceAliases: { "repo-a": { path: wsPath } },
+      allowedEnv: [],
+      maxConcurrent: 1,
+      maxWallClockMs: 60000,
+      abortGraceMs: 5000,
+      projectTrust: "never",
+      sessionStorageRoot: "/state/pi",
+    };
+    const host = new PiRuntimeHost(config);
+    const result = await host.launch({
+      workspaceAlias: "repo-a",
+      envIdentity: { id: "r1", ownerPrincipalId: "u1", executionGeneration: 1 },
+      ownedSession: { role: "worker", conversationId: "has space" },
+    });
+    expect(result).toEqual({ ok: false, error: "Owned session launch refused: owned session launch requires a valid conversation id" });
+    expect(fake.FakeClient.lastArgs).toBeNull();
+  });
 });

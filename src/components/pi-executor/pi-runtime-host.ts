@@ -14,6 +14,7 @@
 
 import { SupervisedPiRpcClient } from "./pi-rpc-client.js";
 import { buildChildEnv, buildSessionDirArgs, buildTrustArgs, resolveAndValidateWorkspace, validatePersistedSession, validateSessionFile, type PiExecutorConfig, type SessionProof } from "./config.js";
+import { buildOwnedSessionLaunchArgs, type PiConversationRole } from "../pi-session/pi-conversation-identity.js";
 import { basename } from "node:path";
 import { accessSync, constants, lstatSync } from "node:fs";
 import { logAndSwallow } from "../log-and-swallow.js";
@@ -119,6 +120,15 @@ export class PiRuntimeHost {
     envIdentity: PiEnvIdentity;
     memoryMode?: PiMemoryMode;
     extensionPaths?: readonly string[];
+    /**
+     * Opt-in owned conversation: when present the launch carries the
+     * partitioned session dir plus the exact abtars-minted conversation ID
+     * (same spelling as the adapter and native handoff). Absent means the
+     * legacy flat shared root with no session ID. An invalid owned session
+     * fails the launch closed — never a silent flat-root fallback under a
+     * different identity.
+     */
+    ownedSession?: { role: PiConversationRole; conversationId: string };
   }): Promise<PiLaunchOutcome> {
     const ws = resolveAndValidateWorkspace(input.workspaceAlias, this.config_);
     if (ws.error) return { ok: false, error: ws.error };
@@ -133,12 +143,25 @@ export class PiRuntimeHost {
     }
 
     const client = new SupervisedPiRpcClient();
+    let sessionArgs: readonly string[];
+    if (input.ownedSession) {
+      const owned = buildOwnedSessionLaunchArgs(this.config_.sessionStorageRoot, {
+        principal: input.envIdentity.ownerPrincipalId,
+        role: input.ownedSession.role,
+        canonicalWorkspace: ws.canonicalPath,
+        conversationId: input.ownedSession.conversationId,
+      });
+      if (!owned.ok) return { ok: false, error: `Owned session launch refused: ${owned.reason}` };
+      sessionArgs = owned.args;
+    } else {
+      sessionArgs = buildSessionDirArgs(this.config_);
+    }
     const args = [
       ...this.config_.fixedArgs,
       ...extensionPaths.flatMap((path) => ["--extension", path] as const),
       "--mode", "rpc",
       ...buildTrustArgs(this.config_, input.workspaceAlias),
-      ...buildSessionDirArgs(this.config_),
+      ...sessionArgs,
     ];
     const env = buildChildEnv(this.config_, input.envIdentity, input.memoryMode ?? "abmind");
 

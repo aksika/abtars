@@ -439,6 +439,11 @@ describe("validateFixedArgs (#1755)", () => {
     expect(errors.some((e) => e.includes("--session-dir"))).toBe(true);
   });
 
+  it("rejects --session-id (executor-owned conversation identity)", () => {
+    const errors = validateFixedArgs(["--session-id"]);
+    expect(errors.some((e) => e.includes("--session-id"))).toBe(true);
+  });
+
   it("no longer rejects dead flags --session-storage-root and --rpc-version", () => {
     expect(validateFixedArgs(["--session-storage-root"])).toEqual([]);
     expect(validateFixedArgs(["--rpc-version"])).toEqual([]);

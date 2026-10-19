@@ -140,3 +140,58 @@ export function allocatePiSuccessor(predecessor: PiConversationBinding): PiConve
     predecessorId: predecessor.conversationId,
   };
 }
+
+/** Owned-session launch identity: the caller supplies role + conversation ID;
+ * principal and workspace come from the already-resolved execution context. */
+export interface PiOwnedSessionLaunch {
+  principal: string;
+  role: PiConversationRole;
+  canonicalWorkspace: string;
+  conversationId: string;
+}
+
+export type PiOwnedSessionLaunchArgs =
+  | { ok: true; sessionDir: string; args: readonly string[] }
+  | { ok: false; reason: string };
+
+const PI_CONVERSATION_ROLES: readonly PiConversationRole[] = [
+  "main",
+  "orc",
+  "worker",
+  "browsing",
+  "coding",
+  "task",
+  "peer",
+  "dreamy",
+  "healer",
+  "maintenance",
+  "skill-isolated",
+];
+
+/**
+ * Build the RPC/Pi launch vector for an owned conversation: the partitioned
+ * session dir plus the exact abtars-minted conversation ID. The same spelling
+ * is shared by in-process open (adapter), RPC launch, and native handoff so
+ * SDK, RPC, and handoff resolve the same directory and ID (R1-R2). Failures
+ * are explicit so the caller fails closed instead of silently launching into
+ * the flat shared root under a different identity.
+ */
+export function buildOwnedSessionLaunchArgs(
+  root: string,
+  launch: PiOwnedSessionLaunch,
+): PiOwnedSessionLaunchArgs {
+  if (!root || !launch.principal || !launch.canonicalWorkspace) {
+    return { ok: false, reason: "owned session launch requires root, principal, and workspace" };
+  }
+  if (!PI_CONVERSATION_ROLES.includes(launch.role)) {
+    return { ok: false, reason: "owned session launch requires a known conversation role" };
+  }
+  if (!isValidPiConversationId(launch.conversationId)) {
+    return { ok: false, reason: "owned session launch requires a valid conversation id" };
+  }
+  const sessionDir = resolvePiConversationDir(root, launch.principal, launch.role, launch.canonicalWorkspace);
+  if (!isPathWithinRoot(root, sessionDir)) {
+    return { ok: false, reason: "owned session directory escapes the authorized root" };
+  }
+  return { ok: true, sessionDir, args: ["--session-dir", sessionDir, "--session-id", launch.conversationId] };
+}

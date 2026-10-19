@@ -153,7 +153,7 @@ export function validateFixedArgs(fixedArgs: readonly string[]): string[] {
   const errors: string[] = [];
   const FORBIDDEN_FLAGS = new Set([
     "--mode", "--approve", "--no-approve", "--extension",
-    "--provider", "--model", "--session-dir",
+    "--provider", "--model", "--session-dir", "--session-id",
   ]);
   for (const arg of fixedArgs) {
     if (FORBIDDEN_FLAGS.has(arg)) {
