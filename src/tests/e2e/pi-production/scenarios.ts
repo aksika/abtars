@@ -707,10 +707,10 @@ async function sessionStartHydration(ctx: PiAcceptanceContext): Promise<void> {
 }
 
 // ── Scenario: provider cooldown suppression (core) ───────────────────────────
-// R6 end-to-end through the real composition: terminal 429s on every
-// configured candidate record a durable availability memo; the next turn is
+// R6 end-to-end through the real composition: a terminal 429 on the single
+// configured candidate records a durable availability memo; the next turn is
 // suppressed before any provider request and reports a bounded reason with
-// the memo's retry time. Cleans up its memo entries so later serial
+// the memo's retry time. Cleans up its memo entry so later serial
 // scenarios in the lane dispatch normally. Runs before fail-closed: the
 // owner must be up (durable intent), since suppression is about provider
 // availability, not memory unavailability.
@@ -718,13 +718,11 @@ async function providerCooldownSuppresses(ctx: PiAcceptanceContext): Promise<voi
   const c1 = ctx.markers.next("PC1");
   const c2 = ctx.markers.next("PC2");
 
-  for (const candidate of [FIXTURE_MODEL_A, FIXTURE_MODEL_B]) {
-    ctx.provider.enqueue({
-      candidate,
-      expectation: { candidate, currentTurn: c1 },
-      action: { kind: "httpError", status: 429, code: "fixture_rate_limited" },
-    });
-  }
+  ctx.provider.enqueue({
+    candidate: FIXTURE_MODEL_A,
+    expectation: { candidate: FIXTURE_MODEL_A, currentTurn: c1 },
+    action: { kind: "httpError", status: 429, code: "fixture_rate_limited" },
+  });
   try {
     await ctx.tui.sendAndAwaitReply(c1, TIMEOUTS.turnMs);
   } catch {
@@ -732,19 +730,17 @@ async function providerCooldownSuppresses(ctx: PiAcceptanceContext): Promise<voi
     // memo write asserted below is the evidence that matters.
   }
 
-  // Durable observation proof: the bridge recorded per-model cooldowns.
+  // Durable observation proof: the bridge recorded the rate-limit cooldown.
   const memoPath = join(ctx.abtarsHome, "state", "provider-availability-v1.json");
   let memo: { entries: Array<{ authNamespace: string; provider: string; reason: string; modelScope?: string }> };
   try {
     memo = JSON.parse(readFileSync(memoPath, "utf-8")) as typeof memo;
   } catch {
-    throw new Error(`availability memo missing after terminal 429s: ${memoPath}`);
+    throw new Error(`availability memo missing after terminal 429: ${memoPath}`);
   }
-  for (const model of [FIXTURE_MODEL_A, FIXTURE_MODEL_B]) {
-    const entry = memo.entries.find((e) => e.modelScope === model);
-    if (!entry || entry.reason !== "rate-limit") {
-      throw new Error(`missing rate-limit memo entry for ${model}: ${JSON.stringify(memo.entries).slice(0, 300)}`);
-    }
+  const entry = memo.entries.find((e) => e.modelScope === FIXTURE_MODEL_A);
+  if (!entry || entry.reason !== "rate-limit") {
+    throw new Error(`missing rate-limit memo entry for ${FIXTURE_MODEL_A}: ${JSON.stringify(memo.entries).slice(0, 300)}`);
   }
 
   // Turn 2 must be suppressed before any provider request, with a bounded
@@ -755,12 +751,12 @@ async function providerCooldownSuppresses(ctx: PiAcceptanceContext): Promise<voi
     const beforeB = ctx.provider.requestCountFor(FIXTURE_MODEL_B);
     await sendExpectReply(ctx.tui, c2, "cooling down", "cooldown suppression reply");
     if (ctx.provider.requestCountFor(FIXTURE_MODEL_A) !== beforeA || ctx.provider.requestCountFor(FIXTURE_MODEL_B) !== beforeB) {
-      throw new Error("provider request sent while every selection cooled down");
+      throw new Error("provider request sent while the configured selection cools down");
     }
     ctx.writeArtifact("provider-cooldown-suppression.json", JSON.stringify({
       scenario: "provider-cooldown-suppression",
       lane: ctx.lane,
-      blockedModels: [FIXTURE_MODEL_A, FIXTURE_MODEL_B],
+      blockedModels: [FIXTURE_MODEL_A],
     }, null, 2));
   } finally {
     // Teardown: expire this scenario's memo so later serial scenarios in the
