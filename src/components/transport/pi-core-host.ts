@@ -207,6 +207,7 @@ export class PiCoreExecutionHost {
           this.opts.seed.source.sessionKey,
         );
         if (result.contextDegraded && this.opts.contextProjection.safeBaseline === null) {
+          logDebug(TAG, `soul gate denies execution ${this.executionId}: degraded projection without safe baseline`);
           throw new DurableContextUnavailableError("hydration_failed");
         }
         if (!this.settled && this.state === "running") {
@@ -214,6 +215,7 @@ export class PiCoreExecutionHost {
         }
         const decision = this.soulGate.checkRequest(1, { abmindAvailable: true, archiveAcknowledged });
         if (!decision.admit) {
+          logDebug(TAG, `soul gate denies execution ${this.executionId}: admission refused (${decision.reason})`);
           throw new DurableContextUnavailableError("hydration_failed");
         }
       }
