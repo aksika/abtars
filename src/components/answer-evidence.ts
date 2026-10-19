@@ -35,18 +35,20 @@ export const MAX_SUPPORT_IDS = 20;
 // ── Tool evidence (execution-scoped) ──────────────────────────────────────
 
 interface ToolEvidenceEntry {
-  ids: Map<number, number | undefined>;
+  ids: Set<string>;
   at: number;
 }
 
 const toolEvidence = new Map<string, ToolEvidenceEntry>();
 
 export interface ToolEvidenceHit {
-  readonly memoryId?: number;
-  readonly semanticRevision?: number;
+  readonly ref?: string;
 }
 
-/** Record memory IDs a successful `memory_recall` delivered to the agent. */
+/**
+ * #1928 M4 — record owner ref keys a successful `memory_recall` delivered
+ * to the agent. Numeric memory IDs no longer exist on this path.
+ */
 export function recordToolEvidence(
   executionId: string | undefined,
   hits: readonly ToolEvidenceHit[],
@@ -56,14 +58,12 @@ export function recordToolEvidence(
   let entry = toolEvidence.get(executionId);
   if (!entry) {
     if (toolEvidence.size >= MAX_TOOL_EXECUTIONS) sweepToolEvidence(nowMs);
-    entry = { ids: new Map(), at: nowMs };
+    entry = { ids: new Set(), at: nowMs };
     toolEvidence.set(executionId, entry);
   }
   for (const hit of hits) {
     if (entry.ids.size >= MAX_TOOL_IDS_PER_EXECUTION) break;
-    if (typeof hit.memoryId === "number" && Number.isInteger(hit.memoryId) && hit.memoryId > 0) {
-      if (!entry.ids.has(hit.memoryId)) entry.ids.set(hit.memoryId, hit.semanticRevision);
-    }
+    if (typeof hit.ref === "string" && hit.ref.length > 0) entry.ids.add(hit.ref);
   }
   sweepToolEvidence(nowMs);
 }
@@ -72,12 +72,12 @@ export function recordToolEvidence(
 export function takeToolEvidence(
   executionId: string | undefined,
   nowMs: number = Date.now(),
-): Map<number, number | undefined> {
+): Set<string> {
   sweepToolEvidence(nowMs);
-  if (!executionId) return new Map();
+  if (!executionId) return new Set();
   const entry = toolEvidence.get(executionId);
   toolEvidence.delete(executionId);
-  return entry ? entry.ids : new Map();
+  return entry ? new Set(entry.ids) : new Set();
 }
 
 function sweepToolEvidence(nowMs: number): void {
@@ -92,9 +92,9 @@ function sweepToolEvidence(nowMs: number): void {
 }
 
 /** Snapshot for an incremental segment: later tool reads cannot change it. */
-export function peekToolEvidence(executionId: string | undefined): ReadonlyMap<number, number | undefined> {
+export function peekToolEvidence(executionId: string | undefined): ReadonlySet<string> {
   sweepToolEvidence(Date.now());
-  return new Map(executionId ? toolEvidence.get(executionId)?.ids : undefined);
+  return new Set(executionId ? toolEvidence.get(executionId)?.ids : undefined);
 }
 
 /** Only a complete, successful model-facing recall envelope supplies evidence. */
@@ -104,8 +104,8 @@ export function recordDeliveredRecall(executionId: string, delivered: string): v
   if (!parsed || typeof parsed !== "object" || "error" in parsed || !("hits" in parsed) || !Array.isArray(parsed.hits)) return;
   const hits: ToolEvidenceHit[] = [];
   for (const hit of parsed.hits) {
-    if (!hit || typeof hit !== "object" || !("memoryId" in hit) || typeof hit.memoryId !== "number") continue;
-    hits.push({ memoryId: hit.memoryId });
+    if (!hit || typeof hit !== "object" || !("ref" in hit) || typeof hit.ref !== "string") continue;
+    hits.push({ ref: hit.ref });
   }
   recordToolEvidence(executionId, hits);
 }
@@ -119,14 +119,14 @@ export function recordDeliveredRecall(executionId: string, delivered: string): v
  * degrades to the eligible subset (possibly empty).
  */
 export function validateSupportIds(
-  declared: readonly number[],
-  available: ReadonlySet<number>,
-): number[] {
-  const out: number[] = [];
-  const seen = new Set<number>();
+  declared: readonly string[],
+  available: ReadonlySet<string>,
+): string[] {
+  const out: string[] = [];
+  const seen = new Set<string>();
   for (const id of declared) {
     if (out.length >= MAX_SUPPORT_IDS) break;
-    if (!Number.isInteger(id) || id <= 0 || seen.has(id) || !available.has(id)) continue;
+    if (typeof id !== "string" || id.length === 0 || seen.has(id) || !available.has(id)) continue;
     seen.add(id);
     out.push(id);
   }
@@ -140,12 +140,12 @@ export function validateSupportIds(
  * name injected memories; anything else degrades to the eligible subset.
  */
 export function resolveAnswerSupport(args: {
-  readonly declared: readonly number[];
-  readonly heuristic: readonly number[];
-  readonly autoInjected: readonly number[];
-  readonly toolDelivered: ReadonlyMap<number, number | undefined> | ReadonlySet<number>;
-}): number[] {
-  const available = new Set<number>(args.autoInjected);
+  readonly declared: readonly string[];
+  readonly heuristic: readonly string[];
+  readonly autoInjected: readonly string[];
+  readonly toolDelivered: ReadonlySet<string>;
+}): string[] {
+  const available = new Set<string>(args.autoInjected);
   for (const id of args.toolDelivered.keys()) available.add(id);
   return validateSupportIds([...args.declared, ...args.heuristic], available);
 }
@@ -158,7 +158,7 @@ export interface AnswerRecord {
   readonly principal: string;
   readonly sessionId: string;
   readonly executionId: string;
-  readonly support: readonly number[];
+  readonly support: readonly string[];
   readonly createdAt: number;
   readonly messageIds: readonly string[];
 }
@@ -169,7 +169,7 @@ export interface PublishAnswerInput {
   readonly principal: string;
   readonly sessionId: string;
   readonly executionId: string;
-  readonly support: readonly number[];
+  readonly support: readonly string[];
   readonly messageIds: readonly string[];
 }
 
@@ -282,13 +282,14 @@ function sweepAnswerRecords(nowMs: number): void {
 // ── Feedback outcomes ─────────────────────────────────────────────────────
 
 export interface FeedbackOutcome {
-  readonly applied: number[];
-  readonly rejected: number[];
-  readonly unknown: number[];
+  readonly applied: string[];
+  readonly rejected: string[];
+  readonly unknown: string[];
 }
 
 export interface FeedbackTarget {
-  readonly memoryId: number;
+  /** Owner ref key. Only `db:` refs resolve to a numeric record feedback target. */
+  readonly ref: string;
   readonly operationKey: string;
 }
 
@@ -308,11 +309,11 @@ export async function recordReactionFeedback(
   const receipts = answerFeedbackReceipts.get(record) ?? new Map<string, Promise<FeedbackOutcome>>();
   answerFeedbackReceipts.set(record, receipts);
   const combined: FeedbackOutcome = { applied: [], rejected: [], unknown: [] };
-  for (const memoryId of record.support) {
-    const operationKey = feedbackKey(record.platform, record.channelId, record.principal, record.executionId, memoryId, feedbackType, "explicit");
+  for (const ref of record.support) {
+    const operationKey = feedbackKey(record.platform, record.channelId, record.principal, record.executionId, ref, feedbackType, "explicit");
     let receipt = receipts.get(operationKey);
     if (!receipt) {
-      receipt = recordFeedbackBatch(runtime, record.principal, feedbackType, [{ memoryId, operationKey }]);
+      receipt = recordFeedbackBatch(runtime, record.principal, feedbackType, [{ ref, operationKey }]);
       receipts.set(operationKey, receipt);
     }
     const outcome = await receipt;
@@ -329,26 +330,39 @@ const REJECT_PATTERNS = [/unauthorized/i, /forbidden/i, /owner/i, /permission/i,
  * Attempt one feedback write per target under its own idempotency identity.
  * Never retries: rejected stays rejected, unknown is reported (never
  * reissued under a new key). Bounded diagnostics only — no memory content.
+ * Only `db:` refs resolve to the numeric record feedback target; artifact and
+ * graph evidence cannot be addressed and report unknown without a call.
  */
+export function feedbackRecordId(ref: string): number | undefined {
+  const match = /^db:(?:durable|episode|raw):(\d+):[^:]+:[^:]+$/.exec(ref);
+  if (!match?.[1]) return undefined;
+  const id = Number(match[1]);
+  return Number.isSafeInteger(id) && id > 0 ? id : undefined;
+}
 export async function recordFeedbackBatch(
   runtime: FeedbackRuntime,
   userId: string,
   feedbackType: "cite" | "reject",
   targets: readonly FeedbackTarget[],
 ): Promise<FeedbackOutcome> {
-  const applied: number[] = [];
-  const rejected: number[] = [];
-  const unknown: number[] = [];
+  const applied: string[] = [];
+  const rejected: string[] = [];
+  const unknown: string[] = [];
   for (const target of targets) {
+    const memoryId = feedbackRecordId(target.ref);
+    if (memoryId === undefined) {
+      unknown.push(target.ref);
+      continue;
+    }
     try {
-      const result = await runtime.recordFeedback({ userId, memoryId: target.memoryId, feedbackType }, target.operationKey);
-      if (result && typeof result === "object" && "ok" in result && result.ok === false) unknown.push(target.memoryId);
-      else applied.push(target.memoryId);
+      const result = await runtime.recordFeedback({ userId, memoryId, feedbackType }, target.operationKey);
+      if (result && typeof result === "object" && "ok" in result && result.ok === false) unknown.push(target.ref);
+      else applied.push(target.ref);
     } catch (err) {
       const code = err && typeof err === "object" && "code" in err ? String(err.code) : undefined;
       const text = err instanceof Error ? `${err.name}: ${err.message}` : String(err);
-      if (code === "unauthorized" || code === "memory_unauthorized" || (!code && REJECT_PATTERNS.some((re) => re.test(text)))) rejected.push(target.memoryId);
-      else unknown.push(target.memoryId);
+      if (code === "unauthorized" || code === "memory_unauthorized" || (!code && REJECT_PATTERNS.some((re) => re.test(text)))) rejected.push(target.ref);
+      else unknown.push(target.ref);
     }
   }
   if (rejected.length > 0 || unknown.length > 0) {

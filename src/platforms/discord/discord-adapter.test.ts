@@ -267,7 +267,7 @@ describe("DiscordAdapter", () => {
       const { publishAnswerRecord } = await import("../../components/answer-evidence.js");
       const { feedbackKey } = await import("../../components/memory-operation-key.js");
       publishAnswerRecord(
-        { platform: "discord", channelId: "ch9", principal: "master", sessionId: "s", executionId: "e", support: [7, 9], messageIds: ["901"] },
+        { platform: "discord", channelId: "ch9", principal: "master", sessionId: "s", executionId: "e", support: ["db:durable:7:master:1", "db:durable:9:master:1"], messageIds: ["901"] },
         Date.now(),
       );
 
@@ -277,12 +277,12 @@ describe("DiscordAdapter", () => {
       expect(recordFeedback).toHaveBeenNthCalledWith(
         1,
         { userId: "master", memoryId: 7, feedbackType: "cite" },
-        feedbackKey("discord", "ch9", "master", "e", 7, "cite", "explicit"),
+        feedbackKey("discord", "ch9", "master", "e", "db:durable:7:master:1", "cite", "explicit"),
       );
       expect(recordFeedback).toHaveBeenNthCalledWith(
         2,
         { userId: "master", memoryId: 9, feedbackType: "cite" },
-        feedbackKey("discord", "ch9", "master", "e", 9, "cite", "explicit"),
+        feedbackKey("discord", "ch9", "master", "e", "db:durable:9:master:1", "cite", "explicit"),
       );
     });
 
@@ -294,7 +294,7 @@ describe("DiscordAdapter", () => {
       await adapter.start();
       const { publishAnswerRecord } = await import("../../components/answer-evidence.js");
       publishAnswerRecord(
-        { platform: "discord", channelId: "ch9", principal: "someone-else", sessionId: "s", executionId: "e", support: [7], messageIds: ["902"] },
+        { platform: "discord", channelId: "ch9", principal: "someone-else", sessionId: "s", executionId: "e", support: ["db:durable:7:master:1"], messageIds: ["902"] },
         Date.now(),
       );
 

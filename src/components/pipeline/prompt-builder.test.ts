@@ -51,10 +51,11 @@ describe("buildPrompt", () => {
 
 // ── #1813 compact injection ───────────────────────────────────────────────────
 
-describe("#1813 — compact evidence injection", () => {
+describe("#1928 — owner packet injection", () => {
   const LONG_A = `Production deploys go through the pipeline. ${"a".repeat(1600)}`;
   const LONG_B = `Rollbacks restore the previous release. ${"b".repeat(1600)}`;
   const CONSTRAINT = "Ask the operator before deploying changes to the production database.";
+  const OWNER_TEXT = "[1] (db:durable:3:u1:1) Ask the operator before deploying changes to the production database.";
 
   function recallRuntime(recall: ReturnType<typeof vi.fn>) {
     return {
@@ -68,9 +69,9 @@ describe("#1813 — compact evidence injection", () => {
 
   function hits() {
     return [
-      { content: LONG_A, score: 1.3, date: "", memoryId: 1 },
-      { content: LONG_B, score: 1.2, date: "", memoryId: 2 },
-      { content: CONSTRAINT, score: 1.1, date: "", memoryId: 3 },
+      { ref: "db:durable:1:u1:1", kind: "db", content: LONG_A, date: "" },
+      { ref: "db:durable:2:u1:1", kind: "db", content: LONG_B, date: "" },
+      { ref: "db:durable:3:u1:1", kind: "db", content: CONSTRAINT, date: "" },
     ];
   }
 
@@ -80,87 +81,54 @@ describe("#1813 — compact evidence injection", () => {
     return match[0];
   }
 
-  it("injects the bounded selection and reduces payload while keeping the constraint", async () => {
-    const fullRecall = vi.fn().mockResolvedValue({ hits: hits(), context: "" });
-    const full = await buildPrompt(
-      { userId: "master", channelId: "1", platform: "telegram", isGroup: false } as never,
-      "how do I deploy",
-      baseDeps(recallRuntime(fullRecall)),
-      masterRegistry(),
-    );
-
-    const compactRecall = vi.fn().mockResolvedValue({
-      hits: hits(),
-      context: "",
-      selection: {
-        version: 1,
-        refs: [{ id: 3, revision: 1 }],
-        budgetBytes: 2000,
-        truncated: true,
-      },
-    });
-    const compact = await buildPrompt(
-      { userId: "master", channelId: "1", platform: "telegram", isGroup: false } as never,
-      "how do I deploy",
-      baseDeps(recallRuntime(compactRecall)),
-      masterRegistry(),
-    );
-
-    const fullBlock = memoryBlock(full.prompt);
-    const compactBlock = memoryBlock(compact.prompt);
-    expect(compactBlock).toContain(CONSTRAINT);
-    expect(compactBlock).not.toContain("aaaa");
-    expect(compactBlock.length).toBeLessThan(fullBlock.length);
-    // Only injected rows are reported as recalled hits.
-    expect(compact.recalledHits).toEqual([{ id: 3, contentEn: CONSTRAINT }]);
-    expect(full.recalledHits?.length).toBe(3);
-  });
-
-  it("falls back to every filtered hit when selection is absent", async () => {
-    const recall = vi.fn().mockResolvedValue({ hits: hits(), context: "" });
+  it("injects the owner text verbatim with no floors or local rendering", async () => {
+    const recall = vi.fn().mockResolvedValue({ hits: hits(), context: OWNER_TEXT, status: "evidence" });
     const result = await buildPrompt(
       { userId: "master", channelId: "1", platform: "telegram", isGroup: false } as never,
       "how do I deploy",
       baseDeps(recallRuntime(recall)),
       masterRegistry(),
     );
+
+    expect(recall).toHaveBeenCalledWith(expect.objectContaining({
+      profile: "recall_fast",
+      rawTurn: "how do I deploy",
+      userId: "master",
+    }));
     const block = memoryBlock(result.prompt);
-    expect(block).toContain(CONSTRAINT);
-    expect(block).toContain("aaaa");
-    expect(result.recalledHits?.length).toBe(3);
+    expect(block).toContain(OWNER_TEXT);
+    expect(block).not.toContain("aaaa");
+    expect(block).toContain("[SUPPORT: ref, ...]");
+    expect(result.recalledHits?.map((h) => h.ref)).toEqual([
+      "db:durable:1:u1:1",
+      "db:durable:2:u1:1",
+      "db:durable:3:u1:1",
+    ]);
   });
 
-  it("falls back when selection refs resolve to none of the delivered hits", async () => {
-    const recall = vi.fn().mockResolvedValue({
-      hits: hits(),
-      context: "",
-      selection: { version: 1, refs: [{ id: 99, revision: 1 }], budgetBytes: 2000, truncated: false },
-    });
+  it("injects nothing on empty evidence, with the skip visible in the log", async () => {
+    const recall = vi.fn().mockResolvedValue({ hits: [], context: "", status: "skipped", omissionReasons: [] });
     const result = await buildPrompt(
       { userId: "master", channelId: "1", platform: "telegram", isGroup: false } as never,
-      "how do I deploy",
+      "köszi",
       baseDeps(recallRuntime(recall)),
       masterRegistry(),
     );
-    expect(memoryBlock(result.prompt)).toContain("aaaa");
-    expect(result.recalledHits?.length).toBe(3);
+    expect(result.prompt).not.toContain("MEMORY CONTEXT");
+    expect(result.recalledHits).toBeUndefined();
   });
 });
 
-// ── #1908 ambient recall: no bridge-side raw-only precheck ─────────────────
-// A raw-only host verdict must never terminate a turn that informative
-// context would rescue, so the bridge does not consult the cheap check on
-// the ambient path at all. The daemon's ambient planner owns the combined
-// skip (raw, hints, eligible context); worthRetrieving stays for CLI and
-// explicit precheck uses.
+// ── #1928 fast recall: verbatim turn, owner skip verdict ───────────────────
+// The bridge never pre-judges a turn: the owner fast core judges the skip and
+// the prompt carries the packet verbatim or nothing at all.
 
-describe("#1908 — ambient recall skips only on the engine verdict", () => {
-  function ambientRuntime(recall: ReturnType<typeof vi.fn>) {
+describe("#1928 — fast recall carries the verbatim turn", () => {
+  function fastRuntime(recall: ReturnType<typeof vi.fn>) {
     return {
       state: "ready",
       capabilities: new Set(["durableContext"]),
       recordMessage: vi.fn().mockResolvedValue({ id: 1 }),
-      worthRetrieving: vi.fn().mockResolvedValue({ verdict: "skip", corpusSize: 14, ceiling: 3 }),
       recall,
       assembleSessionContext: vi.fn().mockResolvedValue({ coreKnowledge: "", recall: "", wakeUp: "" }),
     } as never;
@@ -188,41 +156,39 @@ describe("#1908 — ambient recall skips only on the engine verdict", () => {
     );
   }
 
-  it("never consults the cheap check; an engine skip injects nothing", async () => {
-    const recall = vi.fn().mockResolvedValue({ hits: [], context: "", searchSkipped: true, searchSkippedReason: "no-informative-terms" });
-    const runtime = ambientRuntime(recall);
+  it("an owner skip injects nothing", async () => {
+    const recall = vi.fn().mockResolvedValue({ hits: [], context: "", status: "skipped" });
+    const runtime = fastRuntime(recall);
     const result = await turn(runtime, "köszi");
-    expect((runtime as { worthRetrieving: ReturnType<typeof vi.fn> }).worthRetrieving).not.toHaveBeenCalled();
     expect(recall).toHaveBeenCalledTimes(1);
-    expect(recall).toHaveBeenCalledWith(expect.objectContaining({ intent: "ambient", original: "köszi" }));
+    expect(recall).toHaveBeenCalledWith(expect.objectContaining({ profile: "recall_fast", rawTurn: "köszi" }));
     expect(result.prompt).not.toContain("MEMORY CONTEXT");
     expect(result.recalledHits).toBeUndefined();
   });
 
-  it("a search verdict runs one ambient recall and never touches a model", async () => {
+  it("evidence injects the owner text and never touches a model", async () => {
     const dispatchBackground = vi.fn();
-    const recall = vi.fn().mockResolvedValue({ hits: [], context: "" });
-    const runtime = ambientRuntime(recall);
-    await turn(runtime, "köszi migrációs terv", dispatchBackground);
+    const recall = vi.fn().mockResolvedValue({
+      hits: [{ ref: "db:durable:1:u1:1", kind: "db", content: "köszi note", date: "" }],
+      context: "[1] (db:durable:1:u1:1) köszi note",
+      status: "evidence",
+    });
+    const runtime = fastRuntime(recall);
+    const result = await turn(runtime, "köszi migrációs terv", dispatchBackground);
     expect(recall).toHaveBeenCalledTimes(1);
-    expect(recall).toHaveBeenCalledWith(expect.objectContaining({ intent: "ambient", original: "köszi migrációs terv" }));
     expect(dispatchBackground).not.toHaveBeenCalled();
+    expect(result.prompt).toContain("köszi note");
   });
 
-  it("a runtime without the check (older shape) recalls ordinarily", async () => {
-    const recall = vi.fn().mockResolvedValue({ hits: [], context: "" });
-    const legacy = {
-      state: "ready",
-      capabilities: new Set(["durableContext"]),
-      recordMessage: vi.fn().mockResolvedValue({ id: 1 }),
-      recall,
-      assembleSessionContext: vi.fn().mockResolvedValue({ coreKnowledge: "", recall: "", wakeUp: "" }),
-    } as never;
-    const result = await turn(legacy, "köszi");
+  it("a runtime without evidence recalls ordinarily", async () => {
+    const recall = vi.fn().mockResolvedValue({ hits: [], context: "", status: "empty" });
+    const runtime = fastRuntime(recall);
+    const result = await turn(runtime, "köszi");
     expect(recall).toHaveBeenCalledTimes(1);
     expect(result.prompt).not.toContain("MEMORY CONTEXT");
   });
 });
+
 
 describe("buildPrompt durable-context classification (#1529)", () => {
   it("maps a numeric record ID to durable intent with that exact cursor", async () => {

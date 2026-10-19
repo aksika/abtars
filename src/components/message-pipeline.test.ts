@@ -736,7 +736,7 @@ describe("citation detection (#1270)", () => {
     return {
       state: "ready",
       capabilities: new Set<string>(),
-      recall: vi.fn().mockResolvedValue({ hits: [{ memoryId: 1, content: "test memory", score: 0.95 }] }),
+      recall: vi.fn().mockResolvedValue({ hits: [{ ref: "db:durable:1:master:1", kind: "db", content: "test memory", date: "2026-09-01" }], context: "[1] (db:durable:1:master:1) test memory", status: "evidence" }),
       recordMessage: vi.fn().mockResolvedValue({}),
       recordFeedback: vi.fn().mockResolvedValue({}),
       assembleSessionContext: vi.fn().mockResolvedValue({}),
@@ -1337,7 +1337,7 @@ describe("#1913 answer records", () => {
       memoryRuntime: {
         state: "ready",
         capabilities: new Set<string>(),
-        recall: vi.fn().mockResolvedValue({ hits: [{ memoryId: 1, content: "test memory", score: 0.95 }] }),
+        recall: vi.fn().mockResolvedValue({ hits: [{ ref: "db:durable:1:master:1", kind: "db", content: "test memory", date: "2026-09-01" }], context: "[1] (db:durable:1:master:1) test memory", status: "evidence" }),
         recordMessage: vi.fn().mockResolvedValue({}),
         recordFeedback: vi.fn().mockResolvedValue({}),
         assembleSessionContext: vi.fn().mockResolvedValue({}),
@@ -1353,10 +1353,10 @@ describe("#1913 answer records", () => {
   }
 
   it("publishes validated support for a declared answer", async () => {
-    const { adapter, deps } = rig("Kedden! [SUPPORT: 1]", 101, [1]);
+    const { adapter, deps } = rig("Kedden! [SUPPORT: db:durable:1:master:1]", 101, [1]);
     await handleInboundMessage(makeMsg(), adapter, deps);
     const record = lookupAnswerRecord("telegram", "100", "101");
-    expect(record?.support).toEqual([1]);
+    expect(record?.support).toEqual(["db:durable:1:master:1"]);
     expect(record?.principal).toBe("master");
     // The marker never reaches chat.
     const sent = (adapter.sendMessage as ReturnType<typeof vi.fn>).mock.calls.map((c: unknown[]) => String(c[1] ?? ""));
@@ -1370,51 +1370,51 @@ describe("#1913 answer records", () => {
   });
 
   it("degrades forged declarations to the eligible subset", async () => {
-    const { adapter, deps } = rig("Answer. [SUPPORT: 1, 999]", 103, []);
+    const { adapter, deps } = rig("Answer. [SUPPORT: db:durable:1:master:1, db:durable:999:master:1]", 103, []);
     await handleInboundMessage(makeMsg(), adapter, deps);
-    expect(lookupAnswerRecord("telegram", "100", "103")?.support).toEqual([1]);
+    expect(lookupAnswerRecord("telegram", "100", "103")?.support).toEqual(["db:durable:1:master:1"]);
   });
   it("publishes each successful chunk before later delivery fails", async () => {
-    const { adapter, deps } = rig("Two chunks. [SUPPORT: 1]", 104, []);
+    const { adapter, deps } = rig("Two chunks. [SUPPORT: db:durable:1:master:1]", 104, []);
     adapter.chunkResponse = () => ["First chunk", "Second chunk"];
     adapter.sendMessage = vi.fn().mockImplementation(async (_channel: string, content: string) => {
       if (content === "First chunk") return 104;
       if (content === "Second chunk") {
-        expect(lookupAnswerRecord("telegram", "100", "104")?.support).toEqual([1]);
+        expect(lookupAnswerRecord("telegram", "100", "104")?.support).toEqual(["db:durable:1:master:1"]);
         throw new Error("permanent send failure");
       }
       return 105;
     });
     await handleInboundMessage(makeMsg(), adapter, deps);
-    expect(lookupAnswerRecord("telegram", "100", "104")?.support).toEqual([1]);
+    expect(lookupAnswerRecord("telegram", "100", "104")?.support).toEqual(["db:durable:1:master:1"]);
     expect(lookupAnswerRecord("telegram", "100", "105")).toBeUndefined();
   });
 
   it("uses settled execution identity for tool-only support after session cleanup", async () => {
-    const { adapter, deps } = rig("Kedden! [SUPPORT: 313]", 106, []);
+    const { adapter, deps } = rig("Kedden! [SUPPORT: db:durable:313:master:1]", 106, []);
     deps.memoryRuntime!.recall = vi.fn().mockResolvedValue({ hits: [] });
     deps.sessionManager.spin = vi.fn().mockImplementation(async () => {
       const { recordToolEvidence } = await import("./answer-evidence.js");
-      recordToolEvidence("settled-execution", [{ memoryId: 313 }]);
-      return { sessionId: "test_A_01", executionId: "settled-execution", result: "Kedden! [SUPPORT: 313]", outcome: "text" };
+      recordToolEvidence("settled-execution", [{ ref: "db:durable:313:master:1" }]);
+      return { sessionId: "test_A_01", executionId: "settled-execution", result: "Kedden! [SUPPORT: db:durable:313:master:1]", outcome: "text" };
     });
     await handleInboundMessage(makeMsg(), adapter, deps);
-    expect(lookupAnswerRecord("telegram", "100", "106")).toMatchObject({ executionId: "settled-execution", support: [313] });
+    expect(lookupAnswerRecord("telegram", "100", "106")).toMatchObject({ executionId: "settled-execution", support: ["db:durable:313:master:1"] });
   });
 
   it("does not give a pre-tool segment support from a later read", async () => {
-    const { adapter, deps } = rig("Later answer. [SUPPORT: 313]", 108, []);
+    const { adapter, deps } = rig("Later answer. [SUPPORT: db:durable:313:master:1]", 108, []);
     deps.memoryRuntime!.recall = vi.fn().mockResolvedValue({ hits: [] });
     adapter.sendMessage = vi.fn().mockImplementation(async (_channel: string, content: string) => content === "Earlier answer." ? 107 : 108);
     deps.sessionManager.spin = vi.fn().mockImplementation(async () => {
-      await (currentTransport as IKiroTransport).onSegmentBreak?.("Earlier answer. [SUPPORT: 313]");
+      await (currentTransport as IKiroTransport).onSegmentBreak?.("Earlier answer. [SUPPORT: db:durable:313:master:1]");
       const { recordToolEvidence } = await import("./answer-evidence.js");
-      recordToolEvidence("later-read-execution", [{ memoryId: 313 }]);
-      return { sessionId: "test_A_01", executionId: "later-read-execution", result: "Later answer. [SUPPORT: 313]", outcome: "text" };
+      recordToolEvidence("later-read-execution", [{ ref: "db:durable:313:master:1" }]);
+      return { sessionId: "test_A_01", executionId: "later-read-execution", result: "Later answer. [SUPPORT: db:durable:313:master:1]", outcome: "text" };
     });
     await handleInboundMessage(makeMsg(), adapter, deps);
     expect(lookupAnswerRecord("telegram", "100", "107")).toBeUndefined();
-    expect(lookupAnswerRecord("telegram", "100", "108")?.support).toEqual([313]);
+    expect(lookupAnswerRecord("telegram", "100", "108")?.support).toEqual(["db:durable:313:master:1"]);
   });
 
 });

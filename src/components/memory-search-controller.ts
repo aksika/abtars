@@ -49,27 +49,24 @@ export class MemorySearchController {
       const parsed = Number(value);
       return Number.isFinite(parsed) ? parsed : undefined;
     };
-    const stagesRaw = params.get("stages")?.trim();
-    const stages = stagesRaw ? stagesRaw.split(",").map(s => s.trim()).filter(Boolean) : undefined;
 
     try {
       const t0 = Date.now();
-      // #1895 — deliberate dashboard search: the already-parsed keywords
-      // cross separately (never joined back into a single phrase for
-      // retrieval) with explicit intent, so this path always searches.
+      // #1928 M4 — deliberate dashboard search: the already-parsed keywords
+      // cross as the explicit normal anchor (never joined back into a single
+      // phrase for retrieval), so this path always searches.
       const result = await this.deps.memoryRuntime.recall({
         query: translated.join(" "),
+        profile: "recall_normal",
+        text: translated.join(" "),
         keywords: translated,
-        intent: "explicit",
-        original: params.get("original")?.trim() || keywordsRaw,
         userId,
         limit: 10,
         timeStart: parseNumber(params.get("timeStart")),
         timeEnd: parseNumber(params.get("timeEnd")),
-        stages,
       });
       // #1837 — dashboard search summary.
-      logDebug(TAG, `search: user=${userId} keywords=${translated.length} stages=[${stages?.join(",") ?? "all"}] → ${result.hits.length} hits (${Date.now() - t0}ms) query="${redactSecrets(translated.join(" ")).slice(0, 60)}"`);
+      logDebug(TAG, `search: user=${userId} keywords=${translated.length} → ${result.hits.length} hits (${Date.now() - t0}ms) query="${redactSecrets(translated.join(" ")).slice(0, 60)}"`);
 
       const response: MemorySearchResponse = {
         results: result.hits.map(hitToWebResult),
@@ -88,14 +85,8 @@ function hitToWebResult(hit: RuntimeRecallHit): WebSearchResult {
   return {
     content: hit.content,
     date: hit.date,
-    source: hit.source ?? "abmind.runtime",
-    score: hit.score,
-    contentOriginal: hit.contentOriginal,
-    memoryType: hit.memoryType,
-    trust: hit.trust,
-    integrity: hit.integrity,
-    credibility: hit.credibility,
+    source: hit.ref,
+    score: hit.score ?? 0,
     classification: hit.classification,
-    emotionScore: hit.emotionScore,
   };
 }

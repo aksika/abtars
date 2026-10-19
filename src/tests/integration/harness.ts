@@ -15,10 +15,6 @@ import { MemoryManager, type MemoryConfig, MEMORY_CONFIG_DEFAULTS, detectCitatio
  */
 const TEST_PRIMARY_OWNER = "u1";
 
-// These tests exercise SQLite/FTS recall, quality counters, and citations. The
-// provider-backed Se stage is covered in abmind; leaving it in this harness
-// makes the suite depend on whichever Ollama model happens to be resident.
-const INTEGRATION_RECALL_STAGES = ["Sf", "Ss", "S6"];
 
 function pinTestOwner(): string | undefined {
   const saved = process.env["ABMIND_USER_ID"];
@@ -33,7 +29,11 @@ function restoreTestOwner(saved: string | undefined): void {
 
 export interface IntegrationHarness {
   memory: MemoryManager;
-  recallSearch: MemoryManager["recallSearch"];
+  /**
+   * #1928 M4 — owned recall over a freshly built serving generation, so
+   * integration assertions run the same contract as production routes.
+   */
+  recallOwned: (profile: "recall_fast" | "recall_normal" | "recall_full", text: string, userId?: string) => Promise<import("abmind").OwnedRecallPacket>;
   tmpDir: string;
   cleanup: () => void;
 }
@@ -55,7 +55,19 @@ export async function createHarness(): Promise<IntegrationHarness> {
   await memory.initialize({ skipEmbeddingCheck: true });
   return {
     memory,
-    recallSearch: (params) => memory.recallSearch({ ...params, stages: [...INTEGRATION_RECALL_STAGES] }),
+    recallOwned: async (profile, text, userId = TEST_PRIMARY_OWNER) => {
+      const { buildRecallProjection } = await import("abmind");
+      const db = memoryDb(memory);
+      const built = buildRecallProjection(db, userId, { verifiedBackup: true });
+      if (!built.ok) throw new Error(`projection build failed: ${JSON.stringify(built)}`);
+      return memory.recall({
+        contract: "owned-v1",
+        profile,
+        identity: { principal: userId },
+        ...(profile === "recall_fast" ? { rawTurn: text } : { query: { text } }),
+        capacity: { maxItems: 10 },
+      });
+    },
     tmpDir,
     cleanup: () => { memory.close(); rmSync(tmpDir, { recursive: true, force: true }); restoreTestOwner(savedOwner); },
   };

@@ -11,8 +11,7 @@ import { interceptLargeMessage } from "../message-interceptor.js";
 import { abmind } from "../../utils/abmind-lazy.js";
 import { getEnv } from "../env-schema.js";
 import type { AbtarsMemoryRuntime, MemoryWritePhase } from "../memory-runtime.js";
-import { attemptMemoryMutation, selectInjectedHits, asSessionSoulBundle, shouldInjectRecallHit } from "../memory-runtime.js";
-import { prepareRecallQuery } from "./recall-query-preparation.js";
+import { attemptMemoryMutation, asSessionSoulBundle } from "../memory-runtime.js";
 import { inboundExecutionKey, inboundMessageKey } from "../memory-operation-key.js";
 import type { ConversationBuffer } from "../conversation-buffer.js";
 import { isTrustedScheduledAnnouncement, type InboundMessage } from "../../types/platform.js";
@@ -40,7 +39,7 @@ export interface BuildPromptResult {
   prompt: string;
   isSessionStart: boolean;
   imageContent?: { mime: string; base64: string; path: string };
-  recalledHits?: Array<{ id: number; contentEn: string }>;
+  recalledHits?: Array<{ ref: string; contentEn: string }>;
   /** #1529: explicit durable-context intent — never an ambiguous optional cursor. */
   durableContextIntent: DurableContextIntent;
   /** #1335: structured current turn components for Pi cache-stable assembly. */
@@ -256,70 +255,32 @@ export async function buildPrompt(
   }
 
   // --- Active recall (skipped for K — skill-isolated memory boundary) ---
-  let recalledHits: Array<{ id: number; contentEn: string }> | undefined;
+  let recalledHits: Array<{ ref: string; contentEn: string }> | undefined;
   if (memoryMode !== "skill-isolated" && getEnv().activeMemory && memoryRuntime?.state === "ready") {
     const userEntry = registry.byUserId.get(userId);
     if (userEntry?.role !== "guest" && (contextPercent < 0 || contextPercent < getEnv().ctxCompactPct)) {
-      const priming = pSession?.primingTerms ?? [];
       try {
-        // #1908 — no bridge-side raw-only precheck: the daemon's ambient
-        // planner judges the combined skip (raw, hints, eligible context),
-        // so a raw-only verdict here must never terminate a turn that
-        // informative context would rescue. The engine skip stays observable
-        // per eligible turn below.
+        // #1928 M4 — the verbatim turn rides as the fast raw turn with host
+        // capacity; the owner packet is injected verbatim. No floors,
+        // numeric-ref selection, or local rendering: citations name the
+        // owner ref keys carried on each hit.
         const t0 = performance.now();
-          // #1867 — discrete terms so #1861's coverage ordering participates on
-          // the auto-recall path; the joined query stays the fallback.
-          // Extraction and priming composition are pure and synchronous; the
-          // raw turn still rides along as `original` for source-language
-          // matching. A term-preparation failure never emits no query.
-          const prepared = prepareRecallQuery(text, priming);
-          const terms = prepared.terms;
-          // #1877 — no bridge-side skip decision: whether a search is worth
-          // running is decided by abmind from its own term statistics, in every
-          // language, instead of hand-written per-language cue lists.
-          // #1895 — ambient auto-recall: the raw turn always rides along as
-          // original (even when no terms were prepared) with ambient intent.
-          const recall = await memoryRuntime.recall({
-            query: prepared.query, original: prepared.original, userId, limit: ACTIVE_MEMORY_LIMIT,
-            intent: "ambient",
-            ...(terms !== undefined && terms.length > 0 ? { terms, selectTerms: true } : {}),
-          });
-          const nowMs = Date.now();
-          // #1877 — single exported predicate owns the floor/age rule.
-          const hits = recall.hits.filter((h) => shouldInjectRecallHit(h, nowMs));
-          if (hits.length > 0) {
-            // Inject abmind's deterministic bounded selection when
-            // present and resolvable; otherwise the full filtered set (ordinary
-            // rendering). Selection bounds, never substitutes; the rank order
-            // comes from abmind's final ordering.
-            const inject = selectInjectedHits(hits, recall.selection);
-            // eslint-disable-next-line @typescript-eslint/no-explicit-any
-            const lines = inject.map((h: any) => {
-              const rendered = abmind()?.renderMemory({
-                content_en: h.content,
-              }) ?? h.content;
-              // #1913: bind each injected line to its stable reference so the
-              // agent can declare which memories its answer relies on. The
-              // suffix is model-visible context only; citation matching reads
-              // the original hit content and is unaffected.
-              return typeof h.memoryId === "number" ? `${rendered} [#${h.memoryId}]` : rendered;
-            });
-            const block = `[MEMORY CONTEXT — auto-recalled, do not repeat verbatim]\n${lines.join("\n")}\n(Reference IDs are shown as [#id]; if your answer relies on them, end your reply with [SUPPORT: id, ...] listing only those IDs.)\n[/MEMORY CONTEXT]`;
-            volatileContext.push({ kind: "recall", content: block });
-            prompt = `${block}\n\n${prompt}`;
-            // eslint-disable-next-line @typescript-eslint/no-explicit-any
-            recalledHits = inject.filter((h: any) => h.memoryId != null).map((h: any) => ({ id: h.memoryId as number, contentEn: h.content as string }));
-            // #1867 — diagnostics are advisory: the floor/age rules above still
-            // decide injection. Gating on weakEvidence waits for harness proof
-            // of no suppression (terms now make its lexical arm reachable).
-            logDebug(TAG, `Active recall: ${inject.length}/${hits.length} hits injected (selection ${recall.selection ? "on" : "off"}), weakEvidence=${recall.weakEvidence ?? "n/a"}, ${block.length} chars, ${Math.round(performance.now() - t0)}ms`);
-            logTrace(TAG, `recall content: ${block}`);
-          }
-          // #1877/#1908 — one line per eligible turn, independent of injection,
-          // so skipped searches and the planner's plan/semantic choice are
-          // observable instead of silent.
-          logDebug(TAG, `Active recall outcome: retrieved=${recall.hits.length} injected=${hits.length} skipped=${recall.searchSkipped === true ? `yes(${recall.searchSkippedReason ?? "unknown"})` : "no"} plans=${recall.ambient?.plans ?? "n/a"} semantic=${recall.ambient?.semanticSource ?? "n/a"}`);
+        const recall = await memoryRuntime.recall({
+          query: text,
+          profile: "recall_fast",
+          rawTurn: text,
+          userId,
+          limit: ACTIVE_MEMORY_LIMIT,
+        });
+        if (recall.hits.length > 0) {
+          const block = `[MEMORY CONTEXT — auto-recalled, do not repeat verbatim]\n${recall.context}\n(Reference keys are shown as [n] (ref); if your answer relies on them, end your reply with [SUPPORT: ref, ...] listing only those refs.)\n[/MEMORY CONTEXT]`;
+          volatileContext.push({ kind: "recall", content: block });
+          prompt = `${block}\n\n${prompt}`;
+          recalledHits = recall.hits.map((h) => ({ ref: h.ref, contentEn: h.content }));
+          logDebug(TAG, `Active recall: ${recall.hits.length} hits injected, status=${recall.status}, ${block.length} chars, ${Math.round(performance.now() - t0)}ms`);
+          logTrace(TAG, `recall content: ${block}`);
+        }
+        logDebug(TAG, `Active recall outcome: status=${recall.status} omissions=${(recall.omissionReasons ?? []).join("; ") || "none"}`);
       } catch (err) {
         logDebug(TAG, `Active recall failed: ${err instanceof Error ? err.message : String(err)}`);
       }

@@ -1,17 +1,15 @@
 /**
- * #1813 — compact-injection lifecycle E2E (pipeline lane, not the default suite).
+ * #1928 M4 — compact-injection lifecycle E2E (pipeline lane, not the default suite).
  *
  * Real composition: actual message-pipeline routing, prompt building, agent
  * delivery through the shared lifecycle on ACP and Direct API routes.
  * Fixtured at the boundary: transport/model I/O (mock transport counts
  * invocations) and the abmind recall payload (stubbed memoryRuntime returns
- * caller-built hits plus a deterministic selection, exactly the validated
- * wire shape).
+ * the owner packet shape: text plus ref-keyed hits).
  *
- * Acceptance: a compact turn injects the bounded selection instead of every
- * hit (smaller agent-bound payload, constraint retained); without a selection
- * the turn renders every hit. Removing selectInjectedHits from prompt-builder
- * fails the compact assertion, so this is not mock-mirroring.
+ * Acceptance: the owner text is injected verbatim inside the memory envelope
+ * (smaller agent-bound payload, constraint retained); citations name the
+ * owner ref keys, never numeric IDs.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { setUserRegistryOverride, type UserRegistry } from "../user-registry.js";
@@ -79,25 +77,20 @@ const CONSTRAINT = "Ask the operator before deploying changes to the production 
 
 function broadHits() {
   return [
-    { memoryId: 1, content: LONG_A, score: 1.3, date: "2026-09-01" },
-    { memoryId: 2, content: LONG_B, score: 1.2, date: "2026-09-02" },
-    { memoryId: 3, content: CONSTRAINT, score: 1.1, date: "2026-09-03" },
+    { ref: "db:durable:1:master:1", kind: "db", content: LONG_A, date: "2026-09-01" },
+    { ref: "db:durable:2:master:1", kind: "db", content: LONG_B, date: "2026-09-02" },
+    { ref: "db:durable:3:master:1", kind: "db", content: CONSTRAINT, date: "2026-09-03" },
   ];
 }
 
-const COMPACT_SELECTION = {
-  version: 1,
-  refs: [{ id: 3, revision: 1 }],
-  budgetBytes: 2000,
-  truncated: true,
-};
+const OWNER_TEXT = `[3] (db:durable:3:master:1) ${CONSTRAINT}`;
 
-function mockMemoryRuntime(selection: unknown) {
+function mockMemoryRuntime() {
   const caps = new Set<string>(["recall", "recordMessage"]);
   const recall = vi.fn(async () => ({
     hits: broadHits(),
-    context: "",
-    ...(selection !== undefined ? { selection } : {}),
+    context: OWNER_TEXT,
+    status: "evidence",
   }));
   return {
     state: "ready",
@@ -163,34 +156,21 @@ describe("compact injection lifecycle", () => {
     vi.restoreAllMocks();
   });
 
-  it.each(["acp", "direct"])("compact turn injects the bounded selection (%s route)", async (route) => {
+  it.each(["acp", "direct"])("compact turn injects the owner text verbatim (%s route)", async (route) => {
     const transport = mockTransport(route);
     const adapter = mockAdapter();
     const session = makeSession("test_A_01");
     await setupSpin(session, transport);
-    const runtime = mockMemoryRuntime(COMPACT_SELECTION);
+    const runtime = mockMemoryRuntime();
     const deps = mockDeps(transport, session, runtime);
 
     await handleInboundMessage(makeMsg("How do I deploy?"), adapter, deps);
 
     expect(transport.sendPrompt).toHaveBeenCalledTimes(1);
     const prompt = String(vi.mocked(transport.sendPrompt).mock.calls[0]?.[1] ?? "");
-    expect(prompt).toContain(CONSTRAINT);
+    expect(prompt).toContain(OWNER_TEXT);
+    expect(prompt).toContain("[SUPPORT: ref, ...]");
     expect(prompt).not.toContain("aaaa");
-  });
-
-  it("renders every hit when the turn carries no selection", async () => {
-    const transport = mockTransport();
-    const adapter = mockAdapter();
-    const session = makeSession("test_A_01");
-    await setupSpin(session, transport);
-    const deps = mockDeps(transport, session, mockMemoryRuntime(undefined));
-
-    await handleInboundMessage(makeMsg("How do I deploy?"), adapter, deps);
-
-    expect(transport.sendPrompt).toHaveBeenCalledTimes(1);
-    const prompt = String(vi.mocked(transport.sendPrompt).mock.calls[0]?.[1] ?? "");
-    expect(prompt).toContain(CONSTRAINT);
-    expect(prompt).toContain("aaaa");
+    expect(prompt).not.toContain("[#1]");
   });
 });

@@ -33,17 +33,17 @@ describe("cleanResponse", () => {
     expect(reactionEmoji).toBe("👋");
   });
 
-  it("extracts [SUPPORT: ids] and strips the marker", () => {
-    const raw = "Kedden! Ha kedd, akkor Belgium.\n[SUPPORT: 313, 1314]";
+  it("extracts [SUPPORT: refs] and strips the marker", () => {
+    const raw = "Kedden! Ha kedd, akkor Belgium.\n[SUPPORT: db:durable:313:u1:aaa, db:durable:1314:u1:bbb]";
     const { text, supportIds } = cleanResponse(raw);
     expect(text).toBe("Kedden! Ha kedd, akkor Belgium.");
-    expect(supportIds).toEqual([313, 1314]);
+    expect(supportIds).toEqual(["db:durable:313:u1:aaa", "db:durable:1314:u1:bbb"]);
   });
 
-  it("deduplicates forged support IDs; validation happens downstream", () => {
-    const { text, supportIds } = cleanResponse("Answer. [SUPPORT: 7, 7, 999]");
+  it("deduplicates forged support refs; validation happens downstream", () => {
+    const { text, supportIds } = cleanResponse("Answer. [SUPPORT: db:durable:7:u1:aaa, db:durable:7:u1:aaa, db:durable:999:u1:zzz]");
     expect(text).toBe("Answer.");
-    expect(supportIds).toEqual([7, 999]);
+    expect(supportIds).toEqual(["db:durable:7:u1:aaa", "db:durable:999:u1:zzz"]);
   });
 
   it("omits supportIds when no marker is present", () => {
@@ -90,11 +90,16 @@ describe("classifyContent (#1651)", () => {
 });
 
 
-describe("#1913 support metadata validation", () => {
-  it("strips malformed/empty metadata and rejects partial numeric tokens", () => {
-    const cleaned = cleanResponse("First. [SUPPORT: 12 34, nope, 56] Second. [SUPPORT: ]");
-    expect(cleaned.supportIds).toEqual([56]);
+describe("#1928 support metadata validation (owner ref keys)", () => {
+  it("strips malformed/empty metadata and rejects non-ref tokens", () => {
+    const cleaned = cleanResponse("First. [SUPPORT: db:durable:12:u1:aaa 34, nope, db:durable:56:u1:bbb] Second. [SUPPORT: ]");
+    expect(cleaned.supportIds).toEqual(["db:durable:56:u1:bbb"]);
     expect(cleaned.text).toBe("First.  Second.");
     expect(cleaned.text).not.toContain("SUPPORT");
+  });
+
+  it("accepts artifact and graph refs and dedupes repeats", () => {
+    const cleaned = cleanResponse("[SUPPORT: artifact:u1:summaries/d.md:abc, graph:path:db:x, artifact:u1:summaries/d.md:abc]");
+    expect(cleaned.supportIds).toEqual(["artifact:u1:summaries/d.md:abc", "graph:path:db:x"]);
   });
 });

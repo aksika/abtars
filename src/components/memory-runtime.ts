@@ -28,9 +28,6 @@ export type MemoryRuntimeCapability =
   | "compaction"
   | "dreamQuestions"
   | "dreamQuestionsNextPending"
-  // #1894 — cheap worth-retrieving verdict (private.checkWorthRetrieving).
-  // Older daemons lack the method and callers fall back to ordinary recall.
-  | "worthRetrieving"
   // #1660: composite local sealed-secret capability (find + resolve on a
   // local route). Absent for signed peers and remote routes.
   | "sealedSecrets";
@@ -130,168 +127,59 @@ export interface RecordMessageResult {
 export interface RuntimeRecallInput {
   query: string;
   userId: string;
-  limit?: number;
-  maxClassification?: number;
-  original?: string;
   /**
-   * #1867 — discrete retrieval terms (bridge query preparation). Forwarded
-   * as abmind `translated`; when absent or empty the recall falls back to
-   * today's single joined query. memory_recall and the dashboard path omit
-   * this and keep their current contracts.
+   * #1928 M4 — required logical profile. Fast is compact regardless of
+   * route; normal/full are deliberate and never auto-skip. Auto-recall
+   * uses fast; explicit tools select normal/full.
    */
-  terms?: string[];
-  /**
-   * #1867 — corpus-df term selection inside abmind. Meaningful only with
-   * `terms`; omitted by every other caller. Deprecated alias for ambient
-   * intent through abmind `0.4.x`; prefer `intent`.
-   */
-  selectTerms?: boolean;
-  /**
-   * #1895 — recall intent, forwarded to abmind. Ambient callers (auto-recall)
-   * pass `"ambient"`; deliberate callers pass `"explicit"` with `keywords`.
-   * Absent means abmind's ambient default.
-   */
-  intent?: "ambient" | "explicit";
-  /**
-   * #1895 — deliberate caller keywords. Cross as abmind `translated`
-   * verbatim: no trimming, dedupe, or cap (the ambient `sanitizeRecallTerms`
-   * path never touches them). Requires explicit intent; the runtime enforces
-   * it even when the caller omitted the field. `query` stays for logging and
-   * joined-query compatibility but never replaces this array in retrieval.
-   */
+  profile: "recall_fast" | "recall_normal" | "recall_full";
+  /** Fast requires the verbatim current turn. */
+  rawTurn?: string;
+  /** Normal/full anchor: verbatim explicit text and/or 1–50 keywords. */
+  text?: string;
   keywords?: string[];
-  timeStart?: number;
-  timeEnd?: number;
-  stages?: string[];
-}
-
-/**
- * #1894 — cheap worth-retrieving input: the raw turn plus the effective
- * recall scope, mirroring the filters full recall judges the skip with.
- */
-export interface WorthRetrievingInput {
-  original: string;
-  userId: string;
+  /** Selected items, bounded by the profile ceiling. */
   limit?: number;
+  maxOutputBytes?: number;
+  deadlineMs?: number;
   maxClassification?: number;
   timeStart?: number;
   timeEnd?: number;
-  topic?: string;
-  tier?: "core" | "general";
-  emotion?: string;
-  includeExpired?: boolean;
-  resolution?: "signal" | "compact" | "standard" | "full";
+  memoryType?: string;
+  scope?: string;
+  asOf?: string;
+  continuation?: string;
 }
 
-/** #1894 — abmind df verdict plus the diagnostics behind it. */
-export interface WorthRetrievingResult {
-  verdict: "skip" | "search";
-  corpusSize: number;
-  ceiling: number;
-}
 
 export interface RuntimeRecallHit {
+  /** Owner-rendered excerpt; injected verbatim, never re-rendered locally. */
   content: string;
-  score: number;
   date: string;
-  memoryId?: number;
-  source?: string;
-  contentOriginal?: string;
-  memoryType?: string;
-  trust?: number;
-  integrity?: number;
-  credibility?: number;
+  /**
+   * #1928 M4 — source-safe C2 ref key (`db:<layer>:<id>:<owner>:<version>`,
+   * `artifact:…`, `graph:…`). Numeric IDs never identify evidence alone;
+   * citations and support declarations name this ref.
+   */
+  ref: string;
+  kind: "db" | "artifact" | "graph";
+  layer?: string;
+  rationale?: string;
+  excerptProvenance?: string;
+  currentness?: string;
+  score?: number;
   classification?: number;
-  emotionScore?: number;
-  createdAt?: number;
-  semanticRevision?: number;
-  /** #1877 — 36 h trivial-fact exemption inputs, carried from abmind. */
-  emotionTags?: string;
-  importanceFlags?: string;
 }
 
 export interface RuntimeRecallResult {
   hits: RuntimeRecallHit[];
+  /** Owner-rendered text; injected verbatim. No local clipping. */
   context: string;
-  /**
-   * Deterministic bounded injection selection from abmind. Present on
-   * ordinary recall too (no flag, profile, or backend needed).
-   * Validated at this boundary; malformed selection is dropped.
-   */
-  selection?: RuntimeRecallSelection;
-  /**
-   * #1867 — per-stage outcomes from abmind (#1861). Advisory diagnostics for
-   * the auto-recall path; validated at this boundary, malformed maps dropped.
-   */
-  stageOutcomes?: RuntimeRecallStageOutcomes;
-  /**
-   * #1867 — weak-evidence flag from abmind (#1861). Advisory: no candidate
-   * had an exact topical match or an above-threshold semantic hit. Gating
-   * injection on it requires the term-emission milestone (discrete terms make
-   * the flag's lexical arm reachable); until the harness proves no
-   * suppression of good recalls, the bridge logs it and injects as today.
-   */
-  weakEvidence?: boolean;
-  /**
-   * #1877 — abmind ran no stage because the prepared terms carried no
-   * information for this user's corpus (measured document frequency, not a
-   * per-language word list). Advisory for the turn log: an ordinary empty
-   * result is indistinguishable in behavior, and the bridge injects nothing
-   * either way.
-   */
-  searchSkipped?: boolean;
-  /** #1877 — closed-set reason behind `searchSkipped`, logged verbatim. */
-  searchSkippedReason?: string;
-  /**
-   * #1908 — ambient planner diagnostics from abmind (content-free). Present
-   * on planned ambient recalls; validated at this boundary and preserved
-   * through routing for honest turn logs.
-   */
-  ambient?: RuntimeAmbientPlan;
-}
-
-/** #1867 — structural mirror of abmind's stage outcome (validated, not cast). */
-export interface RuntimeRecallStageOutcome {
-  status: "completed" | "not-requested" | "disabled" | "no-provider" | "deadline" | "failed";
-  hitCount: number;
-}
-
-export type RuntimeRecallStageOutcomes = Record<string, RuntimeRecallStageOutcome>;
-
-/**
- * #1867 — narrow the unknown wire stage-outcome map. Malformed or absent
- * input yields undefined: diagnostics must never steer injection on a lie.
- */
-export function asRecallStageOutcomes(raw: unknown): RuntimeRecallStageOutcomes | undefined {
-  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return undefined;
-  const out: RuntimeRecallStageOutcomes = {};
-  for (const [stage, value] of Object.entries(raw as Record<string, unknown>)) {
-    if (typeof value !== "object" || value === null || Array.isArray(value)) return undefined;
-    const record = value as Record<string, unknown>;
-    const status = record["status"];
-    if (status !== "completed" && status !== "not-requested" && status !== "disabled" &&
-        status !== "no-provider" && status !== "deadline" && status !== "failed") return undefined;
-    const hitCount = record["hitCount"];
-    if (typeof hitCount !== "number" || !Number.isInteger(hitCount) || hitCount < 0) return undefined;
-    out[stage] = { status, hitCount };
-  }
-  return out;
-}
-
-/** #1867 — sanitize discrete recall terms: trim, drop empties, dedupe, cap. */
-export function sanitizeRecallTerms(terms: readonly string[] | undefined): string[] {
-  if (!Array.isArray(terms)) return [];
-  const seen = new Set<string>();
-  const out: string[] = [];
-  for (const raw of terms) {
-    if (typeof raw !== "string") continue;
-    const term = raw.trim();
-    if (!term || seen.has(term)) continue;
-    seen.add(term);
-    out.push(term);
-    if (out.length >= 16) break;
-  }
-  return out;
+  /** Packet status: skipped | empty | evidence | partial | unavailable | cancelled. */
+  status: string;
+  packetId?: string;
+  omissionReasons?: string[];
+  continuation?: string;
 }
 
 /**
@@ -313,187 +201,6 @@ export function asExplicitKeywords(keywords: unknown): string[] {
     accepted.push(keyword);
   }
   return accepted;
-}
-
-/** #1877 — flag-field bound: short tag strings already present in the payload. */
-export const RECALL_FLAG_MAX_CHARS = 256;
-/** #1877 — injection floor; semantics owned by shouldInjectRecallHit. */
-export const RECALL_SCORE_FLOOR = 0.70;
-/** #1877 — trivial-fact TTL; semantics owned by shouldInjectRecallHit. */
-export const TRIVIAL_FACT_TTL_MS = 36 * 60 * 60_000;
-
-/**
- * #1877 — narrow an unknown wire flag to the carried string shape.
- * Non-strings drop, accepted values trim, empty-after-trim counts as absent,
- * over-long values truncate. Absent input yields undefined: recall continues
- * as ordinary and the age rule filters as today.
- */
-export function asRecallFlag(raw: unknown): string | undefined {
-  if (typeof raw !== "string") return undefined;
-  const trimmed = raw.trim();
-  if (!trimmed) return undefined;
-  return trimmed.length > RECALL_FLAG_MAX_CHARS ? trimmed.slice(0, RECALL_FLAG_MAX_CHARS) : trimmed;
-}
-
-/**
- * #1877 — one owner for the bridge floor/age injection rule.
- * Floor first (`score <= 0.70` rejected), then the 36 h age branch (fact,
- * `score < 1.0`, `createdAt` older than 36 h, no flags). Tests and the #1867
- * probe import this predicate; no harness may carry a local copy.
- * `createdAt` stays a truthiness test exactly as the original inline rule
- * had it: 0/absent means "no timestamp" and never enters the age branch.
- */
-export function shouldInjectRecallHit(hit: Pick<RuntimeRecallHit, "score" | "memoryType" | "createdAt" | "emotionTags" | "importanceFlags">, nowMs: number): boolean {
-  if (!(hit.score > RECALL_SCORE_FLOOR)) return false;
-  if (hit.memoryType === "fact" && hit.score < 1.0 && hit.createdAt && nowMs - hit.createdAt > TRIVIAL_FACT_TTL_MS) {
-    if (!hit.emotionTags && !hit.importanceFlags) return false;
-  }
-  return true;
-}
-
-/**
- * #1877 — strip the carried exemption flags before agent-visible
- * `memory_recall` serialization. Returns new hit objects; the input array is
- * not mutated. Auto-recall reads `recall.hits` pre-serialization and keeps
- * the fields; dashboard search maps fields explicitly and never sees them.
- */
-export function stripRecallFlagsForTool<T extends RuntimeRecallHit>(hits: readonly T[]): Array<Omit<T, "emotionTags" | "importanceFlags">> {
-  return hits.map((hit) => {
-    const copy = { ...hit };
-    delete (copy as Partial<RuntimeRecallHit>).emotionTags;
-    delete (copy as Partial<RuntimeRecallHit>).importanceFlags;
-    return copy;
-  });
-}
-
-/**
- * #1908 — structural mirror of abmind ambient planner diagnostics. Content
- * free: term counts, plans, semantic source, and rejection counters only.
- * A malformed or absent envelope is dropped (the recall proceeds).
- */
-export interface RuntimeAmbientPlan {
-  plans: "raw" | "raw+context";
-  semanticSource: "raw" | "context" | "fallback";
-  rawTermsTotal: number;
-  rawTermsInformative: number;
-  hintsTotal: number;
-  hintsInformative: number;
-  contextConsidered: number;
-  contextEligible: number;
-  contextRejected: Record<string, number>;
-  skipReason?: string;
-}
-
-export function asAmbientPlan(raw: unknown): RuntimeAmbientPlan | undefined {
-  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return undefined;
-  const record = raw as Record<string, unknown>;
-  const plans = record["plans"];
-  if (plans !== "raw" && plans !== "raw+context") return undefined;
-  const semanticSource = record["semanticSource"];
-  if (semanticSource !== "raw" && semanticSource !== "context" && semanticSource !== "fallback") return undefined;
-  const count = (value: unknown): number => (typeof value === "number" && Number.isFinite(value) ? value : 0);
-  const rejected: Record<string, number> = {};
-  const rawRejected = record["contextRejected"];
-  if (typeof rawRejected === "object" && rawRejected !== null && !Array.isArray(rawRejected)) {
-    for (const [key, value] of Object.entries(rawRejected as Record<string, unknown>)) {
-      if (typeof value === "number" && Number.isFinite(value)) rejected[key] = value;
-    }
-  }
-  const skipReason = record["skipReason"];
-  return {
-    plans,
-    semanticSource,
-    rawTermsTotal: count(record["rawTermsTotal"]),
-    rawTermsInformative: count(record["rawTermsInformative"]),
-    hintsTotal: count(record["hintsTotal"]),
-    hintsInformative: count(record["hintsInformative"]),
-    contextConsidered: count(record["contextConsidered"]),
-    contextEligible: count(record["contextEligible"]),
-    contextRejected: rejected,
-    ...(typeof skipReason === "string" ? { skipReason } : {}),
-  };
-}
-
-/**
- * #1813 — structural mirror of abmind RecallSelectionV1 (validated, not cast). */
-export interface RuntimeRecallSelectionRef {
-  id: number;
-  revision: number;
-}
-
-export interface RuntimeRecallSelection {
-  version: 1;
-  refs: RuntimeRecallSelectionRef[];
-  budgetBytes: number;
-  truncated: boolean;
-}
-
-/**
- * #1813 — narrow the unknown wire selection to the structural mirror.
- * Anything malformed is dropped: an unverified selection must never bound
- * what the agent receives. Returns undefined for absent input.
- */
-export function asRecallSelection(raw: unknown): RuntimeRecallSelection | undefined {
-  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return undefined;
-  const record = raw as Record<string, unknown>;
-  if (record["version"] !== 1) return undefined;
-  const refs = record["refs"];
-  if (!Array.isArray(refs)) return undefined;
-  for (const entry of refs) {
-    if (typeof entry !== "object" || entry === null) return undefined;
-    const ref = entry as { id?: unknown; revision?: unknown };
-    if (!Number.isInteger(ref.id) || !Number.isInteger(ref.revision)) return undefined;
-  }
-  // A non-finite or non-positive budget would silently disable the bound that
-  // this selection exists to carry (NaN comparisons are always false), so it
-  // is malformed rather than permissive.
-  const budgetBytes = record["budgetBytes"];
-  if (typeof budgetBytes !== "number" || !Number.isFinite(budgetBytes) || budgetBytes <= 0) return undefined;
-  if (typeof record["truncated"] !== "boolean") return undefined;
-  return {
-    version: 1,
-    refs: (refs as Array<{ id: number; revision: number }>).map((r) => ({ id: r.id, revision: r.revision })),
-    budgetBytes,
-    truncated: record["truncated"],
-  };
-}
-
-/**
- * #1813 — rows to inject: the verified selection when present and resolvable
- * within this result set, otherwise the full set (ordinary rendering). Rank
- * order is preserved; selection can only bound, never substitute rows.
- * Id-less rows (S6 consolidation files, S8 entity paths) can never be refs,
- * so they ride along after the selected rows in rank order while the same
- * budget covers them — a resolved selection must not silently lose the
- * consolidation/entity evidence that ordinary rendering includes.
- */
-export function selectInjectedHits<T extends { memoryId?: number; content: string }>(
-  hits: T[],
-  selection: RuntimeRecallSelection | undefined,
-): T[] {
-  if (selection === undefined || selection.refs.length === 0) return hits;
-  const refIds = new Set<number>(selection.refs.map((ref) => ref.id));
-  const selected = hits.filter((hit) => typeof hit.memoryId === "number" && refIds.has(hit.memoryId));
-  if (selected.length === 0) return hits;
-  // Selected rows are already bounded owner-side. Id-less rows (consolidation
-  // files, entity graph) carry no ref, so they fill whatever budget remains —
-  // charged against the whole selection, never overshooting it. One pass keeps
-  // the recall rank order, so a high-ranked file excerpt is emitted in place
-  // rather than after the selected rows, and an over-budget row is skipped
-  // (not a stop) so a smaller later row still fits, mirroring the engine rule.
-  let used = selected.reduce((sum, hit) => sum + Buffer.byteLength(hit.content, "utf8"), 0);
-  const out: T[] = [];
-  for (const hit of hits) {
-    if (typeof hit.memoryId === "number") {
-      if (refIds.has(hit.memoryId)) out.push(hit);
-      continue;
-    }
-    const size = Buffer.byteLength(hit.content, "utf8");
-    if (used + size > selection.budgetBytes) continue;
-    out.push(hit);
-    used += size;
-  }
-  return out;
 }
 
 export interface SessionContextInput {
@@ -832,12 +539,6 @@ export interface AbtarsMemoryRuntime {
   supports(capability: MemoryRuntimeCapability): boolean;
   recordMessage(input: RecordMessageInput, operationKey: string): Promise<RecordMessageResult>;
   recall(input: RuntimeRecallInput): Promise<RuntimeRecallResult>;
-  /**
-   * #1894 — cheap worth-retrieving check. Optional: facades without it
-   * (older runtimes, recomposed test doubles) proceed to ordinary recall.
-   * Present implementations never throw (null on any failure).
-   */
-  worthRetrieving?(input: WorthRetrievingInput): Promise<WorthRetrievingResult | null>;
   assembleSessionContext(input: SessionContextInput): Promise<SessionContextResult>;
   getRecentConversation(input: RecentConversationInput): Promise<RecentConversationResult>;
   getStatus(input?: RuntimeStatusInput): Promise<RuntimeStatusResult>;
@@ -903,9 +604,6 @@ function projectCapabilities(client: AbmindClientLike): Set<MemoryRuntimeCapabil
   if (methods.has("private.edit") && features["private_write"] === "true" && revisionContract) result.add("editMemory");
   if (methods.has("private.rebuildFts") && features["private_write"] === "true") result.add("rebuildFts");
   if (methods.has("private.recordFeedback")) result.add("feedback");
-  // #1894 — same shape: mixed-version daemons without the method simply lack
-  // the capability and callers proceed to ordinary recall.
-  if (methods.has("private.checkWorthRetrieving") && features["private_read"] === "true") result.add("worthRetrieving");
   if (methods.has("private.getCoreKnowledge")) result.add("coreKnowledge");
   if (methods.has("private.getRuntimeStatus")) result.add("status");
   if (methods.has("private.projectConversationContext") && features["private_read"] === "true") result.add("durableContext");
@@ -947,6 +645,124 @@ function dreamQuestionIdempotencyKey(kind: "ask" | "dismiss", questionId: string
     .update(JSON.stringify([kind, questionId, deliveryKey ?? ""]), "utf-8")
     .digest("hex");
   return `dream-question-${kind}-v1-${digest}`;
+}
+
+/**
+ * #1928 M4 — narrow the unknown owner packet (validated, not cast). A
+ * malformed packet fails the recall loudly instead of injecting a lie:
+ * the owner text is only delivered when its items carry complete C2 refs.
+ */
+interface OwnedPacketItem {
+  excerpt: string;
+  refKey: string;
+  kind: "db" | "artifact" | "graph";
+  layer?: string;
+  rationale?: string;
+  provenance?: string;
+  currentness?: string;
+  score?: number;
+  classification?: number;
+}
+
+interface OwnedPacket {
+  profile: string;
+  status: string;
+  items: OwnedPacketItem[];
+  text: string;
+  packetId?: string;
+  omissionReasons?: string[];
+  continuation?: string;
+}
+
+function ownedRefKey(ref: Record<string, unknown>): string | undefined {
+  if (ref["kind"] === "db") {
+    const layer = ref["layer"];
+    const recordId = ref["recordId"];
+    const owner = ref["owner"];
+    const version = ref["version"];
+    if ((layer === "durable" || layer === "episode" || layer === "raw")
+      && Number.isSafeInteger(recordId) && typeof owner === "string" && owner.length > 0
+      && typeof version === "string" && version.length > 0) {
+      return `db:${layer}:${recordId}:${owner}:${version}`;
+    }
+    return undefined;
+  }
+  if (ref["kind"] === "artifact") {
+    const owner = ref["owner"];
+    const artifact = ref["artifact"];
+    const contentVersion = ref["contentVersion"];
+    if (typeof owner === "string" && owner.length > 0 && typeof artifact === "string" && artifact.length > 0
+      && typeof contentVersion === "string" && contentVersion.length > 0) {
+      return `artifact:${owner}:${artifact}:${contentVersion}`;
+    }
+    return undefined;
+  }
+  if (ref["kind"] === "graph") {
+    const edge = ref["edge"];
+    const sources = ref["sources"];
+    if (typeof edge === "string" && edge.length > 0 && Array.isArray(sources)
+      && sources.every((s) => typeof s === "string")) {
+      return `graph:${edge}:${(sources as string[]).join("+")}`;
+    }
+    return undefined;
+  }
+  return undefined;
+}
+
+function asOwnedPacket(raw: unknown): OwnedPacket {
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
+    throw new Error("recall returned a malformed owner packet");
+  }
+  const record = raw as Record<string, unknown>;
+  if (record["contract"] !== "owned-v1") throw new Error("recall returned an unsupported contract");
+  if (typeof record["profile"] !== "string" || typeof record["status"] !== "string") {
+    throw new Error("recall returned a malformed owner packet");
+  }
+  if (typeof record["text"] !== "string" || !Array.isArray(record["items"])) {
+    throw new Error("recall returned a malformed owner packet");
+  }
+  const items: OwnedPacketItem[] = [];
+  for (const entry of record["items"] as unknown[]) {
+    if (typeof entry !== "object" || entry === null || Array.isArray(entry)) {
+      throw new Error("recall returned a malformed owner packet item");
+    }
+    const item = entry as Record<string, unknown>;
+    if (typeof item["excerpt"] !== "string") throw new Error("recall returned a malformed owner packet item");
+    const ref = item["ref"];
+    if (typeof ref !== "object" || ref === null || Array.isArray(ref)) {
+      throw new Error("recall returned an item without a C2 ref");
+    }
+    const refKey = ownedRefKey(ref as Record<string, unknown>);
+    if (refKey === undefined) throw new Error("recall returned an item with an incomplete C2 ref");
+    const kind = (ref as Record<string, unknown>)["kind"];
+    if (kind !== "db" && kind !== "artifact" && kind !== "graph") {
+      throw new Error("recall returned an item with an incomplete C2 ref");
+    }
+    const layer = (ref as Record<string, unknown>)["layer"];
+    items.push({
+      excerpt: item["excerpt"] as string,
+      refKey,
+      kind,
+      ...(typeof layer === "string" ? { layer } : {}),
+      ...(typeof item["rationale"] === "string" ? { rationale: item["rationale"] as string } : {}),
+      ...(typeof item["excerptProvenance"] === "string" ? { provenance: item["excerptProvenance"] as string } : {}),
+      ...(typeof item["currentness"] === "string" ? { currentness: item["currentness"] as string } : {}),
+      ...(typeof item["score"] === "number" ? { score: item["score"] as number } : {}),
+      ...(typeof item["classification"] === "number" ? { classification: item["classification"] as number } : {}),
+    });
+  }
+  const omissionReasons = record["omissionReasons"];
+  return {
+    profile: record["profile"] as string,
+    status: record["status"] as string,
+    items,
+    text: record["text"] as string,
+    ...(typeof record["packetId"] === "string" ? { packetId: record["packetId"] as string } : {}),
+    ...(Array.isArray(omissionReasons) && omissionReasons.every((r) => typeof r === "string")
+      ? { omissionReasons: omissionReasons as string[] }
+      : {}),
+    ...(typeof record["continuation"] === "string" ? { continuation: record["continuation"] as string } : {}),
+  };
 }
 
 // ── Client-backed implementation ──────────────────────────────────────────
@@ -1004,122 +820,78 @@ export function createClientRuntime(client: AbmindClientLike): AbtarsMemoryRunti
     async recall(input: RuntimeRecallInput): Promise<RuntimeRecallResult> {
       requireClientCapability(capabilities, "recall");
       const t0 = Date.now();
-      logDebug("memory-runtime", `recall: query="${redactSecrets(input.query).slice(0, 60)}" user=${input.userId} limit=${input.limit ?? 10} maxClass=${input.maxClassification ?? "?"} stages=[${input.stages?.join(",") ?? "all"}] intent=${input.keywords !== undefined && input.keywords !== null ? "explicit(keywords)" : (input.intent ?? "default")}`);
-      // #1867 — discrete terms cross as abmind `translated` so #1861's
-      // coverage ordering participates; the joined query stays the fallback
-      // when no terms were prepared. selectTerms rides the existing recall
-      // method (no new capability), like #1869's parts.
-      // #1895 — explicit accepted keywords bypass the lossy sanitizer above
-      // and force explicit intent: the caller's array is the retrieval query.
-      const explicitKeywords = input.keywords !== undefined && input.keywords !== null
-        ? asExplicitKeywords(input.keywords)
-        : undefined;
-      const intent = explicitKeywords !== undefined ? "explicit" : input.intent;
-      const terms = explicitKeywords !== undefined ? [] : sanitizeRecallTerms(input.terms);
-      const result = (await pm.recall({
-        translated: explicitKeywords ?? (terms.length > 0 ? terms : [input.query]),
-        original: input.original ?? input.query,
-        userId: input.userId,
-        limit: input.limit ?? 10,
-        maxClassification: input.maxClassification,
-        timeStart: input.timeStart,
-        timeEnd: input.timeEnd,
-        stages: input.stages,
-        ...(intent !== undefined ? { intent } : {}),
-        ...(terms.length > 0 && input.selectTerms === true ? { selectTerms: true } : {}),
-      })) as { results: Array<Record<string, unknown>>; selection?: unknown; stageOutcomes?: unknown; weakEvidence?: unknown; searchSkipped?: unknown; searchSkippedReason?: unknown; ambient?: unknown };
-      const hits: RuntimeRecallHit[] = result.results.map((r) => ({
-        content: String(r["content"] ?? ""),
-        score: Number(r["score"] ?? 0),
-        date: String(r["date"] ?? ""),
-        memoryId: typeof r["id"] === "number" ? r["id"] : undefined,
-        source: typeof r["source"] === "string" ? r["source"] : undefined,
-        contentOriginal: typeof r["contentOriginal"] === "string" ? r["contentOriginal"] : undefined,
-        memoryType: typeof r["memoryType"] === "string" ? r["memoryType"] : undefined,
-        trust: typeof r["trust"] === "number" ? r["trust"] : undefined,
-        integrity: typeof r["integrity"] === "number" ? r["integrity"] : undefined,
-        credibility: typeof r["credibility"] === "number" ? r["credibility"] : undefined,
-        classification: typeof r["classification"] === "number" ? r["classification"] : undefined,
-        emotionScore: typeof r["emotionScore"] === "number" ? r["emotionScore"] : undefined,
-        createdAt: typeof r["createdAt"] === "number" ? r["createdAt"] : undefined,
-        semanticRevision: typeof r["semanticRevision"] === "number" ? r["semanticRevision"] : undefined,
-        // #1877 — carry the 36 h exemption inputs; malformed wire values
-        // drop and recall continues as ordinary (flags absent).
-        ...(() => {
-          const emotionTags = asRecallFlag(r["emotionTags"]);
-          const importanceFlags = asRecallFlag(r["importanceFlags"]);
-          return {
-            ...(emotionTags !== undefined ? { emotionTags } : {}),
-            ...(importanceFlags !== undefined ? { importanceFlags } : {}),
-          };
-        })(),
+      logDebug("memory-runtime", `recall: profile=${input.profile} query="${redactSecrets(input.query).slice(0, 60)}" user=${input.userId} limit=${input.limit ?? "profile"} maxClass=${input.maxClassification ?? "?"}`);
+      // #1928 M4 — the bridge passes raw/context/identity/capacity and
+      // consumes the owner packet. No semantic hints, floors, reranking,
+      // numeric-ref selection, or local rendering: the owner text travels
+      // intact and the owner ref keys identify every hit.
+      const profileBounds = input.profile === "recall_fast"
+        ? { maxItems: 5, maxOutputBytes: 2000 }
+        : input.profile === "recall_normal"
+          ? { maxItems: 15, maxOutputBytes: 12000 }
+          : { maxItems: 40, maxOutputBytes: 32768 };
+      const request: Record<string, unknown> = {
+        contract: "owned-v1",
+        profile: input.profile,
+        identity: { principal: input.userId },
+        ...(input.profile === "recall_fast"
+          ? { rawTurn: (input.rawTurn ?? input.query).trim() }
+          : {
+              query: {
+                ...(input.text !== undefined ? { text: input.text } : {}),
+                ...((() => {
+                  const keywords = input.keywords !== undefined ? asExplicitKeywords(input.keywords) : [];
+                  return keywords.length > 0 ? { keywords } : {};
+                })()),
+              },
+            }),
+        ...((input.maxClassification !== undefined || input.timeStart !== undefined || input.timeEnd !== undefined || input.memoryType !== undefined || input.scope !== undefined || input.asOf !== undefined)
+          ? {
+              filters: {
+                ...(input.memoryType !== undefined ? { memoryType: input.memoryType } : {}),
+                ...(input.scope !== undefined ? { scope: input.scope } : {}),
+                ...(input.timeStart !== undefined ? { timeStart: input.timeStart } : {}),
+                ...(input.timeEnd !== undefined ? { timeEnd: input.timeEnd } : {}),
+                ...(input.maxClassification !== undefined ? { classificationCeiling: input.maxClassification } : {}),
+                ...(input.asOf !== undefined ? { asOf: input.asOf } : {}),
+              },
+            }
+          : {}),
+        capacity: {
+          maxItems: Math.max(1, Math.min(input.limit ?? profileBounds.maxItems, profileBounds.maxItems)),
+          maxOutputBytes: Math.max(64, Math.min(input.maxOutputBytes ?? profileBounds.maxOutputBytes, profileBounds.maxOutputBytes)),
+          ...(input.deadlineMs !== undefined ? { deadlineMs: input.deadlineMs } : {}),
+        },
+        ...(input.continuation !== undefined ? { continuation: input.continuation } : {}),
+      };
+      const packet = asOwnedPacket(await pm.recall(request));
+      const hits: RuntimeRecallHit[] = packet.items.map((item) => ({
+        content: item.excerpt,
+        date: "",
+        ref: item.refKey,
+        kind: item.kind,
+        ...(item.layer !== undefined ? { layer: item.layer } : {}),
+        ...(item.rationale !== undefined ? { rationale: item.rationale } : {}),
+        ...(item.provenance !== undefined ? { excerptProvenance: item.provenance } : {}),
+        ...(item.currentness !== undefined ? { currentness: item.currentness } : {}),
+        ...(item.score !== undefined ? { score: item.score } : {}),
+        ...(item.classification !== undefined ? { classification: item.classification } : {}),
       }));
-      const compact = selectInjectedHits(hits, asRecallSelection(result.selection));
-      const context = compact.map(h => `- (score: ${h.score.toFixed(3)}) ${h.content.slice(0, 200)}`).join("\n");
-      const selection = asRecallSelection(result.selection);
-      // #1867 — carry the validated diagnostics; malformed wire values are
-      // dropped and recall continues as ordinary. Advisory only: the bridge
-      // floor and age rules still decide injection.
-      const stageOutcomes = asRecallStageOutcomes(result.stageOutcomes);
-      const weakEvidence = typeof result.weakEvidence === "boolean" ? result.weakEvidence : undefined;
-      // #1877 — skip signal from abmind: validated, never trusted raw. A
-      // malformed value degrades to "ordinary recall" rather than reporting a
-      // skip that did not happen.
-      const searchSkipped = result.searchSkipped === true ? true : undefined;
-      const skipReason = searchSkipped === true && typeof result.searchSkippedReason === "string"
-        ? result.searchSkippedReason.trim().slice(0, 64) || undefined
-        : undefined;
-      // #1908 — carry the validated planner diagnostics; malformed envelopes
-      // drop and recall continues as ordinary.
-      const ambient = asAmbientPlan(result.ambient);
       const ms = Date.now() - t0;
-      logDebug("memory-runtime", `recall: ${hits.length} hits (${compact.length} injected) in ${ms}ms selection=${selection ? `${selection.refs.length} refs${selection.truncated ? " truncated" : ""}` : "none"} plans=${ambient ? ambient.plans : "n/a"} semantic=${ambient ? ambient.semanticSource : "n/a"} top=${hits.slice(0, 3).map((h) => `${h.memoryId ?? "?"}:${h.score.toFixed(3)}`).join(",")} stages=${stageOutcomes ? Object.entries(stageOutcomes).map(([k, v]) => `${k}:${v.status}/${v.hitCount}`).join(" ") : "n/a"} weakEvidence=${weakEvidence ?? "n/a"} skipped=${searchSkipped === true ? (skipReason ?? "yes") : "no"}`);
+      logDebug("memory-runtime", `recall: profile=${packet.profile} status=${packet.status} hits=${hits.length} in ${ms}ms omissions=${(packet.omissionReasons ?? []).length}`);
       if (isLogLevel("trace")) {
         for (const h of hits.slice(0, 10)) {
-          logTrace("memory-runtime", `hit id=${h.memoryId ?? "?"} score=${h.score.toFixed(3)} source=${h.source ?? "?"} text="${redactSecrets(h.content).slice(0, 120)}"`);
+          logTrace("memory-runtime", `hit ref=${h.ref} text="${redactSecrets(h.content).slice(0, 120)}"`);
         }
       }
-      return { hits, context, ...(selection !== undefined ? { selection } : {}), ...(stageOutcomes !== undefined ? { stageOutcomes } : {}), ...(weakEvidence !== undefined ? { weakEvidence } : {}), ...(searchSkipped !== undefined ? { searchSkipped } : {}), ...(skipReason !== undefined ? { searchSkippedReason: skipReason } : {}), ...(ambient !== undefined ? { ambient } : {}) };
-    },
-
-    /**
-     * #1894 — cheap worth-retrieving check before ambient recall. Returns the
-     * verdict, or null when the check is unsupported, unavailable, failed, or
-     * malformed — null always means "proceed to ordinary recall". Never
-     * throws and never translates: check failure is handled here, separately
-     * from the recall path, so a broken check cannot abort the turn.
-     */
-    async worthRetrieving(input: WorthRetrievingInput): Promise<WorthRetrievingResult | null> {
-      try {
-        if (!capabilities.has("worthRetrieving")) return null;
-        // Mixed-version daemon without the method: unsupported, never an error.
-        if (typeof pm.checkWorthRetrieving !== "function") return null;
-        const raw = (await pm.checkWorthRetrieving({
-          original: input.original,
-          userId: input.userId,
-          intent: "ambient",
-          limit: input.limit ?? 10,
-          ...(input.maxClassification !== undefined ? { maxClassification: input.maxClassification } : {}),
-          ...(input.timeStart !== undefined ? { timeStart: input.timeStart } : {}),
-          ...(input.timeEnd !== undefined ? { timeEnd: input.timeEnd } : {}),
-          ...(input.topic !== undefined ? { topic: input.topic } : {}),
-          ...(input.tier !== undefined ? { tier: input.tier } : {}),
-          ...(input.emotion !== undefined ? { emotion: input.emotion } : {}),
-          ...(input.includeExpired !== undefined ? { includeExpired: input.includeExpired } : {}),
-          ...(input.resolution !== undefined ? { resolution: input.resolution } : {}),
-        })) as unknown;
-        if (!raw || typeof raw !== "object") return null;
-        const record = raw as Record<string, unknown>;
-        if (record["verdict"] !== "skip" && record["verdict"] !== "search") return null;
-        return {
-          verdict: record["verdict"],
-          corpusSize: typeof record["corpusSize"] === "number" ? record["corpusSize"] : 0,
-          ceiling: typeof record["ceiling"] === "number" ? record["ceiling"] : 0,
-        };
-      } catch (err) {
-        logDebug("memory-runtime", `worthRetrieving failed, ordinary recall: ${err instanceof Error ? err.message : String(err)}`);
-        return null;
-      }
+      return {
+        hits,
+        context: packet.text,
+        status: packet.status,
+        ...(packet.packetId !== undefined ? { packetId: packet.packetId } : {}),
+        ...(packet.omissionReasons !== undefined ? { omissionReasons: packet.omissionReasons } : {}),
+        ...(packet.continuation !== undefined ? { continuation: packet.continuation } : {}),
+      };
     },
 
     async assembleSessionContext(input: SessionContextInput): Promise<SessionContextResult> {
@@ -1537,7 +1309,7 @@ export function createDisabledRuntime(): AbtarsMemoryRuntime {
     routeSnapshot: { version: 1, state: "closed", generation: 0, retryEligible: 0, terminalUnknown: 0 },
     supports: () => false,
     recordMessage: async () => { unavailable("recordMessage"); return { id: null }; },
-    recall: async () => { unavailable("recall"); return { hits: [], context: "" }; },
+    recall: async () => { unavailable("recall"); return { hits: [], context: "", status: "unavailable" }; },
     assembleSessionContext: async () => { unavailable("assembleSessionContext"); return { wakeUp: "", recall: "", coreKnowledge: "", soulBundle: emptySoulBundle() }; },
     getRecentConversation: async () => { unavailable("getRecentConversation"); return []; },
     getStatus: async () => { unavailable("getStatus"); return { totalMessages: 0, extractedMemories: 0, extractedByType: {}, consolidationFiles: { daily: 0, weekly: 0, quarterly: 0 }, ingestedDocuments: 0, preservedKeywords: 0, dbSizeBytes: 0, rejectedByScanner: 0, memoryTest: false }; },
@@ -1574,7 +1346,7 @@ export function createUnavailableRuntime(): AbtarsMemoryRuntime {
     routeSnapshot: { version: 1, state: "unavailable", generation: 0, reasonCode: "route_unavailable", retryEligible: 0, terminalUnknown: 0 },
     supports: () => false,
     recordMessage: async () => { unavailable("recordMessage"); return { id: null }; },
-    recall: async () => { unavailable("recall"); return { hits: [], context: "" }; },
+    recall: async () => { unavailable("recall"); return { hits: [], context: "", status: "unavailable" }; },
     assembleSessionContext: async () => { unavailable("assembleSessionContext"); return { wakeUp: "", recall: "", coreKnowledge: "", soulBundle: emptySoulBundle() }; },
     getRecentConversation: async () => { unavailable("getRecentConversation"); return []; },
     getStatus: async () => { unavailable("getStatus"); return { totalMessages: 0, extractedMemories: 0, extractedByType: {}, consolidationFiles: { daily: 0, weekly: 0, quarterly: 0 }, ingestedDocuments: 0, preservedKeywords: 0, dbSizeBytes: 0, rejectedByScanner: 0, memoryTest: false }; },
@@ -1582,7 +1354,7 @@ export function createUnavailableRuntime(): AbtarsMemoryRuntime {
     getCoreKnowledge: async () => { unavailable("getCoreKnowledge"); return ""; },
     recordFeedback: async () => { unavailable("recordFeedback"); return { ok: false }; },
     embed: async () => { unavailable("embed"); return { vectors: [], model: "" }; },
-    runMaintenance: async () => { unavailable("runMaintenance"); return { ok: false, summary: "Memory unavailable" }; },
+    runMaintenance: async () => { unavailable("runMaintenance"); return { ok: false, summary: "Memory disabled" }; },
     instantStore: async () => { unavailable("instantStore"); return { stored: false, memoriesCount: 0, code: "memory_unavailable", message: "Memory unavailable", requestId: "", retryable: false, action: "stop" as const, stage: "pre_dispatch" as const }; },
     editMemory: async () => { unavailable("editMemory"); return { ok: false, code: "memory_unavailable", message: "Memory unavailable", requestId: "", retryable: false, action: "stop" as const, stage: "pre_dispatch" as const }; },
     rebuildFtsIndexes: async () => { unavailable("rebuildFtsIndexes"); return { rebuilt: [] }; },

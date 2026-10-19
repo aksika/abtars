@@ -7,9 +7,10 @@ const REACT_RE = /\[REACT:(.+?)\]/;
 const NO_REPLY_RE = /\s*\[NO[-_]REPLY\]\s*/gi;
 const LANG_TAG_RE = /^\[lang:\w{2}\]\s*/i;
 const TOPICS_RE = /\[TOPICS:\s*(.+?)\]/i;
-// #1913: agent-declared answer support (memory IDs only). Parsed before
-// stripping; validated against host-observed evidence by the pipeline, so a
-// forged marker degrades to the eligible subset instead of authorizing writes.
+// #1928 M4: agent-declared answer support names owner ref keys, not numeric
+// IDs. Parsed before stripping; validated against host-observed evidence by
+// the pipeline, so a forged marker degrades to the eligible subset instead
+// of authorizing writes.
 const SUPPORT_RE = /\[SUPPORT:\s*([^\]]*)\]/gi;
 /** Delivery-time strip for the support marker (segments, TTS inputs). */
 export const SUPPORT_STRIP_RE = /\[SUPPORT:[^\]]*\]/gi;
@@ -32,23 +33,28 @@ export interface CleanedResponse {
   noReply: boolean;
   /** Keywords extracted from [TOPICS: kw1, kw2, kw3], if present. */
   topics?: string[];
-  /** Memory IDs declared via [SUPPORT: id, ...], if present. */
-  supportIds?: number[];
+  /** Owner ref keys declared via [SUPPORT: ref, ...], if present. */
+  supportIds?: string[];
 }
 
-/** Extract declared support IDs (order-preserving, deduplicated, capped). */
-export function extractSupportIds(raw: string): number[] {
+/**
+ * Extract declared support refs (order-preserving, deduplicated, capped).
+ * Each token must look like an owner ref key (`db:…`, `artifact:…`,
+ * `graph:…`); anything else — including legacy numeric IDs — is ignored
+ * and can never match host-observed evidence.
+ */
+export function extractSupportIds(raw: string): string[] {
   SUPPORT_RE.lastIndex = 0;
-  const out: number[] = [];
-  const seen = new Set<number>();
+  const out: string[] = [];
+  const seen = new Set<string>();
   let match: RegExpExecArray | null;
   while ((match = SUPPORT_RE.exec(raw)) !== null) {
     for (const part of match[1]!.split(",")) {
-      if (!/^\d+$/.test(part.trim())) continue;
-      const id = Number(part.trim());
-      if (!Number.isSafeInteger(id) || id <= 0 || seen.has(id)) continue;
-      seen.add(id);
-      out.push(id);
+      const token = part.trim();
+      if (!/^(db|artifact|graph):[A-Za-z0-9:_.+/-]{1,256}$/.test(token)) continue;
+      if (seen.has(token)) continue;
+      seen.add(token);
+      out.push(token);
       if (out.length >= 20) return out;
     }
   }

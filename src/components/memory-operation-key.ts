@@ -134,7 +134,7 @@ export function feedbackKey(
   channelId: string,
   userId: string,
   answerId: string,
-  memoryId: number,
+  memoryRef: string,
   feedbackType: string,
   source: "auto" | "explicit",
 ): string {
@@ -142,6 +142,7 @@ export function feedbackKey(
   requireNonEmpty(channelId, "channelId");
   requireNonEmpty(userId, "userId");
   requireNonEmpty(answerId, "answerId");
+  requireNonEmpty(memoryRef, "memoryRef");
   requireNonEmpty(feedbackType, "feedbackType");
   requireNonEmpty(source, "source");
   return memoryOperationKey("feedback", [
@@ -149,7 +150,7 @@ export function feedbackKey(
     channelId,
     userId,
     answerId,
-    String(memoryId),
+    memoryRef,
     feedbackType,
     source,
   ]);

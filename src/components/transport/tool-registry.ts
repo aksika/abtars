@@ -12,7 +12,7 @@ import { logAndSwallow } from "../log-and-swallow.js";
 import { checkTool, auditDeny, type SandboxPolicy } from "../tool-sandbox.js";
 import { authorizeA2ATool, authorizePath, resolveAuthorizationOrigin } from "../authorization.js";
 import { getMasterUserId } from "../master-user.js";
-import { isDefinitivePreDispatchFailure, stripRecallFlagsForTool } from "../memory-runtime.js";
+import { isDefinitivePreDispatchFailure } from "../memory-runtime.js";
 import { runBashCommand } from "../bash-runner.js";
 import type { ToolExecutionScope } from "../tasks/task-package.js";
 import type { OrcInvocationContextV2 } from "../orc-project/orc-project-contracts.js";
@@ -530,16 +530,17 @@ function finalizeStoreQuota(
 
 const memoryRecallTool: ToolDefinition = {
   name: "memory_recall",
-  description: "Search memories by keyword or semantic query. Returns relevant stored memories. Verify one claim per call with focused keywords: a combined multi-claim query can bury individual facts, and a fact missing from one broad search is inconclusive, never proof it was never stored. Preserve evidence from earlier successful reads; a cautionary lesson is not a contradiction. Distinguish a remembered joke from an actual event and correct claims only when evidence warrants it. When your answer uses returned memories, end that answer or text segment with [SUPPORT: id, ...], using only their memoryId values. Do not declare unused results.",
+  description: "Search long-term memory for relevant facts, preferences, and past conversations. Returns the owner packet: status, owner-rendered text, and source-safe refs. Verify one claim per call with focused keywords: a combined multi-claim query can bury individual facts, and a fact missing from one broad search is inconclusive, never proof it was never stored. Preserve evidence from earlier successful reads; a cautionary lesson is not a contradiction. Distinguish a remembered joke from an actual event and correct claims only when evidence warrants it. When your answer uses returned memories, end that answer or text segment with [SUPPORT: ref, ...], using only their ref values. Do not declare unused results.",
   parameters: {
     type: "object",
     properties: {
-      // #1895 — discrete keywords are the preferred input; the free-text
-      // query stays as the deprecated alternative, split into keywords at
-      // arrival. Either valid input is sufficient.
+      // #1928 M4 — explicit tools select normal/full; the keywords cross
+      // verbatim as the anchor. The free-text query is the deprecated
+      // alternative, split into keywords at arrival.
       keywords: { type: "array", items: { type: "string" }, description: "Discrete search keywords (preferred). Non-empty, non-blank strings; wins over query." },
       query: { type: "string", description: "Deprecated: free-text query, split into keywords at arrival. Prefer keywords." },
-      limit: { type: "integer", description: "Max results (default 10)" },
+      profile: { type: "string", enum: ["recall_normal", "recall_full"], description: "Deliberate breadth: normal precision (default) or full expansion." },
+      limit: { type: "integer", description: "Max results (default 10, bounded by the profile ceiling)" },
     },
     required: [],
   },
@@ -566,11 +567,11 @@ const memoryRecallTool: ToolDefinition = {
         const userEntry = loadUsers().byUserId.get(userId);
         maxClassification = userEntry?.maxClass ?? 1;
       }
-      // #1895 — keyword contract. A present keywords array wins over query
-      // and must be non-empty with only non-blank strings; invalid supplied
-      // keywords are an argument error, never a silent fallback to query.
-      // Query-only calls split Unicode word runs with no stoplist or
-      // ASCII-only filter; short tokens survive on this compatibility path.
+      // #1928 M4 — explicit tool: deliberate keywords select normal/full.
+      // The keyword contract is unchanged (array wins, non-empty/blanks
+      // rejected); the runtime serves the owner packet with source-safe
+      // refs and owner text. No floors, numeric-ref selection, flag
+      // stripping, or local rendering at this boundary.
       const rawKeywords = args["keywords"];
       let terms: string[];
       if (rawKeywords !== undefined && rawKeywords !== null) {
@@ -589,23 +590,26 @@ const memoryRecallTool: ToolDefinition = {
         }
         terms = split;
       }
+      const rawProfile = args["profile"];
+      const profile = rawProfile === undefined || rawProfile === null ? "recall_normal" : rawProfile;
+      if (profile !== "recall_normal" && profile !== "recall_full") {
+        return JSON.stringify({ error: "memory_recall: profile must be recall_normal or recall_full" });
+      }
       const result = await runtime.recall({
         // The joined string stays for logging/compatibility; the array below
-        // is the retrieval query and is never replaced by this string.
+        // is the retrieval anchor and is never replaced by this string.
         query: terms.join(" "),
+        profile,
+        text: terms.join(" "),
         keywords: terms,
-        intent: "explicit",
         userId,
         limit: parseInt(stringValue(args["limit"] ?? "10"), 10),
         maxClassification,
       });
       // #1837 — tool-path recall summary (the runtime boundary logs detail).
-      logDebug(TAG, `memory_recall: user=${userId} limit=${stringValue(args["limit"] ?? "10")} maxClass=${maxClassification} keywords=${terms.length} query="${redactSecrets(terms.join(" ")).slice(0, 60)}"`);
+      logDebug(TAG, `memory_recall: user=${userId} profile=${profile} limit=${stringValue(args["limit"] ?? "10")} maxClass=${maxClassification} keywords=${terms.length} query="${redactSecrets(terms.join(" ")).slice(0, 60)}"`);
       import("../metrics-collector.js").then(({ recordLatency }) => recordLatency("recall", Date.now() - t0)).catch(err => logAndSwallow(TAG, "record recall latency", err));
-      // #1877 — the tool contract predates the carried exemption flags:
-      // strip them before agent-visible serialization. Auto-recall reads
-      // `recall.hits` pre-serialization and is unaffected.
-      return JSON.stringify({ ...result, hits: stripRecallFlagsForTool(result.hits) });
+      return JSON.stringify(result);
     } catch (err) {
       return JSON.stringify({ error: err instanceof Error ? err.message : String(err) });
     }

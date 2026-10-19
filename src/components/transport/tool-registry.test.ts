@@ -29,7 +29,17 @@ function mockAbmindClient(caps: { methods: string[]; features: Record<string, st
     capabilities: { version: 1, methods: caps.methods, domains: ["system", "private"], features: caps.features },
     privateMemory: {
       recordMessage: vi.fn().mockResolvedValue({ id: 42 }),
-      recall: vi.fn().mockResolvedValue({ results: [] }),
+      recall: vi.fn().mockResolvedValue({
+        contract: "owned-v1",
+        profile: "recall_normal",
+        packetId: "test",
+        status: "evidence",
+        items: [],
+        text: "",
+        effective: { maxItems: 15, maxOutputBytes: 12000, deadlineMs: 1500, policyVersion: "owned-v1" },
+        stageOutcomes: {},
+        omissionReasons: [],
+      }),
       instantStore: vi.fn().mockResolvedValue({ stored: true, memoriesCount: 1 }),
       editMemory: vi.fn().mockResolvedValue({ ok: true }),
       rebuildFtsIndexes: vi.fn().mockResolvedValue({ rebuilt: [] }),
@@ -827,47 +837,47 @@ describe("memory_recall peer clearance cap (#1790)", () => {
 
   it("absent maxClass recalls at 0, not the old fixed-1 fallback", async () => {
     await recallAs("peer:plain");
-    expect(lastRecallRequest()).toMatchObject({ userId: "peer:plain", maxClassification: 0 });
+    expect(lastRecallRequest()).toMatchObject({ identity: { principal: "peer:plain" }, filters: { classificationCeiling: 0 } });
   });
 
   it("unknown peer recalls at 0", async () => {
     await recallAs("peer:nobody");
-    expect(lastRecallRequest()).toMatchObject({ userId: "peer:nobody", maxClassification: 0 });
+    expect(lastRecallRequest()).toMatchObject({ identity: { principal: "peer:nobody" }, filters: { classificationCeiling: 0 } });
   });
 
   it("explicit maxClass 1 and 2 forward unchanged", async () => {
     await recallAs("peer:low");
-    expect(lastRecallRequest()).toMatchObject({ userId: "peer:low", maxClassification: 1 });
+    expect(lastRecallRequest()).toMatchObject({ identity: { principal: "peer:low" }, filters: { classificationCeiling: 1 } });
     await recallAs("peer:conf");
-    expect(lastRecallRequest()).toMatchObject({ userId: "peer:conf", maxClassification: 2 });
+    expect(lastRecallRequest()).toMatchObject({ identity: { principal: "peer:conf" }, filters: { classificationCeiling: 2 } });
   });
 
   it("declared maxClass 3 recalls at 2 — SECRET never leaves", async () => {
     await recallAs("peer:sealed");
-    expect(lastRecallRequest()).toMatchObject({ userId: "peer:sealed", maxClassification: 2 });
+    expect(lastRecallRequest()).toMatchObject({ identity: { principal: "peer:sealed" }, filters: { classificationCeiling: 2 } });
   });
 
   it("peer lookup is case-sensitive and wins over a colliding user-registry ID", async () => {
     await recallAs("peer:molty");
-    expect(lastRecallRequest()).toMatchObject({ userId: "peer:molty", maxClassification: 1 });
+    expect(lastRecallRequest()).toMatchObject({ identity: { principal: "peer:molty" }, filters: { classificationCeiling: 1 } });
     await recallAs("peer:Molty");
-    expect(lastRecallRequest()).toMatchObject({ userId: "peer:Molty", maxClassification: 2 });
+    expect(lastRecallRequest()).toMatchObject({ identity: { principal: "peer:Molty" }, filters: { classificationCeiling: 2 } });
   });
 
   it("configured-human and unknown-human behavior is unchanged", async () => {
     await recallAs("master-1");
-    expect(lastRecallRequest()).toMatchObject({ userId: "master-1", maxClassification: 1 });
+    expect(lastRecallRequest()).toMatchObject({ identity: { principal: "master-1" }, filters: { classificationCeiling: 1 } });
     await recallAs("stranger");
-    expect(lastRecallRequest()).toMatchObject({ userId: "stranger", maxClassification: 1 });
+    expect(lastRecallRequest()).toMatchObject({ identity: { principal: "stranger" }, filters: { classificationCeiling: 1 } });
   });
 
   it("model-supplied maxClass/userId arguments cannot override context/config", async () => {
     await recallAs("peer:low", { query: "q", maxClassification: 3, userId: "peer:conf" });
-    expect(lastRecallRequest()).toMatchObject({ userId: "peer:low", maxClassification: 1 });
+    expect(lastRecallRequest()).toMatchObject({ identity: { principal: "peer:low" }, filters: { classificationCeiling: 1 } });
   });
 });
 
-describe("memory_recall keyword contract (#1895)", () => {
+describe("memory_recall keyword contract (#1928)", () => {
   let quotaDir: string;
   let quota: MemoryStoreQuota;
   let holder: MemoryToolDependenciesHolder;
@@ -908,14 +918,23 @@ describe("memory_recall keyword contract (#1895)", () => {
     return calls[calls.length - 1]![0] as Record<string, unknown>;
   }
 
-  it("keyword-only calls work without query and cross verbatim with explicit intent", async () => {
+  it("keyword-only calls work without query and cross verbatim as the explicit anchor", async () => {
     const raw = await executeToolCall("memory_recall", { keywords: ["Migration", "AND", "rollback", "rollback"] }, ctx());
     expect(JSON.parse(raw).hits).toBeDefined();
     // Case, order, duplicates, and literal boolean words survive; no cap.
     expect(lastRecallRequest()).toMatchObject({
-      translated: ["Migration", "AND", "rollback", "rollback"],
-      intent: "explicit",
+      contract: "owned-v1",
+      profile: "recall_normal",
+      query: { keywords: ["Migration", "AND", "rollback", "rollback"] },
     });
+  });
+
+  it("explicit tools default to normal and accept full", async () => {
+    const raw = await executeToolCall("memory_recall", { keywords: ["x"], profile: "recall_full" }, ctx());
+    expect(JSON.parse(raw).hits).toBeDefined();
+    expect(lastRecallRequest()).toMatchObject({ profile: "recall_full" });
+    const bad = await executeToolCall("memory_recall", { keywords: ["x"], profile: "recall_fast" }, ctx());
+    expect(JSON.parse(bad).error).toMatch(/recall_normal or recall_full/);
   });
 
   it("query-only calls take the deprecated split path", async () => {
@@ -923,15 +942,14 @@ describe("memory_recall keyword contract (#1895)", () => {
     expect(JSON.parse(raw).hits).toBeDefined();
     // Unicode word runs, no stoplist/ASCII filter, short tokens preserved.
     expect(lastRecallRequest()).toMatchObject({
-      translated: ["Which", "staging", "rollback"],
-      intent: "explicit",
+      query: { keywords: ["Which", "staging", "rollback"] },
     });
   });
 
   it("present keywords win over query", async () => {
     const raw = await executeToolCall("memory_recall", { keywords: ["zebra"], query: "apples" }, ctx());
     expect(JSON.parse(raw).hits).toBeDefined();
-    expect(lastRecallRequest()).toMatchObject({ translated: ["zebra"], intent: "explicit" });
+    expect(lastRecallRequest()).toMatchObject({ query: { keywords: ["zebra"] } });
   });
 
   it("invalid keywords are an argument error, never a fallback to query", async () => {
@@ -958,7 +976,7 @@ describe("memory_recall keyword contract (#1895)", () => {
     const keywords = Array.from({ length: 24 }, (_, i) => `term${i}`);
     const raw = await executeToolCall("memory_recall", { keywords }, ctx());
     expect(JSON.parse(raw).hits).toBeDefined();
-    expect(lastRecallRequest()).toMatchObject({ translated: keywords, intent: "explicit" });
+    expect(lastRecallRequest()).toMatchObject({ query: { keywords } });
   });
 
   it("schema presents keywords preferred and query no longer universally required", () => {

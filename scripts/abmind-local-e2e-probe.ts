@@ -98,6 +98,8 @@ async function main(): Promise<ProbeResult> {
 
     const recallResult = await runtime.recall({
       query: "probe",
+      profile: "recall_normal",
+      text: "probe",
       userId: user,
       limit: 5,
     });

@@ -385,19 +385,27 @@ export async function handleInboundMessage(
 
     // Capture support at each text segment's boundary. Later reads must never
     // ground text already delivered; successful chunks survive later failures.
-    const citedDeliveredIds = new Set<number>();
+    const citedDeliveredIds = new Set<string>();
     const answerIdentity = (): string => evidenceExecutionId ?? pSession.activeExecutionId ?? deliveryFallbackId;
-    const supportFor = (answerText: string, declared: readonly number[]): number[] => {
+    const supportFor = (answerText: string, declared: readonly string[]): string[] => {
       if (!memoryConfig.memoryEnabled || deps.memoryRuntime?.state !== "ready") return [];
-      let heuristic: number[] = [];
-      try { heuristic = abmind()?.detectCitations?.(answerText, recalledHits ?? []) ?? []; }
+      // detectCitations matches by content and returns positional labels;
+      // map them back to the owner ref keys so no numeric memory identity
+      // is fabricated or persisted.
+      const positional = (recalledHits ?? []).map((hit, index) => ({ id: index + 1, contentEn: hit.contentEn }));
+      let heuristic: string[] = [];
+      try {
+        heuristic = (abmind()?.detectCitations?.(answerText, positional) ?? [])
+          .map((n) => (recalledHits ?? [])[n - 1]?.ref)
+          .filter((ref): ref is string => typeof ref === "string");
+      }
       catch (err) { logWarn(TAG, `Citation detection failed: ${err instanceof Error ? err.message : String(err)}`); }
       return resolveAnswerSupport({
-        declared, heuristic, autoInjected: recalledHits?.map((hit) => hit.id) ?? [],
+        declared, heuristic, autoInjected: recalledHits?.map((hit) => hit.ref) ?? [],
         toolDelivered: peekToolEvidence(answerIdentity()),
       });
     };
-    const deliverAnswer = async (send: () => Promise<number | string | void>, support: readonly number[]): Promise<number | string | void> => {
+    const deliverAnswer = async (send: () => Promise<number | string | void>, support: readonly string[]): Promise<number | string | void> => {
       const executionId = answerIdentity();
       const finishSend = beginAnswerSend(msg.platform, channelId);
       try {
@@ -412,8 +420,8 @@ export async function handleInboundMessage(
     };
     settleAnswerFeedback = async () => {
       if (!memoryConfig.memoryEnabled || deps.memoryRuntime?.state !== "ready") return;
-      const targets = [...citedDeliveredIds].map((memoryId) => ({ memoryId,
-        operationKey: feedbackKey(msg.platform, channelId, userId, answerIdentity(), memoryId, "cite", "auto") }));
+      const targets = [...citedDeliveredIds].map((ref) => ({ ref,
+        operationKey: feedbackKey(msg.platform, channelId, userId, answerIdentity(), ref, "cite", "auto") }));
       await recordFeedbackBatch(deps.memoryRuntime, userId, "cite", targets);
     };
 

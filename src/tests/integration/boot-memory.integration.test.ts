@@ -27,12 +27,14 @@ describe("boot-memory integration", () => {
     expect(tableNames).toContain("content_en_trigram");
     expect(tableNames).toContain("content_original_trigram");
 
-    // Verify functional round-trip
+    // Verify functional round-trip through the owned contract
     await h.memory.editor.instantStore({
       userId: "u1", contentEn: "Boot test memory", contentOriginal: "boot",
       memoryType: "fact", emotionScore: 0, emotionTags: "trust",
     });
-    const result = await h.recallSearch({ translated: ["boot", "test"], userId: "u1" });
-    expect(result.results.length).toBeGreaterThan(0);
+    const result = await h.recallOwned("recall_normal", "Boot test memory");
+    expect(result.items.length).toBeGreaterThan(0);
+    expect(result.items[0]!.excerpt).toContain("Boot test memory");
+    expect(result.status).toBe("evidence");
   });
 });

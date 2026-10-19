@@ -5,10 +5,31 @@ import {
   createUnavailableRuntime,
   attemptMemoryMutation,
   asSessionSoulBundle,
-  asRecallStageOutcomes,
-  sanitizeRecallTerms,
+  asExplicitKeywords,
   type MemoryRuntimeCapability,
 } from "./memory-runtime.js";
+
+function ownedPacket(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    contract: "owned-v1",
+    profile: "recall_fast",
+    packetId: "test-packet",
+    status: "evidence",
+    items: [
+      {
+        ref: { kind: "db", layer: "durable", recordId: 9, owner: "u1", version: "1" },
+        excerpt: "The dog chased the fox.",
+        rationale: "projection porter",
+        excerptProvenance: "projection porter",
+      },
+    ],
+    text: "[1] (db:durable:9:u1:1) The dog chased the fox.",
+    effective: { maxItems: 5, maxOutputBytes: 2000, deadlineMs: 500, policyVersion: "owned-v1" },
+    stageOutcomes: {},
+    omissionReasons: [],
+    ...overrides,
+  };
+}
 import type { AbmindRouteSnapshotV1Like } from "./abmind-route-contract.js";
 
 type AbmindCapabilitiesV1 = { version: number; methods: string[]; domains: string[]; features: Record<string, string> };
@@ -18,17 +39,19 @@ function mockClient(caps: AbmindCapabilitiesV1, overrides?: Partial<import("abmi
     capabilities: caps,
     privateMemory: {
       recordMessage: vi.fn().mockResolvedValue({ id: 42 }),
-      recall: vi.fn().mockResolvedValue({ results: [] }),
+      recall: vi.fn().mockResolvedValue(ownedPacket({ items: [], text: "" })),
       assembleSessionContext: vi.fn().mockResolvedValue({ wakeUp: "", recall: "", coreKnowledge: "", soulBundle: { soul: "", profile: "", notes: "", memoryTools: "", coreFacts: "" } }),
       getRecentConversation: vi.fn().mockResolvedValue([]),
       getRuntimeStatus: vi.fn().mockResolvedValue(null),
       getCoreKnowledge: vi.fn().mockResolvedValue(""),
       recordFeedback: vi.fn().mockResolvedValue(undefined),
-      checkWorthRetrieving: vi.fn(),
       embed: vi.fn().mockResolvedValue({ vectors: [], model: "" }),
       rebuildFtsIndexes: vi.fn().mockResolvedValue({ rebuilt: [] }),
       instantStore: vi.fn().mockResolvedValue({ stored: true, memoriesCount: 1 }),
       editMemory: vi.fn().mockResolvedValue({ ok: true }),
+      adjustRelevance: vi.fn().mockResolvedValue({ ok: true }),
+      mergeMemories: vi.fn().mockResolvedValue({ merged: true }),
+      cascadeDelete: vi.fn().mockResolvedValue({ ok: true }),
       projectConversationContext: vi.fn().mockResolvedValue({
         version: 1,
         messages: [{ role: "user", content: "prior" }],
@@ -48,7 +71,7 @@ function caps(methods: string[], features: Record<string, string> = {}): AbmindC
 const ALL_METHODS = [
   "private.recall", "private.recordMessage", "private.instantStore", "private.edit",
   "private.rebuildFts", "private.recordFeedback", "private.getCoreKnowledge", "private.getRuntimeStatus",
-  "private.projectConversationContext", "private.checkWorthRetrieving",
+  "private.projectConversationContext",
 ];
 
 describe("capability projection", () => {
@@ -56,12 +79,12 @@ describe("capability projection", () => {
     {
       methods: ALL_METHODS,
       features: { private_read: "true", private_write: "true", private_mutation_contract: "revision-v1" },
-      expected: ["recall", "recordMessage", "instantStore", "editMemory", "rebuildFts", "feedback", "coreKnowledge", "status", "durableContext", "worthRetrieving"],
+      expected: ["recall", "recordMessage", "instantStore", "editMemory", "rebuildFts", "feedback", "coreKnowledge", "status", "durableContext"],
     },
     {
       methods: ALL_METHODS,
       features: { private_read: "true", private_write: "false" },
-      expected: ["recall", "recordMessage", "feedback", "coreKnowledge", "status", "durableContext", "worthRetrieving"],
+      expected: ["recall", "recordMessage", "feedback", "coreKnowledge", "status", "durableContext"],
     },
     {
       methods: ALL_METHODS,
@@ -94,7 +117,7 @@ describe("capability projection", () => {
     for (const cap of expected) {
       expect(rt.supports(cap)).toBe(true);
     }
-    const allCaps: MemoryRuntimeCapability[] = ["recall", "recordMessage", "instantStore", "editMemory", "rebuildFts", "feedback", "coreKnowledge", "status", "durableContext", "worthRetrieving"];
+    const allCaps: MemoryRuntimeCapability[] = ["recall", "recordMessage", "instantStore", "editMemory", "rebuildFts", "feedback", "coreKnowledge", "status", "durableContext"];
     for (const cap of allCaps) {
       if (expected.includes(cap)) {
         expect(rt.supports(cap), `${cap} should be supported`).toBe(true);
@@ -123,54 +146,6 @@ describe("capability projection", () => {
     (client as any).capabilities = malformed;
     const rt = createClientRuntime(client);
     expect([...rt.capabilities]).toEqual([]);
-  });
-});
-
-describe("worthRetrieving (#1894)", () => {
-  function checkClient(check: unknown, methods = [...ALL_METHODS]) {
-    const client = mockClient(caps(methods, { private_read: "true" }));
-    (client.privateMemory as unknown as Record<string, unknown>)["checkWorthRetrieving"] = check;
-    return { client, rt: createClientRuntime(client) };
-  }
-
-  it("passes the ambient verdict through with scope filters", async () => {
-    const check = vi.fn().mockResolvedValue({ verdict: "skip", corpusSize: 14, ceiling: 3 });
-    const { client, rt } = checkClient(check);
-    const result = await rt.worthRetrieving!({ original: "köszi", userId: "u1", limit: 5 });
-    expect(result).toEqual({ verdict: "skip", corpusSize: 14, ceiling: 3 });
-    expect(check).toHaveBeenCalledWith(expect.objectContaining({
-      original: "köszi", userId: "u1", intent: "ambient", limit: 5,
-    }));
-    expect(client.privateMemory.recall).not.toHaveBeenCalled();
-  });
-
-  it("missing capability returns null (older daemon falls back to ordinary recall)", async () => {
-    const check = vi.fn();
-    const { rt } = checkClient(check, ["private.recall", "private.recordMessage"]);
-    expect(await rt.worthRetrieving!({ original: "köszi", userId: "u1" })).toBeNull();
-    expect(check).not.toHaveBeenCalled();
-  });
-
-  it("missing method returns null without calling", async () => {
-    const client = mockClient(caps(ALL_METHODS, { private_read: "true" }));
-    delete (client.privateMemory as unknown as Record<string, unknown>)["checkWorthRetrieving"];
-    const rt = createClientRuntime(client);
-    expect(await rt.worthRetrieving!({ original: "köszi", userId: "u1" })).toBeNull();
-  });
-
-  it("a thrown check error returns null (failure favors searching)", async () => {
-    const { rt } = checkClient(vi.fn().mockRejectedValue(new Error("daemon down")));
-    expect(await rt.worthRetrieving!({ original: "köszi", userId: "u1" })).toBeNull();
-  });
-
-  it.each([
-    ["absent", undefined],
-    ["wrong verdict", { verdict: "maybe", corpusSize: 1, ceiling: 0 }],
-    ["non-object", "skip"],
-    ["null", null],
-  ])("malformed verdict (%s) returns null", async (_label, raw) => {
-    const { rt } = checkClient(vi.fn().mockResolvedValue(raw));
-    expect(await rt.worthRetrieving!({ original: "köszi", userId: "u1" })).toBeNull();
   });
 });
 
@@ -524,208 +499,90 @@ describe("Disabled and Unavailable runtimes", () => {
   });
 });
 
-describe("recall carries no decision field after FASTPATH removal", () => {
-  function recallClient(extra: unknown) {
+describe("#1928 M4 — owned recall through createClientRuntime", () => {
+  function recallClient(packet: Record<string, unknown>) {
     const client = mockClient(caps(["private.recall"], { private_read: "true" }));
-    (client.privateMemory.recall as unknown as Mock).mockResolvedValue({
-      results: [{ content: "Deploys run via /deploy prod.", score: 0.9, date: "2026-09-01" }],
-      ...(typeof extra === "object" && extra !== null ? extra as Record<string, unknown> : {}),
-    });
+    (client.privateMemory.recall as unknown as Mock).mockResolvedValue(packet);
     return client;
   }
 
-  it("drops retired decision envelopes and keeps ordinary recall", async () => {
-    const retiredDecision = {
-      version: 1,
-      outcome: "already-supplied",
-      sourceIds: [7],
-      sourceRevisions: { 7: 0 },
-      selectedRefs: [7],
-      profile: "jev/jev-1.13.0 repeat-v1",
-      questionSet: "repeat-v1",
-    };
-    const client = recallClient({ decision: retiredDecision });
+  it("fast sends the verbatim raw turn under the owned contract", async () => {
+    const client = recallClient(ownedPacket());
     const rt = createClientRuntime(client);
-    const res = await rt.recall({ query: "deploy", userId: "u1" });
-    expect(res).not.toHaveProperty("decision");
-    expect(res.hits).toHaveLength(1);
-    expect(vi.mocked(client.privateMemory.recall)).toHaveBeenCalledWith(expect.not.objectContaining({
-      fastPath: expect.anything(),
+    const res = await rt.recall({ query: "deploy now", userId: "u1", profile: "recall_fast", rawTurn: "deploy now" });
+    expect(vi.mocked(client.privateMemory.recall)).toHaveBeenCalledWith(expect.objectContaining({
+      contract: "owned-v1",
+      profile: "recall_fast",
+      identity: { principal: "u1" },
+      rawTurn: "deploy now",
     }));
+    expect(res.status).toBe("evidence");
+    expect(res.context).toBe("[1] (db:durable:9:u1:1) The dog chased the fox.");
+    expect(res.hits).toEqual([expect.objectContaining({ ref: "db:durable:9:u1:1", kind: "db", content: "The dog chased the fox." })]);
   });
 
-  it("recalls without any fast-path intent", async () => {
-    const rt = createClientRuntime(recallClient(null));
-    const res = await rt.recall({ query: "deploy", userId: "u1" });
-    expect(res).not.toHaveProperty("decision");
-    expect(res.hits).toHaveLength(1);
-  });
-});
-
-describe("#1908 ambient planner diagnostics carry", () => {
-  function recallClient(extra: unknown) {
-    const client = mockClient(caps(["private.recall"], { private_read: "true" }));
-    (client.privateMemory.recall as unknown as Mock).mockResolvedValue({
-      results: [{ id: 3, content: "Deploys run via /deploy prod.", score: 0.9, date: "2026-09-01" }],
-      ...(typeof extra === "object" && extra !== null ? extra as Record<string, unknown> : {}),
-    });
-    return client;
-  }
-
-  it("carries validated diagnostics through the runtime", async () => {
-    const rt = createClientRuntime(recallClient({
-      ambient: {
-        plans: "raw+context",
-        semanticSource: "context",
-        rawTermsTotal: 3,
-        rawTermsInformative: 0,
-        hintsTotal: 1,
-        hintsInformative: 0,
-        contextConsidered: 1,
-        contextEligible: 1,
-        contextRejected: { "over-budget": 0, "foreign-principal": 1 },
-      },
-    }));
-    const res = await rt.recall({ query: "deploy", userId: "u1" });
-    expect(res.ambient).toEqual({
-      plans: "raw+context",
-      semanticSource: "context",
-      rawTermsTotal: 3,
-      rawTermsInformative: 0,
-      hintsTotal: 1,
-      hintsInformative: 0,
-      contextConsidered: 1,
-      contextEligible: 1,
-      contextRejected: { "over-budget": 0, "foreign-principal": 1 },
-    });
+  it("clamps host capacity to the profile ceiling, never expands it", async () => {
+    const client = recallClient(ownedPacket());
+    const rt = createClientRuntime(client);
+    await rt.recall({ query: "x", userId: "u1", profile: "recall_fast", rawTurn: "x", limit: 50, maxOutputBytes: 100000 });
+    const sent = vi.mocked(client.privateMemory.recall).mock.calls[0]![0] as Record<string, unknown>;
+    expect((sent["capacity"] as Record<string, unknown>)["maxItems"]).toBe(5);
+    expect((sent["capacity"] as Record<string, unknown>)["maxOutputBytes"]).toBe(2000);
   });
 
-  it("drops a malformed diagnostics envelope", async () => {
+  it("explicit anchor crosses verbatim with filters", async () => {
+    const client = recallClient(ownedPacket());
+    const rt = createClientRuntime(client);
+    const keywords = ["Migration", "AND", "rollback", "rollback"];
+    await rt.recall({ query: keywords.join(" "), userId: "u1", profile: "recall_normal", text: keywords.join(" "), keywords, timeStart: 10, timeEnd: 20 });
+    const sent = vi.mocked(client.privateMemory.recall).mock.calls[0]![0] as Record<string, unknown>;
+    expect(sent["query"]).toEqual({ text: keywords.join(" "), keywords });
+    expect(sent["filters"]).toMatchObject({ timeStart: 10, timeEnd: 20 });
+  });
+
+  it("rejects empty keywords before any retrieval runs", async () => {
+    const client = recallClient(ownedPacket());
+    const rt = createClientRuntime(client);
+    await expect(rt.recall({ query: "q", userId: "u1", profile: "recall_normal", text: "q", keywords: [] })).rejects.toThrow(/non-empty array/);
+    expect(client.privateMemory.recall).not.toHaveBeenCalled();
+  });
+
+  it("rejects malformed packets instead of injecting a lie", async () => {
     for (const bad of [
-      { plans: "maybe", semanticSource: "context" },
-      { plans: "raw", semanticSource: "guess" },
-      "raw+context",
+      { contract: "legacy", profile: "recall_fast" },
+      ownedPacket({ items: [{ noRef: true, excerpt: "x" }] }),
+      ownedPacket({ items: [{ ref: { kind: "db", layer: "durable" }, excerpt: "x" }] }),
+      ownedPacket({ text: 42 }),
+      null,
     ]) {
-      const rt = createClientRuntime(recallClient({ ambient: bad }));
-      const res = await rt.recall({ query: "deploy", userId: "u1" });
-      expect(res.ambient).toBeUndefined();
-      expect(res.hits).toHaveLength(1);
-    }
-  });
-});
-
-describe("#1813 selection carry and compact context", () => {
-  function recallClient(results: Array<Record<string, unknown>>, selection: unknown) {
-    const client = mockClient(caps(["private.recall"], { private_read: "true" }));
-    (client.privateMemory.recall as unknown as Mock).mockResolvedValue({ results, selection });
-    return client;
-  }
-
-  const results = [
-    { id: 1, content: "Deploys run via /deploy prod.", score: 0.9, date: "2026-09-01" },
-    { id: 2, content: "Rollbacks use /rollback prod.", score: 0.8, date: "2026-09-02" },
-  ];
-
-  it("carries a validated selection and compacts the context to it", async () => {
-    const rt = createClientRuntime(recallClient(results, {
-      version: 1, refs: [{ id: 2, revision: 4 }], budgetBytes: 2000, truncated: true,
-    }));
-    const res = await rt.recall({ query: "deploy", userId: "u1" });
-    expect(res.selection).toEqual({
-      version: 1, refs: [{ id: 2, revision: 4 }], budgetBytes: 2000, truncated: true,
-    });
-    expect(res.hits).toHaveLength(2);
-    expect(res.context).toContain("Rollbacks");
-    expect(res.context).not.toContain("Deploys run");
-  });
-
-  it("drops malformed selections and renders every hit", async () => {
-    for (const bad of [
-      { version: 2, refs: [], budgetBytes: 2000, truncated: false },
-      { version: 1, refs: [{ id: "2", revision: 1 }], budgetBytes: 2000, truncated: false },
-      { version: 1, refs: [{ id: 2 }], budgetBytes: 2000, truncated: false },
-      { version: 1, refs: [], budgetBytes: "2000", truncated: false },
-      { version: 1, refs: [], budgetBytes: 2000, truncated: "no" },
-    ]) {
-      const rt = createClientRuntime(recallClient(results, bad));
-      const res = await rt.recall({ query: "deploy", userId: "u1" });
-      expect(res.selection).toBeUndefined();
-      expect(res.context).toContain("Deploys run");
-      expect(res.context).toContain("Rollbacks");
+      const rt = createClientRuntime(recallClient(bad as Record<string, unknown>));
+      await expect(rt.recall({ query: "x", userId: "u1", profile: "recall_fast", rawTurn: "x" })).rejects.toThrow(/recall returned a/);
     }
   });
 
-  it("falls back to every hit when the selection is unresolvable", async () => {
-    const rt = createClientRuntime(recallClient(results, {
-      version: 1, refs: [{ id: 99, revision: 1 }], budgetBytes: 2000, truncated: false,
-    }));
-    const res = await rt.recall({ query: "deploy", userId: "u1" });
-    expect(res.context).toContain("Deploys run");
-    expect(res.context).toContain("Rollbacks");
+  it("surfaces packet status, refs, and continuation", async () => {
+    const rt = createClientRuntime(recallClient(ownedPacket({
+      status: "partial",
+      omissionReasons: ["stage-degraded: Se (failed)"],
+      continuation: "h1",
+      items: [
+        { ref: { kind: "artifact", owner: "u1", artifact: "daily/d.md", contentVersion: "v1" }, excerpt: "Weekly note." },
+        { ref: { kind: "graph", edge: "e", sources: ["a", "b"] }, excerpt: "Linked pair." },
+      ],
+      text: "Weekly note.\nLinked pair.",
+    })));
+    const res = await rt.recall({ query: "x", userId: "u1", profile: "recall_full", text: "x" });
+    expect(res.status).toBe("partial");
+    expect(res.omissionReasons).toEqual(["stage-degraded: Se (failed)"]);
+    expect(res.continuation).toBe("h1");
+    expect(res.hits.map((h) => h.ref)).toEqual(["artifact:u1:daily/d.md:v1", "graph:e:a+b"]);
+    expect(res.context).toBe("Weekly note.\nLinked pair.");
   });
 
-  it("keeps id-less rows while the budget covers them, drops them after", async () => {
-    const withIdless = [
-      ...results,
-      { content: "Weekly summary: two deploys.", score: 0.5, date: "2026-09-03" },
-    ];
-    const roomy = createClientRuntime(recallClient(withIdless, {
-      version: 1, refs: [{ id: 1, revision: 1 }], budgetBytes: 2000, truncated: false,
-    }));
-    const roomyRes = await roomy.recall({ query: "deploy", userId: "u1" });
-    expect(roomyRes.context).toContain("Deploys run");
-    expect(roomyRes.context).toContain("Weekly summary");
-
-    const tight = createClientRuntime(recallClient(withIdless, {
-      version: 1, refs: [{ id: 1, revision: 1 }], budgetBytes: 30, truncated: true,
-    }));
-    const tightRes = await tight.recall({ query: "deploy", userId: "u1" });
-    expect(tightRes.context).toContain("Deploys run");
-    expect(tightRes.context).not.toContain("Weekly summary");
-  });
-
-  it("emits id-less rows in recall rank order, not appended after the selection", async () => {
-    const rt = createClientRuntime(recallClient([
-      { id: 1, content: "Deploys run via /deploy prod.", score: 0.9, date: "2026-09-01" },
-      { content: "Weekly summary: two deploys.", score: 0.8, date: "2026-09-02" },
-      { id: 2, content: "Rollbacks use /rollback prod.", score: 0.7, date: "2026-09-03" },
-    ], {
-      version: 1, refs: [{ id: 1, revision: 1 }, { id: 2, revision: 1 }], budgetBytes: 2000, truncated: false,
-    }));
-    const res = await rt.recall({ query: "deploy", userId: "u1" });
-    const lines = res.context.split("\n");
-    expect(lines.map((l) => l.replace(/^- \(score: [\d.]+\) /, ""))).toEqual([
-      "Deploys run via /deploy prod.",
-      "Weekly summary: two deploys.",
-      "Rollbacks use /rollback prod.",
-    ]);
-  });
-
-  it("skips a single over-budget id-less row so a smaller later one still fits", async () => {
-    const rt = createClientRuntime(recallClient([
-      { id: 1, content: "Deploys run via /deploy prod.", score: 0.9, date: "2026-09-01" },
-      { content: `Long weekly digest ${"x".repeat(200)}`, score: 0.8, date: "2026-09-02" },
-      { content: "Short note.", score: 0.7, date: "2026-09-03" },
-    ], {
-      version: 1, refs: [{ id: 1, revision: 1 }], budgetBytes: 80, truncated: true,
-    }));
-    const res = await rt.recall({ query: "deploy", userId: "u1" });
-    expect(res.context).toContain("Deploys run");
-    expect(res.context).not.toContain("Long weekly digest");
-    expect(res.context).toContain("Short note.");
-  });
-
-  it("treats a non-finite or non-positive budget as malformed", async () => {
-    for (const budgetBytes of [Number.NaN, Number.POSITIVE_INFINITY, 0, -2000]) {
-      const rt = createClientRuntime(recallClient([
-        ...results,
-        { content: "Weekly summary: two deploys.", score: 0.5, date: "2026-09-03" },
-      ], { version: 1, refs: [{ id: 1, revision: 1 }], budgetBytes, truncated: false }));
-      const res = await rt.recall({ query: "deploy", userId: "u1" });
-      expect(res.selection).toBeUndefined();
-      expect(res.context).toContain("Deploys run");
-      expect(res.context).toContain("Rollbacks");
-      expect(res.context).toContain("Weekly summary");
+  it("asExplicitKeywords accepts verbatim arrays and rejects anything else", async () => {
+    expect(asExplicitKeywords(["a", "B", "a"])).toEqual(["a", "B", "a"]);
+    for (const bad of [undefined, null, [], ["ok", ""], ["ok", "  "], "x", [42]]) {
+      expect(() => asExplicitKeywords(bad)).toThrow(/non-empty array of non-blank strings/);
     }
   });
 });
@@ -773,129 +630,3 @@ describe("#1869 session parts and test-mode status", () => {
   });
 });
 
-describe("#1867 discrete terms and diagnostics carry", () => {
-  function recallClient(extra: Record<string, unknown>) {
-    const client = mockClient(caps(["private.recall"], { private_read: "true" }));
-    (client.privateMemory.recall as unknown as Mock).mockResolvedValue({
-      results: [{ content: "The dog chased the fox.", score: 0.9, date: "2026-09-01" }],
-      ...extra,
-    });
-    return client;
-  }
-
-  it("forwards discrete terms as translated with selectTerms, preserving original", async () => {
-    const client = recallClient({});
-    const rt = createClientRuntime(client);
-    await rt.recall({ query: "dog fox looks like", original: "dog fox looks like", userId: "u1", terms: ["dog", "fox"], selectTerms: true });
-    expect(vi.mocked(client.privateMemory.recall)).toHaveBeenCalledWith(expect.objectContaining({
-      translated: ["dog", "fox"],
-      original: "dog fox looks like",
-      selectTerms: true,
-    }));
-  });
-
-  it("falls back to the joined query when no terms were prepared", async () => {
-    const client = recallClient({});
-    const rt = createClientRuntime(client);
-    await rt.recall({ query: "dog fox looks like", userId: "u1" });
-    const call = vi.mocked(client.privateMemory.recall).mock.calls[0]?.[0] as Record<string, unknown>;
-    expect(call["translated"]).toEqual(["dog fox looks like"]);
-    expect(call["selectTerms"]).toBeUndefined();
-  });
-
-  it("sanitizes terms before forwarding (trim, dedupe, drop empties)", () => {
-    expect(sanitizeRecallTerms([" dog ", "", "dog", "fox", 42 as unknown as string])).toEqual(["dog", "fox"]);
-    expect(sanitizeRecallTerms(undefined)).toEqual([]);
-    expect(sanitizeRecallTerms([])).toEqual([]);
-  });
-
-  it("carries validated stageOutcomes and weakEvidence, advisory only", async () => {
-    const stageOutcomes = { Sf: { status: "completed", hitCount: 3 }, Se: { status: "no-provider", hitCount: 0 } };
-    const rt = createClientRuntime(recallClient({ stageOutcomes, weakEvidence: true }));
-    const res = await rt.recall({ query: "dog", userId: "u1", terms: ["dog"], selectTerms: true });
-    expect(res.stageOutcomes).toEqual(stageOutcomes);
-    expect(res.weakEvidence).toBe(true);
-    expect(res.hits).toHaveLength(1);
-  });
-
-  it("drops malformed diagnostics and keeps ordinary recall", async () => {
-    for (const bad of [
-      { stageOutcomes: { Sf: { status: "maybe", hitCount: 1 } }, weakEvidence: "yes" },
-      { stageOutcomes: { Sf: { status: "completed", hitCount: -1 } }, weakEvidence: 1 },
-      { stageOutcomes: [{ status: "completed" }], weakEvidence: null },
-      { stageOutcomes: undefined, weakEvidence: 1 },
-    ]) {
-      const rt = createClientRuntime(recallClient(bad as Record<string, unknown>));
-      const res = await rt.recall({ query: "dog", userId: "u1" });
-      expect(res.stageOutcomes).toBeUndefined();
-      expect(res.weakEvidence).toBeUndefined();
-      expect(res.hits).toHaveLength(1);
-    }
-  });
-
-  it("asRecallStageOutcomes validates the structural mirror", () => {
-    expect(asRecallStageOutcomes({ Sf: { status: "completed", hitCount: 0 } })).toEqual({ Sf: { status: "completed", hitCount: 0 } });
-    for (const bad of [undefined, null, 42, "x", [], { Sf: null }, { Sf: { status: "completed" } }, { Sf: { status: "completed", hitCount: 1.5 } }]) {
-      expect(asRecallStageOutcomes(bad)).toBeUndefined();
-    }
-  });
-});
-
-describe("#1895 explicit keywords and intent carry", () => {
-  function recallClient() {
-    const client = mockClient(caps(["private.recall"], { private_read: "true" }));
-    (client.privateMemory.recall as unknown as Mock).mockResolvedValue({
-      results: [{ content: "The dog chased the fox.", score: 0.9, date: "2026-09-01" }],
-    });
-    return client;
-  }
-
-  it("explicit keywords bypass the lossy sanitizer and force explicit intent", async () => {
-    const client = recallClient();
-    const rt = createClientRuntime(client);
-    const keywords = ["Migration", "AND", "rollback", "rollback", ...Array.from({ length: 20 }, (_, i) => `term${i}`)];
-    await rt.recall({ query: keywords.join(" "), userId: "u1", keywords, intent: "explicit" });
-    expect(vi.mocked(client.privateMemory.recall)).toHaveBeenCalledWith(expect.objectContaining({
-      translated: keywords,
-      intent: "explicit",
-    }));
-    const sent = vi.mocked(client.privateMemory.recall).mock.calls[0]?.[0] as Record<string, unknown>;
-    expect(sent["selectTerms"]).toBeUndefined();
-  });
-
-  it("keywords win over ambient terms and force explicit intent", async () => {
-    const client = recallClient();
-    const rt = createClientRuntime(client);
-    await rt.recall({ query: "q", userId: "u1", terms: ["dog"], selectTerms: true, keywords: ["zebra"] });
-    expect(vi.mocked(client.privateMemory.recall)).toHaveBeenCalledWith(expect.objectContaining({
-      translated: ["zebra"],
-      intent: "explicit",
-    }));
-  });
-
-  it("ambient intent forwards without keywords", async () => {
-    const client = recallClient();
-    const rt = createClientRuntime(client);
-    await rt.recall({ query: "q", original: "q", userId: "u1", terms: ["dog"], selectTerms: true, intent: "ambient" });
-    expect(vi.mocked(client.privateMemory.recall)).toHaveBeenCalledWith(expect.objectContaining({
-      translated: ["dog"],
-      intent: "ambient",
-      selectTerms: true,
-    }));
-  });
-
-  it("asExplicitKeywords accepts verbatim arrays and rejects anything else", async () => {
-    const { asExplicitKeywords } = await import("./memory-runtime.js");
-    expect(asExplicitKeywords(["a", "B", "a"])).toEqual(["a", "B", "a"]);
-    for (const bad of [undefined, null, [], ["ok", ""], ["ok", "  "], "x", [42]]) {
-      expect(() => asExplicitKeywords(bad)).toThrow(/non-empty array of non-blank strings/);
-    }
-  });
-
-  it("invalid keywords reject before any retrieval runs", async () => {
-    const client = recallClient();
-    const rt = createClientRuntime(client);
-    await expect(rt.recall({ query: "q", userId: "u1", keywords: [] })).rejects.toThrow(/non-empty array/);
-    expect(client.privateMemory.recall).not.toHaveBeenCalled();
-  });
-});
