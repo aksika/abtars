@@ -119,8 +119,8 @@ export function buildBridgeConfig(
     maxToolRounds: 3,
     // #1531: the steer-followup run needs three consecutive provider turns on
     // the primary candidate (initial generation + two steered generations).
-    // The candidate-rotation limit must not force a fallback switch mid-run.
-    maxFallbackToolRounds: 3,
+    // #1932: maxFallbackToolRounds is retired and inert; the single
+    // configured candidate serves every turn.
   }, null, 2));
 
   // ── models.json — catalog consumed by /model quick and context resolution ─

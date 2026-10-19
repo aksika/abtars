@@ -154,7 +154,7 @@ describe("#1900 reporting and evidence gates", () => {
     expect(shouldBlockScheduledRestart("scheduled-orc-round-limit-restart", [
       { name: "scheduled-orc-round-limit", state: "passed" },
     ])).toBe(false);
-    expect(shouldBlockScheduledRestart("candidate-fallback", [
+    expect(shouldBlockScheduledRestart("single-candidate-failure", [
       { name: "scheduled-orc-round-limit", state: "failed" },
     ])).toBe(false);
   });

@@ -21,8 +21,6 @@ import type { ManagedSession } from "../../components/spin-types.js";
 import type { IKiroTransport } from "../../components/transport/kiro-transport.js";
 import { createPiAgentTools } from "../../components/transport/pi-core-tools.js";
 import { createPiExecutionSafetyController } from "../../components/transport/pi-core-safety.js";
-import { FallbackPolicy } from "../../components/transport/fallback-policy.js";
-import { ModelHealthRegistry } from "../../components/transport/model-health-registry.js";
 import { buildPolicy } from "../../components/tool-sandbox.js";
 import { MemoryStoreQuota } from "../../components/memory-store-quota.js";
 import { lookupAnswerRecord } from "../../components/answer-evidence.js";
@@ -117,7 +115,7 @@ describe("#1913 composed answer reaction journey (owned refs)", () => {
       const provider = async () => {
         active.activeExecutionId = "journey-exec";
         const tools = createPiAgentTools({ executionId: "journey-exec", userId: "u1", sessionType: "A", sandboxPolicy: buildPolicy("owner", { allowedTools: ["memory_recall"] }),
-          memoryToolDeps: { current: { runtime, quota } }, safety: createPiExecutionSafetyController(new FallbackPolicy([], new ModelHealthRegistry())) });
+          memoryToolDeps: { current: { runtime, quota } }, safety: createPiExecutionSafetyController() });
         const tool = tools.find((entry) => entry.name === "memory_recall");
         expect(tool).toBeDefined();
         expect(tool!.description).toContain("[SUPPORT:");

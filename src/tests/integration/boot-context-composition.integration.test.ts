@@ -22,7 +22,6 @@ import { createBootCtx, type BootCtx } from "../../boot/context.js";
 import { phasePipelineDeps } from "../../boot/phase-pipeline-deps.js";
 import { phaseMemory, type MemoryRuntimeFactoryResult, type PhaseMemoryDeps } from "../../boot/phase-memory.js";
 import { PiCoreTransport } from "../../components/transport/pi-core-transport.js";
-import { ModelHealthRegistry } from "../../components/transport/model-health-registry.js";
 import type { DurableContextProviderHolder } from "../../components/transport/pi-core-context.js";
 import type { AbtarsMemoryRuntime } from "../../components/memory-runtime.js";
 import type { BootNode } from "../../boot/boot-graph.js";
@@ -58,8 +57,13 @@ async function makeTransport(ctx: BootCtx): Promise<PiCoreTransport> {
   return new PiCoreTransport({
     role: "main",
     systemPrompt: "",
-    candidates: [],
-    healthRegistry: new ModelHealthRegistry(undefined),
+    candidate: {
+      model: "test-model",
+      provider: "test-provider",
+      endpoint: "http://localhost:11434/v1",
+      maxContext: 128000,
+      source: "primary",
+    },
     sandboxPolicy: { allowedTools: [], allowedRead: [], allowedWrite: [], canExecuteBash: false },
     contextProvider: ctx.durableContextProvider,
   });

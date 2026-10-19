@@ -59,7 +59,6 @@ const tcMocks = vi.hoisted(() => ({
   validateProviderReady: vi.fn(),
   formatValidationError: vi.fn(),
   resolveAgent: vi.fn(),
-  cleanDemotedModels: vi.fn(),
 }));
 
 vi.mock("../../components/transport-config.js", async (importOriginal) => {
@@ -477,7 +476,6 @@ describe("TelegramAdapter", () => {
         sendInterrupt: vi.fn().mockResolvedValue(undefined),
         destroy: vi.fn(),
         setModel: vi.fn().mockResolvedValue(undefined),
-        switchProvider: vi.fn(),
         transportCommands: [],
         get isReady() { return true; },
       };
@@ -556,12 +554,10 @@ describe("TelegramAdapter", () => {
       tcMocks.getModelsForProvider.mockReset();
       tcMocks.validateProviderReady.mockReset();
       tcMocks.formatValidationError.mockReset();
-      tcMocks.cleanDemotedModels.mockReset();
       tcMocks.writeTransportConfig.mockReturnValue({ ok: true });
       tcMocks.getModelsForProvider.mockReturnValue([{ id: MODEL }]);
       tcMocks.validateProviderReady.mockReturnValue({ ok: true });
       tcMocks.formatValidationError.mockReturnValue("");
-      tcMocks.cleanDemotedModels.mockReturnValue(undefined);
     });
 
     it("calls setModel on the live transport after a completed rebuild", async () => {
@@ -582,7 +578,7 @@ describe("TelegramAdapter", () => {
       expect(sentTexts().some((t) => t.includes(`✓ Switched to ${MODEL}`))).toBe(true);
     });
 
-    it("calls switchProvider on the live transport for a same-type provider change", async () => {
+    it("rebuilds and resets the live transport for a same-type provider change (#1932: no hot swap)", async () => {
       await wireWithLiveGetter();
       tcMocks.loadTransport.mockReturnValue(
         routeConfig("codex", "codex-model", { openrouter: apiProviders.openrouter, codex: apiProviders.codex }),
@@ -598,13 +594,11 @@ describe("TelegramAdapter", () => {
 
       await injectModelCallback(`mset:openrouter:${MODEL}`);
 
-      expect(newTransport.switchProvider).toHaveBeenCalledTimes(1);
-      expect(newTransport.switchProvider).toHaveBeenCalledWith(
-        expect.objectContaining({ provider: "openrouter", model: MODEL, apiKey: "test-key" }),
-      );
-      expect(oldTransport.switchProvider).not.toHaveBeenCalled();
-      expect(pipelineDeps.rebuildTransport).not.toHaveBeenCalled();
-      expect(sentTexts().some((t) => t.includes(`✓ Switched to ${MODEL} (openrouter)`))).toBe(true);
+      // Hot swap is retired: every provider change rebuilds the transport.
+      expect(pipelineDeps.rebuildTransport).toHaveBeenCalledTimes(1);
+      expect(newTransport.resetSession).toHaveBeenCalledTimes(1);
+      expect(newTransport.setModel).not.toHaveBeenCalled();
+      expect(sentTexts().some((t) => t.includes("Transport rebuilt"))).toBe(true);
     });
 
     it("rebuilds and resets the live transport for a cross-transport change", async () => {
@@ -622,8 +616,6 @@ describe("TelegramAdapter", () => {
       expect(newTransport.resetSession).toHaveBeenCalledTimes(1);
       expect(newTransport.resetSession).toHaveBeenCalledWith("telegram:42");
       expect(oldTransport.resetSession).not.toHaveBeenCalled();
-      expect(newTransport.switchProvider).not.toHaveBeenCalled();
-      expect(oldTransport.switchProvider).not.toHaveBeenCalled();
       expect(sentTexts().some((t) => t.includes("Transport rebuilt"))).toBe(true);
     });
   });

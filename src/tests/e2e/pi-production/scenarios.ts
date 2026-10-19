@@ -1001,28 +1001,48 @@ async function steerFollowUp(ctx: PiAcceptanceContext): Promise<void> {
   await sendExpectReply(ctx.tui, s2, a2, "follow-up reply");
 }
 
-// ── Scenario 9: Fallback (full) ─────────────────────────────────────────────
+// ── Scenario 9: Single-candidate failure (full) ────────────────────────────
+// #1932: no fallback chain exists — a terminal provider failure on the
+// configured candidate ends the turn with a bounded error, the fallback
+// candidate is never contacted (even though the lane config still lists
+// it, proving inert config stays inert), and the failure is observed in
+// the availability memo. Cleans up its memo entry so later serial
+// scenarios in the lane dispatch normally.
 
-async function fallback(ctx: PiAcceptanceContext): Promise<void> {
+async function singleCandidateFailure(ctx: PiAcceptanceContext): Promise<void> {
   const fb0 = ctx.markers.next("FB0");
   const fb0a = ctx.markers.next("FB0A");
   const fb1 = ctx.markers.next("FB1");
-  const fb1a = ctx.markers.next("FB1A");
 
   ctx.provider.enqueue(textScript(FIXTURE_MODEL_A, { candidate: FIXTURE_MODEL_A, currentTurn: fb0 }, fb0a));
-  await sendExpectReply(ctx.tui, fb0, fb0a, "fallback baseline reply");
+  await sendExpectReply(ctx.tui, fb0, fb0a, "single-candidate baseline reply");
 
+  const beforeB = ctx.provider.requestCountFor(FIXTURE_MODEL_B);
   ctx.provider.enqueue({ candidate: FIXTURE_MODEL_A, expectation: { candidate: FIXTURE_MODEL_A, currentTurn: fb1 }, action: { kind: "httpError", status: 500, code: "fixture_transient" } });
-  ctx.provider.enqueue(textScript(FIXTURE_MODEL_B, {
-    candidate: FIXTURE_MODEL_B,
-    currentTurn: fb1,
-    orderedContains: [fb0, fb0a],
-    exactlyOnce: [fb1],
-  }, fb1a));
+  await sendExpectReply(ctx.tui, fb1, "candidate failed", "single-candidate bounded error reply");
+  if (ctx.provider.requestCountFor(FIXTURE_MODEL_B) !== beforeB) {
+    throw new Error("fallback candidate contacted after the configured candidate failed");
+  }
 
-  await sendExpectReply(ctx.tui, fb1, fb1a, "fallback reply");
-  const fbSummary = ctx.provider.summariesFor(FIXTURE_MODEL_B).at(-1);
-  if (!fbSummary) throw new Error("candidate B never served the fallback turn");
+  // Failure-observation proof: the bridge recorded a temporary cooldown.
+  const memoPath = join(ctx.abtarsHome, "state", "provider-availability-v1.json");
+  try {
+    const memo = JSON.parse(readFileSync(memoPath, "utf-8")) as { entries: Array<{ modelScope?: string; reason: string }> };
+    const entry = memo.entries.find((e) => e.modelScope === FIXTURE_MODEL_A);
+    if (!entry || entry.reason !== "temporary") {
+      throw new Error(`missing temporary memo entry for ${FIXTURE_MODEL_A}: ${JSON.stringify(memo.entries).slice(0, 300)}`);
+    }
+  } finally {
+    // Teardown: expire this scenario's memo so later serial scenarios in
+    // the lane dispatch normally. The run-isolated state dir makes this safe.
+    rmSync(memoPath, { force: true });
+  }
+  ctx.writeArtifact("single-candidate-failure.json", JSON.stringify({
+    scenario: "single-candidate-failure",
+    lane: ctx.lane,
+    failedModel: FIXTURE_MODEL_A,
+    uncontactedModel: FIXTURE_MODEL_B,
+  }, null, 2));
 }
 
 // ── Scenario 10: Model switch (full) ────────────────────────────────────────
@@ -1278,7 +1298,7 @@ export const PI_SCENARIOS: PiScenario[] = [
   { name: "bridge-restart", profiles: ["full", "proof"], run: bridgeRestart },
   { name: "lazy-transport-composition", profiles: ["full"], run: lazyTransports },
   { name: "steer-followup", profiles: ["full", "proof"], run: steerFollowUp },
-  { name: "candidate-fallback", profiles: ["full"], run: fallback },
+  { name: "single-candidate-failure", profiles: ["full"], run: singleCandidateFailure },
   { name: "model-switch", profiles: ["full", "proof"], run: modelSwitch },
   { name: "cancellation-deadline", profiles: ["full", "proof"], run: cancellation },
   { name: "acquisition-hang-cancellation", profiles: ["full"], run: acquisitionCancel },

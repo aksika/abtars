@@ -46,7 +46,6 @@ vi.mock("../../components/transport-config.js", () => ({
     { name: "opencode-go", config: { transport: "api", authSource: "pi" } },
   ],
   writeTransportConfig: MOCK_writeTransportConfig,
-  cleanDemotedModels: vi.fn(),
   validateProviderReady: () => ({ ok: true }),
   formatValidationError: () => "",
 }));
