@@ -66,8 +66,18 @@ describe("PiCoreContextProjection", () => {
     );
     const prompt = projection.buildSystemPromptFromSeed();
     expect(prompt).toContain("helpful assistant");
+    expect(prompt).toMatch(/^\[ABTARS-SOUL-BUNDLE id=exec_1 bundle=[0-9a-f]{16} cursor=ephemeral\]\n/);
+    expect(prompt).toContain("[/ABTARS-SOUL-BUNDLE]");
     expect(prompt).toContain("[workspace]");
     expect(prompt).toContain("/home/user/proj");
+  });
+
+  it("marks a durable bundle with its history cursor", () => {
+    const projection = new PiCoreContextProjection(durableSeed(100), "You are a helpful assistant.");
+    const prompt = projection.buildSystemPromptFromSeed();
+
+    expect(prompt).toMatch(/^\[ABTARS-SOUL-BUNDLE id=exec_1 bundle=[0-9a-f]{16} cursor=100\]\n/);
+    expect(prompt.endsWith("[/ABTARS-SOUL-BUNDLE]")).toBe(true);
   });
 
   it("ephemeral transform preserves suffix from marker", async () => {

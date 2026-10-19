@@ -14,7 +14,7 @@
 
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { PiCoreExecutionHost } from "./pi-core-host.js";
-import { DurableContextUnavailableError } from "./pi-core-context.js";
+import { PiCoreContextProjection, DurableContextUnavailableError } from "./pi-core-context.js";
 import { PiArchiveOutbox } from "../pi-session/pi-archive-outbox.js";
 import { createCurrentTurnMessage } from "./pi-core-types.js";
 import type { LoadedPiAgentCore, PiAgent, AgentEvent, StreamFn, PiAgentCoreModule, ModelApi } from "./pi-core-types.js";
@@ -701,6 +701,23 @@ describe("#1619 host reasoning/context wiring", () => {
     await new Promise((r) => setTimeout(r, 5));
     const initialState = (captured[0] as { initialState?: { thinkingLevel?: string } })?.initialState;
     expect(initialState?.thinkingLevel).toBe("off");
+    resolvePrompt();
+    await startPromise;
+  });
+
+  it("marks exactly one SOUL bundle in the Agent initial state", async () => {
+    const { loaded, captured, resolvePrompt } = makeCapturingCore();
+    const host = new PiCoreExecutionHost({
+      ...localOpts,
+      contextProjection: new PiCoreContextProjection(localSeed, localOpts.initialState.systemPrompt),
+    });
+    const startPromise = host.start(loaded).catch(() => {});
+    await new Promise((r) => setTimeout(r, 5));
+    const systemPrompt = (captured[0] as { initialState?: { systemPrompt?: string } })?.initialState?.systemPrompt ?? "";
+    expect(systemPrompt).toMatch(/^\[ABTARS-SOUL-BUNDLE id=exec_1 bundle=[0-9a-f]{16} cursor=ephemeral\]\n/);
+    expect(systemPrompt).toContain("[/ABTARS-SOUL-BUNDLE]");
+    expect(systemPrompt.match(/You are a helpful assistant\./g)).toHaveLength(1);
+    expect(systemPrompt.match(/\[ABTARS-SOUL-BUNDLE/g)).toHaveLength(1);
     resolvePrompt();
     await startPromise;
   });

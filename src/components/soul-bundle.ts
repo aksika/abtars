@@ -11,7 +11,7 @@ import { abtarsHome, abtarsRoot, abmindHome } from "../paths.js";
 import { loadUsers, buildUsersBlock } from "./user-registry.js";
 import { describeSoulInputs } from "./soul-input-manifest.js";
 import type { SessionType } from "./spin-types.js";
-import type { SessionSoulBundle } from "./memory-runtime.js";
+import { asSessionSoulBundle, type SessionSoulBundle } from "./memory-runtime.js";
 
 const TAG = "soul-bundle";
 
@@ -160,7 +160,77 @@ export function buildSoulBundle(type: SessionType, bundle?: SessionSoulBundle | 
   return resolveVariables(parts.join("\n\n---\n\n"));
 }
 
-/** #1009: Resolve template variables in prompts. */
+/** Inputs needed to assemble the Main system-prompt bundle without boot plumbing. */
+export interface MainSoulAssemblyRuntime {
+  readonly state: string;
+  assembleSessionContext(input: {
+    identity: { principalId: string; executionId: string };
+    includeHistory: false;
+    wakeUpMaxChars?: number;
+  }): Promise<{ soulBundle?: unknown; parts?: unknown }>;
+}
+
+/** Transport surface needed to install a refreshed Main bundle. */
+export interface MainSoulPromptTransport {
+  setSystemPrompt(prompt: string): void;
+}
+
+/**
+ * Assemble the current Main SOUL system-prompt bundle. Used once at boot and
+ * again after every completed compaction. Returns null when no bundle could
+ * be assembled; callers keep the previous prompt rather than installing an
+ * empty or fabricated bundle.
+ */
+export async function assembleMainSoulBundleText(
+  memoryRuntime: MainSoulAssemblyRuntime,
+  principalId = "master",
+): Promise<string | null> {
+  // An unavailable runtime cannot supply a current bundle. Boot installs the
+  // local minimal fallback explicitly; compaction refresh must not overwrite a
+  // working prompt with that fallback.
+  if (memoryRuntime.state !== "ready") return null;
+  const sessionContext = await memoryRuntime.assembleSessionContext({
+    identity: { principalId, executionId: "boot" },
+    includeHistory: false,
+    wakeUpMaxChars: 4096,
+  }).catch(() => null);
+  const mutableOwner = asSessionSoulBundle(sessionContext?.parts) !== undefined ? "session-start" : "system-prompt";
+  return buildSoulBundle("A", asSessionSoulBundle(sessionContext?.soulBundle) ?? null, mutableOwner);
+}
+
+/**
+ * Refresh the Main transport's bundle after compaction. Best effort: a
+ * failed refresh preserves the previous prompt and never throws through the
+ * compaction callback. Returns whether a new bundle was installed.
+ */
+export async function refreshMainSoulPrompt(
+  transport: unknown,
+  memoryRuntime: MainSoulAssemblyRuntime,
+  principalId = "master",
+): Promise<boolean> {
+  if (
+    !transport
+    || typeof transport !== "object"
+    || !("setSystemPrompt" in transport)
+    || typeof (transport as MainSoulPromptTransport).setSystemPrompt !== "function"
+  ) {
+    return false;
+  }
+  try {
+    const bundle = await assembleMainSoulBundleText(memoryRuntime, principalId);
+    if (!bundle) {
+      logDebug(TAG, "Main SOUL refresh skipped: no bundle assembled");
+      return false;
+    }
+    (transport as MainSoulPromptTransport).setSystemPrompt(bundle);
+    logInfo(TAG, "Main SOUL bundle refreshed after compaction");
+    return true;
+  } catch (err) {
+    logWarn(TAG, `Main SOUL refresh failed: ${err instanceof Error ? err.message : String(err)}`);
+    return false;
+  }
+}
+
 function resolveVariables(text: string): string {
   return text.replaceAll("{instance_name}", getInstanceName());
 }

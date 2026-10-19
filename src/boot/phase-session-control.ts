@@ -11,6 +11,7 @@ import type { BootCtx, PhaseResult } from "./context.js";
 import { logInfo, logWarn } from "../components/logger.js";
 import { SessionControlService, DurableConversationCompactionAdapter, LocalPiRunCompactionAdapter, rehydrateCompactedSession } from "../components/session-control/index.js";
 import { setSessionControlService } from "../components/session-control/instance.js";
+import { refreshMainSoulPrompt } from "../components/soul-bundle.js";
 import { createCompactionSummarizer } from "../components/compact-summarizer.js";
 import { spin as spinInstance } from "../components/spin.js";
 import { recordCompaction } from "../components/metrics-collector.js";
@@ -39,6 +40,10 @@ export async function phaseSessionControl(ctx: BootCtx): Promise<PhaseResult> {
     // its own compaction — a harness without compaction wires nothing.
     onCompactionCompleted: (target) => {
       rehydrateCompactedSession(target, (id) => spinInstance.getSessionById(id));
+      // #1932: compacted history invalidates the previously assembled bundle.
+      // Refresh the Main transport's bundle so the next conversational request
+      // carries one current marked bundle. Best effort and never throwing.
+      void refreshMainSoulPrompt(ctx.transport, ctx.memoryRuntime);
     },
   });
 

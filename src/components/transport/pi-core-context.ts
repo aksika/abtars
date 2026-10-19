@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { logWarn, logError, logTrace } from "../logger.js";
 import type { AssistantMessage, ModelApi, AgentMessage } from "./pi-core-types.js";
+import { soulBundleEnvelope } from "../pi-session/pi-soul-envelope.js";
 import type { PiExecutionContextSeed, AbtarsCurrentTurnMessage } from "./pi-port.js";
 import type { DurableContextProjectionInput, DurableContextProjectionResult } from "../memory-runtime.js";
 
@@ -313,7 +314,17 @@ export class PiCoreContextProjection {
   }
 
   buildSystemPromptFromSeed(): string {
-    const parts: string[] = [this.systemPrompt];
+    // #1932: the projection point emits exactly one marked bundle envelope.
+    // The envelope carries request/cursor/source identity only. When a memory
+    // owner supplies no bundle text, there is no marker to emit; the durable
+    // hydration gate still decides whether the request may proceed.
+    const bundle = this.systemPrompt.trim().length > 0
+      ? soulBundleEnvelope(this.systemPrompt, {
+          executionId: this.seed.executionId,
+          ...(this.seed.source.mode === "durable" ? { beforeMessageId: this.seed.source.beforeMessageId } : {}),
+        })
+      : this.systemPrompt;
+    const parts: string[] = [bundle];
     for (const block of this.seed.volatileBlocks) {
       if (block.content) {
         const kind = block.kind.replaceAll('"', "'");

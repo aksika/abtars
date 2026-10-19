@@ -261,17 +261,11 @@ export async function phasePipelineDeps(ctx: BootCtx): Promise<PhaseResult> {
 
   // #998: Set system prompt AFTER memory state is known
   if (transport && "setSystemPrompt" in transport && typeof (transport as any).setSystemPrompt === "function") {
-    const { buildSoulBundle } = await import("../components/soul-bundle.js");
-    const { asSessionSoulBundle } = await import("../components/memory-runtime.js");
+    const { assembleMainSoulBundleText, buildSoulBundle } = await import("../components/soul-bundle.js");
     const masterUserId = registry.users.find(u => u.role === "master")?.userId ?? "master";
-    const sessionContext = ctx.memoryRuntime.state === "ready"
-      ? await ctx.memoryRuntime.assembleSessionContext({ identity: { principalId: masterUserId, executionId: "boot" }, includeHistory: false, wakeUpMaxChars: 4096 }).catch(() => null)
-      : null;
-    // #1869 — the split activates only against a parts-capable daemon.
-    // Older daemons serve only the legacy fields, so the system prompt keeps
-    // carrying the mutable parts: today's behavior, no part dropped.
-    const mutableOwner = asSessionSoulBundle(sessionContext?.parts) !== undefined ? "session-start" : "system-prompt";
-    const bundle = buildSoulBundle("A", sessionContext?.soulBundle, mutableOwner);
+    const bundle = ctx.memoryRuntime.state === "ready"
+      ? await assembleMainSoulBundleText(ctx.memoryRuntime, masterUserId)
+      : buildSoulBundle("A", null);
     if (bundle) (transport as { setSystemPrompt: (p: string) => void }).setSystemPrompt(bundle);
   }
 

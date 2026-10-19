@@ -80,3 +80,56 @@ describe("Main injection split (#1869)", () => {
     rmSync(TEST_HOME, { recursive: true, force: true });
   });
 });
+
+describe("Main SOUL assembly and refresh (#1932)", () => {
+  const FULL = {
+    soul: "SOUL-MARKER-1932",
+    profile: "PROFILE-MARKER-1932",
+    notes: "NOTES-MARKER-1932",
+    memoryTools: "TOOLS-MARKER-1932",
+    coreFacts: "FACTS-MARKER-1932",
+  };
+
+  it("assembles the same current bundle used at boot", async () => {
+    const { assembleMainSoulBundleText } = await import("./soul-bundle.js");
+    const runtime = {
+      state: "ready",
+      assembleSessionContext: async () => ({ soulBundle: FULL, parts: FULL }),
+    };
+    const bundle = await assembleMainSoulBundleText(runtime, "master");
+
+    expect(bundle).toContain("SOUL-MARKER-1932");
+    expect(bundle).toContain("TOOLS-MARKER-1932");
+    expect(bundle).not.toContain("PROFILE-MARKER-1932");
+  });
+
+  it("installs a refreshed bundle without throwing", async () => {
+    const { refreshMainSoulPrompt } = await import("./soul-bundle.js");
+    let installed: string | null = null;
+    const runtime = {
+      state: "ready",
+      assembleSessionContext: async () => ({ soulBundle: FULL, parts: FULL }),
+    };
+
+    const refreshed = await refreshMainSoulPrompt(
+      { setSystemPrompt: (prompt: string) => { installed = prompt; } },
+      runtime,
+      "master",
+    );
+
+    expect(refreshed).toBe(true);
+    expect(installed).toContain("TOOLS-MARKER-1932");
+  });
+
+  it("keeps the previous bundle when assembly is unavailable", async () => {
+    const { refreshMainSoulPrompt } = await import("./soul-bundle.js");
+    const setSystemPrompt = vi.fn();
+    const runtime = {
+      state: "unavailable",
+      assembleSessionContext: async () => { throw new Error("must not be called"); },
+    };
+
+    await expect(refreshMainSoulPrompt({ setSystemPrompt }, runtime, "master")).resolves.toBe(false);
+    expect(setSystemPrompt).not.toHaveBeenCalled();
+  });
+});
