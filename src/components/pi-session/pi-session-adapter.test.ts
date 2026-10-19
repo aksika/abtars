@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -385,6 +385,28 @@ describe("pi-session-adapter", () => {
     const otherWorkspace = allocatePiBinding(state, bindingParams(wsB));
     const hijack = { ...otherWorkspace, conversationId: binding.conversationId };
     expect(() => openPiConversation(manager, state, hijack)).toThrow(/workspace/);
+  });
+
+  it("defers retention instead of tombstoning when an owned file cannot be removed", () => {
+    const root = mkdtempSync(join(tmpdir(), "pi-adapter-"));
+    const ws = mkdtempSync(join(tmpdir(), "pi-ws-"));
+    const stateRoot = join(root, "pi-sessions");
+    const { manager, flush } = makeSessionManager();
+    const binding = allocatePiBinding(stateRoot, bindingParams(ws));
+    openPiConversation(manager, stateRoot, binding);
+    const file = flush(binding.conversationId, binding.sessionDir);
+    openPiConversation(manager, stateRoot, binding);
+
+    // Make the owned path unremovable as a file: replace it with a directory.
+    rmSync(file);
+    mkdirSync(file);
+
+    const now = Date.now();
+    markPiConversationEnded(stateRoot, binding.conversationId, now - 8 * 24 * 60 * 60 * 1000);
+    const report = sweepPiRetention(stateRoot, now, () => false);
+    expect(report.removed).toEqual([]);
+    expect(report.kept).toContain(binding.conversationId);
+    expect(existsSync(file)).toBe(true);
   });
 
   it("erases owned files without touching standalone sessions", () => {    const root = mkdtempSync(join(tmpdir(), "pi-adapter-"));

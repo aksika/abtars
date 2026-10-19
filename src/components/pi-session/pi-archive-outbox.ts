@@ -112,10 +112,16 @@ export class PiArchiveOutbox {
         this.pending.delete(sessionId);
         return true;
       }
+      logWarn(TAG, `pending terminal write for session "${sessionId}" is not durably confirmed — admission stays closed`);
       return false;
-    } catch {
+    } catch (err) {
       // A failed retry keeps the obligation; the caller fails the turn
-      // closed and the next turn retries again.
+      // closed and the next turn retries again. Log the bounded reason
+      // (never the payload) so a wedged session is diagnosable.
+      const code = err && typeof err === "object" && "code" in err
+        ? String((err as { code: unknown }).code)
+        : "unknown";
+      logWarn(TAG, `pending terminal write retry failed for session "${sessionId}" (error=${code}) — admission stays closed`);
       return false;
     }
   }

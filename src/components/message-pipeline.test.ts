@@ -122,6 +122,9 @@ function mockDeps(transport: IKiroTransport, overrides: Partial<PipelineDeps> = 
     } as any,
     updateCtxStart: vi.fn(),
     _session: session,
+    // #1932: isolate the live-process archive outbox by default so tests
+    // never share obligations through the production singleton.
+    archiveOutbox: new PiArchiveOutbox(),
     ...overrides,
   } as any;
 }

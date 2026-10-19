@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { mkdtempSync, mkdirSync, writeFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -63,6 +63,19 @@ describe("pi-conversation-identity", () => {
     mkdirSync(sessionDir, { recursive: true });
     const escaped = verifyPiConversationFile(base, sessionDir, "conv-1", join(base, "..", "evil.jsonl"), () => "conv-1");
     expect(escaped.ok).toBe(false);
+  });
+
+  it("rejects a symlinked candidate that resolves outside the partition", () => {
+    const base = mkdtempSync(join(tmpdir(), "pi-id-"));
+    const sessionDir = join(base, "partition");
+    mkdirSync(sessionDir, { recursive: true });
+    const outside = join(base, "outside.jsonl");
+    writeHeader(outside, "conv-1");
+    const link = join(sessionDir, "2026-01-01T00-00-00-000Z_conv-1.jsonl");
+    symlinkSync(outside, link);
+
+    const result = verifyPiConversationFile(base, sessionDir, "conv-1", link, () => "conv-1");
+    expect(result).toEqual({ ok: false, reason: "conversation file is a symlink" });
   });
 
   it("allocates a fresh successor with predecessor lineage", () => {

@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import { join } from "node:path";
-import { existsSync, statSync } from "node:fs";
+import { existsSync, lstatSync } from "node:fs";
 import { isPathWithinRoot } from "../workspace-paths.js";
 
 /** Pi accepts IDs matching its assertValidSessionId contract. */
@@ -81,8 +81,11 @@ export function resolvePiConversationDir(
 /**
  * Exact-ID verification of a discovered candidate file. Discovery comes
  * from Pi's findById plus the adapter's claimant scan; this function
- * enforces containment and header identity on the candidate. Never a
- * global latest-session scan or an unscoped suffix search.
+ * enforces containment, symlink rejection, and header identity on the
+ * candidate. Never a global latest-session scan or an unscoped suffix
+ * search. Symlinks are rejected outright: a link inside the partition
+ * could otherwise resolve to a file outside it while passing lexical
+ * containment (R2 requires canonical containment before opening).
  */
 export function verifyPiConversationFile(
   root: string,
@@ -103,14 +106,16 @@ export function verifyPiConversationFile(
   if (!existsSync(candidate)) {
     return { ok: false, reason: "conversation file not found" };
   }
-  let stat: ReturnType<typeof statSync>;
+  let linkStat: ReturnType<typeof lstatSync>;
   try {
-    stat = statSync(candidate);
+    linkStat = lstatSync(candidate);
   } catch {
-    // Race between existence check and stat: fail closed as missing.
     return { ok: false, reason: "conversation file unreadable" };
   }
-  if (!stat.isFile()) {
+  if (linkStat.isSymbolicLink()) {
+    return { ok: false, reason: "conversation file is a symlink" };
+  }
+  if (!linkStat.isFile()) {
     return { ok: false, reason: "conversation path is not a regular file" };
   }
   const headerId = readHeaderId(candidate);

@@ -1,6 +1,7 @@
 import { describe, it, expect, vi } from "vitest";
 import { buildPrompt } from "./prompt-builder.js";
 import { createDisabledRuntime } from "../memory-runtime.js";
+import { PiArchiveOutbox } from "../pi-session/pi-archive-outbox.js";
 
 vi.mock("../spin.js", () => ({ spin: { getSessionById: vi.fn(() => undefined) } }));
 
@@ -20,6 +21,8 @@ function baseDeps(runtime: unknown, memoryEnabled = true) {
     sessionManager: { getActiveSessionId: () => "master_A_1" },
     conversationBuffer: { drain: () => "" },
     contextPercent: -1,
+    // #1932: isolate the live-process archive outbox by default.
+    archiveOutbox: new PiArchiveOutbox(),
   } as never;
 }
 

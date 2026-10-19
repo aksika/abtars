@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { join } from "node:path";
-import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, renameSync, statSync, writeFileSync } from "node:fs";
 import { logWarn } from "../logger.js";
 
 const TAG = "pi-availability-memo";
@@ -8,6 +8,8 @@ export const PI_AVAILABILITY_MEMO_VERSION = 1;
 export const PI_AVAILABILITY_MEMO_FILENAME = "provider-availability-v1.json";
 const MAX_COOLDOWN_MS = 24 * 60 * 60 * 1000;
 const DEFAULT_COOLDOWN_MS = 5 * 60 * 1000;
+/** Bound on the memo file read: it is a small bounded cache, never a log. */
+const MAX_MEMO_BYTES = 256 * 1024;
 
 /**
  * Bounded, memoizable failure kinds. Overflow, tool errors, policy denial,
@@ -94,6 +96,16 @@ function isValidEntry(value: unknown): value is ProviderAvailabilityEntry {
 export function loadAvailabilityMemo(stateDir: string): MemoLoadResult {
   const path = memoFilePath(stateDir);
   if (!existsSync(path)) return { entries: [] };
+  // Bounded read: the memo is a small cache, and a corrupt/oversized file
+  // must not become a memory or parsing hazard.
+  try {
+    if (statSync(path).size > MAX_MEMO_BYTES) {
+      logWarn(TAG, "availability memo exceeds its size bound; using empty cache");
+      return { entries: [], invalid: "memo file exceeds size bound" };
+    }
+  } catch {
+    return { entries: [], invalid: "unreadable memo file" };
+  }
   let parsed: unknown;
   try {
     parsed = JSON.parse(readFileSync(path, "utf-8")) as unknown;

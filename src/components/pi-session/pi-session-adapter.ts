@@ -1,6 +1,6 @@
-import { closeSync, existsSync, mkdirSync, openSync, readFileSync, readdirSync, readSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { closeSync, existsSync, lstatSync, mkdirSync, openSync, readFileSync, readdirSync, readSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { randomUUID } from "node:crypto";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
 import { logWarn } from "../logger.js";
 import {
   isValidPiConversationId,
@@ -133,6 +133,13 @@ export function allocatePiBinding(
 
 function ensurePartitionDir(sessionDir: string): void {
   mkdirSync(sessionDir, { recursive: true, mode: 0o700 });
+  // #1932: reject a partition replaced by a symlink — lexical containment
+  // cannot see through it, and the conversation files would live outside
+  // the authorized root.
+  const stat = lstatSync(sessionDir);
+  if (stat.isSymbolicLink() || !stat.isDirectory()) {
+    throw new Error("conversation partition is not a regular directory");
+  }
 }
 
 /**
@@ -571,7 +578,13 @@ export function sweepPiRetention(
       kept.push(conversationId);
       continue;
     }
-    removeOwnedFiles(record.canonicalFile);
+    if (!removeOwnedFiles(record.canonicalFile)) {
+      // Incomplete removal keeps the record (and its paths) so a later
+      // sweep retries; tombstoning now would leak the file forever.
+      logWarn(TAG, `retention deferred for "${conversationId}" — owned files could not all be removed`);
+      kept.push(conversationId);
+      continue;
+    }
     removed.push(conversationId);
     // Keep a content-free ownership tombstone: the ID must never be
     // reopened by another principal, and the record carries no paths.
@@ -587,16 +600,27 @@ export function sweepPiRetention(
   return { removed, kept };
 }
 
-function removeOwnedFiles(canonicalFile: string): void {
+/** Remove one owned conversation's files. Returns true only when every
+ *  present path was actually removed; a false result leaves the registry
+ *  record intact so a later sweep/erasure retries instead of leaking the
+ *  file behind an "erased" tombstone. */
+function removeOwnedFiles(canonicalFile: string): boolean {
+  let complete = true;
   for (const candidate of [canonicalFile, `${canonicalFile}.quarantined`]) {
+    if (!existsSync(candidate)) continue;
     try {
-      if (existsSync(candidate) && statSync(candidate).isFile()) rmSync(candidate);
+      if (!statSync(candidate).isFile()) {
+        complete = false;
+        logWarn(TAG, `retention found a non-file at an owned path`);
+        continue;
+      }
+      rmSync(candidate);
     } catch {
-      // Best-effort file removal: the registry entry is already dropped so
-      // a later sweep retries; never throw out of retention.
-      logWarn(TAG, `retention could not remove "${dirname(candidate)}" entry`);
+      complete = false;
+      logWarn(TAG, `retention could not remove an owned file entry`);
     }
   }
+  return complete;
 }
 
 export interface PiErasureReport {
@@ -619,17 +643,28 @@ export function erasePiConversation(stateRoot: string, conversationId: string): 
     throw new Error("refusing to erase a conversation outside the owned root");
   }
   const removedFiles: string[] = [];
+  let complete = true;
   if (record.canonicalFile !== null) {
     for (const candidate of [record.canonicalFile, `${record.canonicalFile}.quarantined`]) {
+      if (!existsSync(candidate)) continue;
       try {
-        if (existsSync(candidate) && statSync(candidate).isFile()) {
-          rmSync(candidate);
-          removedFiles.push(candidate);
+        if (!statSync(candidate).isFile()) {
+          complete = false;
+          logWarn(TAG, "erasure found a non-file at an owned path");
+          continue;
         }
+        rmSync(candidate);
+        removedFiles.push(candidate);
       } catch {
+        complete = false;
         logWarn(TAG, "erasure could not remove an owned file");
       }
     }
+  }
+  if (!complete) {
+    // Keep the record (with its paths) so an authorized retry can finish;
+    // a tombstone here would leave owned files unreachable forever.
+    throw new Error("erasure incomplete: owned files remain");
   }
   // Keep a content-free ownership tombstone rather than dropping the record:
   // the ID stays pinned to its owner and cannot be reopened elsewhere.

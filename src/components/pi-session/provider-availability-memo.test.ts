@@ -50,6 +50,14 @@ describe("provider-availability-memo", () => {
     expect(loaded.invalid).toBeDefined();
   });
 
+  it("rejects an oversized memo file without reading it", () => {
+    const dir = mkdtempSync(join(tmpdir(), "pi-memo-"));
+    writeFileSync(join(dir, "provider-availability-v1.json"), "x".repeat(300 * 1024));
+    const loaded = loadAvailabilityMemo(dir);
+    expect(loaded.entries).toEqual([]);
+    expect(loaded.invalid).toContain("size bound");
+  });
+
   it("blocks only until expiry and matches scopes narrowly", () => {
     const blocked = entry({ unusableUntil: 2000 });
     expect(isMemoBlocked(blocked, 1500)).toBe(true);
