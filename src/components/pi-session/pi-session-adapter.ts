@@ -1,4 +1,4 @@
-import { closeSync, existsSync, mkdirSync, openSync, readFileSync, readSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { closeSync, existsSync, mkdirSync, openSync, readFileSync, readdirSync, readSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { randomUUID } from "node:crypto";
 import { dirname, join } from "node:path";
 import { logWarn } from "../logger.js";
@@ -6,12 +6,12 @@ import {
   isValidPiConversationId,
   mintPiConversationId,
   resolvePiConversationDir,
-  resolvePiConversationFile,
   verifyPiConversationFile,
   type PiConversationBinding,
-  type PiConversationRole,
-  type PiMemoryScope,
+  type PiConversationParams,
 } from "./pi-conversation-identity.js";
+
+export type { PiConversationBinding, PiConversationParams };
 
 const TAG = "pi-session-adapter";
 const REGISTRY_FILENAME = "pi-conversations-v1.json";
@@ -24,11 +24,17 @@ const HEADER_READ_MAX_BYTES = 64 * 1024;
  * real module through installed-Pi discovery (never a static runtime import,
  * enforced by check-pi-boundary); tests inject fakes.
  */
+export interface PiSessionManagerShape {
+  getSessionId(): string;
+  getSessionFile(): string | undefined;
+  getSessionDir(): string;
+}
+
 export interface PiSessionManagerCtor {
-  create(cwd: string, sessionDir?: string, options?: { id?: string; parentSession?: string }): unknown;
-  open(path: string, sessionDir?: string, cwdOverride?: string): unknown;
+  create(cwd: string, sessionDir?: string, options?: { id?: string; parentSession?: string }): PiSessionManagerShape;
+  open(path: string, sessionDir?: string, cwdOverride?: string): PiSessionManagerShape;
   findById(cwd: string, id: string, sessionDir?: string): string | undefined;
-  forkFrom(sourcePath: string, targetCwd: string, sessionDir?: string, options?: { id?: string }): unknown;
+  forkFrom(sourcePath: string, targetCwd: string, sessionDir?: string, options?: { id?: string }): PiSessionManagerShape;
 }
 
 /** Minimal AgentSession surface: queue drain, abort, idle, subscriptions. */
@@ -39,18 +45,15 @@ export interface PiAgentSessionShape {
   on(event: string, handler: (event: { type: string }) => void): () => void;
 }
 
-export interface PiConversationParams {
-  principal: string;
-  platform: string;
-  role: PiConversationRole;
-  workspaceAlias: string;
-  canonicalWorkspace: string;
-  memoryScope: PiMemoryScope;
-}
-
 export interface PiConversationHandle {
   binding: PiConversationBinding;
-  canonicalFile: string;
+  /**
+   * Null until Pi flushes the session file. Pi creates the file only once
+   * the session holds a user or assistant message, so a freshly created
+   * conversation has no file yet. Fork and reconstruction require history
+   * and fail clearly while unflushed.
+   */
+  canonicalFile: string | null;
   generation: number;
   admissionOpen: boolean;
 }
@@ -132,19 +135,55 @@ function ensurePartitionDir(sessionDir: string): void {
   mkdirSync(sessionDir, { recursive: true, mode: 0o700 });
 }
 
+/**
+ * All files in the partition claiming this conversation ID. Pi names files
+ * `<timestamp>_<id>.jsonl`, so location comes from discovery, never from a
+ * constructed filename. More than one claimant is an ambiguous duplicate
+ * and fails closed.
+ */
+function findClaimants(sessionDir: string, conversationId: string): string[] {
+  let names: string[];
+  try {
+    names = readdirSync(sessionDir);
+  } catch {
+    return [];
+  }
+  const claimants: string[] = [];
+  for (const name of names) {
+    if (!name.endsWith(".jsonl")) continue;
+    const candidate = join(sessionDir, name);
+    let stat: ReturnType<typeof statSync>;
+    try {
+      stat = statSync(candidate);
+    } catch {
+      continue;
+    }
+    if (!stat.isFile()) continue;
+    if (readPiSessionHeaderId(candidate) === conversationId) claimants.push(candidate);
+  }
+  return claimants;
+}
+
 function verifyOwned(
   stateRoot: string,
   binding: PiConversationBinding,
+  candidate: string,
 ): { ok: true; canonicalFile: string } | { ok: false; reason: string } {
-  const verified = verifyPiConversationFile(stateRoot, binding.sessionDir, binding.conversationId, readPiSessionHeaderId);
+  const verified = verifyPiConversationFile(stateRoot, binding.sessionDir, binding.conversationId, candidate, readPiSessionHeaderId);
   if (!verified.ok) return verified;
-  return { ok: true, canonicalFile: verified.canonicalFile };
+  if (verified.canonicalFile !== candidate) {
+    // Discovery pointed outside the authorized partition layout.
+    return { ok: false, reason: "discovered file is outside the authorized partition" };
+  }
+  return { ok: true, canonicalFile: candidate };
 }
 
 /**
  * Open an intact conversation under its existing ID, or create it with the
- * abtars-minted ID when absent. Exact-ID lookup only: never a global
- * latest-session scan or an unscoped suffix search.
+ * abtars-minted ID when absent. Exact-ID discovery only: findById plus an
+ * independent header/containment check, never a global latest-session scan
+ * or an unscoped suffix search. A fresh conversation has no file until Pi
+ * flushes its first message; the handle reports canonicalFile null then.
  */
 export function openPiConversation(
   sessionManager: PiSessionManagerCtor,
@@ -157,25 +196,46 @@ export function openPiConversation(
   ensurePartitionDir(binding.sessionDir);
   const found = sessionManager.findById(binding.canonicalWorkspace, binding.conversationId, binding.sessionDir);
   if (found !== undefined) {
-    const verified = verifyOwned(stateRoot, binding);
+    const claimants = findClaimants(binding.sessionDir, binding.conversationId);
+    if (claimants.length !== 1 || claimants[0] !== found) {
+      throw new Error("ambiguous duplicate conversation files for one id");
+    }
+    const verified = verifyOwned(stateRoot, binding, found);
     if (!verified.ok) {
-      // Missing or corrupt files are closed/quarantined, never silentlyadopted.
+      // Missing or corrupt files are closed/quarantined, never silently adopted.
       throw new Error(`owned conversation file failed verification (${verified.reason})`);
     }
     sessionManager.open(verified.canonicalFile, binding.sessionDir, binding.canonicalWorkspace);
     registerConversation(stateRoot, binding, verified.canonicalFile);
     return { binding, canonicalFile: verified.canonicalFile, generation: 1, admissionOpen: true };
   }
-  sessionManager.create(binding.canonicalWorkspace, binding.sessionDir, { id: binding.conversationId });
-  const expectedFile = resolvePiConversationFile(binding.sessionDir, binding.conversationId);
-  registerConversation(stateRoot, binding, expectedFile);
-  return { binding, canonicalFile: expectedFile, generation: 1, admissionOpen: true };
+  const created = sessionManager.create(binding.canonicalWorkspace, binding.sessionDir, { id: binding.conversationId });
+  if (created.getSessionId() !== binding.conversationId) {
+    throw new Error("Pi session id does not match the abtars-allocated conversation id");
+  }
+  // Pi assigns the file path eagerly but writes it only once the session
+  // holds a user or assistant message. Report null until a verified file
+  // exists; the next open after the first message discovers it. A foreign
+  // file already sitting at the assigned path is a collision: fail closed.
+  const expectedFile = created.getSessionFile() ?? null;
+  if (expectedFile !== null && existsSync(expectedFile)) {
+    const verified = verifyOwned(stateRoot, binding, expectedFile);
+    if (!verified.ok) {
+      throw new Error(`new conversation file failed verification (${verified.reason})`);
+    }
+    registerConversation(stateRoot, binding, verified.canonicalFile);
+    return { binding, canonicalFile: verified.canonicalFile, generation: 1, admissionOpen: true };
+  }
+  registerConversation(stateRoot, binding, null);
+  return { binding, canonicalFile: null, generation: 1, admissionOpen: true };
 }
 
 /**
  * Fork through abtars allocation first: the successor binding (fresh ID,
  * predecessor lineage) must exist before any Pi fork call, so native or
  * extension forks cannot create addressable unregistered conversations.
+ * The source must have flushed history; an unflushed source has nothing
+ * to fork and fails with an explicit error.
  */
 export function forkPiConversation(
   sessionManager: PiSessionManagerCtor,
@@ -186,20 +246,37 @@ export function forkPiConversation(
   if (successor.predecessorId !== source.binding.conversationId) {
     throw new Error("fork successor must carry the source conversation as predecessor");
   }
-  const verified = verifyOwned(stateRoot, source.binding);
+  if (source.canonicalFile === null) {
+    throw new Error("cannot fork a source with no persisted history yet");
+  }
+  const verified = verifyOwned(stateRoot, source.binding, source.canonicalFile);
   if (!verified.ok) {
     throw new Error(`cannot fork from unverified source (${verified.reason})`);
   }
   ensurePartitionDir(successor.sessionDir);
-  sessionManager.forkFrom(verified.canonicalFile, successor.canonicalWorkspace, successor.sessionDir, {
+  const forked = sessionManager.forkFrom(verified.canonicalFile, successor.canonicalWorkspace, successor.sessionDir, {
     id: successor.conversationId,
   });
-  const forked = verifyOwned(stateRoot, successor);
-  if (!forked.ok) {
-    throw new Error(`forked conversation failed verification (${forked.reason})`);
+  if (forked.getSessionId() !== successor.conversationId) {
+    throw new Error("Pi fork id does not match the abtars-allocated successor id");
   }
-  registerConversation(stateRoot, successor, forked.canonicalFile);
-  return { binding: successor, canonicalFile: forked.canonicalFile, generation: 1, admissionOpen: true };
+  const forkedFile = forked.getSessionFile() ?? sessionManager.findById(
+    successor.canonicalWorkspace,
+    successor.conversationId,
+    successor.sessionDir,
+  );
+  if (forkedFile === undefined) {
+    throw new Error("forked conversation has no discoverable file");
+  }
+  const claimants = findClaimants(successor.sessionDir, successor.conversationId);
+  if (!claimants.includes(forkedFile)) {
+    throw new Error("forked conversation failed verification (undiscoverable file)");
+  }
+  if (readPiSessionHeaderId(forkedFile) !== successor.conversationId) {
+    throw new Error("forked conversation failed verification (header mismatch)");
+  }
+  registerConversation(stateRoot, successor, forkedFile);
+  return { binding: successor, canonicalFile: forkedFile, generation: 1, admissionOpen: true };
 }
 
 /** Close per-execution steering admission before cancellation. */
@@ -266,18 +343,20 @@ export function bindPiObservers(
 
 // ── Owned-conversation registry, retention, and erasure ──
 
+interface PiConversationRecord {
+  sessionDir: string;
+  canonicalFile: string | null;
+  principal: string;
+  platform: string;
+  role: string;
+  canonicalWorkspace: string;
+  predecessorId?: string;
+  endedAt?: number;
+}
+
 interface PiConversationRegistry {
   version: 1;
-  conversations: Record<string, {
-    sessionDir: string;
-    canonicalFile: string;
-    principal: string;
-    platform: string;
-    role: string;
-    canonicalWorkspace: string;
-    predecessorId?: string;
-    endedAt?: number;
-  }>;
+  conversations: Record<string, PiConversationRecord>;
 }
 
 function registryPath(stateRoot: string): string {
@@ -308,7 +387,7 @@ function saveRegistry(stateRoot: string, registry: PiConversationRegistry): void
   renameSync(tmp, path);
 }
 
-function registerConversation(stateRoot: string, binding: PiConversationBinding, canonicalFile: string): void {
+function registerConversation(stateRoot: string, binding: PiConversationBinding, canonicalFile: string | null): void {
   const registry = loadRegistry(stateRoot);
   registry.conversations[binding.conversationId] = {
     sessionDir: binding.sessionDir,
@@ -339,9 +418,9 @@ export interface PiRetentionReport {
 /**
  * Seven-day ended-session retention over registered abtars-owned files
  * only. Never sweeps standalone Pi session directories. Preserves live
- * writers, resumable active work (isActive), and delivery-referenced
- * conversations regardless of age. Event-driven: the caller invokes this
- * at session lifecycle/startup boundaries.
+ * writers, resumable active work (isActive), unflushed registrations, and
+ * delivery-referenced conversations regardless of age. Event-driven: the
+ * caller invokes this at session lifecycle/startup boundaries.
  */
 export function sweepPiRetention(
   stateRoot: string,
@@ -353,6 +432,10 @@ export function sweepPiRetention(
   const kept: string[] = [];
   let changed = false;
   for (const [conversationId, record] of Object.entries(registry.conversations)) {
+    if (record.canonicalFile === null) {
+      kept.push(conversationId);
+      continue;
+    }
     if (record.endedAt === undefined || now - record.endedAt < ENDED_RETENTION_MS) {
       kept.push(conversationId);
       continue;
@@ -401,18 +484,20 @@ export function erasePiConversation(stateRoot: string, conversationId: string): 
   const registry = loadRegistry(stateRoot);
   const record = registry.conversations[conversationId];
   if (!record) return { removedFiles: [] };
-  if (!record.canonicalFile.startsWith(join(stateRoot, ""))) {
+  if (record.canonicalFile !== null && !record.canonicalFile.startsWith(join(stateRoot, ""))) {
     throw new Error("refusing to erase a conversation outside the owned root");
   }
   const removedFiles: string[] = [];
-  for (const candidate of [record.canonicalFile, `${record.canonicalFile}.quarantined`]) {
-    try {
-      if (existsSync(candidate) && statSync(candidate).isFile()) {
-        rmSync(candidate);
-        removedFiles.push(candidate);
+  if (record.canonicalFile !== null) {
+    for (const candidate of [record.canonicalFile, `${record.canonicalFile}.quarantined`]) {
+      try {
+        if (existsSync(candidate) && statSync(candidate).isFile()) {
+          rmSync(candidate);
+          removedFiles.push(candidate);
+        }
+      } catch {
+        logWarn(TAG, "erasure could not remove an owned file");
       }
-    } catch {
-      logWarn(TAG, "erasure could not remove an owned file");
     }
   }
   delete registry.conversations[conversationId];

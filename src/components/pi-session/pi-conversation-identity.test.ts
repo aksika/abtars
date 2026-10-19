@@ -9,9 +9,12 @@ import {
   mintPiConversationId,
   opaquePrincipalKey,
   resolvePiConversationDir,
-  resolvePiConversationFile,
   verifyPiConversationFile,
 } from "./pi-conversation-identity.js";
+
+function writeHeader(file: string, id: string): void {
+  writeFileSync(file, JSON.stringify({ type: "session", id }) + "\n");
+}
 
 describe("pi-conversation-identity", () => {
   it("mints Pi-valid unique IDs", () => {
@@ -37,29 +40,28 @@ describe("pi-conversation-identity", () => {
     expect(dir).not.toContain("/repo/a");
   });
 
-  it("verifies exact-ID files and rejects header mismatch", () => {
+  it("verifies discovered files and rejects header mismatch", () => {
     const base = mkdtempSync(join(tmpdir(), "pi-id-"));
     const sessionDir = join(base, "partition");
     mkdirSync(sessionDir, { recursive: true });
     const id = "conv-1";
-    const file = resolvePiConversationFile(sessionDir, id);
-    writeFileSync(file, JSON.stringify({ type: "session", id }) + "\n");
+    const file = join(sessionDir, `2026-01-01T00-00-00-000Z_${id}.jsonl`);
+    writeHeader(file, id);
 
-    const found = verifyPiConversationFile(base, sessionDir, id, () => id);
+    const found = verifyPiConversationFile(base, sessionDir, id, file, (candidate) =>
+      candidate === file ? id : null,
+    );
     expect(found).toEqual({ ok: true, canonicalFile: file });
 
-    const mismatch = verifyPiConversationFile(base, sessionDir, id, () => "other");
-    expect(mismatch.ok).toBe(false);
-
-    const missing = verifyPiConversationFile(base, sessionDir, "absent-9", () => null);
-    expect(missing).toEqual({ ok: false, reason: "conversation file not found" });
+    const mismatch = verifyPiConversationFile(base, sessionDir, id, file, () => "other");
+    expect(mismatch).toEqual({ ok: false, reason: "header id does not match conversation id" });
   });
 
   it("rejects files escaping the authorized partition", () => {
-    const base = mkdtempSync(join(tmpdir(), "pi-escape-"));
+    const base = mkdtempSync(join(tmpdir(), "pi-id-"));
     const sessionDir = join(base, "partition");
     mkdirSync(sessionDir, { recursive: true });
-    const escaped = verifyPiConversationFile(base, sessionDir, "..", () => "..");
+    const escaped = verifyPiConversationFile(base, sessionDir, "conv-1", join(base, "..", "evil.jsonl"), () => "conv-1");
     expect(escaped.ok).toBe(false);
   });
 

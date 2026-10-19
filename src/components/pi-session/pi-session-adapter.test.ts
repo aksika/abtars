@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { existsSync, mkdtempSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -15,37 +15,85 @@ import {
   sweepPiRetention,
   type PiAgentSessionShape,
   type PiSessionManagerCtor,
+  type PiSessionManagerShape,
 } from "./pi-session-adapter.js";
 import { allocatePiSuccessor } from "./pi-conversation-identity.js";
 
-function writeHeader(file: string, id: string): void {
-  writeFileSync(file, JSON.stringify({ type: "session", id }) + "\n");
-}
-
+/**
+ * Fake mirrors real SDK file semantics: create assigns
+ * `<timestamp>_<id>.jsonl` without flushing until content exists;
+ * fork writes immediately with history.
+ */
 function makeSessionManager() {
   const calls: string[] = [];
+
+  function stamp(id: string): string {
+    return `2026-01-01T00-00-00-000Z_${id}.jsonl`;
+  }
+
+  function shape(id: string, file: string | undefined): PiSessionManagerShape {
+    return {
+      getSessionId: () => id,
+      getSessionFile: () => file,
+      getSessionDir: () => (file ? join(file, "..") : ""),
+    };
+  }
+
+  function readId(file: string): string | null {
+    try {
+      const line = readFileSync(file, "utf-8").split("\n")[0] ?? "";
+      const parsed = JSON.parse(line) as { type?: unknown; id?: unknown };
+      return parsed.type === "session" && typeof parsed.id === "string" ? parsed.id : null;
+    } catch {
+      return null;
+    }
+  }
+
   const manager: PiSessionManagerCtor = {
-    create(cwd: string, sessionDir?: string, options?: { id?: string }) {
-      calls.push(`create:${options?.id}`);
-      writeHeader(join(sessionDir ?? "", `${options?.id}.jsonl`), options?.id ?? "");
-      return {};
+    create(_cwd: string, sessionDir?: string, options?: { id?: string }) {
+      const id = options?.id ?? "minted";
+      calls.push(`create:${id}`);
+      return shape(id, join(sessionDir ?? "", stamp(id)));
     },
     open(path: string) {
       calls.push(`open:${path}`);
-      return {};
+      return shape(readId(path) ?? "unknown", path);
     },
     findById(_cwd: string, id: string, sessionDir?: string) {
-      const candidate = join(sessionDir ?? "", `${id}.jsonl`);
-      return existsSync(candidate) ? candidate : undefined;
+      // Disk-honest like the real SDK: first file whose header names the id.
+      let names: string[];
+      try {
+        names = readdirSync(sessionDir ?? "");
+      } catch {
+        return undefined;
+      }
+      for (const name of names) {
+        if (!name.endsWith(".jsonl")) continue;
+        const candidate = join(sessionDir ?? "", name);
+        if (readId(candidate) === id) return candidate;
+      }
+      return undefined;
     },
     forkFrom(sourcePath: string, _targetCwd: string, sessionDir?: string, options?: { id?: string }) {
-      calls.push(`fork:${options?.id}`);
+      const id = options?.id ?? "minted";
+      calls.push(`fork:${id}`);
       if (!existsSync(sourcePath)) throw new Error("missing source");
-      writeHeader(join(sessionDir ?? "", `${options?.id}.jsonl`), options?.id ?? "");
-      return {};
+      const file = join(sessionDir ?? "", stamp(id));
+      const lines = readFileSync(sourcePath, "utf-8").split("\n").filter((line) => line.length > 0);
+      const history = lines.slice(1);
+      writeFileSync(file, JSON.stringify({ type: "session", id }) + "\n");
+      for (const entry of history) writeFileSync(file, entry + "\n", { flag: "a" });
+      return shape(id, file);
     },
   };
-  return { manager, calls };
+
+  function flush(id: string, sessionDir: string): string {
+    const file = join(sessionDir, stamp(id));
+    writeFileSync(file, JSON.stringify({ type: "session", id }) + "\n");
+    return file;
+  }
+
+  return { manager, calls, flush };
 }
 
 function bindingParams(canonicalWorkspace: string) {
@@ -60,57 +108,90 @@ function bindingParams(canonicalWorkspace: string) {
 }
 
 describe("pi-session-adapter", () => {
-  it("creates with the abtars-minted ID when no session exists", () => {
-    const root = mkdtempSync(join(tmpdir(), "pi-adapter-"));
+  it("creates with the abtars-minted ID and reports unflushed files", () => {
+    const stateRoot = mkdtempSync(join(tmpdir(), "pi-adapter-"));
     const workspace = mkdtempSync(join(tmpdir(), "pi-ws-"));
     const { manager, calls } = makeSessionManager();
-    const binding = allocatePiBinding(join(root, "pi-sessions"), bindingParams(workspace));
+    const binding = allocatePiBinding(stateRoot, bindingParams(workspace));
 
-    const handle = openPiConversation(manager, join(root, "pi-sessions"), binding);
-    expect(handle.canonicalFile).toBe(join(binding.sessionDir, `${binding.conversationId}.jsonl`));
+    const handle = openPiConversation(manager, stateRoot, binding);
+    expect(handle.binding.conversationId).toBe(binding.conversationId);
+    expect(handle.canonicalFile).toBeNull();
     expect(calls.some((call) => call === `create:${binding.conversationId}`)).toBe(true);
   });
 
-  it("reopens an intact conversation under its existing ID", () => {
-    const root = mkdtempSync(join(tmpdir(), "pi-adapter-"));
+  it("reopens an intact flushed conversation under its existing ID", () => {
+    const stateRoot = mkdtempSync(join(tmpdir(), "pi-adapter-"));
     const workspace = mkdtempSync(join(tmpdir(), "pi-ws-"));
-    const stateRoot = join(root, "pi-sessions");
-    const { manager, calls } = makeSessionManager();
+    const { manager, calls, flush } = makeSessionManager();
     const binding = allocatePiBinding(stateRoot, bindingParams(workspace));
 
     openPiConversation(manager, stateRoot, binding);
+    const file = flush(binding.conversationId, binding.sessionDir);
     const reopened = openPiConversation(manager, stateRoot, binding);
-    expect(reopened.canonicalFile).toContain(binding.conversationId);
+    expect(reopened.canonicalFile).toBe(file);
     expect(calls.filter((call) => call.startsWith("create:")).length).toBe(1);
   });
 
-  it("refuses a header mismatch instead of adopting the file", () => {
-    const root = mkdtempSync(join(tmpdir(), "pi-adapter-"));
+  it("rejects ambiguous duplicates instead of picking one", () => {
+    const stateRoot = mkdtempSync(join(tmpdir(), "pi-adapter-"));
     const workspace = mkdtempSync(join(tmpdir(), "pi-ws-"));
-    const stateRoot = join(root, "pi-sessions");
-    const { manager } = makeSessionManager();
+    const { manager, flush } = makeSessionManager();
     const binding = allocatePiBinding(stateRoot, bindingParams(workspace));
 
     openPiConversation(manager, stateRoot, binding);
-    writeHeader(join(binding.sessionDir, `${binding.conversationId}.jsonl`), "impostor");
+    flush(binding.conversationId, binding.sessionDir);
+    writeFileSync(
+      join(binding.sessionDir, `2026-02-02T00-00-00-000Z_${binding.conversationId}.jsonl`),
+      JSON.stringify({ type: "session", id: binding.conversationId }) + "\n",
+    );
 
-    expect(() => openPiConversation(manager, stateRoot, binding)).toThrow(/verification/);
+    expect(() => openPiConversation(manager, stateRoot, binding)).toThrow(/ambiguous/);
   });
 
-  it("forks only through a preallocated successor", () => {
-    const root = mkdtempSync(join(tmpdir(), "pi-adapter-"));
+  it("ignores files whose headers name a different conversation", () => {
+    const stateRoot = mkdtempSync(join(tmpdir(), "pi-adapter-"));
     const workspace = mkdtempSync(join(tmpdir(), "pi-ws-"));
-    const stateRoot = join(root, "pi-sessions");
-    const { manager, calls } = makeSessionManager();
-    const source = openPiConversation(manager, stateRoot, allocatePiBinding(stateRoot, bindingParams(workspace)));
-    const successor = allocatePiSuccessor(source.binding);
+    const { manager } = makeSessionManager();
+    const binding = allocatePiBinding(stateRoot, bindingParams(workspace));
 
+    const impostor = join(binding.sessionDir, `2026-01-01T00-00-00-000Z_${binding.conversationId}.jsonl`);
+    mkdirSync(binding.sessionDir, { recursive: true });
+    writeFileSync(impostor, JSON.stringify({ type: "session", id: "impostor" }) + "\n");
+
+    expect(() => openPiConversation(manager, stateRoot, binding)).toThrow(/verification/);
+    expect(readFileSync(impostor, "utf-8")).toContain("impostor");
+  });
+
+  it("forks flushed history only through a preallocated successor", () => {
+    const stateRoot = mkdtempSync(join(tmpdir(), "pi-adapter-"));
+    const workspace = mkdtempSync(join(tmpdir(), "pi-ws-"));
+    const { manager, calls, flush } = makeSessionManager();
+    const sourceBinding = allocatePiBinding(stateRoot, bindingParams(workspace));
+    openPiConversation(manager, stateRoot, sourceBinding);
+    const sourceFile = flush(sourceBinding.conversationId, sourceBinding.sessionDir);
+    const source = openPiConversation(manager, stateRoot, sourceBinding);
+    expect(source.canonicalFile).toBe(sourceFile);
+
+    const successor = allocatePiSuccessor(sourceBinding);
     const forked = forkPiConversation(manager, stateRoot, source, successor);
-    expect(forked.binding.predecessorId).toBe(source.binding.conversationId);
+    expect(forked.binding.predecessorId).toBe(sourceBinding.conversationId);
     expect(calls.some((call) => call === `fork:${successor.conversationId}`)).toBe(true);
 
     const rogue = allocatePiBinding(stateRoot, bindingParams(workspace));
     expect(() => forkPiConversation(manager, stateRoot, source, rogue)).toThrow(/predecessor/);
+  });
+
+  it("refuses to fork a source with no persisted history yet", () => {
+    const stateRoot = mkdtempSync(join(tmpdir(), "pi-adapter-"));
+    const workspace = mkdtempSync(join(tmpdir(), "pi-ws-"));
+    const { manager } = makeSessionManager();
+    const sourceBinding = allocatePiBinding(stateRoot, bindingParams(workspace));
+    const source = openPiConversation(manager, stateRoot, sourceBinding);
+    expect(source.canonicalFile).toBeNull();
+
+    const successor = allocatePiSuccessor(sourceBinding);
+    expect(() => forkPiConversation(manager, stateRoot, source, successor)).toThrow(/no persisted history/);
   });
 
   it("cancels under a closed gate with explicit queue draining", async () => {
@@ -120,9 +201,8 @@ describe("pi-session-adapter", () => {
       waitForIdle: async () => {},
       on: () => () => {},
     };
-    const root = mkdtempSync(join(tmpdir(), "pi-adapter-"));
+    const stateRoot = mkdtempSync(join(tmpdir(), "pi-adapter-"));
     const workspace = mkdtempSync(join(tmpdir(), "pi-ws-"));
-    const stateRoot = join(root, "pi-sessions");
     const { manager } = makeSessionManager();
     const handle = openPiConversation(manager, stateRoot, allocatePiBinding(stateRoot, bindingParams(workspace)));
 
@@ -133,15 +213,15 @@ describe("pi-session-adapter", () => {
     expect(result.settled).toBe(true);
   });
 
-  it("reports unsettled instead of hanging when idle never arrives", async () => {    const session: PiAgentSessionShape = {
+  it("reports unsettled instead of hanging when idle never arrives", async () => {
+    const session: PiAgentSessionShape = {
       clearQueue: () => ({ steering: [], followUp: [] }),
       abort: async () => {},
       waitForIdle: () => new Promise<void>(() => {}),
       on: () => () => {},
     };
-    const root = mkdtempSync(join(tmpdir(), "pi-adapter-"));
+    const stateRoot = mkdtempSync(join(tmpdir(), "pi-adapter-"));
     const workspace = mkdtempSync(join(tmpdir(), "pi-ws-"));
-    const stateRoot = join(root, "pi-sessions");
     const { manager } = makeSessionManager();
     const handle = openPiConversation(manager, stateRoot, allocatePiBinding(stateRoot, bindingParams(workspace)));
 
@@ -177,35 +257,41 @@ describe("pi-session-adapter", () => {
     expect(unbind).toHaveBeenCalledTimes(3);
   });
 
-  it("retains active and recent sessions and prunes only old ended owned files", () => {
-    const root = mkdtempSync(join(tmpdir(), "pi-adapter-"));
-    const stateRoot = join(root, "pi-sessions");
+  it("retains active, recent, and unflushed sessions and prunes only old ended owned files", () => {
+    const state = mkdtempSync(join(tmpdir(), "pi-state-"));
     const ws = mkdtempSync(join(tmpdir(), "pi-ws-"));
-    const { manager } = makeSessionManager();
-    const oldBinding = allocatePiBinding(stateRoot, bindingParams(ws));
-    const oldHandle = openPiConversation(manager, stateRoot, oldBinding);
-    const recentHandle = openPiConversation(manager, stateRoot, allocatePiBinding(stateRoot, bindingParams(ws)));
+    const { manager, flush } = makeSessionManager();
+    const oldBinding = allocatePiBinding(state, bindingParams(ws));
+    openPiConversation(manager, state, oldBinding);
+    const oldFile = flush(oldBinding.conversationId, oldBinding.sessionDir);
+    openPiConversation(manager, state, oldBinding);
+    const recentBinding = allocatePiBinding(state, bindingParams(ws));
+    openPiConversation(manager, state, recentBinding);
+    const pendingBinding = allocatePiBinding(state, bindingParams(ws));
+    openPiConversation(manager, state, pendingBinding);
 
     const now = Date.now();
-    markPiConversationEnded(stateRoot, oldBinding.conversationId, now - 8 * 24 * 60 * 60 * 1000);
-    const report = sweepPiRetention(stateRoot, now, (id) => id === recentHandle.binding.conversationId);
+    markPiConversationEnded(state, oldBinding.conversationId, now - 8 * 24 * 60 * 60 * 1000);
+    const report = sweepPiRetention(state, now, (id) => id === recentBinding.conversationId);
     expect(report.removed).toEqual([oldBinding.conversationId]);
-    expect(existsSync(oldHandle.canonicalFile)).toBe(false);
-    expect(existsSync(recentHandle.canonicalFile)).toBe(true);
+    expect(existsSync(oldFile)).toBe(false);
   });
 
   it("erases owned files without touching standalone sessions", () => {
     const root = mkdtempSync(join(tmpdir(), "pi-adapter-"));
     const ws = mkdtempSync(join(tmpdir(), "pi-ws-"));
-    const stateRoot = join(root, "pi-sessions");
+    const state = root;
     const standalone = join(root, "standalone.jsonl");
-    writeHeader(standalone, "standalone");
-    const { manager } = makeSessionManager();
-    const handle = openPiConversation(manager, stateRoot, allocatePiBinding(stateRoot, bindingParams(ws)));
+    writeFileSync(standalone, JSON.stringify({ type: "session", id: "standalone" }) + "\n");
+    const { manager, flush } = makeSessionManager();
+    const binding = allocatePiBinding(state, bindingParams(ws));
+    openPiConversation(manager, state, binding);
+    const file = flush(binding.conversationId, binding.sessionDir);
+    openPiConversation(manager, state, binding);
 
-    const report = erasePiConversation(stateRoot, handle.binding.conversationId);
-    expect(report.removedFiles).toEqual([handle.canonicalFile]);
-    expect(existsSync(handle.canonicalFile)).toBe(false);
+    const report = erasePiConversation(state, binding.conversationId);
+    expect(report.removedFiles).toEqual([file]);
+    expect(existsSync(file)).toBe(false);
     expect(existsSync(standalone)).toBe(true);
   });
 });

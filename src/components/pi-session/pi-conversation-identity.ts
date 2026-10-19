@@ -21,6 +21,15 @@ export type PiConversationRole =
 
 export type PiMemoryScope = "abmind" | "none" | "skill-isolated";
 
+export interface PiConversationParams {
+  principal: string;
+  platform: string;
+  role: PiConversationRole;
+  workspaceAlias: string;
+  canonicalWorkspace: string;
+  memoryScope: PiMemoryScope;
+}
+
 export interface PiConversationBinding {
   conversationId: string;
   principal: string;
@@ -69,26 +78,22 @@ export function resolvePiConversationDir(
   return join(root, opaquePrincipalKey(principal), role, canonicalWorkspaceKey(canonicalWorkspace));
 }
 
-export function resolvePiConversationFile(sessionDir: string, conversationId: string): string {
-  return join(sessionDir, `${conversationId}.jsonl`);
-}
-
 /**
- * Exact-ID lookup within the authorized partition. Never a global
- * latest-session scan or an unscoped suffix search: the candidate file is
- * derived from the directory and ID, then containment and header identity
- * are enforced.
+ * Exact-ID verification of a discovered candidate file. Discovery comes
+ * from Pi's findById plus the adapter's claimant scan; this function
+ * enforces containment and header identity on the candidate. Never a
+ * global latest-session scan or an unscoped suffix search.
  */
 export function verifyPiConversationFile(
   root: string,
   sessionDir: string,
   conversationId: string,
+  candidate: string,
   readHeaderId: (canonicalFile: string) => string | null,
 ): PiConversationFileResolution {
   if (!isValidPiConversationId(conversationId)) {
     return { ok: false, reason: "invalid conversation id" };
   }
-  const candidate = resolvePiConversationFile(sessionDir, conversationId);
   if (!isPathWithinRoot(root, candidate)) {
     return { ok: false, reason: "conversation file escapes authorized root" };
   }
