@@ -24,6 +24,11 @@ import { randomUUID } from "node:crypto";
 import { ProviderAttemptRunner } from "./provider-attempt-runner.js";
 import type { ProviderAttemptBundle, ProviderAttemptExit, ProviderAttemptFactory } from "./provider-attempt-runner.js";
 import { recordPiMemoObservation } from "../pi-session/pi-memo-observer.js";
+import {
+  applyMemoSuccess,
+  loadAvailabilityMemo,
+  saveAvailabilityMemo,
+} from "../pi-session/provider-availability-memo.js";
 
 const TAG = "pi-stream-fn";
 
@@ -414,6 +419,11 @@ export function createPiStreamFn(options: AbtarsPiStreamFnOptions): StreamFn {
           // to skip — still poison via poisonCandidate().
           // #1297: the actual classification (credits, auth, rate_limit,
           // transient, ...) is recorded, not an unconditional transient.
+          // #1932: admission timestamp for stale-success guarding — a
+          // success clears only observations not newer than this attempt's
+          // admission. Captured here, when the candidate is selected for
+          // the attempt, before any provider await.
+          const attemptAdmittedAt = Date.now();
           const poisonCandidate = (kind: ErrorKind = "transient", retryAfterMs?: number, detail?: string): void => {
             options.policy.recordError(candidate, kind, retryAfterMs);
             options.policy.excludedKeys.add(candidateKey(candidate.model, candidate.endpoint));
@@ -451,6 +461,23 @@ export function createPiStreamFn(options: AbtarsPiStreamFnOptions): StreamFn {
             });
             if (result === "success") {
               options.policy.recordSuccess(candidate);
+              // #1932: success clears only same-namespace observations not
+              // newer than this attempt's admission; stale completions
+              // cannot clear a newer failure. Skips the write when nothing
+              // changed so successful turns stay read-only.
+              if (options.memoStateDir !== undefined) {
+                try {
+                  const loaded = loadAvailabilityMemo(options.memoStateDir);
+                  const kept = applyMemoSuccess(loaded.entries, {
+                    authNamespace: `${candidate.authSource ?? "abtars"}:${candidate.provider}`,
+                    provider: candidate.provider,
+                    admittedAt: attemptAdmittedAt,
+                  });
+                  if (kept.length !== loaded.entries.length) {
+                    saveAvailabilityMemo(options.memoStateDir, kept);
+                  }
+                } catch { /* best-effort memo clearing; the turn already succeeded */ }
+              }
             } else if (result !== "aborted") {
               if (kind === "context_exceeded") overflowFailures++;
               // #1905: bounded redacted provider error evidence at the

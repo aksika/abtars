@@ -9,6 +9,7 @@ import { join } from "node:path";
 import type { Model, Api } from "@earendil-works/pi-ai";
 import { normalizeContext } from "@earendil-works/pi-ai";
 import { createPiStreamFn } from "./pi-stream-fn.js";
+import { saveAvailabilityMemo } from "../pi-session/provider-availability-memo.js";
 import { FallbackPolicy } from "./fallback-policy.js";
 import { ModelHealthRegistry } from "./model-health-registry.js";
 import type { ModelCandidate } from "./model-candidates.js";
@@ -193,6 +194,47 @@ describe("createPiStreamFn", () => {
       reason: "rate-limit",
       modelScope: "fail",
     });
+  });
+
+  it("clears stale same-namespace observations on success but keeps newer ones (#1932)", async () => {
+    const stateDir = mkdtempSync(join(tmpdir(), "pi-memo-wire-"));
+    saveAvailabilityMemo(stateDir, [
+      {
+        authNamespace: "abtars:test-provider",
+        provider: "test-provider",
+        reason: "rate-limit",
+        observedAt: 1,
+        unusableUntil: Date.now() + 5 * 60 * 1000,
+      },
+      {
+        authNamespace: "abtars:test-provider",
+        provider: "test-provider",
+        reason: "temporary",
+        observedAt: Date.now() + 3_600_000,
+        unusableUntil: Date.now() + 3_900_000,
+      },
+    ]);
+    const okCandidate = makeCandidate({ model: "ok", provider: "test-provider", endpoint: "https://ok/v1" });
+    const okPolicy = new FallbackPolicy([okCandidate], registry);
+    const attemptFactory = vi.fn().mockResolvedValue(makeFakeStream([
+      { type: "text_delta", contentIndex: 0, delta: "Hello" },
+      { type: "done", reason: "stop", message: { role: "assistant", content: "Hello", stopReason: "stop", usage: { input: 10, output: 5 } } },
+    ]));
+    const streamFn = createPiStreamFn({
+      policy: okPolicy,
+      executionId: "memo-success-test",
+      createPiAiAttempt: attemptFactory,
+      memoStateDir: stateDir,
+    });
+
+    const stream = await streamFn(makeModel(), emptyTranscript(), {});
+    for await (const _event of stream) { /* drain to terminal */ }
+
+    const memo = JSON.parse(readFileSync(join(stateDir, "provider-availability-v1.json"), "utf-8")) as {
+      entries: Array<Record<string, unknown>>;
+    };
+    expect(memo.entries).toHaveLength(1);
+    expect(memo.entries[0]).toMatchObject({ reason: "temporary" });
   });
 
   it("falls back to a prior rotation candidate when the selected candidate fails", async () => {
