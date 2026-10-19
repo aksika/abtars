@@ -3,6 +3,9 @@
 // package's own contract tests.
 
 import { describe, it, expect, vi, beforeEach } from "vitest";
+import { mkdtempSync, readFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import type { Model, Api } from "@earendil-works/pi-ai";
 import { normalizeContext } from "@earendil-works/pi-ai";
 import { createPiStreamFn } from "./pi-stream-fn.js";
@@ -163,6 +166,33 @@ describe("createPiStreamFn", () => {
     expect(attemptFactory).toHaveBeenCalledTimes(2);
     const textEvents = events.filter((e) => e.type === "text_delta");
     expect(textEvents.some((e) => e.delta?.includes("Hello from fallback"))).toBe(true);
+  });
+
+  it("records memoizable terminal failures to the availability memo (#1932)", async () => {
+    const stateDir = mkdtempSync(join(tmpdir(), "pi-memo-wire-"));
+    const failCandidate = makeCandidate({ model: "fail", provider: "test-provider", endpoint: "https://fail/v1" });
+    const failPolicy = new FallbackPolicy([failCandidate], registry);
+    const attemptFactory = vi.fn().mockRejectedValue(new Error("API error 429: rate limited"));
+    const streamFn = createPiStreamFn({
+      policy: failPolicy,
+      executionId: "memo-test",
+      createPiAiAttempt: attemptFactory,
+      memoStateDir: stateDir,
+    });
+
+    const stream = await streamFn(makeModel(), emptyTranscript(), {});
+    for await (const _event of stream) { /* drain to terminal */ }
+
+    const memo = JSON.parse(readFileSync(join(stateDir, "provider-availability-v1.json"), "utf-8")) as {
+      entries: Array<Record<string, unknown>>;
+    };
+    expect(memo.entries).toHaveLength(1);
+    expect(memo.entries[0]).toMatchObject({
+      authNamespace: "abtars:test-provider",
+      provider: "test-provider",
+      reason: "rate-limit",
+      modelScope: "fail",
+    });
   });
 
   it("falls back to a prior rotation candidate when the selected candidate fails", async () => {

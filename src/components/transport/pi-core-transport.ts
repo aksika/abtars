@@ -1,4 +1,6 @@
+import { join } from "node:path";
 import { logDebug, logInfo, logWarn } from "../logger.js";
+import { abtarsHome } from "../../paths.js";
 import type { IKiroTransport, PromptRequestContext, ReasoningEffort, ReasoningEffortState, RuntimeUsageSnapshot, RuntimeStatusSnapshot } from "./kiro-transport.js";
 import type { CandidateSpec, ModelCandidate } from "./model-candidates.js";
 import type { ModelHealthRegistry } from "./model-health-registry.js";
@@ -467,6 +469,9 @@ export class PiCoreTransport implements IKiroTransport {
         deadlineAt,
         providerInactivityTimeoutMs: context?.providerInactivityTimeoutMs ?? 180_000,
         reasoningEffort: this.requestedEffort,
+        // #1932: durable availability observations land in the shared
+        // state dir. Write-only: admission is unchanged until cutover.
+        memoStateDir: join(abtarsHome(), "state"),
         // #1748: the session-stable cache identity and the pinned retention
         // reach every provider attempt through the stream options.
         cacheIdentity: this.cacheIdentity,

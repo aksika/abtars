@@ -23,6 +23,7 @@ import type { PiAiModule } from "./pi-ai-adapter.js";
 import { randomUUID } from "node:crypto";
 import { ProviderAttemptRunner } from "./provider-attempt-runner.js";
 import type { ProviderAttemptBundle, ProviderAttemptExit, ProviderAttemptFactory } from "./provider-attempt-runner.js";
+import { recordPiMemoObservation } from "../pi-session/pi-memo-observer.js";
 
 const TAG = "pi-stream-fn";
 
@@ -57,6 +58,11 @@ export interface AbtarsPiStreamFnOptions {
   /** #1748: explicit prompt-cache retention forwarded to pi. Pinned to
    *  "short" by the transport unless a provider opts into "long". */
   cacheRetention?: CacheRetention;
+  /** #1932: state directory for the durable provider-availability memo.
+   *  When present, memoizable terminal failures are recorded after Pi's
+   *  bounded recovery fails. Write-only and best-effort: admission
+   *  behavior is unchanged and memo failures never break a turn. */
+  memoStateDir?: string;
 }
 
 function zeroUsage(): Usage {
@@ -411,6 +417,19 @@ export function createPiStreamFn(options: AbtarsPiStreamFnOptions): StreamFn {
           const poisonCandidate = (kind: ErrorKind = "transient", retryAfterMs?: number, detail?: string): void => {
             options.policy.recordError(candidate, kind, retryAfterMs);
             options.policy.excludedKeys.add(candidateKey(candidate.model, candidate.endpoint));
+            // #1932: write-only availability observation after bounded
+            // recovery failed. Never throws: a memo write must not break
+            // a turn, and admission behavior is unchanged until cutover.
+            if (options.memoStateDir !== undefined) {
+              try {
+                recordPiMemoObservation(options.memoStateDir, {
+                  authNamespace: `${candidate.authSource ?? "abtars"}:${candidate.provider}`,
+                  provider: candidate.provider,
+                  endpoint: candidate.endpoint,
+                  modelScope: candidate.model,
+                }, { kind, retryAfterMs }, Date.now());
+              } catch { /* best-effort memo write; the turn continues */ }
+            }
             // #1905: bounded redacted provider error evidence at the
             // attempt-failure branch — error text only, never prompts.
             // A provider failure is a fallback event, not a successful-turn
