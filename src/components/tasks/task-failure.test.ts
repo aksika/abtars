@@ -73,8 +73,8 @@ describe("#1520 failure policy matrix", () => {
     expect(parseTaskFailure(JSON.parse(JSON.stringify(d)))).toEqual(d);
   });
 
-  it("context_overflow and all_candidates_failed are recognized execution codes at v1", () => {
-    for (const code of ["context_overflow", "all_candidates_failed"]) {
+  it("context_overflow, all_candidates_failed, and provider_unavailable are recognized execution codes at v1", () => {
+    for (const code of ["context_overflow", "all_candidates_failed", "provider_unavailable"]) {
       const d = makeTaskFailure("execution", code, PHASE, "provider terminal failure", "none");
       expect(d.version).toBe(1);
       expect(parseTaskFailure(JSON.parse(JSON.stringify(d)))).toEqual(d);

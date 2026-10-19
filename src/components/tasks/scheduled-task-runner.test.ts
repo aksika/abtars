@@ -712,6 +712,32 @@ describe("ScheduledTaskRunner #1297 credits_exhausted mapping", () => {
     expect(settleCall.diagnostic?.retryability).toBe("none");
   });
 
+  it("#1932: provider_unavailable settles visibly as failed with no retry", async () => {
+    const agentRunner = vi.fn(async () => {
+      throw new ProviderExecutionError({
+        code: "provider_unavailable",
+        retryable: false,
+        attemptedCandidates: 2,
+        message: "All configured providers are cooling down",
+      });
+    });
+    const runner = new ScheduledTaskRunner({ agentRunner });
+    const outcome = await runner.run(makeEntry("unavailable-runner"), makeReservation("unavailable-runner"));
+
+    expect(outcome.status).toBe("failed");
+    expect(outcome.safeDetail).toBe("All configured providers are cooling down");
+    expect(mockedSettle).toHaveBeenCalledWith(expect.objectContaining({
+      outcome: "failed",
+      diagnostic: expect.objectContaining({
+        category: "execution",
+        code: "provider_unavailable",
+        retryability: "none",
+      }),
+    }));
+    const settleCall = mockedSettle.mock.calls[0]![0];
+    expect(settleCall["retryAt"]).toBeUndefined();
+  });
+
   it("keeps generic mapping for ordinary model errors (no typed provider failure)", async () => {
     const agentRunner = vi.fn(async () => {
       throw new Error("generic provider outage");
