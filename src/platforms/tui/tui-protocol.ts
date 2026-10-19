@@ -62,6 +62,9 @@ export interface NativeCodingHandoffInfo {
   workspaceAlias: string;
   canonicalPath: string;
   memoryMode: "none" | "abmind";
+  /** Directory passed as `--session-dir`. Initial handoffs receive the
+   *  session's partitioned directory; resume handoffs keep the configured
+   *  storage root because the proven file is opened explicitly. */
   sessionStorageRoot: string;
   /** Resume: the proven persisted Pi session identity. */
   piSessionId?: string;

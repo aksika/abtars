@@ -15,7 +15,6 @@
  * buildPrompt(), or any memory hook.
  */
 
-import { randomUUID } from "node:crypto";
 import { readdirSync, type Dirent } from "node:fs";
 import { join } from "node:path";
 import { PiCodingSessionStore, type PiCodingSessionRecord, type PiCodingTransitionUpdates, type PiCodingState, type PiCodingLeaseFrontend } from "./pi-coding-session-store.js";
@@ -23,7 +22,7 @@ import { PiWorkspaceClaimStore } from "./pi-workspace-claim-store.js";
 import { PiRuntimeHost } from "./pi-runtime-host.js";
 import type { PiExecutorConfig } from "./config.js";
 import { resolveAndValidateWorkspace, validatePersistedSession } from "./config.js";
-import { mintPiConversationId } from "../pi-session/pi-conversation-identity.js";
+import { mintPiConversationId, resolvePiConversationDir } from "../pi-session/pi-conversation-identity.js";
 import { SupervisedPiRpcClient, type PiAgentEvent } from "./pi-rpc-client.js";
 import { projectPiEvent } from "./pi-event-projection.js";
 import type { RpcExtensionUIRequest } from "@earendil-works/pi-coding-agent";
@@ -314,13 +313,18 @@ export class PiCodingSessionService {
 
     const currentGen = rec.runtimeGeneration;
     const intent: "initial" | "resume" = rec.piSessionId && rec.piSessionFile ? "resume" : "initial";
+    // #1932 — mint before the transaction so an initial turn keeps a durable
+    // identity even if the bridge dies between launch and proof. Boot
+    // reconciliation can then rediscover the file by its durable ID instead
+    // of losing the transcript to the crash window.
+    const initialPiSessionId = intent === "initial" ? mintPiConversationId() : undefined;
 
     // Atomically: bump the generation, CAS idle -> starting, acquire the
     // workspace claim. Any failure rolls the whole transaction back so the
     // durable session stays idle.
     let generation: number;
     try {
-      const tx = this.txTurnStart(rec, currentGen, intent, input.leaseOwner, ws.canonicalPath);
+      const tx = this.txTurnStart(rec, currentGen, intent, input.leaseOwner, ws.canonicalPath, "telegram-rpc", initialPiSessionId);
       if (!tx.ok) {
         this.deps.host.releaseSlot();
         return tx.busy
@@ -333,7 +337,7 @@ export class PiCodingSessionService {
       return { kind: "error", reason: "Failed to start the turn" };
     }
 
-    const turn = await this.launchTurn(rec, generation, ws.canonicalPath, intent);
+    const turn = await this.launchTurn(rec, generation, ws.canonicalPath, initialPiSessionId);
     if (!turn.ok) return { kind: "error", reason: turn.reason };
 
     const owned = turn.owned!;
@@ -476,9 +480,11 @@ export class PiCodingSessionService {
     }
     const currentGen = rec.runtimeGeneration;
     const intent: "initial" | "resume" = rec.piSessionId && rec.piSessionFile ? "resume" : "initial";
+    // #1932 — durable identity before launch, same as startTurn.
+    const initialPiSessionId = intent === "initial" ? mintPiConversationId() : undefined;
     let generation: number;
     try {
-      const tx = this.txTurnStart(rec, currentGen, intent, `compact:${ownerPrincipal}`, ws.canonicalPath);
+      const tx = this.txTurnStart(rec, currentGen, intent, `compact:${ownerPrincipal}`, ws.canonicalPath, "telegram-rpc", initialPiSessionId);
       if (!tx.ok) {
         this.deps.host.releaseSlot();
         return { ok: false, message: tx.busy ? "Workspace is busy" : "Session is starting" };
@@ -489,7 +495,7 @@ export class PiCodingSessionService {
       return { ok: false, message: "Failed to start compaction" };
     }
 
-    const turn = await this.launchTurn(rec, generation, ws.canonicalPath, intent);
+    const turn = await this.launchTurn(rec, generation, ws.canonicalPath, initialPiSessionId);
     if (!turn.ok) {
       return { ok: false, message: turn.reason };
     }
@@ -647,12 +653,20 @@ export class PiCodingSessionService {
     // a durable target even if the bridge dies before the client can report
     // its pid.  Presence of this id alone never grants resumability; the
     // session file still has to be found and proven.
-    const newPiSessionId = isResume ? undefined : randomUUID();
+    const newPiSessionId = isResume ? undefined : mintPiConversationId();
 
     // R4.6 — synchronously reserve the shared Pi slot before anything else.
     if (!this.deps.host.tryReserveSlot()) {
       return { ok: false, reason: "Pi capacity is full — retry when a slot frees up" };
     }
+
+    // #1932 — an initial handoff writes into the same partitioned directory as
+    // the RPC path (R1-R2). Resume keeps the legacy flat root because the
+    // proven file may predate partitioning and is opened explicitly with
+    // --session; --session-dir only governs new/branch sessions.
+    const handoffSessionDir = isResume
+      ? this.deps.config.sessionStorageRoot
+      : resolvePiConversationDir(this.deps.config.sessionStorageRoot, rec.ownerPrincipal, "coding", ws.canonicalPath);
 
     const intent: "initial" | "resume" = isResume ? "resume" : "initial";
     let generation: number;
@@ -684,7 +698,7 @@ export class PiCodingSessionService {
       workspaceAlias: rec.workspaceAlias,
       canonicalPath: ws.canonicalPath,
       memoryMode: rec.memoryMode,
-      sessionStorageRoot: this.deps.config.sessionStorageRoot,
+      sessionStorageRoot: handoffSessionDir,
       piSessionId: proof?.ok ? proof.sessionId : undefined,
       piSessionFile: proof?.ok ? proof.canonicalFile : undefined,
       newPiSessionId,
@@ -1182,16 +1196,16 @@ export class PiCodingSessionService {
     rec: PiCodingSessionRecord,
     generation: number,
     canonicalPath: string,
-    intent: "initial" | "resume",
+    initialPiSessionId: string | undefined,
   ): Promise<{ ok: true; owned: OwnedTurn } | { ok: false; reason: string }> {
     let launched: Awaited<ReturnType<PiRuntimeHost["launch"]>>;
     try {
-      // #1932 — initial turns mint the abtars-owned conversation ID and
-      // launch directly into its partitioned directory (R1-R2). Resume
-      // launches keep the legacy flat root: the proven file may predate
-      // partitioning and resolveIdentity switches to it explicitly. The
-      // post-launch proof adopts whatever Pi reports, so a Pi that ignored
-      // --session-id behaves exactly as today.
+      // #1932 — the initial turn's minted ID is already durable (committed by
+      // txTurnStart), so the launch carries it into the partitioned directory
+      // (R1-R2). Resume launches keep the legacy flat root: the proven file
+      // may predate partitioning and resolveIdentity switches to it
+      // explicitly. The post-launch proof adopts whatever Pi reports, so a
+      // Pi that ignored --session-id behaves exactly as today.
       launched = await this.deps.host.launch({
         workspaceAlias: rec.workspaceAlias,
         envIdentity: {
@@ -1200,8 +1214,8 @@ export class PiCodingSessionService {
           executionGeneration: generation,
         },
         memoryMode: rec.memoryMode,
-        ...(intent === "initial"
-          ? { ownedSession: { role: "coding" as const, conversationId: mintPiConversationId() } }
+        ...(initialPiSessionId
+          ? { ownedSession: { role: "coding" as const, conversationId: initialPiSessionId } }
           : {}),
       });
     } catch (err) {

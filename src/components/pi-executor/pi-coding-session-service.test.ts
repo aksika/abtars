@@ -29,6 +29,8 @@ const fake = vi.hoisted(() => {
       sessionId: "fresh-process", sessionFile: undefined, isStreaming: false, isCompacting: false,
     };
     static onSwitch: ((file: string, client: FakeClient) => void) | null = null;
+    /** Called synchronously inside launch, before the fake reports state. */
+    static onLaunch: (() => void) | null = null;
     static promptError: Error | null = null;
     pid = 4242;
     closed = false;
@@ -46,7 +48,7 @@ const fake = vi.hoisted(() => {
       FakeClient.instances.push(this);
     }
     record(method: string, args: unknown[] = []): void { this.calls.push({ method, args }); }
-    async launch(...args: unknown[]): Promise<void> { this.record("launch", args); }
+    async launch(...args: unknown[]): Promise<void> { this.record("launch", args); FakeClient.onLaunch?.(); }
     async getState(): Promise<{ sessionId: string; sessionFile?: string; isStreaming: boolean; isCompacting: boolean }> {
       this.record("getState");
       return this.state;
@@ -84,6 +86,7 @@ const fake = vi.hoisted(() => {
       FakeClient.instances = [];
       FakeClient.defaultState = { sessionId: "fresh-process", sessionFile: undefined, isStreaming: false, isCompacting: false };
       FakeClient.onSwitch = null;
+      FakeClient.onLaunch = null;
       FakeClient.promptError = null;
     }
   }
@@ -269,6 +272,8 @@ describe("PiCodingSessionService #1635 — turn lifecycle", () => {
     const sessionId = createSession(h);
     const createdFile = writeSession(h.root, "created.jsonl", "pi-created");
     fake.FakeClient.defaultState = { sessionId: "pi-created", sessionFile: createdFile, isStreaming: false, isCompacting: false };
+    let durableAtLaunch: string | null = null;
+    fake.FakeClient.onLaunch = () => { durableAtLaunch = h.store.get(sessionId)?.piSessionId ?? null; };
 
     const first = await h.service.startTurn({ sessionId, text: "first", ownerPrincipal: "usr-1", leaseOwner: "tg:1" });
     expect(first.kind).toBe("started");
@@ -284,6 +289,9 @@ describe("PiCodingSessionService #1635 — turn lifecycle", () => {
     expect(firstArgs).toContain("--session-id");
     const conversationId = firstArgs[firstArgs.indexOf("--session-id") + 1] as string;
     expect(conversationId).toMatch(/^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$/);
+    // Crash-window safety: the identity is durable before the process spawns,
+    // so boot reconciliation can rediscover the file by its ID.
+    expect(durableAtLaunch).toBe(conversationId);
 
     const client = fake.FakeClient.instances[0]!;
     client.emitEvent(agentEnd());
@@ -758,7 +766,7 @@ describe("PiCodingSessionService #1635 — turn lifecycle", () => {
       expect(h.host.reservedCount).toBe(0);
     });
 
-    it("initial handoff issues a --session-id identity and discovers the file at exit", async () => {
+    it("initial handoff issues a --session-id identity in the coding partition and discovers the file at exit", async () => {
       const h = harness;
       const sessionId = createSession(h); // fresh — no Pi identity yet
       const result = h.service.beginNativeHandoff({ ownerPrincipal: "usr-1", leaseOwner: "tui:1", command: "/coding" });
@@ -767,12 +775,16 @@ describe("PiCodingSessionService #1635 — turn lifecycle", () => {
       expect(result.handoff.newPiSessionId).toBeTruthy();
       expect(result.handoff.piSessionFile).toBeUndefined();
       const newId = result.handoff.newPiSessionId!;
+      // The handoff targets the same partitioned directory as the RPC path (R1-R2).
+      expect(result.handoff.sessionStorageRoot.startsWith(h.root)).toBe(true);
+      expect(result.handoff.sessionStorageRoot).toContain("/coding/");
+      expect(result.handoff.sessionStorageRoot).not.toBe(h.root);
 
-      // Pi wrote the session file under the configured storage root during
-      // the handoff (--session-dir layout: <root>/--<encoded-cwd>--/<ts>_<id>.jsonl)
+      // Pi wrote the session file under the handoff session dir (--session-dir layout).
       const encoded = `--${h.wsPath.replace(/^[/\\]/, "").replace(/[/\\:]/g, "-")}--`;
-      mkdirSync(join(h.root, encoded), { recursive: true });
-      const sessionFile = join(h.root, encoded, `2026-08-13T00-00-00-000Z_${newId}.jsonl`);
+      const handoffRoot = result.handoff.sessionStorageRoot;
+      mkdirSync(join(handoffRoot, encoded), { recursive: true });
+      const sessionFile = join(handoffRoot, encoded, `2026-08-13T00-00-00-000Z_${newId}.jsonl`);
       writeFileSync(sessionFile, JSON.stringify({ type: "session", id: newId }) + "\n", "utf-8");
 
       const ended = h.service.endNativeHandoff({ sessionId, leaseOwner: "tui:1", code: 0 });

@@ -10,8 +10,7 @@ import type { SupervisedPiCommunicationPort } from "./supervised-pi-communicatio
 import { validatePersistedSession, type SessionProof } from "./config.js";
 import { mintPiConversationId, type PiConversationRole } from "../pi-session/pi-conversation-identity.js";
 import { PiRuntimeHost } from "./pi-runtime-host.js";
-import type { PiRunOrigin } from "./types.js";
-import type { PiRunRecord, PiRunStatus, PiPendingRequestType, PiUiReply, PendingUiClaim, ResumeCapability } from "./types.js";
+import type { PiRunOrigin, PiRunRecord, PiRunStatus, PiPendingRequestType, PiUiReply, PendingUiClaim, ResumeCapability } from "./types.js";
 import { captureGitEvidence, computeChangedFilesSummary } from "./evidence.js";
 import { nerve } from "../nerve.js";
 import { boundedError, DIALOG_METHODS } from "./turn-utils.js";
