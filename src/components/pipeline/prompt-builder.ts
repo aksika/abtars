@@ -18,6 +18,7 @@ import type { ConversationBuffer } from "../conversation-buffer.js";
 import { isTrustedScheduledAnnouncement, type InboundMessage } from "../../types/platform.js";
 import type { UserRegistry } from "../user-registry.js";
 import { sessionTypeOf, type DurableContextIntent } from "../spin-types.js";
+import { sharedArchiveOutbox, type PiArchiveOutbox } from "../pi-session/pi-archive-outbox.js";
 
 const TAG = "pipeline";
 const ACTIVE_MEMORY_LIMIT = 5;
@@ -30,6 +31,9 @@ export interface BuildPromptDeps {
   contextPercent: number;
   maxContext?: number;
   isAcp?: boolean;
+  /** #1932: archive outbox for pending terminal writes. Tests inject an
+   *  isolated instance; production defaults to the shared one. */
+  archiveOutbox?: PiArchiveOutbox;
 }
 
 export interface BuildPromptResult {
@@ -202,6 +206,22 @@ export async function buildPrompt(
   if (durableRequired && memoryRuntime?.state !== "ready") {
     durableContextIntent = { mode: "required_unavailable", reason: "runtime_unavailable" };
   } else if (durableRequired) {
+    // #1932: a previous turn's required terminal write may still be
+    // unacknowledged (delivered but its archive row never confirmed). Retry
+    // it first under the original operation key — the server keeps the
+    // first row, so a lost acknowledgement retries safely. If the retry
+    // fails, fail the turn closed instead of silently crossing the known
+    // archive gap. Turns that never consume durable history (guest,
+    // skill-isolated, session-start) bypass: they cross no gap.
+    const outbox = deps.archiveOutbox ?? sharedArchiveOutbox;
+    if (outbox.has(sessionKey)) {
+      const flushed = await outbox.flush(sessionKey, (input, key) => memoryRuntime!.recordMessage(input, key));
+      if (!flushed) {
+        durableContextIntent = { mode: "required_unavailable", reason: "record_failed" };
+      }
+    }
+  }
+  if (durableContextIntent.mode === "not_required" && durableRequired) {
     // #1724: a trusted scheduled-announcement event carries its durable,
     // card-derived identity — delivery retries must deduplicate against the
     // same inbound row instead of recording a fresh turn per attempt.

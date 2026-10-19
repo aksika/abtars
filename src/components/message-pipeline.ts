@@ -15,6 +15,7 @@ import { isContextOverflowFailure, isProviderUnavailable } from "./transport/pro
 import type { SttConfig } from "./stt.js";
 import { synthesizeSpeech, type TtsConfig } from "./tts.js";
 import { attemptMemoryMutation } from "./memory-runtime.js";
+import { sharedArchiveOutbox, type PiArchiveOutbox } from "./pi-session/pi-archive-outbox.js";
 import { assistantMessageKey, feedbackKey } from "./memory-operation-key.js";
 import { beginAnswerSend, publishAnswerRecord, resolveAnswerSupport, peekToolEvidence, takeToolEvidence, recordFeedbackBatch } from "./answer-evidence.js";
 
@@ -189,6 +190,9 @@ export interface PipelineDeps extends TransportDeps, MemoryDeps, VoiceDeps {
    *  assistant record for a boot-greeting question. Must never throw through
    *  the pipeline; failure leaves the server row pending. */
   settleDreamQuestion?: (input: { id: string; userId: string; deliveryKey: string }) => Promise<void>;
+  /** #1932: archive outbox for pending terminal writes. Tests inject an
+   *  isolated instance; production defaults to the shared one. */
+  archiveOutbox?: PiArchiveOutbox;
 }
 
 /**
@@ -370,6 +374,7 @@ export async function handleInboundMessage(
     const { prompt: builtPrompt, imageContent, recalledHits, durableContextIntent, currentTurn } = await buildPrompt(msg, text, {
       memoryRuntime: deps.memoryRuntime, memoryConfig, sessionManager: deps.sessionManager, conversationBuffer, contextPercent: ctxPct, maxContext: deps.maxContext,
       isAcp: transport.getRuntimeStatus?.().route === "acp",
+      archiveOutbox: deps.archiveOutbox,
     }, registry, effectiveSession);
 
     if (builtPrompt === "__INJECTION_BLOCKED__") {
@@ -749,6 +754,24 @@ export async function handleInboundMessage(
           run: () => deps.memoryRuntime!.recordMessage({ role: "assistant", content: bootQuestionDelivered ? `[WAKE-UP QUESTION id=${bootQuestion!.id}] ${userResponse}` : userResponse, timestamp, userId, sessionId: activeSessionId }, operationKey),
         });
         assistantDurablyRecorded = hasDurableMessageId(writeResult);
+        // #1932: a required terminal write without durable confirmation
+        // leaves a known archive gap. Hold the delivered payload in the
+        // bounded outbox: the next turn on this session retries it under
+        // the same operation key before any provider request is admitted.
+        // A confirmed write clears defensively.
+        const outbox = deps.archiveOutbox ?? sharedArchiveOutbox;
+        if (assistantDurablyRecorded) {
+          outbox.clear(activeSessionId);
+        } else {
+          outbox.note({
+            role: "assistant",
+            content: bootQuestionDelivered ? `[WAKE-UP QUESTION id=${bootQuestion!.id}] ${userResponse}` : userResponse,
+            timestamp,
+            userId,
+            sessionId: activeSessionId,
+            operationKey,
+          });
+        }
         // #1515: settle the asked CAS only after a durable assistant record;
         // the operation key is the delivery key (server CAS keeps the first).
         if (assistantDurablyRecorded && bootQuestionDelivered) {
@@ -868,6 +891,22 @@ export async function handleInboundMessage(
         }, operationKey),
       });
       assistantDurablyRecorded = hasDurableMessageId(writeResult);
+      // #1932: hold unconfirmed terminal writes for the next turn's retry;
+      // see the simple-delivery branch above for the contract.
+      const outbox = deps.archiveOutbox ?? sharedArchiveOutbox;
+      if (assistantDurablyRecorded) {
+        outbox.clear(activeSessionId);
+      } else {
+        outbox.note({
+          role: "assistant",
+          content: bootQuestionDelivered ? `[WAKE-UP QUESTION id=${bootQuestion!.id}] ${userResponse}` : userResponse,
+          timestamp,
+          userId,
+          sessionId: activeSessionId,
+          ...(lastSentMsgId != null ? { platformMessageId: String(lastSentMsgId) } : {}),
+          operationKey,
+        });
+      }
       // #1515: settle the asked CAS only after a durable assistant record.
       if (assistantDurablyRecorded && bootQuestionDelivered) {
         await settleDreamQuestion(deps, bootQuestion!, userId, operationKey);

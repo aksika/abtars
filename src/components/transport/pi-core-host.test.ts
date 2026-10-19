@@ -15,6 +15,7 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { PiCoreExecutionHost } from "./pi-core-host.js";
 import { DurableContextUnavailableError } from "./pi-core-context.js";
+import { PiArchiveOutbox } from "../pi-session/pi-archive-outbox.js";
 import { createCurrentTurnMessage } from "./pi-core-types.js";
 import type { LoadedPiAgentCore, PiAgent, AgentEvent, StreamFn, PiAgentCoreModule, ModelApi } from "./pi-core-types.js";
 import type { PiExecutionSafetyController } from "./pi-core-safety.js";
@@ -901,6 +902,38 @@ describe("soul-gate hydration (#1932)", () => {
       fakeProjection({ messages: [{ role: "user", content: "suffix only" }], contextDegraded: true }, null),
     );
     await expect(transform([], undefined)).resolves.toEqual([{ role: "user", content: "suffix only" }]);
+    resolvePrompt();
+    await startPromise;
+  });
+
+  it("denies when a terminal archive write is still unacknowledged", async () => {
+    const outbox = new PiArchiveOutbox();
+    outbox.note({
+      role: "assistant",
+      content: "already delivered",
+      timestamp: 1,
+      userId: "u1",
+      sessionId: "session_6",
+      operationKey: "op-6",
+    });
+    const { loaded, captured, resolvePrompt } = capturingCore();
+    const host = new PiCoreExecutionHost({
+      seed: durableSeed("exec_6", "session_6"),
+      initialState: { systemPrompt: "You are a helpful assistant.", model: makeTestModel() },
+      streamFn: vi.fn() as unknown as StreamFn,
+      contextProjection: fakeProjection({ messages: [{ role: "user", content: "hi" }], contextDegraded: false }, null) as never,
+      archiveOutbox: outbox,
+    });
+    const startPromise = host.start(loaded).catch(() => {});
+    await new Promise((r) => setTimeout(r, 5));
+    const transform = (captured[0] as { transformContext: TransformFn }).transformContext;
+    try {
+      await transform([], undefined);
+      expect.unreachable("known archive gap must not admit");
+    } catch (err) {
+      expect(err).toBeInstanceOf(DurableContextUnavailableError);
+      expect((err as DurableContextUnavailableError).reason).toBe("hydration_failed");
+    }
     resolvePrompt();
     await startPromise;
   });

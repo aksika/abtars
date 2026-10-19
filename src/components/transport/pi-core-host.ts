@@ -7,6 +7,7 @@ import type { InstructionQueueHolder } from "../session-instruction-queue.js";
 import { DurableContextUnavailableError } from "./pi-core-context.js";
 import type { PiCoreContextProjection, TransformOptions } from "./pi-core-context.js";
 import { PiSoulGate } from "../pi-session/pi-soul-gate.js";
+import { sharedArchiveOutbox, type PiArchiveOutbox } from "../pi-session/pi-archive-outbox.js";
 import type { PiExecutionContextSeed } from "./pi-port.js";
 import type { PiExecutionSafetyController } from "./pi-core-safety.js";
 import type { OutputObserver } from "../session-output-feed.js";
@@ -52,6 +53,9 @@ export interface PiCoreExecutionHostOptions {
   outputObserver?: OutputObserver;
   /** #1619: derive the effective thinking level for a replacement model. */
   resolveThinkingLevelForModel?: (model: ModelApi) => import("./kiro-transport.js").ReasoningEffort;
+  /** #1932: archive-outbox consulted for admission. Defaults to the shared
+   *  live-process instance; tests inject an isolated one. */
+  archiveOutbox?: PiArchiveOutbox;
   onEvent?: (event: AgentEvent) => Promise<void> | void;
 }
 
@@ -193,14 +197,22 @@ export class PiCoreExecutionHost {
       // context-blind; fail closed with a bounded unavailable result
       // instead (R4). Baseline-backed degraded turns keep existing
       // behavior: clean but possibly stale, explicitly flagged.
+      // Archive admission is read from the shared outbox: prompt
+      // construction retries any unacknowledged terminal write first and
+      // fails the turn closed when the retry fails, so an executing
+      // transform either faces a clear obligation (admit) or a known gap
+      // (deny). Non-pipeline turns carry no archive obligations by policy.
       if (this.opts.seed.source.mode === "durable" && !signal?.aborted) {
+        const archiveAcknowledged = !(this.opts.archiveOutbox ?? sharedArchiveOutbox).has(
+          this.opts.seed.source.sessionKey,
+        );
         if (result.contextDegraded && this.opts.contextProjection.safeBaseline === null) {
           throw new DurableContextUnavailableError("hydration_failed");
         }
         if (!this.settled && this.state === "running") {
           this.soulGate.completeHydration(SOUL_HYDRATED, 1, 1);
         }
-        const decision = this.soulGate.checkRequest(1, { abmindAvailable: true, archiveAcknowledged: true });
+        const decision = this.soulGate.checkRequest(1, { abmindAvailable: true, archiveAcknowledged });
         if (!decision.admit) {
           throw new DurableContextUnavailableError("hydration_failed");
         }

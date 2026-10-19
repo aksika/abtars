@@ -245,6 +245,60 @@ describe("buildPrompt durable-context classification (#1529)", () => {
     expect(result.durableContextIntent).toEqual({ mode: "required_unavailable", reason: "record_failed" });
   });
 
+  it("retries a pending terminal write first and proceeds on durable confirmation (#1932)", async () => {
+    const { PiArchiveOutbox } = await import("../pi-session/pi-archive-outbox.js");
+    const outbox = new PiArchiveOutbox();
+    outbox.note({
+      role: "assistant",
+      content: "already delivered",
+      timestamp: 1,
+      userId: "master",
+      sessionId: "master_A_1",
+      operationKey: "op-old",
+    });
+    const seenKeys: string[] = [];
+    const recordMessage = vi.fn(async (_input: unknown, key: string) => {
+      seenKeys.push(key);
+      return seenKeys.length === 1 ? { id: 9 } : { id: 42 };
+    });
+    const result = await buildPrompt(
+      { userId: "master", channelId: "1", platform: "telegram", isGroup: false, messageId: "m5" } as never,
+      "hello",
+      { ...(baseDeps(readyRuntime(recordMessage)) as unknown as Record<string, unknown>), archiveOutbox: outbox } as never,
+      masterRegistry(),
+    );
+    expect(result.durableContextIntent).toEqual({ mode: "durable", beforeMessageId: 42 });
+    expect(seenKeys[0]).toBe("op-old");
+    expect(outbox.has("master_A_1")).toBe(false);
+  });
+
+  it("fails closed without recording inbound when the pending terminal retry fails (#1932)", async () => {
+    const { PiArchiveOutbox } = await import("../pi-session/pi-archive-outbox.js");
+    const outbox = new PiArchiveOutbox();
+    outbox.note({
+      role: "assistant",
+      content: "already delivered",
+      timestamp: 1,
+      userId: "master",
+      sessionId: "master_A_1",
+      operationKey: "op-old",
+    });
+    const seenKeys: string[] = [];
+    const recordMessage = vi.fn(async (_input: unknown, key: string) => {
+      seenKeys.push(key);
+      throw new Error("owner down");
+    });
+    const result = await buildPrompt(
+      { userId: "master", channelId: "1", platform: "telegram", isGroup: false, messageId: "m6" } as never,
+      "hello",
+      { ...(baseDeps(readyRuntime(recordMessage)) as unknown as Record<string, unknown>), archiveOutbox: outbox } as never,
+      masterRegistry(),
+    );
+    expect(result.durableContextIntent).toEqual({ mode: "required_unavailable", reason: "record_failed" });
+    expect(seenKeys).toEqual(["op-old"]);
+    expect(outbox.has("master_A_1")).toBe(true);
+  });
+
   it("maps a null record ID to required_unavailable/cursor_missing", async () => {
     const recordMessage = vi.fn().mockResolvedValue({ id: null });
     const result = await buildPrompt(

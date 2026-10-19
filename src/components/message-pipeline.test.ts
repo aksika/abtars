@@ -30,6 +30,7 @@ const MAIN_NOTICE_REGISTRY: UserRegistry = {
   byUserId: new Map([["master", { userId: "master", role: "master", maxClass: 3, tools: ["all"], platforms: { telegram: 100 } }]]),
 };
 import { handleInboundMessage, submitTrustedInternalMessage, type PipelineDeps } from "./message-pipeline.js";
+import { PiArchiveOutbox } from "./pi-session/pi-archive-outbox.js";
 import { lookupAnswerRecord } from "./answer-evidence.js";
 import type { PlatformAdapter, InboundMessage } from "../types/platform.js";
 import type { IKiroTransport } from "./transport/kiro-transport.js";
@@ -956,6 +957,52 @@ describe("citation detection (#1270)", () => {
         (c: unknown[]) => (c[0] as { role?: string })?.role === "assistant",
       );
       expect(assistantCalls).toHaveLength(0);
+    });
+
+    it("holds the terminal payload in the outbox when its archive write fails (#1932)", async () => {
+      transport.sendPrompt = vi.fn().mockResolvedValue("done text") as any;
+      const recordMessage = vi.fn(async (input: { role: string }) =>
+        input.role === "assistant" ? Promise.reject(new Error("owner down")) : { id: 1 },
+      );
+      const outbox = new PiArchiveOutbox();
+      const adapter = mockAdapter();
+      const deps = mockDeps(transport, {
+        memoryConfig: { memoryEnabled: true, memoryDir: "/tmp" },
+        memoryRuntime: mockMemoryRuntime({ recordMessage }),
+        archiveOutbox: outbox,
+      } as any);
+
+      await handleInboundMessage(makeMsg({ messageId: 12 }), adapter, deps);
+
+      expect(outbox.has("test_A_01")).toBe(true);
+      expect(outbox.peek("test_A_01")).toMatchObject({ role: "assistant", content: "done text" });
+      expect(outbox.peek("test_A_01")?.operationKey).toEqual(expect.any(String));
+    });
+
+    it("clears a pre-existing obligation when the terminal write confirms (#1932)", async () => {
+      transport.sendPrompt = vi.fn().mockResolvedValue("done text") as any;
+      const recordMessage = vi.fn().mockResolvedValue({ id: 7 });
+      const outbox = new PiArchiveOutbox();
+      outbox.note({
+        role: "assistant",
+        content: "stale payload",
+        timestamp: 1,
+        userId: "master",
+        sessionId: "test_A_01",
+        operationKey: "op-stale",
+      });
+      const adapter = mockAdapter();
+      const deps = mockDeps(transport, {
+        memoryConfig: { memoryEnabled: true, memoryDir: "/tmp" },
+        memoryRuntime: mockMemoryRuntime({ recordMessage }),
+        archiveOutbox: outbox,
+      } as any);
+
+      await handleInboundMessage(makeMsg({ messageId: 13 }), adapter, deps);
+
+      // The stale retry is idempotent (same key) and the fresh terminal write
+      // confirms, so no obligation remains.
+      expect(outbox.has("test_A_01")).toBe(false);
     });
   });
 });
