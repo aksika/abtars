@@ -1,5 +1,5 @@
 import type { ModelCandidate } from "../components/transport/model-candidates.js";
-import { buildCandidates, resolveCandidateAuth } from "../components/transport/model-candidates.js";
+import { resolveCandidateAuth } from "../components/transport/model-candidates.js";
 import { logAndSwallow } from "../components/log-and-swallow.js";
 import { getEnv } from "../components/env-schema.js";
 /**
@@ -235,7 +235,6 @@ export async function buildTransport(ctx: BootCtx): Promise<PhaseResult> {
     );
   } else if (resolved.provider.transport === "api") {
     const { PiCoreTransport } = await import("../components/transport/pi-core-transport.js");
-    const { ModelHealthRegistry } = await import("../components/transport/model-health-registry.js");
     // #1746: buildTransport() also owns the /reset replacement path, which
     // bypasses phaseTransport()'s boot warm. Populate Pi's clamp at the actual
     // construction boundary so the synchronous constructor status is truthful.
@@ -246,71 +245,34 @@ export async function buildTransport(ctx: BootCtx): Promise<PhaseResult> {
     // candidate so dispatch authenticates from Pi's runtime at request time.
     const mainAuth = resolveCandidateAuth(resolved.provider, (name) => getEnv().getApiKey(name), apiKey);
 
-    const fallbackCandidates: ModelCandidate[] = (resolved.fallbacks ?? []).map(fb => {
-      const tcWithFb = tc && tcRa ? { ...tc, routes: { ...tc.routes, [tcActiveRoute!]: { agents: { ...tcRa.agents, _fallback: { model: fb.model, provider: fb.provider } }, fallbacks: tcRa.fallbacks } } } : tc;
-      const fbResolved = tc ? resolveAgent("_fallback", tcWithFb) : null;
-      const fbAuth = resolveCandidateAuth(
-        fbResolved?.provider ?? {},
-        (name) => getEnv().getApiKey(name),
-        mainAuth.apiKey,
-      );
-      return {
-        model: fb.model,
-        provider: fbResolved?.providerName ?? fb.provider,
-        endpoint: fbResolved?.provider.endpoint ?? resolved.provider.endpoint ?? "http://localhost:11434/v1",
-        apiKey: fbAuth.apiKey,
-        authSource: fbAuth.authSource,
-        maxContext: fbResolved?.contextWindow ?? resolved.contextWindow,
-        // #1770: thread the resolved ceiling (pi catalog wins, models.json
-        // floor) so the request carries the model's real limit, not a pin.
-        maxOutput: fbResolved?.maxOutput ?? resolved.maxOutput,
-        apiFormat: fbResolved?.provider.apiFormat,
-        thinking: fbResolved?.provider.thinking,
-        // #1748: resolve retention from the fallback provider itself; absent
-        // means short and must not inherit a primary provider's long policy.
-        cacheRetention: fbResolved?.provider.cacheRetention ?? "short",
-        source: "agent_fallback",
-      };
-    });
-    const candidates = buildCandidates({
-      role: "main",
-      configured: {
-        model: resolved.model,
-        provider: resolved.providerName,
-        endpoint: resolved.provider.endpoint ?? "http://localhost:11434/v1",
-        apiKey: mainAuth.apiKey,
-        authSource: mainAuth.authSource,
-        maxContext: resolved.contextWindow,
-        // #1770: thread the resolved ceiling (pi catalog wins, models.json
-        // floor) so the request carries the model's real limit, not a pin.
-        maxOutput: resolved.maxOutput,
-        apiFormat: resolved.provider.apiFormat,
-        thinking: resolved.provider.thinking,
-        // #1748: every candidate carries its provider-resolved retention.
-        cacheRetention: resolved.provider.cacheRetention ?? "short",
-        source: "primary",
-      },
-      fallbacks: fallbackCandidates,
-    });
-
-    if (!ctx.modelHealthRegistry) {
-      ctx.modelHealthRegistry = new ModelHealthRegistry(tc?.healthPolicy);
-    }
-    if (!ctx.modelHealthRegistry.onDemote) {
-      ctx.modelHealthRegistry.onDemote = (model, _endpoint, reason) => {
-        import("../components/transport-config.js").then(({ demoteModel }) => demoteModel(model, reason));
-        import("../components/notification.js").then(({ sendNotification }) =>
-          sendNotification(ctx, `⚠️ ${model} demoted (${reason}). Next healthy model promoted.`)).catch(err => logAndSwallow(TAG, "sendNotification model-demote", err));
-      };
-    }
+    // #1932: exactly one candidate per transport — the boot-selected primary.
+    // Configured route fallbacks are inert for Pi dispatch (tolerant parsing
+    // keeps old configs loading); unavailability surfaces as a typed
+    // provider_unavailable failure with the memo's retry time instead of an
+    // in-turn model switch.
+    const candidate: ModelCandidate = {
+      model: resolved.model,
+      provider: resolved.providerName,
+      endpoint: resolved.provider.endpoint ?? "http://localhost:11434/v1",
+      apiKey: mainAuth.apiKey,
+      authSource: mainAuth.authSource,
+      maxContext: resolved.contextWindow,
+      // #1770: thread the resolved ceiling (pi catalog wins, models.json
+      // floor) so the request carries the model's real limit, not a pin.
+      maxOutput: resolved.maxOutput,
+      apiFormat: resolved.provider.apiFormat,
+      thinking: resolved.provider.thinking,
+      // #1748: every candidate carries its provider-resolved retention.
+      cacheRetention: resolved.provider.cacheRetention ?? "short",
+      source: "primary",
+    };
 
     transport = new PiCoreTransport({
       role: "main",
       // The SOUL bundle is installed by phase-pipeline-deps once memory state
       // is known. The endpoint is transport configuration, never a prompt.
       systemPrompt: "",
-      candidates,
-      healthRegistry: ctx.modelHealthRegistry,
+      candidate,
       sandboxPolicy: { allowedTools: ["*"], allowedRead: ["*"], allowedWrite: ["*"], canExecuteBash: true },
       maxPromptRounds: tc?.maxToolRounds,
       // #1932: candidate rotation is retired — the single configured
@@ -323,7 +285,7 @@ export async function buildTransport(ctx: BootCtx): Promise<PhaseResult> {
       // #1552: late-bound memory-tool deps holder — same composition point.
       memoryToolDeps: ctx.memoryToolDependencies,
     });
-    logInfo("main", `🔌 PiCore transport (${resolved.providerName}, model=${resolved.model}, ${candidates.length} candidates)`);
+    logInfo("main", `🔌 PiCore transport (${resolved.providerName}, model=${resolved.model})`);
     // #1572: the api route loads Pi into the abtars process — warn once when it
     // is above the pinned line so drift is visible in the boot log.
     const piRes = resolvePiInstallation();
@@ -421,10 +383,6 @@ export async function buildTransport(ctx: BootCtx): Promise<PhaseResult> {
   ctx.modelProvider = resolved.providerName;
   ctx.fallbackChain = resolved.fallbacks.map((f: { model: string }) => f.model);
 
-  if (ctx.modelHealthRegistry) {
-    ctx.runtime.setRegistry(ctx.modelHealthRegistry);
-  }
-  ctx.runtime.setMainTransport(transport);
   ctx.runtime.setSessionManager(ctx.sessionManager);
   if (ctx.sandboxEnabled) ctx.runtime.setSandboxEnabled(true);
 

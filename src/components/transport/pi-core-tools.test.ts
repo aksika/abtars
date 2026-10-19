@@ -2,8 +2,6 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { createPiAgentTools } from "./pi-core-tools.js";
 import type { PiCoreToolContext } from "./pi-core-tools.js";
 import { createPiExecutionSafetyController } from "./pi-core-safety.js";
-import { FallbackPolicy } from "./fallback-policy.js";
-import { ModelHealthRegistry } from "./model-health-registry.js";
 import type { ModelCandidate } from "./model-candidates.js";
 import { buildPolicy } from "../tool-sandbox.js";
 import { PiCoreToolExecutionError } from "./tool-failure-diagnostic.js";
@@ -29,10 +27,6 @@ vi.mock("./tool-registry.js", async (importOriginal) => {
   };
 });
 
-function makeRegistry() {
-  return new ModelHealthRegistry();
-}
-
 function makeCandidate(overrides?: Partial<ModelCandidate>): ModelCandidate {
   return {
     model: "test-model",
@@ -46,13 +40,9 @@ function makeCandidate(overrides?: Partial<ModelCandidate>): ModelCandidate {
 }
 
 describe("createPiAgentTools", () => {
-  let registry: ModelHealthRegistry;
-  let policy: FallbackPolicy;
   let depsHolder: MemoryToolDependenciesHolder;
 
   beforeEach(() => {
-    registry = makeRegistry();
-    policy = new FallbackPolicy([makeCandidate()], registry);
     depsHolder = { current: null };
   });
 
@@ -65,7 +55,7 @@ describe("createPiAgentTools", () => {
       executionId: "exec_1",
       userId: "user_1",
       sandboxPolicy: buildPolicy("owner"),
-      safety: createPiExecutionSafetyController(policy),
+      safety: createPiExecutionSafetyController(),
       memoryToolDeps: depsHolder,
       ...overrides,
     };
@@ -303,7 +293,7 @@ describe("createPiAgentTools", () => {
   });
 
   it("skips tool on safety controller skip decision", async () => {
-    const safety = createPiExecutionSafetyController(policy);
+    const safety = createPiExecutionSafetyController();
     const ctx = makeContext({
       sandboxPolicy: buildPolicy("owner", { allowedTools: ["secret_get"] }),
       safety,
@@ -406,7 +396,7 @@ describe("peer deny-all policy (#1786)", () => {
       executionId: "exec_peer_1",
       userId: "peer:molty",
       sandboxPolicy: buildPolicy("peer"),
-      safety: createPiExecutionSafetyController(new FallbackPolicy([makeCandidate()], makeRegistry())),
+      safety: createPiExecutionSafetyController(),
       memoryToolDeps: { current: null },
       sessionType: "P",
       ...overrides,
@@ -450,14 +440,7 @@ describe("#1895 memory_recall Pi boundary", () => {
       executionId: "exec_kw",
       userId: "user_1",
       sandboxPolicy: buildPolicy("owner", { allowedTools: ["memory_recall"] }),
-      safety: createPiExecutionSafetyController(new FallbackPolicy([{
-        model: "test-model",
-        provider: "test-provider",
-        endpoint: "https://api.test/v1",
-        maxContext: 128000,
-        apiKey: "test-key",
-        source: "primary",
-      }], new ModelHealthRegistry())),
+      safety: createPiExecutionSafetyController(),
       memoryToolDeps: { current: null },
     };
   }

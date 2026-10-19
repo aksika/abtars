@@ -1,7 +1,7 @@
 /**
  * transport-config/writer.ts — atomic persistence of transport.json:
- * candidate writes, demotion mutation/persistence, restore/reset swaps.
- * All filesystem write/rename/unlink choreography lives here.
+ * candidate writes, restore/reset swaps. All filesystem write/rename/unlink
+ * choreography lives here.
  */
 
 import { readFileSync, writeFileSync, existsSync, renameSync, unlinkSync } from "node:fs";
@@ -10,11 +10,10 @@ import { getEnv } from "../env-schema.js";
 import { logInfo, logWarn } from "../logger.js";
 import type {
   AssignmentIssue,
-  ExecutionRoute,
   TransportConfig,
   TransportWriteResult,
 } from "./types.js";
-import { configDir, loadTransport, cacheTransportAfterWrite, clearTransportCache } from "./loader.js";
+import { configDir, cacheTransportAfterWrite, clearTransportCache } from "./loader.js";
 import { validateTransportConfig, serializeTransportConfig, validateTransportAssignments, routeAssignments } from "./validator.js";
 
 const TAG = "transport-config";
@@ -146,52 +145,6 @@ export function writeTransportConfig(candidate: TransportConfig, reason: string)
     logWarn(TAG, `Failed to write transport.json: ${err instanceof Error ? err.message : String(err)}`);
     return { ok: false, issues: [{ location: "write", model: "", provider: "", reason: `Write failed: ${err instanceof Error ? err.message : String(err)}` }] };
   }
-}
-
-/** Remove demoted models from config. Called on user-initiated model switch.
- *  Models the user just chose are resurrected (demotion cleared). All other demoted entries are deleted.
- *  Defaults to the active route only — never bleeds into inactive routes. Use explicitRoute list for bulk cleanup. */
-export function cleanDemotedModels(tc: TransportConfig, chosenModel?: string, explicitRoute?: ExecutionRoute): void {
-  const routesToClean = explicitRoute ? [explicitRoute] : ([tc.activeRoute] as ExecutionRoute[]);
-  for (const r of routesToClean) {
-    const ra = tc.routes[r];
-    if (!ra) continue;
-    for (const agent of Object.values(ra.agents)) {
-      if (agent.demoted) {
-        if (agent.model === chosenModel) { delete agent.demoted; delete agent.demotedReason; delete agent.demotedModel; }
-      }
-    }
-    for (const fb of ra.fallbacks ?? []) {
-      if (fb.demoted && fb.model === chosenModel) { delete fb.demoted; delete fb.demotedReason; delete fb.demotedModel; }
-    }
-  }
-}
-
-/** Mark a model as demoted in transport.json. Skipped by candidate loading. Never demotes the last available model for a role. */
-export function demoteModel(model: string, reason: "auth" | "timeout"): void {
-  const tc = loadTransport();
-  if (!tc) return;
-  // Work on a detached candidate — never mutate the cached object
-  const candidate = JSON.parse(JSON.stringify(tc)) as TransportConfig;
-  // Guard: don't demote if it's the last non-demoted model for any role
-  const activeRa = routeAssignments(candidate);
-  if (activeRa) {
-    for (const agent of Object.values(activeRa.agents)) {
-      const all = [agent, ...(activeRa.fallbacks ?? [])];
-      const healthy = all.filter(m => !m.demoted);
-      if (healthy.length <= 1 && healthy.some(m => m.model === model)) return;
-    }
-  }
-  let found = false;
-  if (activeRa) {
-    for (const agent of Object.values(activeRa.agents)) {
-      if (agent.model === model) { agent.demoted = new Date().toISOString(); agent.demotedReason = reason; agent.demotedModel = model; found = true; }
-    }
-    for (const fb of activeRa.fallbacks ?? []) {
-      if (fb.model === model) { fb.demoted = new Date().toISOString(); fb.demotedReason = reason; fb.demotedModel = model; found = true; }
-    }
-  }
-  if (found) writeTransportConfig(candidate, `auto-demote ${model} (${reason})`);
 }
 
 /** Swap transport.json ↔ transport.json.old (undo last write). Rollback-safe. */

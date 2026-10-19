@@ -13,7 +13,6 @@ import { describe, it, expect, vi } from "vitest";
 import { clampThinkingLevel } from "@earendil-works/pi-ai";
 import { validatePiRuntimeContract, PiRuntimeContractError } from "./pi-runtime-contract.js";
 import { PiCoreTransport } from "./pi-core-transport.js";
-import { ModelHealthRegistry } from "./model-health-registry.js";
 import type { PiInstallation, PiModuleSpecifier, PiInstallationState } from "../pi-installation.js";
 import type { PiRuntimeContractDependencies } from "./pi-runtime-contract.js";
 
@@ -277,7 +276,7 @@ describe("validatePiRuntimeContract (#1573)", () => {
     const transport = new PiCoreTransport({
       role: "main",
       systemPrompt: "",
-      candidates: [{
+      candidate: {
         model: "test-model",
         provider: "test-provider",
         endpoint: "https://api.test/v1",
@@ -285,8 +284,7 @@ describe("validatePiRuntimeContract (#1573)", () => {
         apiKey: "test-key",
         source: "primary",
         thinking: { style: "effort", default: "xhigh" },
-      }],
-      healthRegistry: new ModelHealthRegistry(),
+      },
       sandboxPolicy: { allowedTools: ["*"], allowedRead: ["*"], allowedWrite: ["*"], canExecuteBash: true },
     });
     expect(transport.getRuntimeStatus().reasoning).toBe("high");

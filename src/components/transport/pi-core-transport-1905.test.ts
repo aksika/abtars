@@ -1,11 +1,11 @@
 /**
- * pi-core-transport-1905.test.ts — #1905: prompt-local exclusion lifecycle and
- * typed generic exhaustion at the persistent transport boundary.
+ * pi-core-transport-1905.test.ts — #1905: no cross-turn failure state at the
+ * persistent transport boundary.
  *
- * A stream-function test alone cannot prove the reset location (the latch is
- * cleared in sendPrompt, not in the stream function), so these tests drive two
- * sequential sendPrompt calls on the same transport with a mocked stream
- * factory and host, mirroring pi-core-transport-credits.test.ts.
+ * A stream-function test alone cannot prove the absence of shared exclusion
+ * state, so these tests drive two sequential sendPrompt calls on the same
+ * transport with a mocked stream factory and host, mirroring
+ * pi-core-transport-credits.test.ts.
  */
 import { describe, expect, it, vi, beforeEach } from "vitest";
 
@@ -60,10 +60,7 @@ vi.mock("./pi-runtime-contract.js", () => ({
 
 import { PiCoreTransport } from "./pi-core-transport.js";
 import { ProviderExecutionError, isAllCandidatesFailed } from "./provider-failure.js";
-import { ModelHealthRegistry } from "./model-health-registry.js";
 import type { ModelCandidate } from "./model-candidates.js";
-import { candidateKey } from "./model-candidates.js";
-import type { FallbackPolicy } from "./fallback-policy.js";
 import { createPiStreamFn } from "./pi-stream-fn.js";
 import type { AbtarsPiStreamFnOptions } from "./pi-stream-fn.js";
 import { createAssistantMessageEventStream } from "@earendil-works/pi-ai";
@@ -77,20 +74,14 @@ const CANDIDATE: ModelCandidate = {
   apiKey: "test-key",
   source: "primary",
 };
-const CANDIDATE_KEY = candidateKey(CANDIDATE.model, CANDIDATE.endpoint);
 
 function makeTransport(): PiCoreTransport {
   return new PiCoreTransport({
     role: "main",
     systemPrompt: "system",
-    candidates: [{ ...CANDIDATE }],
-    healthRegistry: new ModelHealthRegistry(),
+    candidate: { ...CANDIDATE },
     sandboxPolicy: { allowedTools: ["*"], allowedRead: ["*"], allowedWrite: ["*"], canExecuteBash: true },
   });
-}
-
-function policyOf(t: PiCoreTransport): FallbackPolicy {
-  return (t as unknown as { policy: FallbackPolicy }).policy;
 }
 
 /** An error stream the FakeHost never consumes; only the factory side effects matter. */
@@ -120,21 +111,14 @@ describe("PiCoreTransport prompt-local exclusions (#1905)", () => {
     vi.mocked(createPiStreamFn).mockImplementation(() => inertStream());
   });
 
-  it("a latched exclusion degrades at most one turn: the next sendPrompt reaches the provider", async () => {
+  it("a failed first turn does not affect the second turn: both reach the provider", async () => {
     const transport = makeTransport();
     await transport.initialize();
 
     let calls = 0;
-    let secondCallEligible: boolean | null = null;
-    vi.mocked(createPiStreamFn).mockImplementation((options: AbtarsPiStreamFnOptions) => {
+    vi.mocked(createPiStreamFn).mockImplementation(() => {
       calls++;
-      if (calls === 1) {
-        // Simulate the previous prompt's failed attempt persisting as a latch.
-        options.policy.excludedKeys.add(CANDIDATE_KEY);
-      } else {
-        secondCallEligible = options.policy.selectModel() !== null;
-        hostBehavior.emitMessageEnd = true;
-      }
+      if (calls === 2) hostBehavior.emitMessageEnd = true;
       return inertStream();
     });
 
@@ -142,26 +126,15 @@ describe("PiCoreTransport prompt-local exclusions (#1905)", () => {
     const first = await transport.sendPrompt("session", "first");
     expect(first).toBe("");
     expect(calls).toBe(1);
-    expect(policyOf(transport).excludedKeys.has(CANDIDATE_KEY)).toBe(true);
 
-    // The next prompt on the same transport resets the latch and delivers.
+    // #1932: no shared exclusion state exists — the next prompt on the same
+    // transport reaches the provider unconditionally and delivers.
     const second = await transport.sendPrompt("session", "second");
     expect(second).toBe("recovered output");
-    expect(secondCallEligible).toBe(true);
+    expect(calls).toBe(2);
   });
 
-  it("leaves successful-turn rotation exclusions untouched at the prompt boundary", async () => {
-    const transport = makeTransport();
-    await transport.initialize();
-    policyOf(transport).rotationExcludedKeys.add(CANDIDATE_KEY);
-    hostBehavior.emitMessageEnd = true;
-
-    const text = await transport.sendPrompt("session", "hello");
-    expect(text).toBe("recovered output");
-    expect(policyOf(transport).rotationExcludedKeys.has(CANDIDATE_KEY)).toBe(true);
-  });
-
-  it("a rejected overlapping call does not reset the active call's exclusions", async () => {
+  it("a rejected overlapping call does not disturb the active call", async () => {
     const transport = makeTransport();
     await transport.initialize();
 
@@ -170,16 +143,12 @@ describe("PiCoreTransport prompt-local exclusions (#1905)", () => {
     try {
       const first = transport.sendPrompt("session_1", "hello");
       await vi.waitFor(() => expect((transport as unknown as { activeSlot: unknown }).activeSlot).not.toBeNull());
-      const policy = policyOf(transport);
-      // Simulate an in-prompt exclusion acquired by the active call.
-      policy.excludedKeys.add(CANDIDATE_KEY);
 
       await expect(transport.sendPrompt("session_2", "second")).rejects.toThrow(/already active/);
-      expect(policy.excludedKeys.has(CANDIDATE_KEY)).toBe(true);
 
       releaseStart();
       await first;
-      expect(policy.excludedKeys.has(CANDIDATE_KEY)).toBe(true);
+      expect((transport as unknown as { activeSlot: unknown }).activeSlot).toBeNull();
     } finally {
       hostGate.wait = null;
     }

@@ -49,7 +49,6 @@ vi.mock("./pi-runtime-contract.js", () => ({
 }));
 
 import { PiCoreTransport } from "./pi-core-transport.js";
-import { ModelHealthRegistry } from "./model-health-registry.js";
 import type { ModelCandidate } from "./model-candidates.js";
 
 function makeTransport(): PiCoreTransport {
@@ -64,8 +63,7 @@ function makeTransport(): PiCoreTransport {
   return new PiCoreTransport({
     role: "main",
     systemPrompt: "system",
-    candidates: [candidate],
-    healthRegistry: new ModelHealthRegistry(),
+    candidate: candidate,
     sandboxPolicy: { allowedTools: ["*"], allowedRead: ["*"], allowedWrite: ["*"], canExecuteBash: true },
     maxPromptRounds: 0,
   });

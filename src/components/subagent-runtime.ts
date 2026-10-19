@@ -11,9 +11,6 @@ import { randomBytes } from "node:crypto";
 import { realpathSync } from "node:fs";
 import type { ToolExecutionScope } from "./tasks/task-package.js";
 
-import type { ModelHealthRegistry } from "./transport/model-health-registry.js";
-import type { CandidateSpec } from "./transport/model-candidates.js";
-
 const TAG = "runtime";
 
 export type AgentName = "professor" | "dreamy" | "browsie" | "coding" | "task";
@@ -102,35 +99,12 @@ const DEFAULT_SPAWN_TIMEOUT_MS = 15 * 60_000; // 15 min
 export class SubagentRuntime {
   private readonly cache = new Map<string, CachedAgent>();
   private readonly activeSpawns = new Map<string, { abort: AbortController; startedAt: number }>();
-  private _registry: ModelHealthRegistry | null = null;
   private _lastUsage: RuntimeUsageSnapshot | null = null;
 
   /** Token usage from last complete() call. */
   get lastUsage(): RuntimeUsageSnapshot | null { return this._lastUsage; }
   private _sessionManager: import("./spin.js").Spin | null = null;
   private _sandboxEnabled = false;
-
-  /** Set shared model health registry (from boot ctx). */
-  setRegistry(registry: ModelHealthRegistry): void { this._registry = registry; }
-
-  /** Set main transport reference and wire the #1418 last-successful-Main tracker. */
-  setMainTransport(transport: IKiroTransport): void {
-    // #1418: Wire last-successful-Main tracker from the transport. The tracker
-    // stores the complete secret-free candidate tuple (provider/model/endpoint/
-    // maxContext) so specialists can reuse the exact Main candidate that worked.
-    const apiTransport = transport as unknown as { lastSuccessfulCandidate: CandidateSpec | null; onLastSuccessfulChanged?: (candidate: CandidateSpec) => void };
-    if (apiTransport && "lastSuccessfulCandidate" in apiTransport) {
-      this._lastSuccessfulMain = apiTransport.lastSuccessfulCandidate ?? null;
-      if ("onLastSuccessfulChanged" in apiTransport) {
-        apiTransport.onLastSuccessfulChanged = (c: CandidateSpec) => { this._lastSuccessfulMain = c; };
-      }
-    }
-  }
-
-  /** #1418: Last successful Main candidate (complete secret-free tuple) for
-   *  specialist fallback ordering. Null until Main produces a non-empty response. */
-  private _lastSuccessfulMain: CandidateSpec | null = null;
-  get lastSuccessfulMain(): CandidateSpec | null { return this._lastSuccessfulMain; }
 
   /** Set session manager for auto-spawn sub-session creation (#510). */
   setSessionManager(mgr: import("./spin.js").Spin): void { this._sessionManager = mgr; }
@@ -417,7 +391,7 @@ export class SubagentRuntime {
     // candidate that last produced a non-empty response.
     // #1611: configured-only restricts transport construction to the configured
     // candidate — applied before the first Dreamy prompt, never after the fact.
-    const { transport, model } = await createSubagentTransport(role, this._registry ?? undefined, this._lastSuccessfulMain, this._contextProvider, this._memoryToolDeps, candidatePolicy, workingDir);
+    const { transport, model } = await createSubagentTransport(role, this._contextProvider, this._memoryToolDeps, candidatePolicy, workingDir);
 
     // #1290: attribute per-turn budget to the agent Spin resolved for this session.
     // External ACP keeps its own agent label; embedded Pi uses this label when

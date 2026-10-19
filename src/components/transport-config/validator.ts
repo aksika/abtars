@@ -47,6 +47,8 @@ const TRANSPORT_ALLOWED_FIELDS = new Set([
   "transportDefaults",
   "maxTurns",
   "maxToolRounds",
+  // #1932: retired recovery-machinery keys. Parsed tolerantly so existing
+  // operator configs keep loading; the values are inert and never read.
   "maxFallbackToolRounds",
   "hailMary",
   "healthPolicy",

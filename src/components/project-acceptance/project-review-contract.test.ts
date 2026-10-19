@@ -11,11 +11,8 @@ import { getToolDefinitions, getToolSchemas } from "../transport/tool-registry.j
 import { toAnthropicRequest } from "../transport/anthropic-adapter.js";
 import { createPiAgentTools, validatePiSchemaOrThrow } from "../transport/pi-core-tools.js";
 import { createPiExecutionSafetyController } from "../transport/pi-core-safety.js";
-import { FallbackPolicy } from "../transport/fallback-policy.js";
-import { ModelHealthRegistry } from "../transport/model-health-registry.js";
 import { buildPolicy } from "../tool-sandbox.js";
 import type { PiCoreToolContext } from "../transport/pi-core-tools.js";
-import type { ModelCandidate } from "../transport/model-candidates.js";
 
 function reviewToolParams(): Record<string, unknown> {
   // #1792: the review_project tool is deleted — the contract constants below
@@ -24,14 +21,11 @@ function reviewToolParams(): Record<string, unknown> {
 }
 
 function makePiContext(): PiCoreToolContext {
-  const candidate: ModelCandidate = { model: "test-model", provider: "test-provider", endpoint: "https://api.test/v1", maxContext: 128000, apiKey: "k", source: "primary" };
-  const registry = new ModelHealthRegistry();
-  const policy = new FallbackPolicy([candidate], registry);
   return {
     executionId: "exec_1",
     userId: "user_1",
     sandboxPolicy: buildPolicy("owner"),
-    safety: createPiExecutionSafetyController(policy),
+    safety: createPiExecutionSafetyController(),
     memoryToolDeps: { current: null },
   };
 }

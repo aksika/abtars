@@ -619,8 +619,6 @@ async function main(): Promise<void> {
     // resolves and no iterator exists for any stream watchdog to observe. The
     // whole-attempt liveness runner must bound the acquisition itself.
     const SF = await import("../src/components/transport/pi-stream-fn.js");
-    const FP = await import("../src/components/transport/fallback-policy.js");
-    const MHR = await import("../src/components/transport/model-health-registry.js");
     const candidate: ModelCandidate = {
       model: "fixture-stuck",
       provider: "fixture",
@@ -629,15 +627,18 @@ async function main(): Promise<void> {
       apiKey: "fixture-key",
       source: "primary",
     };
-    const registry = new MHR.ModelHealthRegistry();
-    const policy = new FP.FallbackPolicy([candidate], registry);
     const attemptFactory = async () => new Promise<never>(() => {});
     const executionId = `m30a-${Date.now()}`;
+    const { mkdtempSync } = await import("node:fs");
+    const { tmpdir } = await import("node:os");
+    const { join } = await import("node:path");
+    const memoDir = mkdtempSync(join(tmpdir(), "m30a-memo-"));
     const streamFn = SF.createPiStreamFn({
-      policy,
+      candidate,
       executionId,
       createPiAiAttempt: attemptFactory,
       providerInactivityTimeoutMs: 100,
+      memoStateDir: memoDir,
     });
     const started = Date.now();
     const events: any[] = [];
@@ -651,9 +652,12 @@ async function main(): Promise<void> {
     const terminal = events.at(-1);
     if (terminal?.type !== "error") return `expected terminal error event, got ${terminal?.type ?? "none"}`;
     if (elapsed > 5_000) return `acquisition hang not bounded: ${elapsed}ms`;
-    if (!policy.excludedKeys.has("fixture-stuck@https://fixture.invalid/v1")) return "candidate not poisoned after acquisition timeout";
-    if (policy.excludedKeys.size !== 1) return `candidate poisoned more than once: ${policy.excludedKeys.size}`;
-    return { observed: `bounded at ${elapsed}ms; terminal stopReason=${(terminal.error as { stopReason?: string } | undefined)?.stopReason}; candidate poisoned exactly once`, evidence: [`elapsedMs=${elapsed}`, `executionId=${executionId}`], correlation: { executionId } };
+    // #1932: the stall is observed in the availability memo (no exclusion
+    // set exists anymore) — exactly one observation for the one attempt.
+    const { loadAvailabilityMemo } = await import("../src/components/pi-session/provider-availability-memo.js");
+    const entries = loadAvailabilityMemo(memoDir).entries;
+    if (entries.length !== 1) return `expected exactly one memo observation, got ${entries.length}`;
+    return { observed: `bounded at ${elapsed}ms; terminal stopReason=${(terminal.error as { stopReason?: string } | undefined)?.stopReason}; stall observed in memo`, evidence: [`elapsedMs=${elapsed}`, `executionId=${executionId}`], correlation: { executionId } };
   });
 
   await checkpoint("M31", "History written for cancellation", "settlement", "cancelled outcome in history", async () => {

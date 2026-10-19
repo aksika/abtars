@@ -3,8 +3,6 @@
  * Type declarations only; no runtime state, filesystem, or environment access.
  */
 
-import type { HealthPolicyConfig } from "../transport/model-health-registry.js";
-
 export type ModelCost = {
   /** $/1M tokens — human-readable, used for arithmetic (sort, usage accounting, pi-catalog copy). */
   input: number;
@@ -34,14 +32,6 @@ export type ExecutionRoute = "pi-ai" | "acp";
 export type AgentAssignment = {
   model: string;
   provider: string;
-  /** #1744: auto-demotion metadata, persisted on the assignment itself.
-   *  WARNING: the validator rejects any field name ending in "auth" as a
-   *  plaintext credential (isNestedRawSecretField, validator.ts) — never
-   *  rename demotedReason (or these siblings) to a *auth form; it would
-   *  break config load with plaintext_secret_field. */
-  demoted?: string; // ISO timestamp set by demoteModel()
-  demotedReason?: "auth" | "timeout"; // union pinned by demoteModel()'s param
-  demotedModel?: string; // the demoted model's own id, for diagnostics
 };
 
 export type ProviderConfig = {
@@ -97,10 +87,7 @@ export type TransportConfig = {
   transportDefaults?: TransportDefaults;
   maxTurns?: number;
   maxToolRounds?: number;
-  /** #1386: Lower tool-round limit for fallback candidates. Default 5. */
-  maxFallbackToolRounds?: number;
   hailMary?: HailMaryConfig;
-  healthPolicy?: HealthPolicyConfig;
 };
 
 export type ResolvedAgent = {

@@ -310,8 +310,7 @@ export async function handleModels(text: string, ctx: CommandContext): Promise<b
     const candidate = JSON.parse(JSON.stringify(tc)) as typeof tc;
     const activeRa = candidate.routes[candidate.activeRoute];
     if (activeRa) activeRa.agents["main"]!.model = newModel;
-    const { cleanDemotedModels, writeTransportConfig } = await import("../transport-config.js");
-    cleanDemotedModels(candidate, newModel);
+    const { writeTransportConfig } = await import("../transport-config.js");
     const result = writeTransportConfig(candidate, `main model → ${newModel}`);
     if (!result.ok) {
       await ctx.reply(`❌ Cannot switch: ${result.issues.map(i => i.reason).join("; ")}`);
@@ -449,7 +448,6 @@ export async function handleModels(text: string, ctx: CommandContext): Promise<b
     if (a === "main") {
       const ra = tc ? routeAssignments(tc) : null;
       const fbLines = (ra?.fallbacks ?? []).map((f, i) => {
-        if (f.demoted) return null;
         return `    ↳ fb${i + 1}: ${f.model} (${f.provider})`;
       }).filter(Boolean).join("\n");
       if (fbLines) line += "\n" + fbLines;
@@ -459,12 +457,6 @@ export async function handleModels(text: string, ctx: CommandContext): Promise<b
   const ra = tc ? routeAssignments(tc) : null;
   if (ra?.fallbacks?.length) {
     lines.push(`\nFallback chain: ${ra.fallbacks.map(f => f.model).join(" → ")}`);
-  }
-  // #1386: Show effective candidate order from the attached transport's policy
-  const transport = attached as unknown as { policy?: { candidates: Array<{ model: string; endpoint: string; source: string }> } };
-  if (transport.policy?.candidates && transport.policy.candidates.length > 1) {
-    const { formatCandidateChain } = await import("../transport/model-candidates.js");
-    lines.push(`\nEffective chain:\n${formatCandidateChain(transport.policy.candidates as any)}`);
   }
   if (ctx.hailMary) {
     lines.push(`hailMary: ${ctx.hailMary.model} `);

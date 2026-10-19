@@ -3,8 +3,6 @@ import { logDebug, logInfo, logWarn } from "../logger.js";
 import { abtarsHome } from "../../paths.js";
 import type { IKiroTransport, PromptRequestContext, ReasoningEffort, ReasoningEffortState, RuntimeUsageSnapshot, RuntimeStatusSnapshot } from "./kiro-transport.js";
 import type { CandidateSpec, ModelCandidate } from "./model-candidates.js";
-import type { ModelHealthRegistry } from "./model-health-registry.js";
-import { FallbackPolicy } from "./fallback-policy.js";
 import { PiCoreExecutionHost } from "./pi-core-host.js";
 import { PiCoreContextProjection, DurableContextUnavailableError } from "./pi-core-context.js";
 import { createPiStreamFn } from "./pi-stream-fn.js";
@@ -52,8 +50,9 @@ export function hasToolCallContent(content: unknown): boolean {
 export interface PiCoreTransportOptions {
   role: "main" | "specialist" | "background" | "task";
   systemPrompt: string;
-  candidates: ModelCandidate[];
-  healthRegistry: ModelHealthRegistry;
+  /** #1932: exactly one configured candidate serves every turn. No fallback
+   *  chain, no rotation, no health-gated selection. */
+  candidate: ModelCandidate;
   sandboxPolicy: SandboxPolicy;
   session?: { instructionQueue: Array<import("../spin-types.js").QueuedSessionInstruction>; id: string };
   /** #1527: late-bound durable context provider holder (parallel boot composition). */
@@ -95,9 +94,7 @@ interface ActivePiExecution {
 }
 
 export class PiCoreTransport implements IKiroTransport {
-  readonly config: { candidates: ModelCandidate[]; systemPrompt: string; role: string };
-  private policy: FallbackPolicy;
-  private healthRegistry: ModelHealthRegistry;
+  readonly config: { candidate: ModelCandidate; systemPrompt: string; role: string };
   private sandboxPolicy: SandboxPolicy;
   private session?: PiCoreTransportOptions["session"];
   private maxPromptRounds?: number;
@@ -120,10 +117,6 @@ export class PiCoreTransport implements IKiroTransport {
   private _intermediateText = "";
   /** Most recent tool failure diagnostic from the current sendPrompt call. */
   private _lastToolFailure: ToolFailureDiagnosticV1 | null = null;
-
-  /** Last candidate that produced semantic output; reused by specialists. */
-  lastSuccessfulCandidate: CandidateSpec | null = null;
-  onLastSuccessfulChanged?: (candidate: CandidateSpec) => void;
 
   onReady?: () => void;
   onIntermediateResponse?: (text: string) => void;
@@ -156,8 +149,7 @@ export class PiCoreTransport implements IKiroTransport {
   private memoStateDir: string;
 
   constructor(opts: PiCoreTransportOptions) {
-    this.config = { candidates: opts.candidates, systemPrompt: opts.systemPrompt, role: opts.role };
-    this.healthRegistry = opts.healthRegistry;
+    this.config = { candidate: opts.candidate, systemPrompt: opts.systemPrompt, role: opts.role };
     this.sandboxPolicy = opts.sandboxPolicy;
     this.session = opts.session;
     this._contextProvider = opts.contextProvider ?? { current: null };
@@ -170,19 +162,16 @@ export class PiCoreTransport implements IKiroTransport {
     // change the shipped behavior. "long" is per-provider opt-in only.
     this.cacheRetention = opts.cacheRetention ?? "short";
     this.maxPromptRounds = opts.maxPromptRounds;
-    this.policy = new FallbackPolicy(opts.candidates, opts.healthRegistry);
-    // #1619: baseline from the primary candidate's effort-style config; a
+    // #1619: baseline from the configured candidate's effort-style config; a
     // transport without one starts at Pi's truthful headless baseline.
-    const primary = opts.candidates[0];
+    const primary = opts.candidate;
     this.requestedEffort = primary?.thinking?.style === "effort"
       ? primary.thinking.default
       : "off";
     // The configured default is subject to the same Pi capability clamp as a
     // live `/effort` change. Without this, status can claim xhigh before the
     // first turn even though the initial model will actually run at high.
-    this.effectiveEffort = primary
-      ? resolveCandidateModel(primary, this.requestedEffort, false).effective
-      : this.requestedEffort;
+    this.effectiveEffort = resolveCandidateModel(primary, this.requestedEffort, false).effective;
   }
 
   get isReady(): boolean { return this._isReady; }
@@ -207,11 +196,7 @@ export class PiCoreTransport implements IKiroTransport {
    */
   setReasoningEffort(level: ReasoningEffort): ReasoningEffortState {
     this.requestedEffort = level;
-    const primary = this.config.candidates[0];
-    if (!primary) {
-      this.effectiveEffort = level;
-      return { requested: level, effective: level };
-    }
+    const primary = this.config.candidate;
     const resolved = resolveCandidateModel(primary, level, false);
     this.effectiveEffort = resolved.effective;
     return { requested: level, effective: resolved.effective };
@@ -235,12 +220,10 @@ export class PiCoreTransport implements IKiroTransport {
   }
 
   async setModel(model: string, endpoint?: string, maxContext?: number): Promise<void> {
-    const primary = this.config.candidates[0];
-    if (!primary) throw new Error("No model candidate configured");
+    const primary = this.config.candidate;
     primary.model = model;
     if (endpoint) primary.endpoint = endpoint;
     if (maxContext) primary.maxContext = maxContext;
-    this.policy = new FallbackPolicy(this.config.candidates, this.healthRegistry);
     this.effectiveEffort = resolveCandidateModel(primary, this.requestedEffort, false).effective;
   }
 
@@ -352,7 +335,7 @@ export class PiCoreTransport implements IKiroTransport {
 
   private async runInitialization(): Promise<void> {
     const { validatePiRuntimeContract } = await import("./pi-runtime-contract.js");
-    await validatePiRuntimeContract(this.config.candidates);
+    await validatePiRuntimeContract([this.config.candidate]);
     this._isReady = true;
     this.onReady?.();
   }
@@ -374,15 +357,8 @@ export class PiCoreTransport implements IKiroTransport {
       this._intermediateText = "";
       this._toolCallsSucceeded = 0;
       this._lastToolFailure = null;
-      // #1905: prompt-local exclusion lifecycle — a failed attempt degrades at
-      // most its own prompt. Cleared once here, after the exclusive slot is
-      // acquired (a rejected overlapping call never reaches this line) and
-      // before any model selection; never between attempts within the prompt,
-      // so within-prompt fallback is unaffected. Successful-turn rotation and
-      // shared registry health are intentionally untouched.
-      this.policy.excludedKeys.clear();
       // #1297: terminal-failure state is allocated per execution — a previous
-      // request's credit failure can never contaminate a later request.
+      // request's failure can never contaminate a later request.
       const executionState: { terminalFailure: ProviderTerminalFailure | null } = { terminalFailure: null };
 
       // #1529: fail closed when durable context is required but unavailable.
@@ -403,21 +379,22 @@ export class PiCoreTransport implements IKiroTransport {
         throw new DurableContextUnavailableError("identity_unavailable");
       }
 
-      // #1932: suppress dispatch while every allowed selection cools down.
+      // #1932: suppress dispatch while the configured selection cools down.
       // Best-effort read — an unreadable memo admits, and the provider still
-      // enforces its own errors. A uniform block throws the typed
-      // unavailable failure before model selection, stream construction, Pi
-      // loading, host construction, fallback, or any provider request, so
-      // scheduled work settles visibly instead of retrying known-dead
-      // providers. No credential values or provider names in the message.
-      if (this.config.candidates.length > 0) {
+      // enforces its own errors. A block throws the typed unavailable
+      // failure before stream construction, Pi loading, host construction,
+      // or any provider request, so scheduled work settles visibly instead
+      // of retrying a known-dead provider. No credential values or provider
+      // names in the message.
+      {
+        const candidate = this.config.candidate;
         const memoVerdict = admitPiSelection(
-          this.config.candidates.map((candidate) => ({
+          [{
             authNamespace: `${candidate.authSource ?? "abtars"}:${candidate.provider}`,
             provider: candidate.provider,
             endpoint: candidate.endpoint,
             modelScope: candidate.model,
-          })),
+          }],
           loadAvailabilityMemo(this.memoStateDir).entries,
           Date.now(),
         );
@@ -425,8 +402,8 @@ export class PiCoreTransport implements IKiroTransport {
           throw new ProviderExecutionError({
             code: "provider_unavailable",
             retryable: false,
-            attemptedCandidates: this.config.candidates.length,
-            message: `All configured providers are cooling down; retry after ${new Date(memoVerdict.retryAt).toISOString()}`,
+            attemptedCandidates: 1,
+            message: `The configured provider is cooling down; retry after ${new Date(memoVerdict.retryAt).toISOString()}`,
             retryAt: memoVerdict.retryAt,
           });
         }
@@ -443,19 +420,12 @@ export class PiCoreTransport implements IKiroTransport {
 
       // #1748: cache identity — derived ONCE per transport from the first
       // session key (main) or the agent role scope (subagent), never per
-      // turn, per execution, or on candidate rotation. Rotating models
-      // legitimately changes which backend holds the cached prefix; resetting
-      // the identity would guarantee a miss on every rotation. resetSession
-      // clears it so a new session derives a fresh identity.
+      // turn or per execution. resetSession clears it so a new session
+      // derives a fresh identity.
       if (this.cacheIdentity === null) {
         this.cacheIdentity = deriveCacheIdentity(this.cacheScope ?? sessionKey);
       }
 
-      const modelForCandidate = (key: string) => {
-        const candidate = this.config.candidates.find((item) => candidateKey(item.model, item.endpoint) === key);
-        if (!candidate) return undefined;
-        return this.resolveModel(candidate, Boolean(image)).model;
-      };
       const safety = createPiExecutionSafetyController({
         // #1680: the intent-policy prompt bound overrides transport defaults
         // when the caller carries it (contract authoring keeps its narrow
@@ -476,7 +446,7 @@ export class PiCoreTransport implements IKiroTransport {
       // just-persisted cursor and a non-empty caller identity, both enforced by
       // the #1529 preflight above.
       const source = durableIntent.mode === "durable"
-        ? { mode: "durable" as const, sessionKey, beforeMessageId: durableIntent.beforeMessageId, maxContext: this.config.candidates[0]?.maxContext ?? 128000, userId: callerUserId! }
+        ? { mode: "durable" as const, sessionKey, beforeMessageId: durableIntent.beforeMessageId, maxContext: this.config.candidate.maxContext, userId: callerUserId! }
         : { mode: "ephemeral" as const, sessionKey };
 
       const volatileBlocks: Array<{ kind: string; content: string }> = [];
@@ -486,11 +456,8 @@ export class PiCoreTransport implements IKiroTransport {
 
       const systemPrompt = this.config.systemPrompt;
 
-      // Build the Pi model
-      const first = this.config.candidates[0];
-      const piModel = first
-        ? this.resolveModel(first, Boolean(image)).model
-        : resolveCandidateModel({ model: "unknown", endpoint: "", maxContext: 128000, provider: "unknown" }, this.requestedEffort, Boolean(image)).model;
+      // Build the Pi model from the single configured candidate.
+      const piModel = this.resolveModel(this.config.candidate, Boolean(image)).model;
 
       const timeoutOverride = this.timeoutOverrideMs;
       const deadlineAt = context?.deadlineAt
@@ -498,17 +465,18 @@ export class PiCoreTransport implements IKiroTransport {
 
       // Build StreamFn — no emergency L0, no legacy conversion
       const streamFn = createPiStreamFn({
-        policy: this.policy,
+        candidate: this.config.candidate,
         executionId,
         telemetry: context?.executionTelemetry,
         deadlineAt,
         providerInactivityTimeoutMs: context?.providerInactivityTimeoutMs ?? 180_000,
         reasoningEffort: this.requestedEffort,
         // #1932: durable availability observations land in the shared
-        // state dir. Write-only: admission is unchanged until cutover.
+        // state dir. Write-only and best-effort: memo failures never break
+        // a turn.
         memoStateDir: join(abtarsHome(), "state"),
         // #1748: the session-stable cache identity and the pinned retention
-        // reach every provider attempt through the stream options.
+        // reach the provider attempt through the stream options.
         cacheIdentity: this.cacheIdentity,
         cacheRetention: this.cacheRetention,
         onCandidateCommitted: (candidate) => {
@@ -520,11 +488,8 @@ export class PiCoreTransport implements IKiroTransport {
             apiFormat: candidate.apiFormat,
             thinking: candidate.thinking,
           };
-          this.lastSuccessfulCandidate = successful;
-          this.onLastSuccessfulChanged?.(successful);
           // #1619: the candidate that actually commits owns live provider/model/
-          // window/effective-effort state. Fallback preserves the requested
-          // level, not the prior candidate's clamped effective level.
+          // window/effective-effort state.
           this.committedCandidate = successful;
           const resolved = this.resolveModel(candidate, Boolean(image));
           this.effectiveEffort = resolved.effective;
@@ -533,7 +498,7 @@ export class PiCoreTransport implements IKiroTransport {
         },
         onTerminalFailure: (failure) => {
           executionState.terminalFailure = failure;
-          logDebug(TAG, `sendPrompt: terminal provider failure ${failure.code} (${failure.attemptedCandidates} candidates attempted)`);
+          logDebug(TAG, `sendPrompt: terminal provider failure ${failure.code}`);
         },
       });
 
@@ -586,7 +551,7 @@ export class PiCoreTransport implements IKiroTransport {
           tools: tools as unknown as import("@earendil-works/pi-agent-core").AgentTool<any>[],
           // #1619: the clamped effective level for the initial model; Pi Agent
           // turns it into the first request's reasoning option.
-          thinkingLevel: this.resolveModel(first ?? { model: "unknown", endpoint: "", maxContext: 128000, provider: "unknown" }, Boolean(image)).effective,
+          thinkingLevel: this.resolveModel(this.config.candidate, Boolean(image)).effective,
         },
         streamFn,
         session: this.session,
@@ -597,11 +562,9 @@ export class PiCoreTransport implements IKiroTransport {
           signal: undefined,
           hostGeneration: 0,
           contextProvider: context?.contextProvider ?? this._contextProvider.current ?? undefined,
-          candidateKeyFn: () => {
-            const candidate = this.policy.selectModel();
-            return candidate ? candidateKey(candidate.model, candidate.endpoint) : executionId;
-          },
-          candidateModelFn: modelForCandidate,
+          // #1932: attribution key for the single configured candidate —
+          // no selection happens here.
+          candidateKeyFn: () => candidateKey(this.config.candidate.model, this.config.candidate.endpoint),
         },
         outputObserver,
         onEvent: async (event) => {
@@ -709,16 +672,13 @@ export class PiCoreTransport implements IKiroTransport {
         if (contextTokens !== null && contextTokens > 0) {
           this.currentContextTokens = contextTokens;
           this.currentContextWindow = this.committedCandidate?.maxContext
-            ?? this.config.candidates[0]?.maxContext
-            ?? null;
+            ?? this.config.candidate.maxContext;
           logDebug(TAG, `Context usage captured: ${contextTokens} tokens / ${this.currentContextWindow ?? "?"} window`);
         }
 
         // #1595: the terminal cause leads; a prior tool failure is supporting
         // context only. Never present a stale tool failure as the primary
-        // reason, and never report candidate_exhausted:true for a run that
-        // continued past rotation (sole-candidate or switched) and ended for
-        // another reason.
+        // reason.
         if (safety.terminalSafetyFailure && safety.lastTerminalIncident) {
           const inc = safety.lastTerminalIncident;
           logInfo(TAG, `sendPrompt: terminal safety incident (${inc.type}) — leading with terminal cause, prior tool failure retained as context`);
@@ -776,7 +736,6 @@ export class PiCoreTransport implements IKiroTransport {
   }
 
   async resetSession(_sessionKey: string): Promise<void> {
-    this.policy = new FallbackPolicy(this.config.candidates, this.healthRegistry);
     // #1619: reset/compaction invalidates measured usage; requested effort
     // survives on the same transport instance.
     this.currentContextTokens = null;
@@ -811,8 +770,7 @@ export class PiCoreTransport implements IKiroTransport {
   }
 
   getRuntimeStatus(): RuntimeStatusSnapshot {
-    const live = this.committedCandidate
-      ?? this.config.candidates[0] ?? null;
+    const live = this.committedCandidate ?? this.config.candidate;
     const contextWindow = this.currentContextWindow ?? live?.maxContext ?? undefined;
     const tokens = this.currentContextTokens;
     let contextPercent: number | undefined;

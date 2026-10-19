@@ -9,15 +9,9 @@ import { join } from "node:path";
 import type { Model, Api } from "@earendil-works/pi-ai";
 import { normalizeContext } from "@earendil-works/pi-ai";
 import { createPiStreamFn } from "./pi-stream-fn.js";
-import { saveAvailabilityMemo } from "../pi-session/provider-availability-memo.js";
-import { FallbackPolicy } from "./fallback-policy.js";
-import { ModelHealthRegistry } from "./model-health-registry.js";
+import { saveAvailabilityMemo, loadAvailabilityMemo } from "../pi-session/provider-availability-memo.js";
 import type { ModelCandidate } from "./model-candidates.js";
 import type { SimpleStreamOptions } from "./pi-core-types.js";
-
-function makeRegistry() {
-  return new ModelHealthRegistry();
-}
 
 // #1921: StreamFn takes Pi's TranscriptContext since 0.86. The attempt
 // factories below ignore context, so every call site shares one normalized
@@ -63,19 +57,22 @@ function makeFakeStream(events: any[]): any {
   };
 }
 
+function doneStream(text: string): any {
+  return makeFakeStream([
+    { type: "text_delta", contentIndex: 0, delta: text },
+    { type: "done", reason: "stop", message: { role: "assistant", content: text, stopReason: "stop", usage: { input: 10, output: 5 } } },
+  ]);
+}
+
 describe("createPiStreamFn", () => {
-  let registry: ModelHealthRegistry;
-  let candidates: ModelCandidate[];
-  let policy: FallbackPolicy;
+  let candidate: ModelCandidate;
 
   beforeEach(() => {
-    registry = makeRegistry();
-    candidates = [makeCandidate()];
-    policy = new FallbackPolicy(candidates, registry);
+    candidate = makeCandidate();
   });
 
   it("returns a StreamFn", () => {
-    const streamFn = createPiStreamFn({ policy, executionId: "test" });
+    const streamFn = createPiStreamFn({ candidate, executionId: "test" });
     expect(typeof streamFn).toBe("function");
   });
 
@@ -93,7 +90,7 @@ describe("createPiStreamFn", () => {
       maxTokens: 128,
     };
     const streamFn = createPiStreamFn({
-      policy,
+      candidate,
       executionId: "test",
       createPiAiAttempt: vi.fn().mockRejectedValue(new Error("provider unavailable")),
     });
@@ -104,14 +101,9 @@ describe("createPiStreamFn", () => {
     expect(events.at(-1)?.error?.errorMessage).toBeTruthy();
   });
 
-  it("succeeds with valid candidate", async () => {
-    const fakeStream = makeFakeStream([
-      { type: "text_delta", contentIndex: 0, delta: "Hello" },
-      { type: "done", reason: "stop", message: { role: "assistant", content: "Hello", stopReason: "stop", usage: { input: 10, output: 5 } } },
-    ]);
-
-    const attemptFactory = vi.fn().mockResolvedValue(fakeStream);
-    const streamFn = createPiStreamFn({ policy, executionId: "test", createPiAiAttempt: attemptFactory });
+  it("succeeds with the configured candidate", async () => {
+    const attemptFactory = vi.fn().mockResolvedValue(doneStream("Hello"));
+    const streamFn = createPiStreamFn({ candidate, executionId: "test", createPiAiAttempt: attemptFactory });
     const ctx = normalizeContext({ systemPrompt: "You are a bot.", messages: [{ role: "user", content: "hi", timestamp: 0 }] });
     const opts: SimpleStreamOptions = {};
 
@@ -120,21 +112,21 @@ describe("createPiStreamFn", () => {
     for await (const ev of stream) events.push(ev);
 
     expect(attemptFactory).toHaveBeenCalledTimes(1);
+    expect(attemptFactory.mock.calls[0]?.[0]).toMatchObject({ model: "test-model" });
     expect(events.length).toBeGreaterThan(0);
     expect(events.some((e) => e.type === "text_delta")).toBe(true);
   });
 
   it("preserves candidate API format and thinking metadata", async () => {
-    const candidate = makeCandidate({
+    const configured = makeCandidate({
       apiFormat: "responses",
       thinking: { style: "effort", default: "high" },
     });
-    const metadataPolicy = new FallbackPolicy([candidate], registry);
     const attemptFactory = vi.fn().mockResolvedValue(makeFakeStream([
       { type: "done", reason: "stop", message: { role: "assistant", content: "ok", stopReason: "stop", usage: { input: 1, output: 1 } } },
     ]));
 
-    const stream = await createPiStreamFn({ policy: metadataPolicy, executionId: "test", createPiAiAttempt: attemptFactory })(
+    const stream = await createPiStreamFn({ candidate: configured, executionId: "test", createPiAiAttempt: attemptFactory })(
       makeModel(), emptyTranscript(), {},
     );
     for await (const _event of stream) { /* consume */ }
@@ -144,19 +136,10 @@ describe("createPiStreamFn", () => {
     expect(model.reasoning).toBe(true);
   });
 
-  it("falls back on setup failure before commit", async () => {
-    const failCandidate = makeCandidate({ model: "fail", endpoint: "https://fail/v1" });
-    const goodCandidate = makeCandidate({ model: "good", endpoint: "https://good/v1" });
-    const failPolicy = new FallbackPolicy([failCandidate, goodCandidate], registry);
-
-    const attemptFactory = vi.fn()
-      .mockRejectedValueOnce(new Error("API error 500: server failure"))
-      .mockResolvedValueOnce(makeFakeStream([
-        { type: "text_delta", contentIndex: 0, delta: "Hello from fallback" },
-        { type: "done", reason: "stop", message: { role: "assistant", content: "Hello from fallback", stopReason: "stop", usage: { input: 10, output: 5 } } },
-      ]));
-
-    const streamFn = createPiStreamFn({ policy: failPolicy, executionId: "test", createPiAiAttempt: attemptFactory });
+  it("fails closed on setup failure before commit — exactly one attempt, no silent retry", async () => {
+    const attemptFactory = vi.fn().mockRejectedValue(new Error("API error 500: server failure"));
+    const onTerminalFailure = vi.fn();
+    const streamFn = createPiStreamFn({ candidate, executionId: "test", createPiAiAttempt: attemptFactory, onTerminalFailure });
     const ctx = normalizeContext({ systemPrompt: "", messages: [{ role: "user", content: "hi", timestamp: 0 }] });
     const opts: SimpleStreamOptions = {};
 
@@ -164,18 +147,21 @@ describe("createPiStreamFn", () => {
     const events: any[] = [];
     for await (const ev of stream) events.push(ev);
 
-    expect(attemptFactory).toHaveBeenCalledTimes(2);
-    const textEvents = events.filter((e) => e.type === "text_delta");
-    expect(textEvents.some((e) => e.delta?.includes("Hello from fallback"))).toBe(true);
+    expect(attemptFactory).toHaveBeenCalledTimes(1);
+    expect(events.at(-1)?.type).toBe("error");
+    expect(onTerminalFailure).toHaveBeenCalledWith(expect.objectContaining({
+      code: "all_candidates_failed",
+      retryable: false,
+      attemptedCandidates: 1,
+    }));
   });
 
   it("records memoizable terminal failures to the availability memo (#1932)", async () => {
     const stateDir = mkdtempSync(join(tmpdir(), "pi-memo-wire-"));
     const failCandidate = makeCandidate({ model: "fail", provider: "test-provider", endpoint: "https://fail/v1" });
-    const failPolicy = new FallbackPolicy([failCandidate], registry);
     const attemptFactory = vi.fn().mockRejectedValue(new Error("API error 429: rate limited"));
     const streamFn = createPiStreamFn({
-      policy: failPolicy,
+      candidate: failCandidate,
       executionId: "memo-test",
       createPiAiAttempt: attemptFactory,
       memoStateDir: stateDir,
@@ -215,13 +201,9 @@ describe("createPiStreamFn", () => {
       },
     ]);
     const okCandidate = makeCandidate({ model: "ok", provider: "test-provider", endpoint: "https://ok/v1" });
-    const okPolicy = new FallbackPolicy([okCandidate], registry);
-    const attemptFactory = vi.fn().mockResolvedValue(makeFakeStream([
-      { type: "text_delta", contentIndex: 0, delta: "Hello" },
-      { type: "done", reason: "stop", message: { role: "assistant", content: "Hello", stopReason: "stop", usage: { input: 10, output: 5 } } },
-    ]));
+    const attemptFactory = vi.fn().mockResolvedValue(doneStream("Hello"));
     const streamFn = createPiStreamFn({
-      policy: okPolicy,
+      candidate: okCandidate,
       executionId: "memo-success-test",
       createPiAiAttempt: attemptFactory,
       memoStateDir: stateDir,
@@ -237,49 +219,17 @@ describe("createPiStreamFn", () => {
     expect(memo.entries[0]).toMatchObject({ reason: "temporary" });
   });
 
-  it("falls back to a prior rotation candidate when the selected candidate fails", async () => {
-    const first = makeCandidate({ model: "first", endpoint: "https://first/v1" });
-    const second = makeCandidate({ model: "second", endpoint: "https://second/v1" });
-    const rotatedPolicy = new FallbackPolicy([first, second], registry);
-    rotatedPolicy.rotationExcludedKeys.add("first@https://first/v1");
-
-    const attemptFactory = vi.fn()
-      .mockRejectedValueOnce(new Error("selected candidate unavailable"))
-      .mockResolvedValueOnce(makeFakeStream([
-        { type: "done", reason: "stop", message: { role: "assistant", content: "recovered", stopReason: "stop", usage: { input: 1, output: 1 } } },
-      ]));
-    const streamFn = createPiStreamFn({ policy: rotatedPolicy, executionId: "rotation-fallback", createPiAiAttempt: attemptFactory });
-    const events: any[] = [];
-    for await (const event of await streamFn(makeModel(), emptyTranscript())) events.push(event);
-
-    expect(attemptFactory.mock.calls.map((call) => (call[0] as ModelCandidate).model)).toEqual(["second", "first"]);
-    expect(events.some((event) => event.type === "done" && event.message?.content === "recovered")).toBe(true);
-    expect(rotatedPolicy.excludedKeys.has("second@https://second/v1")).toBe(true);
-    expect(rotatedPolicy.rotationExcludedKeys.size).toBe(0);
-  });
-
-  it("does not fall back after semantic commit", async () => {
-    const firstCandidate = makeCandidate({ model: "first" });
-    const secondCandidate = makeCandidate({ model: "second" });
-    const failPolicy = new FallbackPolicy([firstCandidate, secondCandidate], registry);
-
+  it("does not retry after semantic commit", async () => {
     let callCount = 0;
     const attemptFactory = vi.fn().mockImplementation(async () => {
       callCount++;
-      if (callCount === 1) {
-        const stream = makeFakeStream([
-          { type: "text_delta", contentIndex: 0, delta: "partial " },
-          { type: "done", reason: "stop", message: { role: "assistant", content: "partial", stopReason: "stop", usage: { input: 5, output: 2 } } },
-        ]);
-        return stream;
-      }
       return makeFakeStream([
-        { type: "text_delta", contentIndex: 0, delta: "should not reach" },
-        { type: "done", reason: "stop", message: { role: "assistant", content: "should not reach", stopReason: "stop", usage: { input: 0, output: 0 } } },
+        { type: "text_delta", contentIndex: 0, delta: "partial " },
+        { type: "done", reason: "stop", message: { role: "assistant", content: "partial", stopReason: "stop", usage: { input: 5, output: 2 } } },
       ]);
     });
 
-    const streamFn = createPiStreamFn({ policy: failPolicy, executionId: "test", createPiAiAttempt: attemptFactory });
+    const streamFn = createPiStreamFn({ candidate, executionId: "test", createPiAiAttempt: attemptFactory });
     const ctx = normalizeContext({ systemPrompt: "", messages: [{ role: "user", content: "hi", timestamp: 0 }] });
     const opts: SimpleStreamOptions = {};
 
@@ -294,7 +244,7 @@ describe("createPiStreamFn", () => {
 
   it("returns error stream on total exhaustion", async () => {
     const attemptFactory = vi.fn().mockRejectedValue(new Error("API error 500"));
-    const streamFn = createPiStreamFn({ policy, executionId: "test", createPiAiAttempt: attemptFactory });
+    const streamFn = createPiStreamFn({ candidate, executionId: "test", createPiAiAttempt: attemptFactory });
     const ctx = emptyTranscript();
     const opts: SimpleStreamOptions = {};
 
@@ -314,7 +264,7 @@ describe("createPiStreamFn", () => {
       return makeFakeStream([]);
     });
 
-    const streamFn = createPiStreamFn({ policy, executionId: "test", createPiAiAttempt: attemptFactory });
+    const streamFn = createPiStreamFn({ candidate, executionId: "test", createPiAiAttempt: attemptFactory });
     const ctx = emptyTranscript();
     const opts: SimpleStreamOptions = { signal: controller.signal };
 
@@ -327,7 +277,8 @@ describe("createPiStreamFn", () => {
     expect((errorEv2?.error as Record<string, unknown> | undefined)?.stopReason).toBe("aborted");
   });
 
-  it("does not poison candidate health when the attempt is aborted (#1534)", async () => {
+  it("records no memo observation when the attempt is aborted (#1534)", async () => {
+    const stateDir = mkdtempSync(join(tmpdir(), "pi-memo-abort-"));
     const controller = new AbortController();
     const attemptFactory = vi.fn().mockImplementation(async () => {
       controller.abort();
@@ -337,66 +288,32 @@ describe("createPiStreamFn", () => {
       ]);
     });
 
-    const streamFn = createPiStreamFn({ policy, executionId: "test", createPiAiAttempt: attemptFactory });
+    const streamFn = createPiStreamFn({ candidate, executionId: "test", createPiAiAttempt: attemptFactory, memoStateDir: stateDir });
     const events: any[] = [];
     for await (const event of await streamFn(makeModel(), emptyTranscript(), { signal: controller.signal })) events.push(event);
 
     expect(events.some((e) => e.type === "error")).toBe(true);
     expect((events.find((e) => e.type === "error")?.error as { stopReason?: string } | undefined)?.stopReason).toBe("aborted");
-    // #1534: an operator abort must not exclude the candidate or fill its
-    // health bucket — a post-cancel continuation must still reach the provider.
-    expect(policy.excludedKeys.size).toBe(0);
-    expect(policy.selectModel()).not.toBeNull();
+    // #1534: an operator abort is not a provider failure — a post-cancel
+    // continuation must still reach the provider, so nothing is observed.
+    expect(loadAvailabilityMemo(stateDir).entries).toHaveLength(0);
   });
 
-  it("times out a provider iterator that never resolves next() and falls back before semantic output", async () => {
-    const first = makeCandidate({ model: "stuck", endpoint: "https://stuck/v1" });
-    const second = makeCandidate({ model: "fallback", endpoint: "https://fallback/v1" });
-    const fallbackPolicy = new FallbackPolicy([first, second], registry);
-    let firstSignal: AbortSignal | undefined;
+  it("times out a provider iterator that never resolves next() before semantic output", async () => {
     const stuckStream = {
       [Symbol.asyncIterator]: () => ({
         next: () => new Promise<IteratorResult<any>>(() => {}),
         return: vi.fn(async () => ({ done: true, value: undefined })),
       }),
     };
-    const attemptFactory = vi.fn().mockImplementation(async (candidate: ModelCandidate, _model: unknown, _ctx: unknown, _opts: unknown, signal: AbortSignal) => {
-      if (candidate.model === "stuck") {
-        firstSignal = signal;
-        return stuckStream;
-      }
-      return makeFakeStream([{ type: "done", reason: "stop", message: { role: "assistant", content: "fallback", stopReason: "stop", usage: { input: 1, output: 1 } } }]);
-    });
-
-    const streamFn = createPiStreamFn({
-      policy: fallbackPolicy,
-      executionId: "stuck-provider",
-      createPiAiAttempt: attemptFactory,
-      providerInactivityTimeoutMs: 20,
-    });
-    const events: any[] = [];
-    for await (const event of await streamFn(makeModel(), emptyTranscript(), {})) events.push(event);
-
-    expect(attemptFactory).toHaveBeenCalledTimes(2);
-    expect(firstSignal?.aborted).toBe(true);
-    expect(events.some((event) => event.type === "done" && event.message?.content === "fallback")).toBe(true);
-  });
-
-  it("times out an attempt factory that never resolves and falls back before semantic output (#1506 acquisition)", async () => {
-    const first = makeCandidate({ model: "stuck", endpoint: "https://stuck/v1" });
-    const second = makeCandidate({ model: "fallback", endpoint: "https://fallback/v1" });
-    const fallbackPolicy = new FallbackPolicy([first, second], registry);
     let firstSignal: AbortSignal | undefined;
-    const attemptFactory = vi.fn().mockImplementation(async (candidate: ModelCandidate, _model: unknown, _ctx: unknown, _opts: unknown, signal: AbortSignal) => {
-      if (candidate.model === "stuck") {
-        firstSignal = signal;
-        return new Promise<never>(() => {}); // never resolves, ignores abort
-      }
-      return makeFakeStream([{ type: "done", reason: "stop", message: { role: "assistant", content: "fallback", stopReason: "stop", usage: { input: 1, output: 1 } } }]);
+    const attemptFactory = vi.fn().mockImplementation(async (_candidate: unknown, _model: unknown, _ctx: unknown, _opts: unknown, signal: AbortSignal) => {
+      firstSignal = signal;
+      return stuckStream;
     });
 
     const streamFn = createPiStreamFn({
-      policy: fallbackPolicy,
+      candidate,
       executionId: "stuck-provider",
       createPiAiAttempt: attemptFactory,
       providerInactivityTimeoutMs: 20,
@@ -404,15 +321,33 @@ describe("createPiStreamFn", () => {
     const events: any[] = [];
     for await (const event of await streamFn(makeModel(), emptyTranscript(), {})) events.push(event);
 
-    expect(attemptFactory).toHaveBeenCalledTimes(2);
+    expect(attemptFactory).toHaveBeenCalledTimes(1);
     expect(firstSignal?.aborted).toBe(true);
-    expect(events.some((event) => event.type === "done" && event.message?.content === "fallback")).toBe(true);
+    expect(events.at(-1)?.type).toBe("error");
   });
 
-  it("does not publish or re-record telemetry when a timed-out factory resolves after fallback (#1506)", async () => {
-    const first = makeCandidate({ model: "stuck", endpoint: "https://stuck/v1" });
-    const second = makeCandidate({ model: "fallback", endpoint: "https://fallback/v1" });
-    const fallbackPolicy = new FallbackPolicy([first, second], registry);
+  it("times out an attempt factory that never resolves before semantic output (#1506 acquisition)", async () => {
+    let firstSignal: AbortSignal | undefined;
+    const attemptFactory = vi.fn().mockImplementation(async (_candidate: unknown, _model: unknown, _ctx: unknown, _opts: unknown, signal: AbortSignal) => {
+      firstSignal = signal;
+      return new Promise<never>(() => {}); // never resolves, ignores abort
+    });
+
+    const streamFn = createPiStreamFn({
+      candidate,
+      executionId: "stuck-provider",
+      createPiAiAttempt: attemptFactory,
+      providerInactivityTimeoutMs: 20,
+    });
+    const events: any[] = [];
+    for await (const event of await streamFn(makeModel(), emptyTranscript(), {})) events.push(event);
+
+    expect(attemptFactory).toHaveBeenCalledTimes(1);
+    expect(firstSignal?.aborted).toBe(true);
+    expect(events.at(-1)?.type).toBe("error");
+  });
+
+  it("does not publish or re-record telemetry when a timed-out factory resolves late (#1506)", async () => {
     let resolveLate: ((v: unknown) => void) | undefined;
     const lateReturn = vi.fn(async () => ({ done: true, value: undefined }));
     const telemetryCalls: string[] = [];
@@ -427,15 +362,12 @@ describe("createPiStreamFn", () => {
       close: vi.fn(),
     };
 
-    const attemptFactory = vi.fn().mockImplementation(async (candidate: ModelCandidate) => {
-      if (candidate.model === "stuck") {
-        return new Promise((resolve) => { resolveLate = resolve; });
-      }
-      return makeFakeStream([{ type: "done", reason: "stop", message: { role: "assistant", content: "fallback", stopReason: "stop", usage: { input: 1, output: 1 } } }]);
+    const attemptFactory = vi.fn().mockImplementation(async () => {
+      return new Promise((resolve) => { resolveLate = resolve; });
     });
 
     const streamFn = createPiStreamFn({
-      policy: fallbackPolicy,
+      candidate,
       executionId: "stuck-provider",
       createPiAiAttempt: attemptFactory,
       providerInactivityTimeoutMs: 20,
@@ -444,9 +376,9 @@ describe("createPiStreamFn", () => {
     const events: any[] = [];
     for await (const event of await streamFn(makeModel(), emptyTranscript(), {})) events.push(event);
 
-    expect(events.some((event) => event.type === "done" && event.message?.content === "fallback")).toBe(true);
-    // Exactly one terminal record per started request: stuck timeout + fallback success.
-    expect(telemetryCalls).toEqual(["aborted", "success"]);
+    expect(events.at(-1)?.type).toBe("error");
+    // Exactly one terminal record for the timed-out request.
+    expect(telemetryCalls).toEqual(["aborted"]);
 
     const lateStream = {
       [Symbol.asyncIterator]: () => ({
@@ -457,16 +389,11 @@ describe("createPiStreamFn", () => {
     resolveLate?.(lateStream);
     await vi.waitFor(() => expect(lateReturn).toHaveBeenCalled(), { timeout: 2_000, interval: 10 });
 
-    // The late stream must not publish output, change health, or add a record.
-    expect(telemetryCalls).toEqual(["aborted", "success"]);
-    expect(fallbackPolicy.excludedKeys.has("stuck@https://stuck/v1")).toBe(true);
-    expect(fallbackPolicy.excludedKeys.has("fallback@https://fallback/v1")).toBe(false);
+    // The late stream must not publish output or add a record.
+    expect(telemetryCalls).toEqual(["aborted"]);
   });
 
-  it("consumes a timed-out factory rejection after fallback (no unhandled rejection, no duplicate telemetry) (#1506)", async () => {
-    const first = makeCandidate({ model: "stuck", endpoint: "https://stuck/v1" });
-    const second = makeCandidate({ model: "fallback", endpoint: "https://fallback/v1" });
-    const fallbackPolicy = new FallbackPolicy([first, second], registry);
+  it("consumes a timed-out factory rejection late (no unhandled rejection, no duplicate telemetry) (#1506)", async () => {
     let rejectLate: ((err: Error) => void) | undefined;
     const telemetryCalls: string[] = [];
     const mockTelemetry = {
@@ -480,15 +407,12 @@ describe("createPiStreamFn", () => {
       close: vi.fn(),
     };
 
-    const attemptFactory = vi.fn().mockImplementation(async (candidate: ModelCandidate) => {
-      if (candidate.model === "stuck") {
-        return new Promise((_resolve, reject) => { rejectLate = reject; });
-      }
-      return makeFakeStream([{ type: "done", reason: "stop", message: { role: "assistant", content: "fallback", stopReason: "stop", usage: { input: 1, output: 1 } } }]);
+    const attemptFactory = vi.fn().mockImplementation(async () => {
+      return new Promise((_resolve, reject) => { rejectLate = reject; });
     });
 
     const streamFn = createPiStreamFn({
-      policy: fallbackPolicy,
+      candidate,
       executionId: "stuck-provider",
       createPiAiAttempt: attemptFactory,
       providerInactivityTimeoutMs: 20,
@@ -497,18 +421,15 @@ describe("createPiStreamFn", () => {
     const events: any[] = [];
     for await (const event of await streamFn(makeModel(), emptyTranscript(), {})) events.push(event);
 
-    expect(events.some((event) => event.type === "done" && event.message?.content === "fallback")).toBe(true);
+    expect(events.at(-1)?.type).toBe("error");
     rejectLate?.(new Error("late provider failure"));
     // An unhandled rejection would fail the test; telemetry stays exactly-once.
     await new Promise((resolve) => setTimeout(resolve, 10));
-    expect(telemetryCalls).toEqual(["aborted", "success"]);
-    expect(attemptFactory).toHaveBeenCalledTimes(2);
+    expect(telemetryCalls).toEqual(["aborted"]);
+    expect(attemptFactory).toHaveBeenCalledTimes(1);
   });
 
-  it("does not fall back after a stalled provider has emitted semantic output", async () => {
-    const first = makeCandidate({ model: "partial", endpoint: "https://partial/v1" });
-    const second = makeCandidate({ model: "should-not-run", endpoint: "https://unused/v1" });
-    const fallbackPolicy = new FallbackPolicy([first, second], registry);
+  it("does not retry after a stalled provider has emitted semantic output", async () => {
     const partialStream = {
       [Symbol.asyncIterator]: () => {
         let firstEvent = true;
@@ -522,7 +443,7 @@ describe("createPiStreamFn", () => {
     };
     const attemptFactory = vi.fn().mockResolvedValue(partialStream);
     const streamFn = createPiStreamFn({
-      policy: fallbackPolicy,
+      candidate,
       executionId: "partial-provider",
       createPiAiAttempt: attemptFactory,
       providerInactivityTimeoutMs: 20,
@@ -533,23 +454,18 @@ describe("createPiStreamFn", () => {
     expect(attemptFactory).toHaveBeenCalledTimes(1);
     expect(events.some((event) => event.type === "text_delta" && event.delta === "partial")).toBe(true);
     expect(events.at(-1)?.type).toBe("error");
-    expect(fallbackPolicy.excludedKeys.has("partial@https://partial/v1")).toBe(true);
-    expect(fallbackPolicy.excludedKeys.has("should-not-run@https://unused/v1")).toBe(false);
   });
 
   // ── Request-identity tests (#1472) ──────────────────────────────────────────
 
   it("replaces stale caller-provided x-client-request-id with a generated ID", async () => {
-    const usedIds: string[] = [];
     const requestIdFactory = vi.fn()
       .mockReturnValueOnce("gen-req-1")
       .mockReturnValueOnce("gen-req-2");
-    const attemptFactory = vi.fn().mockResolvedValue(makeFakeStream([
-      { type: "done", reason: "stop", message: { role: "assistant", content: "ok", stopReason: "stop", usage: { input: 1, output: 1 } } },
-    ]));
+    const attemptFactory = vi.fn().mockResolvedValue(doneStream("ok"));
 
     const streamFn = createPiStreamFn({
-      policy, createPiAiAttempt: attemptFactory, executionId: "exec_1",
+      candidate, createPiAiAttempt: attemptFactory, executionId: "exec_1",
       providerRequestIdFactory: requestIdFactory,
     });
     const opts: SimpleStreamOptions = { headers: { "x-client-request-id": "stale-session-value" } };
@@ -568,12 +484,10 @@ describe("createPiStreamFn", () => {
       ids.push(id);
       return id;
     });
-    const attemptFactory = vi.fn().mockResolvedValue(makeFakeStream([
-      { type: "done", reason: "stop", message: { role: "assistant", content: "ok", stopReason: "stop", usage: { input: 1, output: 1 } } },
-    ]));
+    const attemptFactory = vi.fn().mockResolvedValue(doneStream("ok"));
 
     const streamFn = createPiStreamFn({
-      policy, createPiAiAttempt: attemptFactory, executionId: "exec_1",
+      candidate, createPiAiAttempt: attemptFactory, executionId: "exec_1",
       providerRequestIdFactory: requestIdFactory,
     });
     for await (const _ev of await streamFn(makeModel({ api: "openai-completions" }), emptyTranscript(), {})) { /* consume */ }
@@ -591,12 +505,10 @@ describe("createPiStreamFn", () => {
     });
     const attemptFactory = vi.fn()
       .mockRejectedValueOnce(new Error("idempotency_conflict"))
-      .mockResolvedValueOnce(makeFakeStream([
-        { type: "done", reason: "stop", message: { role: "assistant", content: "recovered", stopReason: "stop", usage: { input: 2, output: 2 } } },
-      ]));
+      .mockResolvedValueOnce(doneStream("recovered"));
 
     const streamFn = createPiStreamFn({
-      policy, createPiAiAttempt: attemptFactory, executionId: "exec_1",
+      candidate, createPiAiAttempt: attemptFactory, executionId: "exec_1",
       providerRequestIdFactory: requestIdFactory,
     });
     for await (const _ev of await streamFn(makeModel({ api: "openai-completions" }), emptyTranscript(), {})) { /* consume */ }
@@ -612,12 +524,10 @@ describe("createPiStreamFn", () => {
   });
 
   it("preserves sessionId and unrelated option headers while adding request ID", async () => {
-    const attemptFactory = vi.fn().mockResolvedValue(makeFakeStream([
-      { type: "done", reason: "stop", message: { role: "assistant", content: "ok", stopReason: "stop", usage: { input: 1, output: 1 } } },
-    ]));
+    const attemptFactory = vi.fn().mockResolvedValue(doneStream("ok"));
 
     const streamFn = createPiStreamFn({
-      policy, createPiAiAttempt: attemptFactory, executionId: "exec_1",
+      candidate, createPiAiAttempt: attemptFactory, executionId: "exec_1",
       providerRequestIdFactory: () => "gen-id",
     });
     const opts: SimpleStreamOptions = {
@@ -634,13 +544,12 @@ describe("createPiStreamFn", () => {
 
   it("does not add x-client-request-id for anthropic-messages candidates", async () => {
     const anthropicCandidate = makeCandidate({ apiFormat: "anthropic" });
-    const anthropicPolicy = new FallbackPolicy([anthropicCandidate], registry);
     const attemptFactory = vi.fn().mockResolvedValue(makeFakeStream([
       { type: "done", reason: "stop", message: { role: "assistant", content: "ok", stopReason: "stop", usage: { input: 1, output: 1 } } },
     ]));
 
     const streamFn = createPiStreamFn({
-      policy: anthropicPolicy, createPiAiAttempt: attemptFactory, executionId: "exec_1",
+      candidate: anthropicCandidate, createPiAiAttempt: attemptFactory, executionId: "exec_1",
       providerRequestIdFactory: () => "gen-id",
     });
     const opts: SimpleStreamOptions = {};
@@ -653,12 +562,10 @@ describe("createPiStreamFn", () => {
   // ── Cache identity + retention (#1748) ─────────────────────────────────────
 
   it("forwards cacheIdentity as sessionId and cacheRetention to the attempt options", async () => {
-    const attemptFactory = vi.fn().mockResolvedValue(makeFakeStream([
-      { type: "done", reason: "stop", message: { role: "assistant", content: "ok", stopReason: "stop", usage: { input: 1, output: 1 } } },
-    ]));
+    const attemptFactory = vi.fn().mockResolvedValue(doneStream("ok"));
 
     const streamFn = createPiStreamFn({
-      policy, createPiAiAttempt: attemptFactory, executionId: "exec_1",
+      candidate, createPiAiAttempt: attemptFactory, executionId: "exec_1",
       cacheIdentity: "cache-id-1", cacheRetention: "short",
     });
     for await (const _ev of await streamFn(makeModel({ api: "openai-completions" }), emptyTranscript(), {})) { /* consume */ }
@@ -668,18 +575,13 @@ describe("createPiStreamFn", () => {
     expect(passedOptions?.cacheRetention).toBe("short");
   });
 
-  it("sends the same cache identity on both attempts of a candidate rotation within one turn", async () => {
-    const first = makeCandidate({ model: "first", endpoint: "https://first/v1" });
-    const second = makeCandidate({ model: "second", endpoint: "https://second/v1" });
-    const rotationPolicy = new FallbackPolicy([first, second], registry);
+  it("sends the same cache identity on the conflict-recovery retry within one turn", async () => {
     const attemptFactory = vi.fn()
-      .mockRejectedValueOnce(new Error("API error 503: overloaded"))
-      .mockResolvedValueOnce(makeFakeStream([
-        { type: "done", reason: "stop", message: { role: "assistant", content: "recovered", stopReason: "stop", usage: { input: 1, output: 1 } } },
-      ]));
+      .mockRejectedValueOnce(new Error("idempotency_conflict"))
+      .mockResolvedValueOnce(doneStream("recovered"));
 
     const streamFn = createPiStreamFn({
-      policy: rotationPolicy, createPiAiAttempt: attemptFactory, executionId: "exec_1",
+      candidate, createPiAiAttempt: attemptFactory, executionId: "exec_1",
       cacheIdentity: "rotation-stable-id",
     });
     for await (const _ev of await streamFn(makeModel({ api: "openai-completions" }), emptyTranscript(), {})) { /* consume */ }
@@ -691,28 +593,19 @@ describe("createPiStreamFn", () => {
     expect(opts2?.sessionId).toBe("rotation-stable-id");
   });
 
-  it("uses each candidate's retention policy during provider rotation", async () => {
-    const first = makeCandidate({ model: "first", endpoint: "https://first/v1", cacheRetention: "short" });
-    const second = makeCandidate({ model: "second", endpoint: "https://second/v1", cacheRetention: "long" });
-    const rotationPolicy = new FallbackPolicy([first, second], registry);
-    const attemptFactory = vi.fn()
-      .mockRejectedValueOnce(new Error("API error 503: overloaded"))
-      .mockResolvedValueOnce(makeFakeStream([
-        { type: "done", reason: "stop", message: { role: "assistant", content: "recovered", stopReason: "stop", usage: { input: 1, output: 1 } } },
-      ]));
+  it("uses the candidate's retention policy on the attempt", async () => {
+    const retentionCandidate = makeCandidate({ cacheRetention: "long" });
+    const attemptFactory = vi.fn().mockResolvedValue(doneStream("ok"));
 
     const streamFn = createPiStreamFn({
-      policy: rotationPolicy, createPiAiAttempt: attemptFactory, executionId: "exec_1",
+      candidate: retentionCandidate, createPiAiAttempt: attemptFactory, executionId: "exec_1",
       cacheIdentity: "rotation-stable-id", cacheRetention: "short",
     });
     for await (const _ev of await streamFn(makeModel(), emptyTranscript(), {})) { /* consume */ }
 
-    const opts1 = attemptFactory.mock.calls[0]?.[3] as SimpleStreamOptions;
-    const opts2 = attemptFactory.mock.calls[1]?.[3] as SimpleStreamOptions;
-    expect(opts1?.cacheRetention).toBe("short");
-    expect(opts2?.cacheRetention).toBe("long");
-    expect(opts1?.sessionId).toBe("rotation-stable-id");
-    expect(opts2?.sessionId).toBe("rotation-stable-id");
+    const passedOptions = attemptFactory.mock.calls[0]?.[3] as SimpleStreamOptions;
+    expect(passedOptions?.cacheRetention).toBe("long");
+    expect(passedOptions?.sessionId).toBe("rotation-stable-id");
   });
 
   it("keeps x-client-request-id fresh per attempt while the cache identity stays stable", async () => {
@@ -722,17 +615,12 @@ describe("createPiStreamFn", () => {
       ids.push(id);
       return id;
     });
-    const first = makeCandidate({ model: "first", endpoint: "https://first/v1" });
-    const second = makeCandidate({ model: "second", endpoint: "https://second/v1" });
-    const rotationPolicy = new FallbackPolicy([first, second], registry);
     const attemptFactory = vi.fn()
-      .mockRejectedValueOnce(new Error("API error 503: overloaded"))
-      .mockResolvedValueOnce(makeFakeStream([
-        { type: "done", reason: "stop", message: { role: "assistant", content: "recovered", stopReason: "stop", usage: { input: 1, output: 1 } } },
-      ]));
+      .mockRejectedValueOnce(new Error("idempotency_conflict"))
+      .mockResolvedValueOnce(doneStream("recovered"));
 
     const streamFn = createPiStreamFn({
-      policy: rotationPolicy, createPiAiAttempt: attemptFactory, executionId: "exec_1",
+      candidate, createPiAiAttempt: attemptFactory, executionId: "exec_1",
       providerRequestIdFactory: requestIdFactory,
       cacheIdentity: "rotation-stable-id",
     });
@@ -752,13 +640,10 @@ describe("createPiStreamFn", () => {
   it("retries once on thrown idempotency_conflict before commit", async () => {
     const attemptFactory = vi.fn()
       .mockRejectedValueOnce(new Error("idempotency_conflict: duplicate request"))
-      .mockResolvedValueOnce(makeFakeStream([
-        { type: "text_delta", contentIndex: 0, delta: "recovered" },
-        { type: "done", reason: "stop", message: { role: "assistant", content: "recovered", stopReason: "stop", usage: { input: 5, output: 3 } } },
-      ]));
+      .mockResolvedValueOnce(doneStream("recovered"));
 
     const streamFn = createPiStreamFn({
-      policy, createPiAiAttempt: attemptFactory, executionId: "exec_1",
+      candidate, createPiAiAttempt: attemptFactory, executionId: "exec_1",
       providerRequestIdFactory: () => "fresh-id",
     });
     const events: any[] = [];
@@ -774,13 +659,10 @@ describe("createPiStreamFn", () => {
       .mockResolvedValueOnce(makeFakeStream([
         { type: "error", reason: "error", error: { role: "assistant", content: [], stopReason: "error", errorMessage: "idempotency_conflict: request key reused", usage: { input: 0, output: 0 } } },
       ]))
-      .mockResolvedValueOnce(makeFakeStream([
-        { type: "text_delta", contentIndex: 0, delta: "ok" },
-        { type: "done", reason: "stop", message: { role: "assistant", content: "ok", stopReason: "stop", usage: { input: 3, output: 1 } } },
-      ]));
+      .mockResolvedValueOnce(doneStream("ok"));
 
     const streamFn = createPiStreamFn({
-      policy, createPiAiAttempt: attemptFactory, executionId: "exec_1",
+      candidate, createPiAiAttempt: attemptFactory, executionId: "exec_1",
       providerRequestIdFactory: () => "fresh-id",
     });
     const events: any[] = [];
@@ -796,7 +678,7 @@ describe("createPiStreamFn", () => {
       .mockRejectedValueOnce(new Error("idempotency_conflict again"));
 
     const streamFn = createPiStreamFn({
-      policy, createPiAiAttempt: attemptFactory, executionId: "exec_1",
+      candidate, createPiAiAttempt: attemptFactory, executionId: "exec_1",
       providerRequestIdFactory: () => "fresh-id",
     });
     const events: any[] = [];
@@ -815,7 +697,7 @@ describe("createPiStreamFn", () => {
     ]));
 
     const streamFn = createPiStreamFn({
-      policy, createPiAiAttempt: attemptFactory, executionId: "exec_1",
+      candidate, createPiAiAttempt: attemptFactory, executionId: "exec_1",
       providerRequestIdFactory: () => "fresh-id",
     });
     const events: any[] = [];
@@ -827,32 +709,30 @@ describe("createPiStreamFn", () => {
     expect(events.some((e) => e.delta?.includes("committed"))).toBe(true);
   });
 
-  it("falls back to next candidate when recovery attempt fails", async () => {
-    const first = makeCandidate({ model: "first", endpoint: "https://first/v1" });
-    const second = makeCandidate({ model: "second", endpoint: "https://second/v1" });
-    const fallbackPolicy = new FallbackPolicy([first, second], registry);
-
+  it("reports a terminal failure when the recovery attempt fails", async () => {
+    const onTerminalFailure = vi.fn();
     const attemptFactory = vi.fn()
       .mockRejectedValueOnce(new Error("idempotency_conflict"))
-      .mockRejectedValueOnce(new Error("API error 503"))
-      .mockResolvedValueOnce(makeFakeStream([
-        { type: "text_delta", contentIndex: 0, delta: "fallback worked" },
-        { type: "done", reason: "stop", message: { role: "assistant", content: "fallback worked", stopReason: "stop", usage: { input: 3, output: 1 } } },
-      ]));
+      .mockRejectedValueOnce(new Error("API error 503"));
 
     const streamFn = createPiStreamFn({
-      policy: fallbackPolicy, createPiAiAttempt: attemptFactory, executionId: "exec_1",
+      candidate, createPiAiAttempt: attemptFactory, executionId: "exec_1",
       providerRequestIdFactory: () => "fresh-id",
+      onTerminalFailure,
     });
     const events: any[] = [];
     for await (const ev of await streamFn(makeModel({ api: "openai-completions" }), emptyTranscript(), {})) events.push(ev);
 
-    // Two calls for first candidate (conflict + recovery failure) + one for second (success)
-    expect(attemptFactory).toHaveBeenCalledTimes(3);
-    expect(events.some((e) => e.delta?.includes("fallback worked"))).toBe(true);
+    expect(attemptFactory).toHaveBeenCalledTimes(2);
+    expect(events.some((e) => e.type === "error")).toBe(true);
+    expect(onTerminalFailure).toHaveBeenCalledWith(expect.objectContaining({
+      code: "all_candidates_failed",
+      retryable: false,
+      attemptedCandidates: 1,
+    }));
   });
 
-  // ── Telemetry and policy settlement tests (#1472 §4) ────────────────────────
+  // ── Telemetry and observation tests (#1472 §4, #1932) ───────────────────────
 
   it("records telemetry for both conflict and recovery attempts", async () => {
     const telemetryCalls: Array<{ result: string }> = [];
@@ -869,12 +749,10 @@ describe("createPiStreamFn", () => {
 
     const attemptFactory = vi.fn()
       .mockRejectedValueOnce(new Error("idempotency_conflict"))
-      .mockResolvedValueOnce(makeFakeStream([
-        { type: "done", reason: "stop", message: { role: "assistant", content: "ok", stopReason: "stop", usage: { input: 2, output: 1 } } },
-      ]));
+      .mockResolvedValueOnce(doneStream("ok"));
 
     const streamFn = createPiStreamFn({
-      policy, createPiAiAttempt: attemptFactory, executionId: "exec_1",
+      candidate, createPiAiAttempt: attemptFactory, executionId: "exec_1",
       providerRequestIdFactory: () => "fresh-id",
       telemetry: mockTelemetry,
     });
@@ -887,36 +765,22 @@ describe("createPiStreamFn", () => {
     expect(telemetryCalls[1]?.result).toBe("success");
   });
 
-  it("does not penalize policy on recoverable conflict", async () => {
-    const attemptFactory = vi.fn()
-      .mockRejectedValueOnce(new Error("idempotency_conflict"))
-      .mockResolvedValueOnce(makeFakeStream([
-        { type: "done", reason: "stop", message: { role: "assistant", content: "ok", stopReason: "stop", usage: { input: 2, output: 1 } } },
-      ]));
-
-    const streamFn = createPiStreamFn({
-      policy, createPiAiAttempt: attemptFactory, executionId: "exec_1",
-      providerRequestIdFactory: () => "fresh-id",
-    });
-    for await (const _ev of await streamFn(makeModel({ api: "openai-completions" }), emptyTranscript(), {})) { /* consume */ }
-
-    // The candidate should NOT be excluded (recordError was not called for the conflict)
-    expect(policy.excludedKeys.size).toBe(0);
-  });
-
-  it("penalizes policy when recovery attempt fails", async () => {
+  it("observes the failure in the memo when the recovery attempt fails", async () => {
+    const stateDir = mkdtempSync(join(tmpdir(), "pi-memo-recovery-"));
     const attemptFactory = vi.fn()
       .mockRejectedValueOnce(new Error("idempotency_conflict"))
       .mockRejectedValueOnce(new Error("API error 503"));
 
     const streamFn = createPiStreamFn({
-      policy, createPiAiAttempt: attemptFactory, executionId: "exec_1",
+      candidate, createPiAiAttempt: attemptFactory, executionId: "exec_1",
       providerRequestIdFactory: () => "fresh-id",
+      memoStateDir: stateDir,
     });
     for await (const _ev of await streamFn(makeModel({ api: "openai-completions" }), emptyTranscript(), {})) { /* consume */ }
 
-    // The candidate IS excluded after the recovery attempt fails (one recordError)
-    expect(policy.excludedKeys.size).toBe(1);
+    // The failed recovery attempt is observed as a temporary failure.
+    expect(loadAvailabilityMemo(stateDir).entries).toHaveLength(1);
+    expect(loadAvailabilityMemo(stateDir).entries[0]).toMatchObject({ reason: "temporary" });
   });
 
   // ── Error classification (#1297) ───────────────────────────────────────────
@@ -924,45 +788,48 @@ describe("createPiStreamFn", () => {
   it.each([
     "402: {\"error\":{\"message\":\"insufficient credits for this model\"}}",
     "OpenAI API error (402): Insufficient Credits for this model",
-  ])("records credits (not transient) for Pi-AI 402 format: %s", async (message) => {
+  ])("observes account-limit (not transient) for Pi-AI 402 format: %s", async (message) => {
+    const stateDir = mkdtempSync(join(tmpdir(), "pi-memo-402-"));
     const attemptFactory = vi.fn().mockRejectedValue(new Error(message));
-    const streamFn = createPiStreamFn({ policy, executionId: "exec_1", createPiAiAttempt: attemptFactory });
+    const streamFn = createPiStreamFn({ candidate, executionId: "exec_1", createPiAiAttempt: attemptFactory, memoStateDir: stateDir });
     for await (const _ev of await streamFn(makeModel({ api: "openai-completions" }), emptyTranscript(), {})) { /* consume */ }
 
-    expect(registry.isCreditFailed("test-model", "https://api.test/v1")).toBe(true);
-    expect(policy.excludedKeys.has("test-model@https://api.test/v1")).toBe(true);
+    expect(loadAvailabilityMemo(stateDir).entries).toHaveLength(1);
+    expect(loadAvailabilityMemo(stateDir).entries[0]).toMatchObject({ reason: "account-limit" });
   });
 
-  it("records credits for a terminal error event with a 402 credits message", async () => {
+  it("observes account-limit for a terminal error event with a 402 credits message", async () => {
+    const stateDir = mkdtempSync(join(tmpdir(), "pi-memo-402ev-"));
     const attemptFactory = vi.fn().mockResolvedValue(makeFakeStream([
       { type: "error", reason: "error", error: { role: "assistant", content: [], stopReason: "error", errorMessage: "API error 402: credits exhausted", usage: { input: 0, output: 0 } } },
     ]));
-    const streamFn = createPiStreamFn({ policy, executionId: "exec_1", createPiAiAttempt: attemptFactory });
+    const streamFn = createPiStreamFn({ candidate, executionId: "exec_1", createPiAiAttempt: attemptFactory, memoStateDir: stateDir });
     for await (const _ev of await streamFn(makeModel({ api: "openai-completions" }), emptyTranscript(), {})) { /* consume */ }
 
-    expect(registry.isCreditFailed("test-model", "https://api.test/v1")).toBe(true);
+    expect(loadAvailabilityMemo(stateDir).entries).toHaveLength(1);
+    expect(loadAvailabilityMemo(stateDir).entries[0]).toMatchObject({ reason: "account-limit" });
   });
 
-  it("records transient (not credits) for a 500 error", async () => {
+  it("observes temporary (not account-limit) for a 500 error", async () => {
+    const stateDir = mkdtempSync(join(tmpdir(), "pi-memo-500-"));
     const attemptFactory = vi.fn().mockRejectedValue(new Error("API error 500: server failure"));
-    const streamFn = createPiStreamFn({ policy, executionId: "exec_1", createPiAiAttempt: attemptFactory });
+    const streamFn = createPiStreamFn({ candidate, executionId: "exec_1", createPiAiAttempt: attemptFactory, memoStateDir: stateDir });
     for await (const _ev of await streamFn(makeModel({ api: "openai-completions" }), emptyTranscript(), {})) { /* consume */ }
 
-    expect(registry.isCreditFailed("test-model", "https://api.test/v1")).toBe(false);
-    expect(registry.getBucketLevel("test-model", "https://api.test/v1")).toBeGreaterThan(0);
+    expect(loadAvailabilityMemo(stateDir).entries).toHaveLength(1);
+    expect(loadAvailabilityMemo(stateDir).entries[0]).toMatchObject({ reason: "temporary" });
   });
 
-  it("propagates retry-after metadata into the registry cooldown", async () => {
-    vi.useFakeTimers();
+  it("observes rate-limit with the retry-after window", async () => {
+    const stateDir = mkdtempSync(join(tmpdir(), "pi-memo-429-"));
     const attemptFactory = vi.fn().mockRejectedValue(new Error('API error 429: rate limited {"retry_after": 60}'));
-    const streamFn = createPiStreamFn({ policy, executionId: "exec_1", createPiAiAttempt: attemptFactory });
+    const streamFn = createPiStreamFn({ candidate, executionId: "exec_1", createPiAiAttempt: attemptFactory, memoStateDir: stateDir });
     for await (const _ev of await streamFn(makeModel({ api: "openai-completions" }), emptyTranscript(), {})) { /* consume */ }
 
-    expect(registry.shouldSkip("test-model", "https://api.test/v1")).toBe(true);
-    vi.advanceTimersByTime(61_000);
-    // Cooldown expired — bucket alone (0.5) is below the skip threshold.
-    expect(registry.shouldSkip("test-model", "https://api.test/v1")).toBe(false);
-    vi.useRealTimers();
+    const entries = loadAvailabilityMemo(stateDir).entries;
+    expect(entries).toHaveLength(1);
+    expect(entries[0]).toMatchObject({ reason: "rate-limit" });
+    expect(entries[0]?.unusableUntil).toBeGreaterThan(Date.now());
   });
 
   // ── Context-overflow classification (#1745) ────────────────────────────────
@@ -982,7 +849,7 @@ describe("createPiStreamFn", () => {
       () => true,
       { type: "error", reason: "error", error: { role: "assistant", content: [], stopReason: "error", errorMessage: "This model's maximum context length is 128000 tokens. However, your messages resulted in 129000 tokens", usage: { input: 0, output: 0 } } },
     );
-    const streamFn = createPiStreamFn({ policy, executionId: "exec_1", createPiAiAttempt: vi.fn().mockResolvedValue(fakePi) });
+    const streamFn = createPiStreamFn({ candidate, executionId: "exec_1", createPiAiAttempt: vi.fn().mockResolvedValue(fakePi) });
     for await (const _ev of await streamFn(makeModel({ api: "openai-completions", contextWindow: 128000 }), emptyTranscript(), {})) { /* consume */ }
 
     // The predicate receives the AssistantMessage (not a stringified error) and
@@ -991,20 +858,16 @@ describe("createPiStreamFn", () => {
       expect.objectContaining({ errorMessage: expect.stringContaining("maximum context length") }),
       128000,
     );
-    // #1326's no-fill handling finally has a producer: bucket level unchanged.
-    expect(registry.getBucketLevel("test-model", "https://api.test/v1")).toBe(0);
-    expect(registry.isCreditFailed("test-model", "https://api.test/v1")).toBe(false);
   });
 
-  it("uses the attempted candidate's context window for Pi overflow classification", async () => {
-    const candidate = makeCandidate({ maxContext: 64_000 });
-    const candidatePolicy = new FallbackPolicy([candidate], registry);
+  it("uses the configured candidate's context window for Pi overflow classification", async () => {
+    const windowed = makeCandidate({ maxContext: 64_000 });
     const fakePi = overflowAttempt(
       () => true,
       { type: "error", reason: "error", error: { role: "assistant", content: [], stopReason: "error", errorMessage: "This model's maximum context length is 64000 tokens", usage: { input: 0, output: 0 } } },
     );
     const attemptFactory = vi.fn().mockResolvedValue(fakePi);
-    const streamFn = createPiStreamFn({ policy: candidatePolicy, executionId: "exec_1", createPiAiAttempt: attemptFactory });
+    const streamFn = createPiStreamFn({ candidate: windowed, executionId: "exec_1", createPiAiAttempt: attemptFactory });
     for await (const _ev of await streamFn(makeModel({ api: "openai-completions", contextWindow: 128_000 }), emptyTranscript(), {})) { /* consume */ }
 
     expect(attemptFactory.mock.calls[0]?.[1]).toMatchObject({ contextWindow: 64_000 });
@@ -1012,213 +875,56 @@ describe("createPiStreamFn", () => {
       expect.objectContaining({ errorMessage: expect.stringContaining("maximum context length") }),
       64_000,
     );
-    expect(registry.getBucketLevel("test-model", "https://api.test/v1")).toBe(0);
   });
 
-  it("keeps bucket level unchanged for context_exceeded (no transient fill)", async () => {
-    const fakePi = overflowAttempt(
-      () => true,
-      { type: "error", reason: "error", error: { role: "assistant", content: [], stopReason: "error", errorMessage: "prompt is too long: 200000 tokens > 128000 maximum", usage: { input: 0, output: 0 } } },
-    );
-    const streamFn = createPiStreamFn({ policy, executionId: "exec_1", createPiAiAttempt: vi.fn().mockResolvedValue(fakePi) });
-    for await (const _ev of await streamFn(makeModel({ api: "openai-completions" }), emptyTranscript(), {})) { /* consume */ }
-
-    expect(registry.getBucketLevel("test-model", "https://api.test/v1")).toBe(0);
-  });
-
-  it("keeps credits sticky when a 402 message also mentions tokens", async () => {
-    // The overflow predicate even agrees — a definite credits verdict must win.
-    const fakePi = overflowAttempt(
-      () => true,
-      { type: "error", reason: "error", error: { role: "assistant", content: [], stopReason: "error", errorMessage: "API error 402: insufficient credits — token limit exceeded", usage: { input: 0, output: 0 } } },
-    );
-    const streamFn = createPiStreamFn({ policy, executionId: "exec_1", createPiAiAttempt: vi.fn().mockResolvedValue(fakePi) });
-    for await (const _ev of await streamFn(makeModel({ api: "openai-completions" }), emptyTranscript(), {})) { /* consume */ }
-
-    expect(registry.isCreditFailed("test-model", "https://api.test/v1")).toBe(true);
-    expect(registry.getBucketLevel("test-model", "https://api.test/v1")).toBe(100);
-  });
-
-  it("keeps rate_limit when a 429 message mentions token limit (reset-false-positive guard)", async () => {
-    const fakePi = overflowAttempt(
-      () => true,
-      { type: "error", reason: "error", error: { role: "assistant", content: [], stopReason: "error", errorMessage: 'API error 429: token limit reached {"retry_after": 60}', usage: { input: 0, output: 0 } } },
-    );
-    const streamFn = createPiStreamFn({ policy, executionId: "exec_1", createPiAiAttempt: vi.fn().mockResolvedValue(fakePi) });
-    for await (const _ev of await streamFn(makeModel({ api: "openai-completions" }), emptyTranscript(), {})) { /* consume */ }
-
-    // rate_limit fills 0.5 and arms the retry-after cooldown — not context_exceeded.
-    expect(registry.getBucketLevel("test-model", "https://api.test/v1")).toBe(50);
-    expect(registry.shouldSkip("test-model", "https://api.test/v1")).toBe(true);
-    expect(registry.isCreditFailed("test-model", "https://api.test/v1")).toBe(false);
-  });
-
-  it("keeps content_filter as transient (unchanged from today)", async () => {
-    const fakePi = overflowAttempt(
-      () => false,
-      { type: "error", reason: "error", error: { role: "assistant", content: [], stopReason: "error", errorMessage: "Provider finish_reason: content_filter", usage: { input: 0, output: 0 } } },
-    );
-    const streamFn = createPiStreamFn({ policy, executionId: "exec_1", createPiAiAttempt: vi.fn().mockResolvedValue(fakePi) });
-    for await (const _ev of await streamFn(makeModel({ api: "openai-completions" }), emptyTranscript(), {})) { /* consume */ }
-
-    expect(registry.getBucketLevel("test-model", "https://api.test/v1")).toBeGreaterThan(0);
-    expect(registry.isCreditFailed("test-model", "https://api.test/v1")).toBe(false);
-  });
-
-  // ── Terminal credit failure callback (#1297) ───────────────────────────────
-
-  it("reports credits_exhausted when every candidate (including pre-poisoned) is credit-failed", async () => {
-    const first = makeCandidate({ model: "first", endpoint: "https://first/v1" });
-    const second = makeCandidate({ model: "second", endpoint: "https://second/v1" });
-    const exhaustionPolicy = new FallbackPolicy([first, second], registry);
-    // Pre-poison both in shared health — the stream never even attempts them.
-    registry.recordError("first", "https://first/v1", "credits");
-    registry.recordError("second", "https://second/v1", "credits");
-
-    const onTerminalFailure = vi.fn();
-    const attemptFactory = vi.fn();
-    const streamFn = createPiStreamFn({
-      policy: exhaustionPolicy, executionId: "exec_1",
-      createPiAiAttempt: attemptFactory, onTerminalFailure,
-    });
-    const events: any[] = [];
-    for await (const ev of await streamFn(makeModel({ api: "openai-completions" }), emptyTranscript(), {})) events.push(ev);
-
-    expect(attemptFactory).not.toHaveBeenCalled();
-    expect(onTerminalFailure).toHaveBeenCalledTimes(1);
-    expect(onTerminalFailure).toHaveBeenCalledWith(expect.objectContaining({
-      code: "credits_exhausted",
-      retryable: false,
-      attemptedCandidates: 0,
-    }));
-    expect(events.some((e) => e.type === "error")).toBe(true);
-  });
-
-  it("reports credits_exhausted when the last viable candidate fails with credits", async () => {
-    const first = makeCandidate({ model: "first", endpoint: "https://first/v1" });
-    const second = makeCandidate({ model: "second", endpoint: "https://second/v1" });
-    const exhaustionPolicy = new FallbackPolicy([first, second], registry);
-    registry.recordError("first", "https://first/v1", "credits"); // pre-poisoned
-
-    const onTerminalFailure = vi.fn();
-    const attemptFactory = vi.fn().mockRejectedValue(new Error("API error 402: out of credits"));
-    const streamFn = createPiStreamFn({
-      policy: exhaustionPolicy, executionId: "exec_1",
-      createPiAiAttempt: attemptFactory, onTerminalFailure,
-    });
-    for await (const _ev of await streamFn(makeModel({ api: "openai-completions" }), emptyTranscript(), {})) { /* consume */ }
-
-    expect(attemptFactory).toHaveBeenCalledTimes(1);
-    expect(attemptFactory.mock.calls[0]?.[0]).toMatchObject({ model: "second" });
-    expect(onTerminalFailure).toHaveBeenCalledWith(expect.objectContaining({
-      code: "credits_exhausted",
-      attemptedCandidates: 1,
-    }));
-  });
-
-  it("reports all_candidates_failed (not credits_exhausted) for a mix of credit and transient failures", async () => {
-    const first = makeCandidate({ model: "first", endpoint: "https://first/v1" });
-    const second = makeCandidate({ model: "second", endpoint: "https://second/v1" });
-    const mixedPolicy = new FallbackPolicy([first, second], registry);
-    registry.recordError("first", "https://first/v1", "credits"); // pre-poisoned
-
-    const onTerminalFailure = vi.fn();
-    const attemptFactory = vi.fn().mockRejectedValue(new Error("API error 500: server failure"));
-    const streamFn = createPiStreamFn({
-      policy: mixedPolicy, executionId: "exec_1",
-      createPiAiAttempt: attemptFactory, onTerminalFailure,
-    });
-    for await (const _ev of await streamFn(makeModel({ api: "openai-completions" }), emptyTranscript(), {})) { /* consume */ }
-
-    expect(onTerminalFailure).toHaveBeenCalledTimes(1);
-    expect(onTerminalFailure).toHaveBeenCalledWith(expect.objectContaining({
-      code: "all_candidates_failed",
-      retryable: false,
-      attemptedCandidates: 1,
-    }));
-  });
-
-  it("attempts a viable fallback and never reports credits_exhausted when one candidate succeeds", async () => {
-    const first = makeCandidate({ model: "first", endpoint: "https://first/v1" });
-    const second = makeCandidate({ model: "second", endpoint: "https://second/v1" });
-    const recoveryPolicy = new FallbackPolicy([first, second], registry);
-    registry.recordError("first", "https://first/v1", "credits"); // pre-poisoned
-
-    const onTerminalFailure = vi.fn();
-    const attemptFactory = vi.fn().mockResolvedValue(makeFakeStream([
-      { type: "text_delta", contentIndex: 0, delta: "recovered" },
-      { type: "done", reason: "stop", message: { role: "assistant", content: "recovered", stopReason: "stop", usage: { input: 1, output: 1 } } },
-    ]));
-    const streamFn = createPiStreamFn({
-      policy: recoveryPolicy, executionId: "exec_1",
-      createPiAiAttempt: attemptFactory, onTerminalFailure,
-    });
-    const events: any[] = [];
-    for await (const ev of await streamFn(makeModel({ api: "openai-completions" }), emptyTranscript(), {})) events.push(ev);
-
-    expect(attemptFactory).toHaveBeenCalledTimes(1);
-    expect(attemptFactory.mock.calls[0]?.[0]).toMatchObject({ model: "second" });
-    expect(events.some((e) => e.type === "text_delta" && e.delta === "recovered")).toBe(true);
-    expect(onTerminalFailure).not.toHaveBeenCalled();
-  });
-
-  // ── Terminal context-overflow failure (#1745) ──────────────────────────────
-
-  it("reports context_overflow when every attempted candidate overflowed", async () => {
-    const first = makeCandidate({ model: "first", endpoint: "https://first/v1" });
-    const second = makeCandidate({ model: "second", endpoint: "https://second/v1" });
-    const overflowPolicy = new FallbackPolicy([first, second], registry);
-
+  it("reports context_overflow when the attempt overflows", async () => {
     const onTerminalFailure = vi.fn();
     const overflowEvent = { type: "error", reason: "error", error: { role: "assistant", content: [], stopReason: "error", errorMessage: "This model's maximum context length is 128000 tokens", usage: { input: 0, output: 0 } } };
     const attemptFactory = vi.fn().mockResolvedValue(overflowAttempt(() => true, overflowEvent));
-    const streamFn = createPiStreamFn({ policy: overflowPolicy, executionId: "exec_1", createPiAiAttempt: attemptFactory, onTerminalFailure });
+    const streamFn = createPiStreamFn({ candidate, executionId: "exec_1", createPiAiAttempt: attemptFactory, onTerminalFailure });
     for await (const _ev of await streamFn(makeModel({ api: "openai-completions" }), emptyTranscript(), {})) { /* consume */ }
 
-    expect(attemptFactory).toHaveBeenCalledTimes(2);
+    expect(attemptFactory).toHaveBeenCalledTimes(1);
     expect(onTerminalFailure).toHaveBeenCalledTimes(1);
     expect(onTerminalFailure).toHaveBeenCalledWith(expect.objectContaining({
       code: "context_overflow",
       retryable: false,
-      attemptedCandidates: 2,
+      attemptedCandidates: 1,
     }));
   });
 
-  it("reports all_candidates_failed (not context_overflow) for a mix of overflow and auth failures", async () => {
-    const first = makeCandidate({ model: "first", endpoint: "https://first/v1" });
-    const second = makeCandidate({ model: "second", endpoint: "https://second/v1" });
-    const mixedPolicy = new FallbackPolicy([first, second], registry);
-
+  it("reports all_candidates_failed for a transient failure", async () => {
     const onTerminalFailure = vi.fn();
-    const overflowEvent = { type: "error", reason: "error", error: { role: "assistant", content: [], stopReason: "error", errorMessage: "This model's maximum context length is 128000 tokens", usage: { input: 0, output: 0 } } };
-    const attemptFactory = vi.fn()
-      .mockResolvedValueOnce(overflowAttempt(() => true, overflowEvent))
-      .mockRejectedValueOnce(new Error("API error 401: invalid credentials"));
-    const streamFn = createPiStreamFn({ policy: mixedPolicy, executionId: "exec_1", createPiAiAttempt: attemptFactory, onTerminalFailure });
+    const attemptFactory = vi.fn().mockRejectedValue(new Error("API error 500: server failure"));
+    const streamFn = createPiStreamFn({
+      candidate, executionId: "exec_1",
+      createPiAiAttempt: attemptFactory, onTerminalFailure,
+    });
     for await (const _ev of await streamFn(makeModel({ api: "openai-completions" }), emptyTranscript(), {})) { /* consume */ }
 
-    expect(attemptFactory).toHaveBeenCalledTimes(2);
+    expect(attemptFactory).toHaveBeenCalledTimes(1);
     expect(onTerminalFailure).toHaveBeenCalledTimes(1);
     expect(onTerminalFailure).toHaveBeenCalledWith(expect.objectContaining({
       code: "all_candidates_failed",
       retryable: false,
-      attemptedCandidates: 2,
+      attemptedCandidates: 1,
     }));
   });
 
-  it("still reports credits_exhausted when all candidates are credit-failed (#1297 unchanged)", async () => {
-    const first = makeCandidate({ model: "first", endpoint: "https://first/v1" });
-    const second = makeCandidate({ model: "second", endpoint: "https://second/v1" });
-    const creditsPolicy = new FallbackPolicy([first, second], registry);
-    registry.recordError("first", "https://first/v1", "credits");
-    registry.recordError("second", "https://second/v1", "credits");
-
+  it("reports credits_exhausted for an account-limit failure", async () => {
     const onTerminalFailure = vi.fn();
-    const streamFn = createPiStreamFn({ policy: creditsPolicy, executionId: "exec_1", onTerminalFailure });
+    const attemptFactory = vi.fn().mockRejectedValue(new Error("API error 402: out of credits"));
+    const streamFn = createPiStreamFn({
+      candidate, executionId: "exec_1",
+      createPiAiAttempt: attemptFactory, onTerminalFailure,
+    });
     for await (const _ev of await streamFn(makeModel({ api: "openai-completions" }), emptyTranscript(), {})) { /* consume */ }
 
-    expect(onTerminalFailure).toHaveBeenCalledTimes(1);
-    expect(onTerminalFailure).toHaveBeenCalledWith(expect.objectContaining({ code: "credits_exhausted" }));
+    expect(attemptFactory).toHaveBeenCalledTimes(1);
+    expect(onTerminalFailure).toHaveBeenCalledWith(expect.objectContaining({
+      code: "credits_exhausted",
+      attemptedCandidates: 1,
+    }));
   });
 
   it("reports no terminal code on an aborted execution", async () => {
@@ -1229,62 +935,9 @@ describe("createPiStreamFn", () => {
       controller.abort();
       return overflowAttempt(() => true, overflowEvent);
     });
-    const streamFn = createPiStreamFn({ policy, executionId: "exec_1", createPiAiAttempt: attemptFactory, onTerminalFailure });
+    const streamFn = createPiStreamFn({ candidate, executionId: "exec_1", createPiAiAttempt: attemptFactory, onTerminalFailure });
     for await (const _ev of await streamFn(makeModel({ api: "openai-completions" }), emptyTranscript(), { signal: controller.signal })) { /* consume */ }
 
     expect(onTerminalFailure).not.toHaveBeenCalled();
-  });
-
-  // ── Generic exhaustion (#1905) ──────────────────────────────────────────
-
-  it("reports all_candidates_failed with zero attempts when the latch excludes the sole candidate", async () => {
-    const only = makeCandidate({ model: "only", endpoint: "https://only/v1" });
-    const latchedPolicy = new FallbackPolicy([only], registry);
-    // Simulate a previous prompt's failed attempt that was never cleared.
-    latchedPolicy.excludedKeys.add("only@https://only/v1");
-
-    const onTerminalFailure = vi.fn();
-    const attemptFactory = vi.fn();
-    const streamFn = createPiStreamFn({
-      policy: latchedPolicy, executionId: "exec_latch",
-      createPiAiAttempt: attemptFactory, onTerminalFailure,
-    });
-    const events: any[] = [];
-    for await (const ev of await streamFn(makeModel({ api: "openai-completions" }), emptyTranscript(), {})) events.push(ev);
-
-    expect(attemptFactory).not.toHaveBeenCalled();
-    expect(onTerminalFailure).toHaveBeenCalledTimes(1);
-    expect(onTerminalFailure).toHaveBeenCalledWith(expect.objectContaining({
-      code: "all_candidates_failed",
-      retryable: false,
-      attemptedCandidates: 0,
-    }));
-    expect(events.some((e) => e.type === "error")).toBe(true);
-    // Skip evidence is retained at the selection boundary even though
-    // selectModel clears lastDecision on exhaustion.
-    expect(latchedPolicy.lastDecision).toBeNull();
-    expect(latchedPolicy.lastSkipped.join("; ")).toContain("only");
-  });
-
-  it("reports all_candidates_failed when every candidate fails transiently", async () => {
-    const first = makeCandidate({ model: "first", endpoint: "https://first/v1" });
-    const second = makeCandidate({ model: "second", endpoint: "https://second/v1" });
-    const transientPolicy = new FallbackPolicy([first, second], registry);
-
-    const onTerminalFailure = vi.fn();
-    const attemptFactory = vi.fn().mockRejectedValue(new Error("API error 500: server failure"));
-    const streamFn = createPiStreamFn({
-      policy: transientPolicy, executionId: "exec_1",
-      createPiAiAttempt: attemptFactory, onTerminalFailure,
-    });
-    for await (const _ev of await streamFn(makeModel({ api: "openai-completions" }), emptyTranscript(), {})) { /* consume */ }
-
-    expect(attemptFactory).toHaveBeenCalledTimes(2);
-    expect(onTerminalFailure).toHaveBeenCalledTimes(1);
-    expect(onTerminalFailure).toHaveBeenCalledWith(expect.objectContaining({
-      code: "all_candidates_failed",
-      retryable: false,
-      attemptedCandidates: 2,
-    }));
   });
 });

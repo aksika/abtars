@@ -23,7 +23,6 @@ import { PiCoreContractError, convertCurrentTurnToLlm } from "./pi-core-types.js
 import type { DurableContextProviderHolder } from "./pi-core-context.js";
 import type { PiExecutionContextSeed, AbtarsCurrentTurnMessage, AgentMessage } from "./pi-core-types.js";
 import type { ModelCandidate } from "./model-candidates.js";
-import { ModelHealthRegistry } from "./model-health-registry.js";
 
 const mockCreatePiStreamFn = vi.hoisted(() =>
   vi.fn((..._args: [AbtarsPiStreamFnOptions]): StreamFn => vi.fn() as unknown as StreamFn),
@@ -70,12 +69,10 @@ function makeCandidates(): ModelCandidate[] {
 }
 
 function makeTransport() {
-  const registry = new ModelHealthRegistry();
   return new PiCoreTransport({
     role: "main",
     systemPrompt: "You are a helpful assistant.",
-    candidates: makeCandidates(),
-    healthRegistry: registry,
+    candidate: makeCandidates()[0]!,
     sandboxPolicy: { allowedTools: ["*"], allowedRead: ["*"], allowedWrite: ["*"], canExecuteBash: true },
   });
 }
@@ -84,7 +81,7 @@ describe("PiCoreTransport", () => {
   it("constructs with main role", () => {
     const t = makeTransport();
     expect(t.config.role).toBe("main");
-    expect(t.config.candidates).toHaveLength(1);
+    expect(t.config.candidate.model).toBe("test-model");
   });
 
   it("starts uninitialized", () => {
@@ -105,12 +102,10 @@ describe("PiCoreTransport", () => {
         observedAt: Date.now(),
         unusableUntil: Date.now() + 5 * 60 * 1000,
       }]);
-      const registry = new ModelHealthRegistry();
       const transport = new PiCoreTransport({
         role: "main",
         systemPrompt: "You are a helpful assistant.",
-        candidates: makeCandidates(),
-        healthRegistry: registry,
+        candidate: makeCandidates()[0]!,
         sandboxPolicy: { allowedTools: ["*"], allowedRead: ["*"], allowedWrite: ["*"], canExecuteBash: true },
         memoStateDir,
       });
@@ -125,12 +120,10 @@ describe("PiCoreTransport", () => {
     it("dispatches when the memo is empty", async () => {
       mockCreatePiStreamFn.mockClear();
       const memoStateDir = mkdtempSync(join(tmpdir(), "pi-memo-admit-"));
-      const registry = new ModelHealthRegistry();
       const transport = new PiCoreTransport({
         role: "main",
         systemPrompt: "You are a helpful assistant.",
-        candidates: makeCandidates(),
-        healthRegistry: registry,
+        candidate: makeCandidates()[0]!,
         sandboxPolicy: { allowedTools: ["*"], allowedRead: ["*"], allowedWrite: ["*"], canExecuteBash: true },
         memoStateDir,
       });
@@ -250,12 +243,10 @@ describe("PiCoreTransport", () => {
   });
 
   it("supports specialist role", () => {
-    const registry = new ModelHealthRegistry();
     const t = new PiCoreTransport({
       role: "specialist",
       systemPrompt: "",
-      candidates: makeCandidates(),
-      healthRegistry: registry,
+      candidate: makeCandidates()[0]!,
       sandboxPolicy: { allowedTools: ["*"], allowedRead: ["*"], allowedWrite: ["*"], canExecuteBash: true },
     });
     expect(t.config.role).toBe("specialist");
@@ -269,8 +260,7 @@ describe("PiCoreTransport", () => {
     const t = new PiCoreTransport({
       role: "main",
       systemPrompt: "",
-      candidates: makeCandidates(),
-      healthRegistry: new ModelHealthRegistry(),
+      candidate: makeCandidates()[0]!,
       sandboxPolicy: { allowedTools: ["*"], allowedRead: ["*"], allowedWrite: ["*"], canExecuteBash: true },
       contextProvider: holder,
     });
@@ -358,12 +348,10 @@ describe("PiCoreTransport", () => {
   it("#1748: Main and a subagent of the same bridge send different identities", async () => {
     mockCreatePiStreamFn.mockClear();
     const main = makeTransport();
-    const registry = new ModelHealthRegistry();
     const sub = new PiCoreTransport({
       role: "specialist",
       systemPrompt: "You are an abtars cody agent.",
-      candidates: makeCandidates(),
-      healthRegistry: registry,
+      candidate: makeCandidates()[0]!,
       sandboxPolicy: { allowedTools: ["*"], allowedRead: ["*"], allowedWrite: ["*"], canExecuteBash: true },
       cacheScope: "cody",
     });
@@ -381,8 +369,7 @@ describe("PiCoreTransport", () => {
     const makeSub = () => new PiCoreTransport({
       role: "specialist",
       systemPrompt: "You are an abtars dreamy agent.",
-      candidates: makeCandidates(),
-      healthRegistry: new ModelHealthRegistry(),
+      candidate: makeCandidates()[0]!,
       sandboxPolicy: { allowedTools: ["*"], allowedRead: ["*"], allowedWrite: ["*"], canExecuteBash: true },
       cacheScope: "dreamy",
     });
@@ -421,12 +408,10 @@ describe("PiCoreTransport", () => {
 
   it("#1748: a provider opting into long retention forwards long to the streamFn", async () => {
     mockCreatePiStreamFn.mockClear();
-    const registry = new ModelHealthRegistry();
     const t = new PiCoreTransport({
       role: "main",
       systemPrompt: "You are a helpful assistant.",
-      candidates: makeCandidates(),
-      healthRegistry: registry,
+      candidate: makeCandidates()[0]!,
       sandboxPolicy: { allowedTools: ["*"], allowedRead: ["*"], allowedWrite: ["*"], canExecuteBash: true },
       cacheRetention: "long",
     });
@@ -458,12 +443,12 @@ describe("PiCoreTransport", () => {
     expect(t.config.systemPrompt).toBe("New prompt");
   });
 
-  it("setModel changes active candidate and resets policy", () => {
+  it("setModel changes the configured candidate", () => {
     const t = makeTransport();
     t.setModel("new-model", "https://new.endpoint/v1", 64000);
-    expect(t.config.candidates[0]?.model).toBe("new-model");
-    expect(t.config.candidates[0]?.endpoint).toBe("https://new.endpoint/v1");
-    expect(t.config.candidates[0]?.maxContext).toBe(64000);
+    expect(t.config.candidate.model).toBe("new-model");
+    expect(t.config.candidate.endpoint).toBe("https://new.endpoint/v1");
+    expect(t.config.candidate.maxContext).toBe(64000);
   });
 
   it("image input emits text+image parts in the pi-ai message", () => {
@@ -701,24 +686,20 @@ describe("#1619 reasoning effort (session-scoped)", () => {
     const t = makeTransport();
     const status = t.getRuntimeStatus();
     expect(status.reasoning).toBe("off");
-    const registry = new ModelHealthRegistry();
     const withConfig = new PiCoreTransport({
       role: "main",
       systemPrompt: "",
-      candidates: [{ ...makeCandidates()[0]!, thinking: { style: "effort", default: "medium" } }],
-      healthRegistry: registry,
+      candidate: { ...makeCandidates()[0]!, thinking: { style: "effort", default: "medium" } },
       sandboxPolicy: { allowedTools: ["*"], allowedRead: ["*"], allowedWrite: ["*"], canExecuteBash: true },
     });
     expect(withConfig.getRuntimeStatus().reasoning).toBe("medium");
   });
 
   it("clamps an effort-style configured default before the first turn", () => {
-    const registry = new ModelHealthRegistry();
     const withConfig = new PiCoreTransport({
       role: "main",
       systemPrompt: "",
-      candidates: [{ ...makeCandidates()[0]!, thinking: { style: "effort", default: "xhigh" } }],
-      healthRegistry: registry,
+      candidate: { ...makeCandidates()[0]!, thinking: { style: "effort", default: "xhigh" } },
       sandboxPolicy: { allowedTools: ["*"], allowedRead: ["*"], allowedWrite: ["*"], canExecuteBash: true },
     });
     expect(withConfig.getRuntimeStatus().reasoning).toBe("high");

@@ -10,7 +10,6 @@ import type {
   Usage,
 } from "@earendil-works/pi-ai";
 import { logDebug, redactSecrets } from "../logger.js";
-import type { FallbackPolicy } from "./fallback-policy.js";
 import type { ModelCandidate } from "./model-candidates.js";
 import { candidateKey } from "./model-candidates.js";
 import { parseErrorStatus, parseRetryAfter } from "./transport-utils.js";
@@ -36,37 +35,40 @@ const TAG = "pi-stream-fn";
 export type { ProviderAttemptFactory } from "./provider-attempt-runner.js";
 
 export interface AbtarsPiStreamFnOptions {
-  policy: FallbackPolicy;
+  /** #1932: the single configured candidate for this execution. No fallback
+   *  chain, no rotation, no health-gated selection — the transport admits
+   *  exactly one candidate per role and the memo suppresses known-dead
+   *  selections before this boundary. */
+  candidate: ModelCandidate;
   executionId: string;
   telemetry?: ExecutionTelemetryScope;
   createPiAiAttempt?: ProviderAttemptFactory;
   onCandidateCommitted?: (candidate: ModelCandidate) => void;
   providerRequestIdFactory?: () => string;
-  /** #1619: session-scoped requested reasoning effort threaded into every
-   *  candidate model build so `model.reasoning` matches the requested level
-   *  regardless of which candidate commits. */
+  /** #1619: session-scoped requested reasoning effort threaded into the
+   *  candidate model build so `model.reasoning` matches the requested level. */
   reasoningEffort?: import("./kiro-transport.js").ReasoningEffort;
-  /** #1506: Max inactivity (no stream event) before candidate is aborted.
+  /** #1506: Max inactivity (no stream event) before the attempt is aborted.
    *  Capped by remaining absolute deadline when passed via deadlineAt. */
   providerInactivityTimeoutMs?: number;
   /** #1506: Absolute deadline epoch ms — inactivity timeout is capped by remaining. */
   deadlineAt?: number;
   /** #1297: execution-local terminal-failure channel. Fired once when the
-   *  fallback loop exhausts: every candidate sticky credit-failed
-   *  (`credits_exhausted`), every attempt over-context (`context_overflow`),
-   *  or other genuine exhaustion (`all_candidates_failed`, #1905). */
+   *  single attempt fails: memoizable account-limit exhaustion
+   *  (`credits_exhausted`), over-context (`context_overflow`), or any other
+   *  genuine failure (`all_candidates_failed`, #1905). */
   onTerminalFailure?: (failure: ProviderTerminalFailure) => void;
   /** #1748: opaque per-session cache identity forwarded as pi's
-   *  `options.sessionId`. Stable across turns and candidate rotation; derived
-   *  once per transport, never per execution. */
+   *  `options.sessionId`. Stable across turns; derived once per transport,
+   *  never per execution. */
   cacheIdentity?: string;
   /** #1748: explicit prompt-cache retention forwarded to pi. Pinned to
-   *  "short" by the transport unless a provider opts into "long". */
+   *  "short" by the transport unless the candidate opts into "long". */
   cacheRetention?: CacheRetention;
   /** #1932: state directory for the durable provider-availability memo.
    *  When present, memoizable terminal failures are recorded after Pi's
-   *  bounded recovery fails. Write-only and best-effort: admission
-   *  behavior is unchanged and memo failures never break a turn. */
+   *  bounded recovery fails. Write-only and best-effort: memo failures
+   *  never break a turn. */
   memoStateDir?: string;
 }
 
@@ -324,11 +326,10 @@ export function createPiStreamFn(options: AbtarsPiStreamFnOptions): StreamFn {
   // below and is normalized idempotently in createPiAiAssistantStream via the
   // loaded pi module — no second transcript is built and no prompt is dropped.
   return (model: Model<Api>, context: Context, fnOptions: SimpleStreamOptions = {}): AssistantMessageEventStream => {
-    // #1748: the session-level cache identity is merged here once so every
-    // attempt (including candidate rotation) carries the same identity. The
-    // retention value is resolved per candidate below because fallback
-    // providers may have different policies. Headers are untouched —
-    // buildAttemptOptions still owns x-client-request-id per attempt.
+    // #1748: the session-level cache identity is merged here once so the
+    // attempt carries it. The retention value is resolved from the single
+    // candidate below. Headers are untouched — buildAttemptOptions still
+    // owns x-client-request-id per attempt.
     const streamOptions: SimpleStreamOptions = {
       ...fnOptions,
       ...(options.cacheIdentity !== undefined ? { sessionId: options.cacheIdentity } : {}),
@@ -336,233 +337,253 @@ export function createPiStreamFn(options: AbtarsPiStreamFnOptions): StreamFn {
     };
     const signal = streamOptions.signal ?? new AbortController().signal;
     const outer = async function* (): AsyncGenerator<AssistantMessageEvent> {
-      // Start with the policy's selected candidate, then walk the remaining
-      // candidates. Rotation can select a later candidate (for example B
-      // after A's successful-turn budget); keeping the selected candidate
-      // first ensures a provider failure can still fall back to A in the same
-      // logical turn after rotation state is cleared.
-      const firstSelected = options.policy.selectModel();
-      const orderedCandidates = firstSelected
-        ? [firstSelected, ...options.policy.candidates.filter((candidate) => candidate !== firstSelected)]
-        : [];
-      // #1905: zero-attempt exhaustion (latch or registry skips) must leave
-      // evidence at the selection boundary — selectModel clears lastDecision
-      // on exhaustion, so read lastSkipped synchronously here.
-      if (!firstSelected && options.policy.candidates.length > 0) {
-        logDebug(TAG, `no candidate available at prompt start execution=${options.executionId} skipped=[${options.policy.lastSkipped.join("; ").slice(0, 500)}]`);
+      // #1932: single configured candidate, attempted at most once (plus one
+      // bounded idempotency-conflict retry). No fallback chain, no rotation,
+      // no health-gated skipping — the memo observes failures for future
+      // admissions instead of excluding candidates from this turn.
+      const candidate = options.candidate;
+      let attempted = false;
+      // #1745: overflow is a property of THIS request's size, observed for
+      // the memo/terminal verdict but never promoted to shared health (which
+      // no longer exists).
+      let overflowed = false;
+      // Classified kind of the attempt's failure, when it failed (never for
+      // aborts). Drives the single terminal verdict below.
+      let failureKind: ErrorKind | undefined;
+
+      const attemptFactory = options.createPiAiAttempt ?? defaultCreatePiAiAttempt;
+      const hasImage = context.messages.some((message) =>
+        Array.isArray(message.content)
+          && message.content.some((part) => part.type === "image"),
+      );
+      const piModel = buildPiModel({
+        ...candidate,
+        contextWindow: candidate.maxContext,
+        reasoningEffort: options.reasoningEffort,
+        maxOutput: model.maxTokens,
+      }, pickPiApi(candidate.apiFormat), hasImage, candidate.provider);
+
+      let attemptCommitted = false;
+      let retried = false;
+      // #1748: retention belongs to the provider candidate, not the
+      // transport. A missing candidate value falls back to the transport
+      // option for direct callers and ultimately pins Pi's current default.
+      const cacheRetention = candidate.cacheRetention
+        ?? options.cacheRetention
+        ?? fnOptions.cacheRetention
+        ?? "short";
+
+      if (signal.aborted) {
+        yield terminalError(model, "aborted", "Execution cancelled");
+        return;
       }
-      let attemptedCandidateCount = 0;
-      // #1745: execution-scoped overflow count. Overflow is a property of THIS
-      // request's size, not of any candidate's health. Never promote it to the
-      // shared ModelHealthRegistry — a shared sticky overflow flag would exclude
-      // healthy models from later, smaller requests.
-      let overflowFailures = 0;
-      for (const candidate of orderedCandidates) {
-        const selected = options.policy.selectModel();
-        if (!selected || selected !== candidate) {
-          // #1905: fallback-chain skip evidence at debug; bounded, no prompts.
-          logDebug(TAG, `candidate skipped execution=${options.executionId} candidate=${candidateKey(candidate.model, candidate.endpoint)} skipped=[${options.policy.lastSkipped.join("; ").slice(0, 300)}]`);
-          continue;
-        }
-        attemptedCandidateCount++;
-        if (signal.aborted) {
-          yield terminalError(model, "aborted", "Execution cancelled");
-          return;
-        }
+      attempted = true;
 
-        const attemptFactory = options.createPiAiAttempt ?? defaultCreatePiAiAttempt;
-        const hasImage = context.messages.some((message) =>
-          Array.isArray(message.content)
-            && message.content.some((part) => part.type === "image"),
-        );
-        const piModel = buildPiModel({
-          ...candidate,
-          contextWindow: candidate.maxContext,
-          reasoningEffort: options.reasoningEffort,
-          maxOutput: model.maxTokens,
-        }, pickPiApi(candidate.apiFormat), hasImage, candidate.provider);
+      while (true) {
+        const providerRequestId = (options.providerRequestIdFactory ?? randomUUID)();
+        const cacheOptions: SimpleStreamOptions = { ...streamOptions, cacheRetention };
+        const attemptOptions = isOpenAiCompatible(piModel.api)
+          ? buildAttemptOptions(cacheOptions, providerRequestId)
+          : cacheOptions;
 
-        let attemptCommitted = false;
-        let retried = false;
-        // #1748: retention belongs to the provider candidate, not the
-        // transport. A missing candidate value falls back to the transport
-        // option for direct callers and ultimately pins Pi's current default.
-        const cacheRetention = candidate.cacheRetention
-          ?? options.cacheRetention
-          ?? fnOptions.cacheRetention
-          ?? "short";
+        logDebug(TAG, `provider attempt execution=${options.executionId} request=${providerRequestId} candidate=${candidateKey(candidate.model, candidate.endpoint)}`);
 
-        while (true) {
-          const providerRequestId = (options.providerRequestIdFactory ?? randomUUID)();
-          const cacheOptions: SimpleStreamOptions = { ...streamOptions, cacheRetention };
-          const attemptOptions = isOpenAiCompatible(piModel.api)
-            ? buildAttemptOptions(cacheOptions, providerRequestId)
-            : cacheOptions;
+        const handle = options.telemetry?.beginProviderCall({
+          provider: candidate.provider,
+          model: candidate.model,
+          candidate: candidateKey(candidate.model, candidate.endpoint),
+          startedAt: Date.now(),
+        });
 
-          logDebug(TAG, `provider attempt execution=${options.executionId} request=${providerRequestId} candidate=${candidateKey(candidate.model, candidate.endpoint)}`);
-
-          const handle = options.telemetry?.beginProviderCall({
-            provider: candidate.provider,
-            model: candidate.model,
-            candidate: candidateKey(candidate.model, candidate.endpoint),
-            startedAt: Date.now(),
+        let telemetryEnded = false;
+        // #1534: an aborted attempt (operator /stop, execution deadline, or
+        // signal cut) is not a candidate failure. A post-cancel continuation
+        // turn must still reach the provider.
+        // #1297: the actual classification (credits, auth, rate_limit,
+        // transient, ...) is recorded, not an unconditional transient.
+        // #1932: admission timestamp for stale-success guarding — a
+        // success clears only observations not newer than this attempt's
+        // admission. Captured here, before any provider await.
+        const attemptAdmittedAt = Date.now();
+        // #1932: write-only availability observation after the attempt
+        // failed. Never throws: a memo write must not break a turn. There
+        // is no exclusion set anymore — future admissions consult the memo.
+        const observeFailure = (kind: ErrorKind = "transient", retryAfterMs?: number, detail?: string): void => {
+          if (options.memoStateDir !== undefined) {
+            try {
+              recordPiMemoObservation(options.memoStateDir, {
+                authNamespace: `${candidate.authSource ?? "abtars"}:${candidate.provider}`,
+                provider: candidate.provider,
+                endpoint: candidate.endpoint,
+                modelScope: candidate.model,
+              }, { kind, retryAfterMs }, Date.now());
+            } catch { /* best-effort memo write; the turn continues */ }
+          }
+          // #1905: bounded redacted provider error evidence at the
+          // attempt-failure branch — error text only, never prompts.
+          logDebug(TAG, `attempt failed execution=${options.executionId} candidate=${candidateKey(candidate.model, candidate.endpoint)} kind=${kind}${detail ? ` error="${detail}"` : ""}`);
+        };
+        const finishAttempt = (result: ProviderCallTerminal["result"], message?: AssistantMessage, kind?: ErrorKind, retryAfterMs?: number): void => {
+          if (telemetryEnded) return;
+          telemetryEnded = true;
+          endTelemetry(handle, {
+            result,
+            endedAt: Date.now(),
+            input: message?.usage.input,
+            output: message?.usage.output,
+            cacheRead: message?.usage.cacheRead,
+            cacheWrite: message?.usage.cacheWrite,
           });
-
-          let telemetryEnded = false;
-          // #1534: an aborted attempt (operator /stop, execution deadline, or
-          // signal cut) is not a candidate failure. Recording a transient
-          // error and excluding the candidate there would poison the health
-          // registry and leave the session transport with an excluded
-          // candidate, so a post-cancel continuation turn would fail with
-          // "no candidates" instead of reaching the provider. Genuine
-          // failures — and inactivity stalls, which the fallback chain needs
-          // to skip — still poison via poisonCandidate().
-          // #1297: the actual classification (credits, auth, rate_limit,
-          // transient, ...) is recorded, not an unconditional transient.
-          // #1932: admission timestamp for stale-success guarding — a
-          // success clears only observations not newer than this attempt's
-          // admission. Captured here, when the candidate is selected for
-          // the attempt, before any provider await.
-          const attemptAdmittedAt = Date.now();
-          const poisonCandidate = (kind: ErrorKind = "transient", retryAfterMs?: number, detail?: string): void => {
-            options.policy.recordError(candidate, kind, retryAfterMs);
-            options.policy.excludedKeys.add(candidateKey(candidate.model, candidate.endpoint));
-            // #1932: write-only availability observation after bounded
-            // recovery failed. Never throws: a memo write must not break
-            // a turn, and admission behavior is unchanged until cutover.
+          if (result === "success") {
+            // #1932: success clears only same-namespace observations not
+            // newer than this attempt's admission; stale completions
+            // cannot clear a newer failure. Skips the write when nothing
+            // changed so successful turns stay read-only.
             if (options.memoStateDir !== undefined) {
               try {
-                recordPiMemoObservation(options.memoStateDir, {
+                const loaded = loadAvailabilityMemo(options.memoStateDir);
+                const kept = applyMemoSuccess(loaded.entries, {
                   authNamespace: `${candidate.authSource ?? "abtars"}:${candidate.provider}`,
                   provider: candidate.provider,
                   endpoint: candidate.endpoint,
                   modelScope: candidate.model,
-                }, { kind, retryAfterMs }, Date.now());
-              } catch { /* best-effort memo write; the turn continues */ }
+                  admittedAt: attemptAdmittedAt,
+                });
+                if (kept.length !== loaded.entries.length) {
+                  saveAvailabilityMemo(options.memoStateDir, kept);
+                }
+              } catch { /* best-effort memo clearing; the turn already succeeded */ }
             }
+          } else if (result !== "aborted") {
+            if (kind !== undefined) failureKind = kind;
+            if (kind === "context_exceeded") overflowed = true;
             // #1905: bounded redacted provider error evidence at the
             // attempt-failure branch — error text only, never prompts.
-            // A provider failure is a fallback event, not a successful-turn
-            // rotation event. Healthy candidates from the prior rotation
-            // cycle must be eligible for recovery.
-            logDebug(TAG, `candidate excluded execution=${options.executionId} candidate=${candidateKey(candidate.model, candidate.endpoint)} kind=${kind}${detail ? ` error="${detail}"` : ""}`);
-            options.policy.rotationExcludedKeys.clear();
-          };
-          const finishAttempt = (result: ProviderCallTerminal["result"], message?: AssistantMessage, kind?: ErrorKind, retryAfterMs?: number): void => {
-            if (telemetryEnded) return;
-            telemetryEnded = true;
-            endTelemetry(handle, {
-              result,
-              endedAt: Date.now(),
-              input: message?.usage.input,
-              output: message?.usage.output,
-              cacheRead: message?.usage.cacheRead,
-              cacheWrite: message?.usage.cacheWrite,
-            });
-            if (result === "success") {
-              options.policy.recordSuccess(candidate);
-              // #1932: success clears only same-namespace observations not
-              // newer than this attempt's admission; stale completions
-              // cannot clear a newer failure. Skips the write when nothing
-              // changed so successful turns stay read-only.
-              if (options.memoStateDir !== undefined) {
-                try {
-                  const loaded = loadAvailabilityMemo(options.memoStateDir);
-                  const kept = applyMemoSuccess(loaded.entries, {
-                    authNamespace: `${candidate.authSource ?? "abtars"}:${candidate.provider}`,
-                    provider: candidate.provider,
-                    endpoint: candidate.endpoint,
-                    modelScope: candidate.model,
-                    admittedAt: attemptAdmittedAt,
-                  });
-                  if (kept.length !== loaded.entries.length) {
-                    saveAvailabilityMemo(options.memoStateDir, kept);
-                  }
-                } catch { /* best-effort memo clearing; the turn already succeeded */ }
-              }
-            } else if (result !== "aborted") {
-              if (kind === "context_exceeded") overflowFailures++;
-              // #1905: bounded redacted provider error evidence at the
-              // attempt-failure branch — error text only, never prompts.
-              const failureText = message?.errorMessage ? redactSecrets(message.errorMessage).slice(0, 300) : undefined;
-              poisonCandidate(kind, retryAfterMs, failureText);
-            }
-          };
-
-          if (options.deadlineAt !== undefined && options.deadlineAt <= Date.now()) {
-            finishAttempt("aborted");
-            yield terminalError(model, "aborted", "Execution deadline reached before provider attempt");
-            return;
+            const failureText = message?.errorMessage ? redactSecrets(message.errorMessage).slice(0, 300) : undefined;
+            observeFailure(kind, retryAfterMs, failureText);
           }
+        };
 
-          let shouldRetry = false;
-          // #1506: the whole provider attempt (acquisition AND streaming) is
-          // owned by one liveness runner whose inactivity/abort/deadline scope
-          // is armed before the first external await. Acquisition can no longer
-          // hang without an iterator for the watchdog to observe.
-          const runner = new ProviderAttemptRunner({
-            executionId: options.executionId,
-            requestId: providerRequestId,
-            candidate,
-            model: piModel,
-            context,
-            options: attemptOptions,
-            attemptFactory,
-            signal,
-            deadlineAt: options.deadlineAt,
-            inactivityTimeoutMs: options.providerInactivityTimeoutMs ?? 180_000,
-          });
+        if (options.deadlineAt !== undefined && options.deadlineAt <= Date.now()) {
+          finishAttempt("aborted");
+          yield terminalError(model, "aborted", "Execution deadline reached before provider attempt");
+          return;
+        }
 
-          const buffered: AssistantMessageEvent[] = [];
-          let terminal: AssistantMessage | undefined;
-          let exit: ProviderAttemptExit | null = null;
-          try {
-            for await (const item of runner.run()) {
-              if (item.kind !== "event") {
-                exit = item;
+        let shouldRetry = false;
+        // #1506: the whole provider attempt (acquisition AND streaming) is
+        // owned by one liveness runner whose inactivity/abort/deadline scope
+        // is armed before the first external await. Acquisition can no longer
+        // hang without an iterator for the watchdog to observe.
+        const runner = new ProviderAttemptRunner({
+          executionId: options.executionId,
+          requestId: providerRequestId,
+          candidate,
+          model: piModel,
+          context,
+          options: attemptOptions,
+          attemptFactory,
+          signal,
+          deadlineAt: options.deadlineAt,
+          inactivityTimeoutMs: options.providerInactivityTimeoutMs ?? 180_000,
+        });
+
+        const buffered: AssistantMessageEvent[] = [];
+        let terminal: AssistantMessage | undefined;
+        let exit: ProviderAttemptExit | null = null;
+        try {
+          for await (const item of runner.run()) {
+            if (item.kind !== "event") {
+              exit = item;
+              break;
+            }
+            const event = item.event;
+            terminal = terminalResult(event) ?? terminal;
+            if (!attemptCommitted && isSemanticEvent(event)) {
+              attemptCommitted = true;
+              options.onCandidateCommitted?.(candidate);
+              for (const bufferedEvent of buffered) yield bufferedEvent;
+              buffered.length = 0;
+            }
+            if (!attemptCommitted && isTerminal(event)) {
+              const result = terminalResult(event);
+              const failed = event.type === "error" || result?.stopReason === "error" || result?.stopReason === "aborted";
+              if (failed && !retried && isIdempotencyConflict(result?.errorMessage ?? "")) {
+                endTelemetry(handle, { result: "failure", endedAt: Date.now() });
+                telemetryEnded = true;
+                retried = true;
+                shouldRetry = true;
                 break;
               }
-              const event = item.event;
-              terminal = terminalResult(event) ?? terminal;
-              if (!attemptCommitted && isSemanticEvent(event)) {
-                attemptCommitted = true;
-                options.onCandidateCommitted?.(candidate);
-                for (const bufferedEvent of buffered) yield bufferedEvent;
-                buffered.length = 0;
-              }
-              if (!attemptCommitted && isTerminal(event)) {
-                const result = terminalResult(event);
-                const failed = event.type === "error" || result?.stopReason === "error" || result?.stopReason === "aborted";
-                if (failed && !retried && isIdempotencyConflict(result?.errorMessage ?? "")) {
-                  endTelemetry(handle, { result: "failure", endedAt: Date.now() });
-                  telemetryEnded = true;
-                  retried = true;
-                  shouldRetry = true;
-                  break;
-                }
-                if (failed) {
-                  const classified = classifyAttemptFailure(terminal, piModel.contextWindow, runner.bundle?.pi);
-                  finishAttempt(event.type === "error" && event.reason === "aborted" ? "aborted" : "failure", terminal, classified.kind, classified.retryAfterMs);
-                  break;
-                }
-                finishAttempt("success", terminal);
-                for (const bufferedEvent of buffered) yield bufferedEvent;
-                yield event;
-                return;
-              }
-              if (attemptCommitted) yield event;
-              else buffered.push(event);
-              if (attemptCommitted && isTerminal(event)) {
-                const result = terminalResult(event);
-                const failed = event.type === "error" || result?.stopReason === "error" || result?.stopReason === "aborted";
+              if (failed) {
                 const classified = classifyAttemptFailure(terminal, piModel.contextWindow, runner.bundle?.pi);
-                finishAttempt(failed
-                  ? (event.type === "error" && event.reason === "aborted" ? "aborted" : "failure")
-                  : "success", terminal, failed ? classified.kind : undefined, failed ? classified.retryAfterMs : undefined);
-                return;
+                finishAttempt(event.type === "error" && event.reason === "aborted" ? "aborted" : "failure", terminal, classified.kind, classified.retryAfterMs);
+                break;
               }
+              finishAttempt("success", terminal);
+              for (const bufferedEvent of buffered) yield bufferedEvent;
+              yield event;
+              return;
             }
-          } catch (err) {
+            if (attemptCommitted) yield event;
+            else buffered.push(event);
+            if (attemptCommitted && isTerminal(event)) {
+              const result = terminalResult(event);
+              const failed = event.type === "error" || result?.stopReason === "error" || result?.stopReason === "aborted";
+              const classified = classifyAttemptFailure(terminal, piModel.contextWindow, runner.bundle?.pi);
+              finishAttempt(failed
+                ? (event.type === "error" && event.reason === "aborted" ? "aborted" : "failure")
+                : "success", terminal, failed ? classified.kind : undefined, failed ? classified.retryAfterMs : undefined);
+              return;
+            }
+          }
+        } catch (err) {
+          if (!retried && isIdempotencyConflict(err)) {
+            endTelemetry(handle, { result: "failure", endedAt: Date.now() });
+            telemetryEnded = true;
+            retried = true;
+            continue;
+          }
+          const classified = classifyAttemptError(err);
+          finishAttempt(signal.aborted ? "aborted" : "failure", undefined, classified.kind, classified.retryAfterMs);
+          if (attemptCommitted) {
+            yield terminalError(model, signal.aborted ? "aborted" : "error", "Provider stream failed after output began");
+            return;
+          }
+          logDebug(TAG, `Provider attempt failed before commit (${err instanceof Error ? err.name : "unknown"})`);
+          if (signal.aborted) {
+            yield terminalError(model, "aborted", "Execution cancelled");
+            return;
+          }
+          break;
+        }
+
+        if (exit) {
+          if (exit.kind === "timeout") {
+            logDebug(TAG, `provider_attempt_timeout execution=${options.executionId} request=${providerRequestId} phase=${exit.phase} elapsed_ms=${exit.elapsedMs}`);
+            if (attemptCommitted) {
+              // #1506: a streaming inactivity stall after semantic output
+              // ends the turn. Operator/deadline cancellation has
+              // signal.aborted=true and must not record a failure.
+              if (!signal.aborted) observeFailure();
+              finishAttempt("aborted", terminal);
+              yield terminalError(model, "aborted", `provider_stream_timeout after ${exit.elapsedMs}ms inactivity (semantic output was emitted)`);
+              return;
+            }
+            // #1534: a genuine inactivity stall (the signal was NOT
+            // aborted) is still a failure of this attempt; an
+            // operator/execution abort is never recorded.
+            if (!signal.aborted) observeFailure();
+            finishAttempt("aborted", terminal);
+            break;
+          }
+          if (exit.kind === "aborted") {
+            finishAttempt("aborted", terminal);
+            yield terminalError(model, "aborted", "Execution cancelled");
+            return;
+          }
+          if (exit.kind === "failed") {
+            const err = exit.error;
             if (!retried && isIdempotencyConflict(err)) {
               endTelemetry(handle, { result: "failure", endedAt: Date.now() });
               telemetryEnded = true;
@@ -582,117 +603,61 @@ export function createPiStreamFn(options: AbtarsPiStreamFnOptions): StreamFn {
             }
             break;
           }
-
-          if (exit) {
-            if (exit.kind === "timeout") {
-              logDebug(TAG, `provider_attempt_timeout execution=${options.executionId} request=${providerRequestId} phase=${exit.phase} elapsed_ms=${exit.elapsedMs}`);
-              if (attemptCommitted) {
-                // #1506: a streaming inactivity stall after semantic output
-                // is a genuine candidate failure, but fallback is forbidden
-                // once output was emitted. Operator/deadline cancellation has
-                // signal.aborted=true and must not poison health.
-                if (!signal.aborted) poisonCandidate();
-                finishAttempt("aborted", terminal);
-                yield terminalError(model, "aborted", `provider_stream_timeout after ${exit.elapsedMs}ms inactivity (semantic output was emitted)`);
-                return;
-              }
-              // #1534: exclude only genuine inactivity stalls (the signal was
-              // NOT aborted) so the fallback chain skips them; an
-              // operator/execution abort must never poison the candidate.
-              if (!signal.aborted) poisonCandidate();
-              finishAttempt("aborted", terminal);
-              break;
-            }
-            if (exit.kind === "aborted") {
-              finishAttempt("aborted", terminal);
-              yield terminalError(model, "aborted", "Execution cancelled");
-              return;
-            }
-            if (exit.kind === "failed") {
-              const err = exit.error;
-              if (!retried && isIdempotencyConflict(err)) {
-                endTelemetry(handle, { result: "failure", endedAt: Date.now() });
-                telemetryEnded = true;
-                retried = true;
-                continue;
-              }
-              const classified = classifyAttemptError(err);
-              finishAttempt(signal.aborted ? "aborted" : "failure", undefined, classified.kind, classified.retryAfterMs);
-              if (attemptCommitted) {
-                yield terminalError(model, signal.aborted ? "aborted" : "error", "Provider stream failed after output began");
-                return;
-              }
-              logDebug(TAG, `Provider attempt failed before commit (${err instanceof Error ? err.name : "unknown"})`);
-              if (signal.aborted) {
-                yield terminalError(model, "aborted", "Execution cancelled");
-                return;
-              }
-              break;
-            }
-            // exit.kind === "ended": the stream completed without a terminal event.
-            if (attemptCommitted) {
-              finishAttempt(signal.aborted ? "aborted" : "failure", terminal);
-              yield terminalError(model, signal.aborted ? "aborted" : "error", "Provider stream ended without a terminal event");
-              return;
-            }
-            if (!telemetryEnded) {
-              finishAttempt(signal.aborted ? "aborted" : "failure", terminal);
-              break;
-            }
-          } else if (shouldRetry) {
-            continue;
-          } else if (attemptCommitted) {
+          // exit.kind === "ended": the stream completed without a terminal event.
+          if (attemptCommitted) {
             finishAttempt(signal.aborted ? "aborted" : "failure", terminal);
             yield terminalError(model, signal.aborted ? "aborted" : "error", "Provider stream ended without a terminal event");
             return;
-          } else if (!telemetryEnded) {
-            finishAttempt(signal.aborted ? "aborted" : "failure", terminal);
           }
-          break;
+          if (!telemetryEnded) {
+            finishAttempt(signal.aborted ? "aborted" : "failure", terminal);
+            break;
+          }
+        } else if (shouldRetry) {
+          continue;
+        } else if (attemptCommitted) {
+          finishAttempt(signal.aborted ? "aborted" : "failure", terminal);
+          yield terminalError(model, signal.aborted ? "aborted" : "error", "Provider stream ended without a terminal event");
+          return;
+        } else if (!telemetryEnded) {
+          finishAttempt(signal.aborted ? "aborted" : "failure", terminal);
         }
+        break;
       }
 
-      // #1297: the strict all-candidates credit predicate is evaluated only at
-      // true exhaustion — never after the first credit failure and never when a
-      // viable candidate remains. Candidates skipped this call because shared
-      // health already marks them credit-failed are included by the predicate.
-      if (!signal.aborted && options.policy.allCandidatesCreditFailed()) {
-        options.onTerminalFailure?.({
-          code: "credits_exhausted",
-          retryable: false,
-          attemptedCandidates: attemptedCandidateCount,
-          message: "All model candidates are blocked by provider credit exhaustion",
-        });
-      } else if (!signal.aborted && attemptedCandidateCount > 0 && overflowFailures === attemptedCandidateCount) {
-        // #1745: every attempted candidate rejected the request as over-context.
-        // Mirrors the credits predicate's same-cause-for-every-candidate
-        // semantics; a mixed execution (overflow + auth) reports no overflow
-        // code so the session is not reset on ambiguous evidence (it falls
-        // through to the generic exhaustion code below). Credits keeps
-        // precedence — at most one terminal code is emitted per execution.
-        options.onTerminalFailure?.({
-          code: "context_overflow",
-          retryable: false,
-          attemptedCandidates: attemptedCandidateCount,
-          message: "The request exceeds the context window of every configured model",
-        });
-      } else if (!signal.aborted && options.policy.candidates.length > 0) {
-        // #1905: genuine exhaustion with no single-cause verdict — mixed
-        // failure kinds, latch/registry zero-attempt, or silent empty streams.
-        // Surface a typed provider failure so spin/sleep observe provider
-        // failure instead of a settled domain empty. Credits/overflow keep
-        // precedence above; abort, cancellation, and committed output return
-        // earlier and never reach this branch.
-        logDebug(TAG, `all candidates exhausted execution=${options.executionId} attempted=${attemptedCandidateCount} skipped=[${options.policy.lastSkipped.join("; ").slice(0, 500)}]`);
-        options.onTerminalFailure?.({
-          code: "all_candidates_failed",
-          retryable: false,
-          attemptedCandidates: attemptedCandidateCount,
-          message: "All model candidates failed",
-        });
+      // #1932: single-attempt terminal verdict. The failure kind was
+      // classified at the attempt boundary above. Account-limit exhaustion
+      // and over-context keep their exact codes; any other genuine failure
+      // reports the generic code so spin/sleep observe provider failure
+      // instead of a settled domain empty. Abort, cancellation, and
+      // committed output return earlier and never reach this branch.
+      if (!signal.aborted && attempted) {
+        if (failureKind === "credits") {
+          options.onTerminalFailure?.({
+            code: "credits_exhausted",
+            retryable: false,
+            attemptedCandidates: 1,
+            message: "The configured model is blocked by provider credit exhaustion",
+          });
+        } else if (failureKind === "context_exceeded" || overflowed) {
+          options.onTerminalFailure?.({
+            code: "context_overflow",
+            retryable: false,
+            attemptedCandidates: 1,
+            message: "The request exceeds the configured model's context window",
+          });
+        } else {
+          logDebug(TAG, `candidate failed execution=${options.executionId} kind=${failureKind ?? "unclassified"}`);
+          options.onTerminalFailure?.({
+            code: "all_candidates_failed",
+            retryable: false,
+            attemptedCandidates: 1,
+            message: "The configured model candidate failed",
+          });
+        }
       }
-      yield terminalError(model, signal.aborted ? "aborted" : "error", signal.aborted ? "Execution cancelled" : "All model candidates failed");
+      yield terminalError(model, signal.aborted ? "aborted" : "error", signal.aborted ? "Execution cancelled" : "The configured model candidate failed");
     };
-    return wrapEventStream(outer(), () => assistantMessage(model, [], signal.aborted ? "aborted" : "error", signal.aborted ? "Execution cancelled" : "All model candidates failed"));
+    return wrapEventStream(outer(), () => assistantMessage(model, [], signal.aborted ? "aborted" : "error", signal.aborted ? "Execution cancelled" : "The configured model candidate failed"));
   };
 }

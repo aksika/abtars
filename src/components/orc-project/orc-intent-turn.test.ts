@@ -35,8 +35,6 @@ let contributionStoreMod: typeof import("../peer-help/contribution-store.js");
 let policyMod: typeof import("./orc-intent-policy.js");
 let piCoreToolsMod: typeof import("../transport/pi-core-tools.js");
 let piCoreSafetyMod: typeof import("../transport/pi-core-safety.js");
-let fallbackPolicyMod: typeof import("../transport/fallback-policy.js");
-let healthRegistryMod: typeof import("../transport/model-health-registry.js");
 
 let activeHandle: import("../reconciler.js").ReconcilerHandle | null = null;
 let wakeScheduler: import("../lifecycle-wake-scheduler.js").LifecycleWakeScheduler | null = null;
@@ -65,8 +63,6 @@ beforeEach(async () => {
   policyMod = await import("./orc-intent-policy.js");
   piCoreToolsMod = await import("../transport/pi-core-tools.js");
   piCoreSafetyMod = await import("../transport/pi-core-safety.js");
-  fallbackPolicyMod = await import("../transport/fallback-policy.js");
-  healthRegistryMod = await import("../transport/model-health-registry.js");
   const { setUserRegistryOverride } = await import("../user-registry.js");
   setUserRegistryOverride({
     users: [{ userId: "kp", role: "master", maxClass: 3, tools: ["all"], platforms: { telegram: 1 } }],

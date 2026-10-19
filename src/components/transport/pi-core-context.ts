@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { logWarn, logError, logTrace } from "../logger.js";
-import type { AssistantMessage, ModelApi, AgentMessage } from "./pi-core-types.js";
+import type { AssistantMessage, AgentMessage } from "./pi-core-types.js";
 import { soulBundleEnvelope } from "../pi-session/pi-soul-envelope.js";
 import type { PiExecutionContextSeed, AbtarsCurrentTurnMessage } from "./pi-port.js";
 import type { DurableContextProjectionInput, DurableContextProjectionResult } from "../memory-runtime.js";
@@ -57,8 +57,8 @@ export function createDurableContextProvider(
 export interface TransformOptions {
   signal?: AbortSignal;
   hostGeneration?: number;
+  /** #1932: attribution key for the single configured candidate. */
   candidateKeyFn?: () => string;
-  candidateModelFn?: (candidateKey: string) => ModelApi | undefined;
   contextProvider?: PiDurableContextProvider;
 }
 

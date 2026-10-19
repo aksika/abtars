@@ -10,11 +10,12 @@
  *
  * Resilience contract (downward-only):
  *   - L1 executes one call; it does not rotate or retry. pi-ai is called with
- *     maxRetries: 0 — abtars L2 (fallback-policy) owns the retry budget.
+ *     maxRetries: 0 — the single attempt plus one bounded idempotency retry
+ *     is the whole retry budget (#1932).
  *   - If pi-ai cannot be loaded, streamPiAiCompletion throws PiAiUnavailableError;
  *     the gate catches it and falls through to the L0 reptile floor.
  *   - Request errors (provider down, quota, auth) are mapped to an Error whose
- *     message carries "API error <status>" so sendWithPolicy's existing
+ *     message carries "API error <status>" so the boundary
  *     parseErrorStatus/classifyError/parseRetryAfter classify them unchanged.
  *
  * Contracts verified against @earendil-works/pi-ai@~1.3.0 via devDependency.

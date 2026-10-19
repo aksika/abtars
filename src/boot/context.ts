@@ -25,7 +25,6 @@ import type { IDashboardSlot } from "../components/skeleton.js";
 import type { AgentApiServer } from "../components/agent-api-server.js";
 import type { PlatformAdapter } from "../types/platform.js";
 import { spin as spinInstance } from "../components/spin.js";
-import type { ModelHealthRegistry } from "../components/transport/model-health-registry.js";
 import type { ResolvedHailMary } from "../components/transport-config.js";
 import type { SttConfig } from "../components/stt.js";
 import type { TtsConfig } from "../components/tts.js";
@@ -119,7 +118,6 @@ export interface BootCtx {
   /** #1429 — Boot-recorded sleep-unavailable reason (set by phase-sleep). */
   sleepUnavailable: SleepUnavailable | null;
   sleepHandle: SleepHandle | null;
-  modelHealthRegistry: ModelHealthRegistry | null;
   hailMary: (ResolvedHailMary & { apiKey?: string }) | null;
   /**
    * #1468: boot-owned emergency execution service. Constructed at the early
@@ -265,7 +263,6 @@ export function createBootCtx(overrides: Partial<BootCtx> = {}): BootCtx {
     abmindModule: null,
     sleepUnavailable: null,
     sleepHandle: null,
-    modelHealthRegistry: null,
     hailMary: null,
     emergencyExecution: null,
     selfHealerTask: null,

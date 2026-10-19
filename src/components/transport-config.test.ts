@@ -502,125 +502,43 @@ describe("#1467 — target route provider readiness", () => {
   });
 });
 
-// ── Demotion tests (#567) ───────────────────────────────────────────────────
+// ── Demotion retirement (#1932) ─────────────────────────────────────────────
 
-import { cleanDemotedModels } from "./transport-config.js";
-
-describe("resolveAgent with demotion", () => {
-  it("marks demoted primary — runtime FallbackPolicy handles skipping", () => {
-    // Demotion metadata is persisted on route-local assignments (routes.acp.agents),
-    // not on top-level TransportConfig fields.
-    type DemotedAssignment = AgentAssignment & Required<Pick<AgentAssignment, "demoted" | "demotedReason">>;
-    const acpRoute = TRANSPORT.routes.acp;
-    if (acpRoute === undefined) throw new Error("test fixture missing acp route");
-    const demotedMain = {
-      model: "claude-sonnet-4.6",
-      provider: "kiro-free",
-      demoted: "2026-05-22",
-      demotedReason: "auth",
-    } satisfies DemotedAssignment;
+describe("resolveAgent ignores legacy demotion metadata", () => {
+  it("returns the configured primary regardless of demoted flags", () => {
     const tc: TransportConfig = {
       ...TRANSPORT,
       routes: {
         ...TRANSPORT.routes,
         acp: {
-          ...acpRoute,
-          agents: { ...acpRoute.agents, main: demotedMain },
-        },
-      },
-    };
-    // resolveAgent no longer auto-promotes — FallbackPolicy handles demoted models at runtime
-    const r = resolveAgent("main", tc, MODELS)!;
-    expect(r.model).toBe("claude-sonnet-4.6"); // still returns configured primary
-    expect(r.fallbacks).toHaveLength(1);
-    expect(r.fallbacks[0]!.model).toBe("minimax-m2.5:cloud");
-  });
-
-  it("filters demoted fallbacks from returned list", () => {
-    const tc: TransportConfig = {
-      ...TRANSPORT,
-      routes: {
-        acp: {
-          agents: { main: { model: "claude-sonnet-4.6", provider: "kiro-free" }, dreamy: { model: "minimax-m2.5:cloud", provider: "ollama" } },
-          fallbacks: [
-            { model: "minimax-m2.5:cloud", provider: "ollama", demoted: "2026-05-22" },
-          ],
-        },
-      },
-    };
-    const r = resolveAgent("main", tc, MODELS)!;
-    expect(r.model).toBe("claude-sonnet-4.6");
-    expect(r.fallbacks).toEqual([]);
-  });
-
-  it("uses primary anyway when all models demoted", () => {
-    const tc: TransportConfig = {
-      ...TRANSPORT,
-      routes: {
-        acp: {
           agents: {
-            main: { model: "claude-sonnet-4.6", provider: "kiro-free", demoted: "2026-05-22" },
-            dreamy: { model: "minimax-m2.5:cloud", provider: "ollama" },
-          },
-          fallbacks: [
-            { model: "minimax-m2.5:cloud", provider: "ollama", demoted: "2026-05-22" },
-          ],
-        },
-      },
-    };
-    const r = resolveAgent("main", tc, MODELS)!;
-    expect(r.model).toBe("claude-sonnet-4.6"); // falls back to primary
-  });
-});
-
-describe("cleanDemotedModels", () => {
-  const ra = { agents: { main: { model: "claude-sonnet-4.6", provider: "kiro-free" }, dreamy: { model: "minimax-m2.5:cloud", provider: "ollama" } }, fallbacks: [{ model: "minimax-m2.5:cloud", provider: "ollama", demoted: "2026-05-22" }] };
-
-  it("keeps demoted fallbacks but does not remove them", () => {
-    const tc: TransportConfig = { ...TRANSPORT, routes: { acp: { ...ra } } };
-    cleanDemotedModels(tc);
-    const tcRa = tc.routes["acp"]!;
-    expect(tcRa.fallbacks).toHaveLength(1);
-    expect(tcRa.fallbacks![0]!.model).toBe("minimax-m2.5:cloud");
-  });
-
-  it("resurrects chosen model (clears demotion)", () => {
-    const tc: TransportConfig = {
-      ...TRANSPORT,
-      routes: {
-        acp: {
-          agents: {
-            main: { model: "claude-sonnet-4.6", provider: "kiro-free", demoted: "2026-05-22", demotedReason: "auth" },
+            main: { model: "claude-sonnet-4.6", provider: "kiro-free", demoted: "2026-05-22", demotedReason: "auth" } as AgentAssignment,
             dreamy: { model: "minimax-m2.5:cloud", provider: "ollama" },
           },
           fallbacks: [],
         },
       },
     };
-    cleanDemotedModels(tc, "claude-sonnet-4.6");
-    const tcRa = tc.routes["acp"]!;
-    const mainAfter = tcRa.agents["main"];
-    if (mainAfter === undefined) throw new Error("test fixture missing main agent");
-    expect(mainAfter.demoted).toBeUndefined();
-    expect(mainAfter.demotedReason).toBeUndefined();
+    // Legacy demotion keys are inert: no filtering, no promotion.
+    const r = resolveAgent("main", tc, MODELS)!;
+    expect(r.model).toBe("claude-sonnet-4.6");
   });
 
-  it("keeps all fallbacks — demoted and non-demoted", () => {
+  it("keeps demoted fallbacks in the returned list", () => {
     const tc: TransportConfig = {
       ...TRANSPORT,
       routes: {
         acp: {
           agents: { main: { model: "claude-sonnet-4.6", provider: "kiro-free" }, dreamy: { model: "minimax-m2.5:cloud", provider: "ollama" } },
           fallbacks: [
-            { model: "minimax-m2.5:cloud", provider: "ollama" },
-            { model: "dead-model", provider: "ollama", demoted: "2026-05-22" },
+            { model: "minimax-m2.5:cloud", provider: "ollama", demoted: "2026-05-22" } as AgentAssignment,
           ],
         },
       },
     };
-    cleanDemotedModels(tc);
-    const tcRa = tc.routes["acp"]!;
-    expect(tcRa.fallbacks).toHaveLength(2);
+    const r = resolveAgent("main", tc, MODELS)!;
+    expect(r.model).toBe("claude-sonnet-4.6");
+    expect(r.fallbacks).toEqual([{ model: "minimax-m2.5:cloud", provider: "ollama", demoted: "2026-05-22" }]);
   });
 });
 

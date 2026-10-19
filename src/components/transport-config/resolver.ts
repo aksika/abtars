@@ -40,7 +40,7 @@ export function resolveHailMary(transport?: TransportConfig | null): ResolvedHai
 
 // ── Resolution ──────────────────────────────────────────────────────────────
 
-export function resolveAgent(role: string, transport?: TransportConfig | null, models?: ModelCatalog, lastSuccessfulMain?: { model: string; provider: string } | null, explicitRoute?: ExecutionRoute): ResolvedAgent | null {
+export function resolveAgent(role: string, transport?: TransportConfig | null, models?: ModelCatalog, explicitRoute?: ExecutionRoute): ResolvedAgent | null {
   const tc = transport ?? loadTransport();
   if (!tc) return null;
 
@@ -80,24 +80,14 @@ export function resolveAgent(role: string, transport?: TransportConfig | null, m
   const piMeta = resolveModelMeta(effectiveModel, effectiveProvider);
   if (piMeta) { contextWindow = piMeta.contextWindow; maxOutput = piMeta.maxOutput; }
 
-  // Build fallback list: route-local fallbacks (filtered), plus last successful Main for specialists
+  // Build fallback list: route-local fallbacks minus self-duplicates.
+  // (ACP route selection and boot-time model selection; Pi dispatch is
+  // single-candidate and never reads this list.)
   const seen = new Set<string>();
   const fallbackList: Array<{ model: string; provider: string }> = [];
 
-  // For specialists, prepend last successful Main (or configured Main) before route-local fallbacks
-  if (role !== "main" && role !== "task") {
-    const mainAssignment = ra.agents["main"];
-    const lastMain = lastSuccessfulMain ?? { model: mainAssignment?.model ?? "", provider: mainAssignment?.provider ?? "" };
-    if (lastMain.model && lastMain.provider) {
-      const key = `${lastMain.model}@${lastMain.provider}`;
-      seen.add(key);
-      fallbackList.push(lastMain);
-    }
-  }
-
-  // Append route-local fallbacks, filtering demoted and self-duplicates
   for (const fb of ra.fallbacks ?? []) {
-    if (fb.demoted || fb.model === effectiveModel) continue;
+    if (fb.model === effectiveModel) continue;
     const key = `${fb.model}@${fb.provider}`;
     if (seen.has(key)) continue;
     seen.add(key);

@@ -2,8 +2,6 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 import type { Model, Api } from "@earendil-works/pi-ai";
 import { normalizeContext } from "@earendil-works/pi-ai";
 import { createPiStreamFn } from "./pi-stream-fn.js";
-import { FallbackPolicy } from "./fallback-policy.js";
-import { ModelHealthRegistry } from "./model-health-registry.js";
 import type { ModelCandidate } from "./model-candidates.js";
 import type { SimpleStreamOptions } from "./pi-core-types.js";
 
@@ -24,10 +22,6 @@ vi.mock("./pi-ai-adapter.js", async (importOriginal) => {
     }),
   };
 });
-
-function makeRegistry() {
-  return new ModelHealthRegistry();
-}
 
 function makeCandidate(overrides?: Partial<ModelCandidate>): ModelCandidate {
   return {
@@ -61,20 +55,15 @@ function makeModel(overrides?: Partial<Model<Api>>): Model<Api> {
 }
 
 describe("pi-stream-fn → createPiAiAssistantStream boundary", () => {
-  let registry: ModelHealthRegistry;
-  let candidates: ModelCandidate[];
-  let policy: FallbackPolicy;
+  const candidate = makeCandidate();
 
   beforeEach(() => {
-    registry = makeRegistry();
-    candidates = [makeCandidate()];
-    policy = new FallbackPolicy(candidates, registry);
     vi.mocked(createPiAiAssistantStream).mockClear();
   });
 
   it("passes generated x-client-request-id header to createPiAiAssistantStream for OpenAI-compatible", async () => {
     const streamFn = createPiStreamFn({
-      policy, executionId: "exec_1",
+      candidate, executionId: "exec_1",
       providerRequestIdFactory: () => "boundary-test-id",
     });
     // Awaited: StreamFn allows async implementations; abtars' is sync and
@@ -89,9 +78,8 @@ describe("pi-stream-fn → createPiAiAssistantStream boundary", () => {
 
   it("omits x-client-request-id header for anthropic-messages API", async () => {
     const anthropicCandidate = makeCandidate({ apiFormat: "anthropic" });
-    const anthropicPolicy = new FallbackPolicy([anthropicCandidate], registry);
     const streamFn = createPiStreamFn({
-      policy: anthropicPolicy, executionId: "exec_2",
+      candidate: anthropicCandidate, executionId: "exec_2",
       providerRequestIdFactory: () => "no-anthropic-id",
     });
     const stream2 = await streamFn(makeModel({ id: "claude", api: "anthropic-messages" }), normalizeContext({ messages: [] }), {});

@@ -14,7 +14,7 @@ export interface PickerState {
 }
 
 export interface PickerDeps {
-  transport: { setModel?: (m: string) => Promise<void> | void; switchProvider?: (o: unknown) => void; [k: string]: unknown };
+  transport: { setModel?: (m: string) => Promise<void> | void; [k: string]: unknown };
   pipeline: { rebuildTransport?: () => Promise<void>; [k: string]: unknown };
   resetSessionForModelSwitch: (chatId: number, reason?: string) => Promise<void>;
 }
@@ -293,8 +293,6 @@ export async function handleModelPickerCallback(
         if (!activeRa.fallbacks) activeRa.fallbacks = [];
         activeRa.fallbacks[fbIndex] = { model, provider: providerName };
       }
-      const { cleanDemotedModels } = await import("../../components/transport-config.js");
-      cleanDemotedModels(candidate, model);
       const wr = writeTransportConfig(candidate, `fallback ${fbIndex + 1} → ${model} (${providerName})`);
       if (wr.ok) {
         try { await api.sendMessage(chatId, `✓ Fallback ${fbIndex + 1} → ${model} (${providerName})`); } catch (err) { logAndSwallow(TAG, "confirm fallback", err); }
@@ -309,8 +307,6 @@ export async function handleModelPickerCallback(
       if (activeRa) {
         activeRa.agents[slot] = { ...activeRa.agents[slot]!, model, provider: providerName };
       }
-      const { cleanDemotedModels } = await import("../../components/transport-config.js");
-      cleanDemotedModels(candidate, model);
       const wr = writeTransportConfig(candidate, `${slot} → ${model} (${providerName})`);
       if (!wr.ok) {
         try { await api.sendMessage(chatId, `❌ ${slot} not updated: ${wr.issues.map(i => i.reason).join("; ")}`); } catch (err) { logAndSwallow(TAG, "confirm model fail", err); }
@@ -335,61 +331,6 @@ export async function handleModelPickerCallback(
       if (isMain && !providerChanged && "setModel" in deps.transport) {
         await (deps.transport as unknown as { setModel: (m: string) => Promise<void> }).setModel(model);
         try { await api.sendMessage(chatId, `✓ Switched to ${model}`); } catch (err) { logAndSwallow(TAG, "confirm model switch", err); }
-      } else if (isMain && providerChanged && oldType === newType && "switchProvider" in deps.transport) {
-        try {
-          const { FallbackPolicy } = await import("../../components/transport/fallback-policy.js");
-          const { ModelHealthRegistry } = await import("../../components/transport/model-health-registry.js");
-          const { buildCandidates, resolveCandidateAuth } = await import("../../components/transport/model-candidates.js");
-          // #1757: shared auth resolution; the legacy API_KEY default is
-          // preserved as the inherit key for keyless providers.
-          const newAuth = resolveCandidateAuth(
-            newResolved!.provider,
-            (name) => getEnv().getApiKey(name),
-            getEnv().getApiKey(newResolved!.provider.apiKeyEnv ?? "API_KEY"),
-          );
-          const apiKey = newAuth.apiKey;
-          // #1418: build candidates through the shared builder so each carries its
-          // complete identity tuple (provider/endpoint/apiKey/maxContext).
-          const route = tc.activeRoute;
-          const tcRa = tc.routes[route];
-          const fallbackCandidates = (tcRa?.fallbacks ?? []).map(fb => {
-            const tcWithFb = tcRa ? { ...tc, routes: { ...tc.routes, [route]: { agents: { ...tcRa.agents, _fb: { model: fb.model, provider: fb.provider } }, fallbacks: tcRa.fallbacks } } } : tc;
-            const fbRes = resolveAgent("_fb", tcWithFb);
-            const fbAuth = resolveCandidateAuth(fbRes?.provider ?? {}, (name) => getEnv().getApiKey(name), apiKey);
-            return {
-              model: fb.model,
-              provider: fb.provider,
-              endpoint: fbRes?.provider.endpoint ?? newResolved!.provider.endpoint!,
-              apiKey: fbAuth.apiKey,
-              authSource: fbAuth.authSource,
-              maxContext: fbRes?.contextWindow ?? newResolved!.contextWindow,
-              cacheRetention: fbRes?.provider.cacheRetention ?? "short",
-              apiFormat: fbRes?.provider.apiFormat,
-              thinking: fbRes?.provider.thinking,
-              source: "agent_fallback" as const,
-            };
-          });
-          const candidates = buildCandidates({
-            role: "main",
-            configured: {
-              model, provider: providerName, endpoint: newResolved!.provider.endpoint!, apiKey,
-              authSource: newAuth.authSource,
-              maxContext: newResolved!.contextWindow,
-              cacheRetention: newResolved!.provider.cacheRetention ?? "short",
-              apiFormat: newResolved!.provider.apiFormat,
-              thinking: newResolved!.provider.thinking,
-              source: "primary",
-            },
-            fallbacks: fallbackCandidates,
-          });
-          const registry = (deps.transport as unknown as { policy?: { registry: InstanceType<typeof ModelHealthRegistry> } }).policy?.registry ?? new ModelHealthRegistry();
-          const policy = new FallbackPolicy(candidates, registry);
-          (deps.transport as unknown as { switchProvider: (o: unknown) => void }).switchProvider({ provider: providerName, endpoint: newResolved!.provider.endpoint!, apiKey, model, maxContext: newResolved!.contextWindow, policy });
-        } catch (err) {
-          await api.sendMessage(chatId, `⚠️ Hot swap failed: ${err instanceof Error ? err.message : String(err)}. Use /reset to apply.`);
-          return;
-        }
-        try { await api.sendMessage(chatId, `✓ Switched to ${model} (${providerName})`); } catch (err) { logAndSwallow(TAG, "sendMessage model switch confirm", err); }
       } else if (isMain && providerChanged) {
         const cascadeNote = oldType !== newType ? " Subagents also reset." : "";
         try {

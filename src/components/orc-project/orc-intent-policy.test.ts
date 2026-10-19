@@ -20,8 +20,6 @@ let runStoreMod: typeof import("./orc-project-run-store.js");
 let toolRegistry: typeof import("../transport/tool-registry.js");
 let piCoreToolsMod: typeof import("../transport/pi-core-tools.js");
 let piCoreSafetyMod: typeof import("../transport/pi-core-safety.js");
-let fallbackPolicyMod: typeof import("../transport/fallback-policy.js");
-let healthRegistryMod: typeof import("../transport/model-health-registry.js");
 
 beforeAll(async () => {
   vi.resetModules();
@@ -36,8 +34,6 @@ beforeAll(async () => {
   toolRegistry = await import("../transport/tool-registry.js");
   piCoreToolsMod = await import("../transport/pi-core-tools.js");
   piCoreSafetyMod = await import("../transport/pi-core-safety.js");
-  fallbackPolicyMod = await import("../transport/fallback-policy.js");
-  healthRegistryMod = await import("../transport/model-health-registry.js");
 }, 30_000);
 
 afterAll(() => {
@@ -63,7 +59,7 @@ function makeOrcContext(overrides: Partial<import("./orc-project-contracts.js").
 }
 
 function makeSafety() {
-  return piCoreSafetyMod.createPiExecutionSafetyController(new fallbackPolicyMod.FallbackPolicy([] as never, new healthRegistryMod.ModelHealthRegistry()), undefined);
+  return piCoreSafetyMod.createPiExecutionSafetyController(undefined);
 }
 
 describe("#1680 intent policy rows (#1792: operator_turn only)", () => {

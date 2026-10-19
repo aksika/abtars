@@ -185,29 +185,23 @@ describe("SubagentRuntime", () => {
   });
 });
 
-describe("SubagentRuntime shared registry", () => {
-  it("passes registry to createSubagentTransport when set", async () => {
-    const { ModelHealthRegistry } = await import("./transport/model-health-registry.js");
-    const registry = new ModelHealthRegistry();
+describe("SubagentRuntime composed holders", () => {
+  it("forwards holders to createSubagentTransport", async () => {
     const runtime = new SubagentRuntime();
-    runtime.setRegistry(registry);
 
     mockSendPrompt.mockResolvedValueOnce("ok");
     await runtime.complete("dreamy", "test");
 
     const { createSubagentTransport } = await import("./agent-registry.js");
-    // #1527: the late-bound durable context provider holder is the 4th arg;
-    // #1552: the memory-tool deps holder is the 5th.
+    // #1527: the late-bound durable context provider holder is the 2nd arg;
+    // #1552: the memory-tool deps holder is the 3rd.
     // --- the transport factory's trailing workingDir override (#1807) is
-    // undefined here; the assertion pins forwarding of the first six args.
-    expect(createSubagentTransport).toHaveBeenCalledWith("sleep", registry, null, { current: null }, { current: null }, undefined, undefined);
+    // undefined here; the assertion pins forwarding of the first args.
+    expect(createSubagentTransport).toHaveBeenCalledWith("sleep", { current: null }, { current: null }, undefined, undefined);
   });
 
   it("forwards the composed durable context provider holder to lazy transports (#1527)", async () => {
-    const { ModelHealthRegistry } = await import("./transport/model-health-registry.js");
-    const registry = new ModelHealthRegistry();
     const runtime = new SubagentRuntime();
-    runtime.setRegistry(registry);
 
     const holder = { current: { projectContext: () => Promise.resolve({ messages: [], estimatedTokens: 0, sourceMessageCount: 0 }) } };
     runtime.setContextProvider(holder);
@@ -218,7 +212,7 @@ describe("SubagentRuntime shared registry", () => {
     await runtime.complete("dreamy", "test");
 
     const { createSubagentTransport } = await import("./agent-registry.js");
-    expect(createSubagentTransport).toHaveBeenCalledWith("sleep", registry, null, holder, memoryDepsHolder, undefined, undefined);
+    expect(createSubagentTransport).toHaveBeenCalledWith("sleep", holder, memoryDepsHolder, undefined, undefined);
   });
 
   it("#1611: a persistent session rejects conflicting candidate-policy reuse — never broadens configured-only", async () => {

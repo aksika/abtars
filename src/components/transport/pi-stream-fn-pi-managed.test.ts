@@ -3,17 +3,19 @@
  * candidates (#1757).
  *
  * Proves Pi-managed candidates route through the Pi runtime (never the
- * abtars-keyed adapter path) and that Pi credential-absence failures record
- * auth-kind — sticky skip, the demote path — instead of transient.
+ * abtars-keyed adapter path) and that Pi credential-absence failures are
+ * observed in the availability memo as provider-wide auth evidence.
  */
 
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import type { Model, Api, AssistantMessageEvent } from "@earendil-works/pi-ai";
 import { normalizeContext } from "@earendil-works/pi-ai";
+import { mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { createPiStreamFn } from "./pi-stream-fn.js";
-import { FallbackPolicy } from "./fallback-policy.js";
-import { ModelHealthRegistry } from "./model-health-registry.js";
 import type { ModelCandidate } from "./model-candidates.js";
+import { loadAvailabilityMemo } from "../pi-session/provider-availability-memo.js";
 import { streamPiManaged } from "./pi-runtime.js";
 import { createPiAiAssistantStream } from "./pi-ai-adapter.js";
 
@@ -104,18 +106,14 @@ async function consume(stream: AsyncIterable<AssistantMessageEvent>): Promise<As
 }
 
 describe("pi-stream-fn → Pi-managed dispatch (#1757)", () => {
-  let registry: ModelHealthRegistry;
-
   beforeEach(() => {
-    registry = new ModelHealthRegistry();
     vi.mocked(streamPiManaged).mockReset();
     vi.mocked(createPiAiAssistantStream).mockReset();
   });
 
   it("routes Pi-managed candidates through the Pi runtime, never the keyed adapter", async () => {
     vi.mocked(streamPiManaged).mockResolvedValue(fakeStream([doneEvent()]) as never);
-    const policy = new FallbackPolicy([makeCandidate()], registry);
-    const streamFn = createPiStreamFn({ policy, executionId: "pi-1" });
+    const streamFn = createPiStreamFn({ candidate: makeCandidate(), executionId: "pi-1" });
     const events = await consume(await streamFn(makeModel(), normalizeContext({ messages: [] }), {}));
     expect(events.at(-1)?.type).toBe("done");
     expect(vi.mocked(streamPiManaged)).toHaveBeenCalledTimes(1);
@@ -128,14 +126,19 @@ describe("pi-stream-fn → Pi-managed dispatch (#1757)", () => {
     expect(options).not.toHaveProperty("apiKey");
   });
 
-  it("records Pi credential-absence as auth-kind (sticky skip)", async () => {
+  it("observes Pi credential-absence as provider-wide auth evidence", async () => {
     vi.mocked(streamPiManaged).mockResolvedValue(fakeStream([authErrorEvent()]) as never);
-    const policy = new FallbackPolicy([makeCandidate()], registry);
-    const streamFn = createPiStreamFn({ policy, executionId: "pi-2" });
+    const stateDir = mkdtempSync(join(tmpdir(), "pi-managed-memo-"));
+    const streamFn = createPiStreamFn({ candidate: makeCandidate(), executionId: "pi-2", memoStateDir: stateDir });
     const events = await consume(await streamFn(makeModel(), normalizeContext({ messages: [] }), {}));
     expect(events.at(-1)?.type).toBe("error");
-    expect(registry.shouldSkip("m", "https://pi.test/v1")).toBe(true);
     expect(vi.mocked(createPiAiAssistantStream)).not.toHaveBeenCalled();
+    const entries = loadAvailabilityMemo(stateDir).entries;
+    expect(entries).toHaveLength(1);
+    expect(entries[0]).toMatchObject({ provider: "piman", reason: "auth" });
+    // Auth evidence is provider-wide, never model-scoped.
+    expect(entries[0]).not.toHaveProperty("modelScope");
+    expect(entries[0]).not.toHaveProperty("endpoint");
   });
 
   it("keyed candidates still use the adapter path", async () => {
@@ -144,8 +147,7 @@ describe("pi-stream-fn → Pi-managed dispatch (#1757)", () => {
       pi: { createProvider: vi.fn(), isContextOverflow: () => false },
     } as never);
     const keyed: ModelCandidate = { ...makeCandidate(), authSource: undefined, apiKey: "k" };
-    const policy = new FallbackPolicy([keyed], registry);
-    const streamFn = createPiStreamFn({ policy, executionId: "pi-3" });
+    const streamFn = createPiStreamFn({ candidate: keyed, executionId: "pi-3" });
     const events = await consume(await streamFn(makeModel(), normalizeContext({ messages: [] }), {}));
     expect(events.at(-1)?.type).toBe("done");
     expect(vi.mocked(streamPiManaged)).not.toHaveBeenCalled();
