@@ -455,6 +455,8 @@ export class PiCoreExecutionHost {
     if (this.settled) return;
     this.settled = true;
     this.state = "settled";
+    // #1932: no request may be admitted after settlement either.
+    this.soulGate.cancel();
 
     // #1531: a host that settles before ever running must reject the
     // native-steering readiness promise so waiting steer() calls fail

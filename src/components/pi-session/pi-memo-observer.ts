@@ -40,8 +40,10 @@ export interface PiMemoClassification {
 
 /**
  * Write-only observation at the Pi boundary, called after Pi's bounded
- * recovery has failed. Records nothing for non-memoizable kinds. Changes
- * no admission behavior: enforcement arrives with the Stage 3 cutover.
+ * recovery has failed. Records nothing for non-memoizable kinds. Auth and
+ * account-limit evidence is provider-wide within the auth namespace (it is
+ * not model-specific); rate limits and temporary failures stay scoped to the
+ * exact endpoint/model. Changes no admission behavior by itself.
  */
 export function recordPiMemoObservation(
   stateDir: string,
@@ -51,12 +53,14 @@ export function recordPiMemoObservation(
 ): boolean {
   const memoKind = memoKindForErrorKind(classification.kind);
   if (memoKind === null) return false;
+  const providerWide = memoKind === "auth" || memoKind === "account-limit";
   const loaded = loadAvailabilityMemo(stateDir);
   const updated = observePiFailure(loaded.entries, {
     authNamespace: target.authNamespace,
     provider: target.provider,
-    endpoint: target.endpoint,
-    modelScope: target.modelScope,
+    ...(providerWide
+      ? {}
+      : { endpoint: target.endpoint, modelScope: target.modelScope }),
     kind: memoKind,
     observedAt,
     retryAfterMs: classification.retryAfterMs,

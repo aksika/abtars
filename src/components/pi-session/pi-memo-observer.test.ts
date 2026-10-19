@@ -28,6 +28,16 @@ describe("pi-memo-observer", () => {
     expect(loaded.entries[0]).toMatchObject({ reason: "rate-limit", observedAt: 5000, unusableUntil: 6000 });
   });
 
+  it("scopes auth and account-limit evidence provider-wide, not per model", () => {
+    const stateDir = mkdtempSync(join(tmpdir(), "pi-memo-obs-"));
+    recordPiMemoObservation(stateDir, { ...TARGET, endpoint: "https://a/v1", modelScope: "m1" }, { kind: "auth" }, 5000);
+    const loaded = loadAvailabilityMemo(stateDir);
+    expect(loaded.entries).toHaveLength(1);
+    expect(loaded.entries[0]).toMatchObject({ reason: "auth", observedAt: 5000 });
+    expect(loaded.entries[0]?.endpoint).toBeUndefined();
+    expect(loaded.entries[0]?.modelScope).toBeUndefined();
+  });
+
   it("ignores overflow and model-behavior failures entirely", () => {
     const stateDir = mkdtempSync(join(tmpdir(), "pi-memo-obs-"));
     const recorded = recordPiMemoObservation(stateDir, TARGET, { kind: "context_exceeded" }, 5000);

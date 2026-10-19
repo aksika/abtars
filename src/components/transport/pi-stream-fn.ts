@@ -471,6 +471,8 @@ export function createPiStreamFn(options: AbtarsPiStreamFnOptions): StreamFn {
                   const kept = applyMemoSuccess(loaded.entries, {
                     authNamespace: `${candidate.authSource ?? "abtars"}:${candidate.provider}`,
                     provider: candidate.provider,
+                    endpoint: candidate.endpoint,
+                    modelScope: candidate.model,
                     admittedAt: attemptAdmittedAt,
                   });
                   if (kept.length !== loaded.entries.length) {

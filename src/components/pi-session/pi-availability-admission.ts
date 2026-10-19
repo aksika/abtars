@@ -77,6 +77,17 @@ export function observePiFailure(
   };
   if (observation.endpoint !== undefined) next.endpoint = observation.endpoint;
   if (observation.modelScope !== undefined) next.modelScope = observation.modelScope;
-  const rest = entries.filter((entry) => !memoScopeMatches(entry, observation));
+  // Replace only the exact same scope. A narrower observation must not erase
+  // wider namespace/provider evidence, and vice versa: dropping either would
+  // release selections the evidence still covers.
+  const rest = entries.filter(
+    (entry) =>
+      !(
+        entry.authNamespace === observation.authNamespace &&
+        entry.provider === observation.provider &&
+        entry.endpoint === observation.endpoint &&
+        entry.modelScope === observation.modelScope
+      ),
+  );
   return [...rest, next];
 }

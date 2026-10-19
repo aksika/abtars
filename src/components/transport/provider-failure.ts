@@ -32,6 +32,10 @@ export interface ProviderTerminalFailure {
   attemptedCandidates: number;
   /** Stable, non-secret, provider-neutral display text. */
   message: string;
+  /** #1932: earliest time the availability memo admits dispatch again.
+   *  Present only for provider_unavailable; consumers may schedule a bounded
+   *  retry at or after this instant instead of inventing a backoff. */
+  retryAt?: number;
 }
 
 export class ProviderExecutionError extends Error {
@@ -68,6 +72,6 @@ export function isAllCandidatesFailed(err: unknown): boolean {
 /** #1932: every allowed selection is inside its availability cooldown.
  * Distinct from all_candidates_failed: no provider request was sent —
  * dispatch was suppressed before the boundary. */
-export function isProviderUnavailable(err: unknown): boolean {
+export function isProviderUnavailable(err: unknown): err is ProviderExecutionError {
   return isProviderExecutionError(err) && err.failure.code === "provider_unavailable";
 }

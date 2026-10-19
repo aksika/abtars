@@ -346,7 +346,7 @@ export function bindPiObservers(
 // ── Owned-conversation registry, retention, and erasure ──
 
 interface PiConversationRecord {
-  sessionDir: string;
+  sessionDir: string | null;
   canonicalFile: string | null;
   principal: string;
   platform: string;
@@ -355,6 +355,9 @@ interface PiConversationRecord {
   predecessorId?: string;
   endedAt?: number;
   reseed?: PiReseedProgress;
+  /** Set by retention/erasure: the files are gone but ownership must stay
+   *  pinned so the same ID can never be reopened by another principal. */
+  erasedAt?: number;
 }
 
 export interface PiReseedProgress {
@@ -404,22 +407,46 @@ function assertOwnerClear(stateRoot: string, binding: PiConversationBinding): vo
   const registry = loadRegistry(stateRoot);
   const record = registry.conversations[binding.conversationId];
   if (!record) return;
-  if (record.principal !== binding.principal || record.platform !== binding.platform || record.role !== binding.role) {
-    throw new Error("conversation id is owned by a different principal or role");
+  if (record.erasedAt !== undefined) {
+    throw new Error("conversation id was erased and cannot be reused");
+  }
+  if (
+    record.principal !== binding.principal ||
+    record.platform !== binding.platform ||
+    record.role !== binding.role ||
+    record.canonicalWorkspace !== binding.canonicalWorkspace
+  ) {
+    throw new Error("conversation id is owned by a different principal, role, or workspace");
   }
 }
 
+/**
+ * Register or refresh an owned conversation. Preserves reseed progress and
+ * retention state: reopening a conversation must never erase the seed
+ * boundary that makes reconstruction idempotent. Skips the disk write when
+ * nothing changed so per-turn opens stay read-only.
+ */
 function registerConversation(stateRoot: string, binding: PiConversationBinding, canonicalFile: string | null): void {
   const registry = loadRegistry(stateRoot);
-  registry.conversations[binding.conversationId] = {
+  const existing = registry.conversations[binding.conversationId];
+  const next: PiConversationRecord = {
     sessionDir: binding.sessionDir,
     canonicalFile,
     principal: binding.principal,
     platform: binding.platform,
     role: binding.role,
     canonicalWorkspace: binding.canonicalWorkspace,
-    predecessorId: binding.predecessorId,
+    ...(binding.predecessorId !== undefined
+      ? { predecessorId: binding.predecessorId }
+      : existing?.predecessorId !== undefined
+        ? { predecessorId: existing.predecessorId }
+        : {}),
+    ...(existing?.endedAt !== undefined ? { endedAt: existing.endedAt } : {}),
+    ...(existing?.reseed !== undefined ? { reseed: existing.reseed } : {}),
+    ...(existing?.erasedAt !== undefined ? { erasedAt: existing.erasedAt } : {}),
   };
+  if (existing !== undefined && JSON.stringify(existing) === JSON.stringify(next)) return;
+  registry.conversations[binding.conversationId] = next;
   saveRegistry(stateRoot, registry);
 }
 
@@ -453,11 +480,7 @@ export function savePiReseedProgress(stateRoot: string, conversationId: string, 
 
 /** Minimal structural append surface of a Pi SessionManager instance. */
 export interface PiArchiveSeedTarget {
-  appendMessage(message: {
-    role: "user" | "assistant";
-    content: Array<{ type: "text"; text: string }>;
-    timestamp: number;
-  }): string;
+  appendMessage(message: import("@earendil-works/pi-ai").Message): string;
 }
 
 export interface PiSeedMessageInput {
@@ -466,19 +489,42 @@ export interface PiSeedMessageInput {
   timestamp: number;
 }
 
+function seedUsage(): import("@earendil-works/pi-ai").Usage {
+  return {
+    input: 0,
+    output: 0,
+    cacheRead: 0,
+    cacheWrite: 0,
+    totalTokens: 0,
+    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+  };
+}
+
 /**
  * Wrap a Pi SessionManager instance as a reconstruction seed writer.
  * Archive context enters as ordinary user/assistant turns through the
- * public append API; no private entry rewriting, no tool replay.
+ * public append API; no private entry rewriting, no tool replay. Seeded
+ * assistant turns carry zero usage and a synthetic provider identity —
+ * they are history, not billable or attributable model output.
  */
 export function seedWriterForSessionManager(instance: PiArchiveSeedTarget): {
   appendSeed: (message: PiSeedMessageInput) => void;
 } {
   return {
     appendSeed: (message: PiSeedMessageInput) => {
+      const content = [{ type: "text" as const, text: message.text }];
+      if (message.role === "user") {
+        instance.appendMessage({ role: "user", content, timestamp: message.timestamp });
+        return;
+      }
       instance.appendMessage({
-        role: message.role,
-        content: [{ type: "text", text: message.text }],
+        role: "assistant",
+        content,
+        api: "openai-completions",
+        provider: "abmind",
+        model: "historical",
+        usage: seedUsage(),
+        stopReason: "stop",
         timestamp: message.timestamp,
       });
     },
@@ -527,7 +573,14 @@ export function sweepPiRetention(
     }
     removeOwnedFiles(record.canonicalFile);
     removed.push(conversationId);
-    delete registry.conversations[conversationId];
+    // Keep a content-free ownership tombstone: the ID must never be
+    // reopened by another principal, and the record carries no paths.
+    registry.conversations[conversationId] = {
+      ...record,
+      sessionDir: null,
+      canonicalFile: null,
+      erasedAt: now,
+    };
     changed = true;
   }
   if (changed) saveRegistry(stateRoot, registry);
@@ -559,6 +612,9 @@ export function erasePiConversation(stateRoot: string, conversationId: string): 
   const registry = loadRegistry(stateRoot);
   const record = registry.conversations[conversationId];
   if (!record) return { removedFiles: [] };
+  if (record.erasedAt !== undefined && record.canonicalFile === null) {
+    return { removedFiles: [] };
+  }
   if (record.canonicalFile !== null && !record.canonicalFile.startsWith(join(stateRoot, ""))) {
     throw new Error("refusing to erase a conversation outside the owned root");
   }
@@ -575,7 +631,14 @@ export function erasePiConversation(stateRoot: string, conversationId: string): 
       }
     }
   }
-  delete registry.conversations[conversationId];
+  // Keep a content-free ownership tombstone rather than dropping the record:
+  // the ID stays pinned to its owner and cannot be reopened elsewhere.
+  registry.conversations[conversationId] = {
+    ...record,
+    sessionDir: null,
+    canonicalFile: null,
+    erasedAt: Date.now(),
+  };
   saveRegistry(stateRoot, registry);
   return { removedFiles };
 }

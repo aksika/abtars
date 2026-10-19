@@ -69,6 +69,19 @@ describe("provider-availability-memo", () => {
     expect(kept).toEqual([newer]);
   });
 
+  it("does not clear another model's scoped cooldown on success", () => {
+    const thisModel = entry({ endpoint: "https://a/v1", modelScope: "m1", observedAt: 1000, unusableUntil: 2000 });
+    const otherModel = entry({ endpoint: "https://a/v1", modelScope: "m2", observedAt: 1000, unusableUntil: 2000 });
+    const kept = applyMemoSuccess([thisModel, otherModel], {
+      authNamespace: "pi:openai",
+      provider: "openai",
+      endpoint: "https://a/v1",
+      modelScope: "m1",
+      admittedAt: 1200,
+    });
+    expect(kept).toEqual([otherModel]);
+  });
+
   it("clears a namespace on explicit reset without touching others", () => {
     const kept = clearMemoNamespace([entry(), entry({ authNamespace: "pi:other", provider: "openai" })], "pi:openai");
     expect(kept).toHaveLength(1);

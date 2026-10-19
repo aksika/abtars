@@ -58,6 +58,7 @@ export const PI_RECONSTRUCTION_LOSSES: readonly string[] = [
   "unacknowledged crash-window output",
 ] as const;
 
+/** In-memory store for tests and single-process reconstructions. */
 export function memoryReconstructionStore(): PiReconstructionStore & { entries: Map<string, PiReconstructionProgress> } {
   const entries = new Map<string, PiReconstructionProgress>();
   return {
@@ -68,7 +69,6 @@ export function memoryReconstructionStore(): PiReconstructionStore & { entries: 
     },
   };
 }
-
 /**
  * Seed the successor from authorized archive context, then admit the
  * current input once. Skips already-seeded prefixes and already-admitted

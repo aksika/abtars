@@ -428,6 +428,7 @@ export class PiCoreTransport implements IKiroTransport {
             retryable: false,
             attemptedCandidates: this.config.candidates.length,
             message: `All configured providers are cooling down; retry after ${new Date(memoVerdict.retryAt).toISOString()}`,
+            retryAt: memoVerdict.retryAt,
           });
         }
       }

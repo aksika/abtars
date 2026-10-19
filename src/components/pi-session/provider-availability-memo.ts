@@ -134,21 +134,30 @@ export function saveAvailabilityMemo(stateDir: string, entries: ProviderAvailabi
 
 /**
  * A success clears only applicable observations that are not newer than
- * that attempt's admission and belong to the same auth namespace. Stale
- * completions cannot clear a newer failure.
+ * that attempt's admission and belong to the same auth namespace. "Applicable"
+ * means namespace/provider-wide evidence, or evidence for the exact endpoint
+ * and model that succeeded: a success on one model never clears another
+ * model's cooldown, and stale completions cannot clear a newer failure.
  */
 export function applyMemoSuccess(
   entries: ProviderAvailabilityEntry[],
-  success: { authNamespace: string; provider: string; admittedAt: number },
+  success: {
+    authNamespace: string;
+    provider: string;
+    endpoint?: string;
+    modelScope?: string;
+    admittedAt: number;
+  },
 ): ProviderAvailabilityEntry[] {
-  return entries.filter(
-    (entry) =>
-      !(
-        entry.authNamespace === success.authNamespace &&
-        entry.provider === success.provider &&
-        entry.observedAt <= success.admittedAt
-      ),
-  );
+  return entries.filter((entry) => {
+    if (entry.authNamespace !== success.authNamespace) return true;
+    if (entry.provider !== success.provider) return true;
+    if (entry.observedAt > success.admittedAt) return true;
+    const wide = entry.endpoint === undefined && entry.modelScope === undefined;
+    const exact =
+      entry.endpoint === success.endpoint && entry.modelScope === success.modelScope;
+    return !(wide || exact);
+  });
 }
 
 /** Explicit selection/reset and auth-source changes clear the namespace. */

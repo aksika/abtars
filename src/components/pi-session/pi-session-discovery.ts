@@ -16,15 +16,22 @@ export async function loadPiSessionManager(): Promise<PiSessionManagerCtor | nul
     return null;
   }
   try {
-    const mod = await loadPiModule<{ SessionManager?: PiSessionManagerCtor }>(
+    const mod = await loadPiModule<{ SessionManager?: unknown }>(
       resolved.installation,
       { package: "@earendil-works/pi-coding-agent" },
     );
-    if (!mod.SessionManager) {
-      logWarn(TAG, "Pi coding-agent root has no SessionManager — Pi-owned sessions cannot open");
+    const candidate = mod.SessionManager as Partial<PiSessionManagerCtor> | undefined;
+    if (
+      !candidate ||
+      typeof candidate.create !== "function" ||
+      typeof candidate.open !== "function" ||
+      typeof candidate.findById !== "function" ||
+      typeof candidate.forkFrom !== "function"
+    ) {
+      logWarn(TAG, "Pi coding-agent root has no usable SessionManager surface — Pi-owned sessions cannot open");
       return null;
     }
-    return mod.SessionManager;
+    return candidate as PiSessionManagerCtor;
   } catch (err) {
     logWarn(TAG, `Pi SessionManager load failed: ${err instanceof Error ? err.message : String(err)}`);
     return null;

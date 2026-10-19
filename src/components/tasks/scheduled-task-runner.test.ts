@@ -712,13 +712,15 @@ describe("ScheduledTaskRunner #1297 credits_exhausted mapping", () => {
     expect(settleCall.diagnostic?.retryability).toBe("none");
   });
 
-  it("#1932: provider_unavailable settles visibly as failed with no retry", async () => {
+  it("#1932: provider_unavailable settles visibly as failed with a bounded retry time", async () => {
+    const retryAt = Date.now() + 60_000;
     const agentRunner = vi.fn(async () => {
       throw new ProviderExecutionError({
         code: "provider_unavailable",
         retryable: false,
         attemptedCandidates: 2,
         message: "All configured providers are cooling down",
+        retryAt,
       });
     });
     const runner = new ScheduledTaskRunner({ agentRunner });
@@ -731,11 +733,11 @@ describe("ScheduledTaskRunner #1297 credits_exhausted mapping", () => {
       diagnostic: expect.objectContaining({
         category: "execution",
         code: "provider_unavailable",
-        retryability: "none",
+        retryability: "transient",
       }),
     }));
     const settleCall = mockedSettle.mock.calls[0]![0];
-    expect(settleCall["retryAt"]).toBeUndefined();
+    expect(settleCall["retryAt"]).toBeGreaterThan(Date.now());
   });
 
   it("keeps generic mapping for ordinary model errors (no typed provider failure)", async () => {

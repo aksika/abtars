@@ -11,7 +11,7 @@ import { cleanResponse, extractSupportIds, SUPPORT_STRIP_RE } from "./clean-resp
 import { loadUsers } from "./user-registry.js";
 import { ModelNotFoundError } from "./transport/acp-transport.js";
 import { DurableContextUnavailableError } from "./transport/pi-core-context.js";
-import { isContextOverflowFailure } from "./transport/provider-failure.js";
+import { isContextOverflowFailure, isProviderUnavailable } from "./transport/provider-failure.js";
 import type { SttConfig } from "./stt.js";
 import { synthesizeSpeech, type TtsConfig } from "./tts.js";
 import { attemptMemoryMutation } from "./memory-runtime.js";
@@ -978,8 +978,16 @@ export async function handleInboundMessage(
       // bounded, stable response. No session reset, no candidate-health impact.
       logWarn(TAG, `Durable context unavailable for ${activeSessionId} (${err.reason}) — failing closed`);
       if (notifyUser) await adapter.sendMessage(channelId, "Memory context is temporarily unavailable. Please retry.", { threadId: msg.threadId }).catch(err => logAndSwallow(TAG, "adapter call", err));
-    } else {
-      logError(TAG, `Pipeline error: ${errStr.slice(0, 500)}`);
+    } else if (isProviderUnavailable(err)) {
+      // #1932: bounded reason with the memo's retry time; no session reset
+      // and no health impact — the provider's own state decides.
+      const retryAt = err.failure.retryAt;
+      logWarn(TAG, `Provider unavailable for ${activeSessionId} — retry after ${retryAt ? new Date(retryAt).toISOString() : "unknown"}`);
+      if (notifyUser) {
+        const retryText = retryAt ? ` Retry after ${new Date(retryAt).toISOString()}.` : "";
+        await adapter.sendMessage(channelId, `Providers are cooling down.${retryText}`, { threadId: msg.threadId }).catch(err => logAndSwallow(TAG, "adapter call", err));
+      }
+    } else {      logError(TAG, `Pipeline error: ${errStr.slice(0, 500)}`);
       const reason = errStr.includes("credits") ? "OpenRouter credits exhausted — top up at openrouter.ai/credits"
         : errStr.includes("rate") || errStr.includes("429") ? "Rate limited."
         : errStr.includes("auth") || errStr.includes("401") || errStr.includes("403") ? "Authentication failed."

@@ -178,11 +178,11 @@ describe("pi-session-adapter", () => {
       { ...bindingParams(workspace), principal: "user-2" },
     );
     const hijackPrincipal = { ...otherPrincipal, conversationId: binding.conversationId };
-    expect(() => openPiConversation(manager, stateRoot, hijackPrincipal)).toThrow(/different principal or role/);
+    expect(() => openPiConversation(manager, stateRoot, hijackPrincipal)).toThrow(/different principal, role, or workspace/);
 
     const otherRole = allocatePiBinding(stateRoot, { ...bindingParams(workspace), role: "main" });
     const hijackRole = { ...otherRole, conversationId: binding.conversationId };
-    expect(() => openPiConversation(manager, stateRoot, hijackRole)).toThrow(/different principal or role/);
+    expect(() => openPiConversation(manager, stateRoot, hijackRole)).toThrow(/different principal, role, or workspace/);
   });
 
   it("denies forks that reuse an id owned by another principal", () => {
@@ -201,7 +201,7 @@ describe("pi-session-adapter", () => {
       conversationId: taken.conversationId,
       predecessorId: source.binding.conversationId,
     };
-    expect(() => forkPiConversation(manager, stateRoot, source, rogue)).toThrow(/different principal or role/);
+    expect(() => forkPiConversation(manager, stateRoot, source, rogue)).toThrow(/different principal, role, or workspace/);
   });
 
   it("forks flushed history only through a preallocated successor", () => {
@@ -331,7 +331,7 @@ describe("pi-session-adapter", () => {
   });
 
   it("seeds archive context as ordinary turns through the public append API", () => {
-    const appended: Array<{ role: string; content: Array<{ text: string }>; timestamp: number }> = [];
+    const appended: Array<{ role: string; content: unknown; timestamp: number }> = [];
     const writer = seedWriterForSessionManager({
       appendMessage: (message) => {
         appended.push({ role: message.role, content: message.content, timestamp: message.timestamp });
@@ -339,7 +339,52 @@ describe("pi-session-adapter", () => {
       },
     });
     writer.appendSeed({ role: "user", text: "seed", timestamp: 7 });
-    expect(appended).toEqual([{ role: "user", content: [{ type: "text", text: "seed" }], timestamp: 7 }]);
+    writer.appendSeed({ role: "assistant", text: "answer", timestamp: 8 });
+    expect(appended).toEqual([
+      { role: "user", content: [{ type: "text", text: "seed" }], timestamp: 7 },
+      { role: "assistant", content: [{ type: "text", text: "answer" }], timestamp: 8 },
+    ]);
+    const assistant = appended[1] as { role: string; timestamp: number };
+    expect(assistant.role).toBe("assistant");
+  });
+
+  it("preserves reconstruction progress across reopen", () => {
+    const state = mkdtempSync(join(tmpdir(), "pi-state-"));
+    const ws = mkdtempSync(join(tmpdir(), "pi-ws-"));
+    const { manager } = makeSessionManager();
+    const binding = allocatePiBinding(state, bindingParams(ws));
+    openPiConversation(manager, state, binding);
+    savePiReseedProgress(state, binding.conversationId, { seeded: 2, currentAdmitted: true });
+
+    openPiConversation(manager, state, binding);
+    expect(loadPiReseedProgress(state, binding.conversationId)).toEqual({ seeded: 2, currentAdmitted: true });
+  });
+
+  it("keeps an ownership tombstone after erasure so the id cannot be reused", () => {
+    const state = mkdtempSync(join(tmpdir(), "pi-state-"));
+    const ws = mkdtempSync(join(tmpdir(), "pi-ws-"));
+    const { manager } = makeSessionManager();
+    const binding = allocatePiBinding(state, bindingParams(ws));
+    openPiConversation(manager, state, binding);
+    erasePiConversation(state, binding.conversationId);
+
+    expect(() => openPiConversation(manager, state, binding)).toThrow(/erased/);
+    const otherPrincipal = { ...bindingParams(ws), principal: "user-2" };
+    const hijack = { ...allocatePiBinding(state, otherPrincipal), conversationId: binding.conversationId };
+    expect(() => openPiConversation(manager, state, hijack)).toThrow(/erased/);
+  });
+
+  it("denies a workspace mismatch for the same principal and role", () => {
+    const state = mkdtempSync(join(tmpdir(), "pi-state-"));
+    const wsA = mkdtempSync(join(tmpdir(), "pi-ws-"));
+    const wsB = mkdtempSync(join(tmpdir(), "pi-ws-"));
+    const { manager } = makeSessionManager();
+    const binding = allocatePiBinding(state, bindingParams(wsA));
+    openPiConversation(manager, state, binding);
+
+    const otherWorkspace = allocatePiBinding(state, bindingParams(wsB));
+    const hijack = { ...otherWorkspace, conversationId: binding.conversationId };
+    expect(() => openPiConversation(manager, state, hijack)).toThrow(/workspace/);
   });
 
   it("erases owned files without touching standalone sessions", () => {    const root = mkdtempSync(join(tmpdir(), "pi-adapter-"));

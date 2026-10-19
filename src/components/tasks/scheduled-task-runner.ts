@@ -348,10 +348,19 @@ export class ScheduledTaskRunner {
         // settlement. Never classified as a transient model_error.
         if (isProviderExecutionError(error)) {
           const failure = error.failure;
+          // #1932: a cooling-down provider is a bounded availability signal,
+          // not a permanent failure. Use the existing one-delayed-retry
+          // branch with the memo's retry time; the attempt budget still
+          // bounds it and a second failure settles visibly.
+          const cooling = failure.code === "provider_unavailable";
           settleRunOnce({
             entry, run: reservation, outcome: "failed",
-            diagnostic: makeTaskFailure("execution", failure.code, "executing", failure.message, "none"),
+            diagnostic: makeTaskFailure(
+              "execution", failure.code, "executing", failure.message,
+              cooling ? "transient" : "none",
+            ),
             detail: failure.message, cardId, executionRef: runId, onPaused: this.onPaused, onFailure: this.onFailure,
+            ...(cooling && failure.retryAt !== undefined ? { retryAt: failure.retryAt } : {}),
           });
           return { status: "failed", safeDetail: failure.message, ...(cardId !== undefined ? { cardId } : {}) };
         }

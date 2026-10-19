@@ -796,7 +796,7 @@ describe("soul-gate hydration (#1932)", () => {
     } as never;
   }
 
-  function capturingCore() {
+  function capturingCore(): { loaded: LoadedPiAgentCore; captured: Array<Record<string, unknown>>; resolvePrompt: () => void } {
     const captured: Array<Record<string, unknown>> = [];
     let resolvePrompt: (() => void) | null = null;
     const Fake = class {

@@ -91,7 +91,7 @@ describe("pi-session real-SDK proof (R1-R2)", () => {
     expect(attempt3.canonicalFile).toBe(attempt2.canonicalFile);
 
     const hijack = { ...main, conversationId: worker.conversationId };
-    expect(() => openPiConversation(realSessionManager, stateRoot, hijack)).toThrow(/different principal or role/);
+    expect(() => openPiConversation(realSessionManager, stateRoot, hijack)).toThrow(/different principal, role, or workspace/);
   });
 
   it("isolates principals into separate partitions", () => {
