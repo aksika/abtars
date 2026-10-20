@@ -142,12 +142,11 @@ For sleep maintenance:
 ```text
 abmind sleep-state
 abmind sleep-report
-abmind sleep-apply --dry-run
 abmind sleep --level basic|budget|normal|ultimate
 ```
 
-`abmind sleep-apply` and `abmind sleep` may change memory state; run them only
-when requested or when they are part of an explicitly approved maintenance task.
+`abmind sleep` may change memory state; run it only
+when requested or when it is part of an explicitly approved maintenance task.
 
 ## Backup, restore, and encryption
 
