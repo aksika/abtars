@@ -96,11 +96,7 @@ export const busyGuardMiddleware: Middleware = async (ctx, next) => {
     entry.queue.push({ msg, adapter });
     logInfo("busy-guard", `Queued "${ctx.text.slice(0, 40)}" for ${activeId} (${entry.queue.length} pending)`);
     if (!ctx.deferReply) {
-      if (entry.compacting) {
-        try { await adapter.sendMessage(msg.channelId, "☕ Hold on, just tidying up my thoughts over coffee... I'll get to you in a moment!", { threadId: msg.threadId }); }
-        catch { /* */ }
-      }
-      logDebug("busy-guard", `Queue: ${entry.compacting ? "compacting" : `queued (${entry.queue.length})`} for ${activeId}`);
+      logDebug("busy-guard", `Queue: queued (${entry.queue.length}) for ${activeId}`);
     }
     ctx.handled = true;
     return;

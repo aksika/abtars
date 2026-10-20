@@ -101,19 +101,16 @@ export async function phasePiExecutor(ctx: BootCtx): Promise<void> {
     codingService.reconcileOnBoot();
 
     // #1932 R8 — bounded retention sweep over terminal RPC session files,
-    // stale SDK bindings, and aged quarantine. Best-effort and never
+    // and aged quarantine. Best-effort and never
     // throwing: retention must not break boot.
     try {
       const { sweepPiSessionsAtBoot } = await import("../components/pi-executor/pi-session-retention.js");
-      const { abtarsHome } = await import("../paths.js");
-      const { join } = await import("node:path");
       const report = sweepPiSessionsAtBoot({
-        stateDir: join(abtarsHome(), "state"),
         sessionStorageRoot: config.sessionStorageRoot,
         codingStore,
         runStore: store,
       });
-      const pruned = [...report.rpcRemoved, ...report.bindingsPruned, ...report.quarantineRemoved];
+      const pruned = [...report.rpcRemoved, ...report.quarantineRemoved];
       if (pruned.length > 0) logInfo(TAG, `Session retention pruned ${pruned.length} file(s)/record(s)`);
     } catch (err) {
       logWarn(TAG, `Session retention sweep skipped: ${err instanceof Error ? err.message : String(err)}`);

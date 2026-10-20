@@ -1,16 +1,13 @@
 import { describe, it, expect, vi, beforeAll } from "vitest";
-import type {
-  Api, ThinkingLevel, Model, AssistantMessage, AssistantMessageEvent,
-  ProviderStreams, CreateProviderOptions, Provider,
-} from "@earendil-works/pi-ai";
+import type { Api, ThinkingLevel, Model } from "@earendil-works/pi-ai";
 // #1746: pi's authoritative clamp, captured into the runtime slot under test.
 // Test files are exempt from the production import boundary.
 import { clampThinkingLevel } from "@earendil-works/pi-ai";
 
 import {
-  pickPiApi, buildPiModel, buildPiContext, resolveReasoning, resolveCandidateModel,
-  ensurePiThinkingClamp, deriveCacheIdentity,
-  type PiAiCandidate, type PiAiConversation,
+  pickPiApi, buildPiModel, resolveReasoning, resolveCandidateModel,
+  ensurePiThinkingClamp,
+  type PiAiCandidate,
 } from "./pi-ai-adapter.js";
 
 // ── pickPiApi ────────────────────────────────────────────────────────────────
@@ -99,112 +96,6 @@ describe("buildPiModel", () => {
 });
 
 // ── buildPiContext ───────────────────────────────────────────────────────────
-
-describe("buildPiContext", () => {
-  it("collapses system messages into systemPrompt and translates the rest", () => {
-    const conv: PiAiConversation = {
-      messages: [
-        { role: "system", content: "be brief" },
-        { role: "user", content: "hi" },
-        { role: "assistant", content: "hello", tool_calls: [{ id: "t1", type: "function", function: { name: "run", arguments: '{"cmd":"ls"}' } }] },
-        { role: "tool", content: "ok", tool_call_id: "t1", name: "run" },
-      ],
-      tools: [],
-    };
-    const ctx = buildPiContext(conv, "openai-completions", "test-provider");
-    expect(ctx.systemPrompt).toBe("be brief");
-    expect(ctx.messages).toHaveLength(3);
-    expect(ctx.messages[0]!.role).toBe("user");
-    const a = ctx.messages[1]!;
-    expect(a.role).toBe("assistant");
-    if (a.role === "assistant") {
-      expect(a.content[0]).toEqual({ type: "text", text: "hello" });
-      expect(a.content[1]).toEqual({ type: "toolCall", id: "t1", name: "run", arguments: { cmd: "ls" } });
-    }
-    const t = ctx.messages[2]!;
-    expect(t.role).toBe("toolResult");
-    expect(t).toMatchObject({ toolCallId: "t1", toolName: "run", isError: false });
-  });
-
-  it("parses data-URL image parts into pi image content", () => {
-    const conv: PiAiConversation = {
-      messages: [{
-        role: "user",
-        content: [
-          { type: "image_url", image_url: { url: "data:image/png;base64,QUJDRA==" } },
-          { type: "text", text: "what is this" },
-        ],
-      }],
-      tools: [],
-    };
-    const ctx = buildPiContext(conv);
-    const u = ctx.messages[0]!;
-    expect(u.role).toBe("user");
-    expect(Array.isArray(u.content)).toBe(true);
-    if (!Array.isArray(u.content)) throw new Error("expected content parts");
-    expect(u.content[0]).toEqual({ type: "image", data: "QUJDRA==", mimeType: "image/png" });
-  });
-
-  it("maps OpenAI tool schemas to pi Tool shape", () => {
-    const conv: PiAiConversation = {
-      messages: [{ role: "user", content: "hi" }],
-      tools: [{ type: "function", function: { name: "bash", description: "run", parameters: { type: "object" } } }],
-    };
-    expect(buildPiContext(conv).tools).toEqual([{ name: "bash", description: "run", parameters: { type: "object" } }]);
-  });
-});
-
-
-
-// ── deriveCacheIdentity (#1748) ─────────────────────────────────────────────
-
-/*
- * TEST DEFICIENCY (2026-08-30):
- * Missing: a deterministic test proving that `sessionId` improves the
- * provider-side cache-read ratio on a real provider path.
- * Reason deferred: the measured provider path (deepseek/deepseek-v4-flash via
- * openrouter) shows a NULL delta within provider noise — see
- * abproject/specs/1748/measurements.md. Wire-verified, pi-ai 0.84.3 gates
- * `prompt_cache_key` on `baseUrl.includes("api.openai.com")` OR
- * `cacheRetention === "long"` (openai-completions.js), so the plumbed
- * "short" default is a deliberate wire-level no-op on this path, and "long"
- * (which does send prompt_cache_key) produced no benefit on DeepSeek's
- * automatic cache. A unit test here could only assert plumbing, which the
- * transport tests already do.
- * Future verification: the smallest credible path where the effect is
- * observable is an api.openai.com-compatible endpoint (prompt_cache_key gated
- * on retention alone) or an anthropic-messages provider (cacheSessionId feeds
- * cache-control placement). Measure cacheRead before/after there, attributed
- * via `cacheIdentityHash` in cache-telemetry.
- */
-
-describe("deriveCacheIdentity", () => {
-  it("is byte-identical for an identical scope across repeated calls", () => {
-    const scope = "session_alpha";
-    expect(deriveCacheIdentity(scope)).toBe(deriveCacheIdentity(scope));
-  });
-
-  it("differs between two scopes, and still differs after clamping to 64 chars", () => {
-    const a = deriveCacheIdentity("session_alpha");
-    const b = deriveCacheIdentity("session_beta");
-    expect(a).not.toBe(b);
-    expect(a.slice(0, 64)).not.toBe(b.slice(0, 64));
-  });
-
-  it("contains no substring of a user id, chat id, or platform name built into the scope", () => {
-    const scope = "telegram:7773842843:user_alpha";
-    const id = deriveCacheIdentity(scope);
-    for (const needle of ["telegram", "7773842843", "user_alpha", "alpha"]) {
-      expect(id).not.toContain(needle);
-    }
-  });
-
-  it("output length is <= 64 (OPENAI_PROMPT_CACHE_KEY_MAX_LENGTH)", () => {
-    expect(deriveCacheIdentity("x".repeat(5000)).length).toBeLessThanOrEqual(64);
-  });
-});
-
-// ── resolveCandidateModel (#1619) ──────────────────────────────────────────
 
 describe("resolveCandidateModel", () => {
   const candidate = {

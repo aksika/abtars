@@ -1,26 +1,12 @@
 /**
- * pi-runtime.ts — Pi-managed model runtime bridge (#1757).
+ * pi-runtime.ts — Pi-managed auth/model readiness (#1757).
  *
- * Loads Pi's configured model runtime (ModelRuntime from the discovered
- * Pi coding-agent installation) and dispatches explicitly Pi-managed
- * candidates through it. Pi owns endpoint, API format, headers, credential
- * resolution, and refresh on this path; abtars never sees a Pi credential
- * value — only presence-only auth state.
- *
- * Resilience (downward-only, mirrors pi-catalog.ts): every entrypoint is
- * best-effort and never throws for unavailability (null / not-ok readiness).
- * Only genuine auth failures throw, and they carry HTTP 401 so the existing
- * model-health classifier demotes instead of spinning transiently.
+ * Loads Pi's configured model runtime for presence-only readiness checks
+ * (boot model selection, /model, pickers). Provider calls go through the
+ * Pi AgentSession (#1940). abtars never sees a Pi credential value. Every
+ * entrypoint is best-effort and never throws for unavailability.
  */
 
-import type {
-  Api,
-  AssistantMessageEventStream,
-  Context,
-  Model,
-  ProviderHeaders,
-  SimpleStreamOptions,
-} from "@earendil-works/pi-ai";
 import type { ModelRuntime } from "@earendil-works/pi-coding-agent";
 import { logInfo, logWarn } from "../logger.js";
 import { loadPiModule, resolvePiInstallation } from "../pi-installation.js";
@@ -35,31 +21,6 @@ export interface PiManagedReadiness {
   state: PiAuthState;
   /** Actionable, presence-only detail. Never a credential value. */
   detail: string;
-}
-
-/**
- * Auth-kind failure on the Pi-managed path. The `status` field is read by
- * the shared `parseErrorStatus` so `classifyError` maps it to "auth"
- * (sticky failure + auto-demote), never an unhandled daemon crash.
- */
-export class PiManagedAuthError extends Error {
-  readonly status = 401;
-  constructor(message: string) {
-    super(message);
-    this.name = "PiManagedAuthError";
-  }
-}
-
-/**
- * Pi credential-absence phrasings. A terminal carrying one of these means
- * no credential existed to send — definitionally auth-kind, even when the
- * transport surfaced no HTTP status.
- */
-const PI_AUTH_ABSENCE =
-  /no API key for provider|not configured|needs[ -]login|login (required|expired)|invalid API key|incorrect API key|authentication (failed|required|expired)|invalid_api_key|authentication_error/i;
-
-export function isPiAuthAbsenceMessage(message: string): boolean {
-  return PI_AUTH_ABSENCE.test(message);
 }
 
 let _runtime: ModelRuntime | null = null;
@@ -241,73 +202,4 @@ export async function isPiManagedModelKnown(providerName: string, modelId: strin
   } catch {
     return false;
   }
-}
-
-/**
- * Dispatch one request through Pi's configured runtime. Auth is resolved by
- * Pi inside `streamSimple` at request time — abtars passes no key on this
- * path. Throws `PiManagedAuthError` (401) when Pi reports no usable auth so
- * the health path demotes; throws a plain Error (transient → fallback) when
- * the installation, mapping, or model is unknown.
- */
-export async function streamPiManaged(
-  providerName: string,
-  modelId: string,
-  context: Context,
-  options?: SimpleStreamOptions,
-  /** Adapter-built model's reasoning flag, carried over so a session effort
-   *  override (notably "off") applies on this path exactly as on the
-   *  abtars-keyed path. Pi's own catalog value leads when absent. */
-  reasoningOverride?: boolean,
-): Promise<AssistantMessageEventStream> {
-  const piProvider = mapProviderName(providerName);
-  if (!piProvider) {
-    throw new Error(`Pi-managed provider "${providerName}" has no Pi provider mapping`);
-  }
-  const runtime = await loadRuntime();
-  if (!runtime) {
-    throw new Error("Pi installation unavailable — reinstall with: abtars deps install pi");
-  }
-  const catalogModel: Model<Api> | undefined = runtime.getModel(piProvider, modelId);
-  if (!catalogModel) {
-    throw new Error(`Model "${modelId}" unknown to Pi provider "${providerName}" — pick a model Pi knows`);
-  }
-  // Shallow copy: Pi's endpoint/API/auth semantics stay authoritative; only
-  // the session reasoning flag is overlaid for parity with the adapter path.
-  const model = reasoningOverride === undefined || reasoningOverride === catalogModel.reasoning
-    ? catalogModel
-    : { ...catalogModel, reasoning: reasoningOverride };
-  // Opencode-family providers require a session attribution header that Pi
-  // only attaches on its SDK path (mergeProviderAttributionHeaders over
-  // options.sessionId). Bare streamSimple never sends it, so headless
-  // dispatch 400s with MissingSessionID. Mirror the SDK merge here using the
-  // session id abtars already shares with providers for prompt caching —
-  // attribution only, never identity: no user/chat/platform key travels.
-  const sessionId = (options as { sessionId?: string } | undefined)?.sessionId;
-  const needsSessionHeader = model.provider === "opencode" || model.provider === "opencode-go"
-    || (model.baseUrl ?? "").includes("opencode.ai");
-  const dispatchOptions = sessionId && needsSessionHeader
-    ? {
-      ...options,
-      transformHeaders: async (headers: ProviderHeaders) => ({
-        ...headers,
-        "x-opencode-session": sessionId,
-        "x-opencode-client": "pi",
-      }),
-    }
-    : options;
-  try {
-    const auth = await runtime.checkAuth(piProvider);
-    if (!auth) {
-      throw new PiManagedAuthError(
-        `Pi has no usable auth for provider "${providerName}" — diagnose with: pi auth check --provider ${piProvider}`,
-      );
-    }
-  } catch (err) {
-    if (err instanceof PiManagedAuthError) throw err;
-    throw new PiManagedAuthError(
-      `Pi credential check failed for "${providerName}" (${err instanceof Error ? err.message : String(err)})`,
-    );
-  }
-  return runtime.streamSimple(model, context, dispatchOptions);
 }

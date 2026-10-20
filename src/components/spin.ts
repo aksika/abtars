@@ -968,7 +968,6 @@ export class Spin {
         // #1552: the trusted session type always comes from the allocated
         // ManagedSession — model arguments can never select or override it.
         sessionType: sessionType(session),
-        durableContextIntent: spec.durableContextIntent,
         directContextTurn: spec.directContextTurn,
         executionScope: spec.executionScope,
         deadlineAt: spec.deadlineAt,
@@ -1889,7 +1888,17 @@ export class Spin {
   }
 
   private releaseSessionTransport(session: ManagedSession): void {
-    if (session.transportOwner === "runtime" && session.releaseTransport) {
+    const transport = session.transport as (IKiroTransport & { piAgentSessionRoute?: boolean }) | undefined;
+    // #1940 R2: the Pi session of an ending Spin session ends with it, also
+    // on a bridge-owned transport that stays attached to other sessions.
+    if (transport?.piAgentSessionRoute === true) {
+      void transport.resetSession(session.id).catch((err) => logAndSwallow(TAG, "dispose Pi session", err));
+    }
+    // A runtime transport cached for a shared key can serve other live
+    // sessions; destroying it would end their Pi sessions too.
+    const shared = transport !== undefined && this.sessions.listAll()
+      .some((other) => other !== session && other.transport === transport && other.status !== "ended");
+    if (session.transportOwner === "runtime" && session.releaseTransport && !shared) {
       try { void session.releaseTransport(); } catch (err) { logAndSwallow(TAG, "releaseTransport", err); }
     }
     session.transportOwner = undefined;

@@ -8,7 +8,7 @@
  * before the bridge is spawned.
  */
 
-import { mkdirSync, writeFileSync, copyFileSync, chmodSync, symlinkSync, rmSync, realpathSync, statSync, existsSync, readFileSync } from "node:fs";
+import { mkdirSync, writeFileSync, copyFileSync, chmodSync, symlinkSync, rmSync, realpathSync, statSync, existsSync } from "node:fs";
 import { execSync } from "node:child_process";
 import { homedir } from "node:os";
 import { delimiter, join } from "node:path";
@@ -212,19 +212,10 @@ const OS_ENV_ALLOWLIST = [
   "LANG", "LC_ALL", "LC_CTYPE", "TZ", "CI", "TERM",
 ] as const;
 
-/**
- * True when the abmind package build carries the durable-context projection
- * capability required by the local lane (#1527). A stale dist silently
- * degrades the local route; the harness must block on it, never skip.
- */
-export function abmindPackageHasDurableContext(packageDir: string): boolean {
-  try {
-    const clientJs = join(packageDir, "dist", "src", "abmind-client.js");
-    if (!existsSync(clientJs)) return false;
-    return readFileSync(clientJs, "utf-8").includes("projectConversationContext");
-  } catch {
-    return false;
-  }
+/** True when the abmind package directory carries a built client. */
+function abmindPackageIsBuilt(packageDir: string): boolean {
+  return existsSync(join(packageDir, "package.json"))
+    && existsSync(join(packageDir, "dist", "src", "abmind-client.js"));
 }
 
 /**
@@ -232,13 +223,12 @@ export function abmindPackageHasDurableContext(packageDir: string): boolean {
  * would (ABMIND_PATH, npm global root, legacy location). The bridge child has
  * a sandboxed HOME, so the production strategies that depend on the real home
  * (npm root config, ~/.abmind/src, ~/.local) need the explicit ABMIND_PATH
- * override. Only packages carrying the durable-context client capability are
- * acceptable; anything else is treated as missing. Returns null when no
- * usable install exists.
+ * override. The preferred (workspace) root wins; an unbuilt package is
+ * treated as missing. Returns null when no usable install exists.
  */
 export function resolveAbmindPackageDir(preferredRoot?: string): string | null {
   const explicit = process.env["ABMIND_PATH"]?.trim();
-  if (explicit && existsSync(join(explicit, "package.json")) && abmindPackageHasDurableContext(explicit)) {
+  if (explicit && abmindPackageIsBuilt(explicit)) {
     return realpathSync(explicit);
   }
   const candidates = [
@@ -251,8 +241,7 @@ export function resolveAbmindPackageDir(preferredRoot?: string): string | null {
   for (const candidate of candidates) {
     if (!candidate) continue;
     try {
-      const pkg = join(candidate, "package.json");
-      if (existsSync(pkg) && abmindPackageHasDurableContext(candidate)) {
+      if (abmindPackageIsBuilt(candidate)) {
         return realpathSync(candidate);
       }
     } catch {

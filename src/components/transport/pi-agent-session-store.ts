@@ -37,7 +37,7 @@ import {
 } from "./tool-failure-diagnostic.js";
 import type { ToolFailureDiagnosticV1 } from "./tool-failure-diagnostic.js";
 import { limitPiCoreToolResult } from "./pi-core-tools.js";
-import { ProviderExecutionError } from "./provider-failure.js";
+import { ProviderExecutionError, terminalFailureCodeFor } from "./provider-failure.js";
 import type { PiCoreToolContext } from "./pi-core-tools.js";
 import { recordDeliveredRecall } from "../answer-evidence.js";
 import type { ModelCandidate } from "./model-candidates.js";
@@ -206,6 +206,8 @@ interface LivePiAgentSession {
     terminalError: string | null;
   } | null;
   safety: PiExecutionSafetyController | null;
+  /** Provider requests started in the current prompt run (turn_start count). */
+  providerRequests: number;
 }
 
 function freshCollector(): NonNullable<LivePiAgentSession["collector"]> {
@@ -275,6 +277,13 @@ export class PiAgentSessionStore {
     candidate: ModelCandidate,
   ): unknown {
     const piProvider = mapProviderName(candidate.provider) ?? candidate.provider;
+    // Pi-managed selection of a model Pi already knows: Pi owns the provider
+    // definition, endpoint, API shape and auth. Re-registering it with the
+    // abtars-guessed API shape would override Pi's own provider.
+    if (candidate.authSource === "pi") {
+      const native = runtime.getModel(piProvider, candidate.model);
+      if (native) return native;
+    }
     // Pi API shape: default to completions exactly like the removed
     // candidate-built model path (pickPiApi default).
     const api = candidate.apiFormat === "responses"
@@ -391,6 +400,7 @@ export class PiAgentSessionStore {
             }
             const diag = parseToolResultToDiagnostic(result, context.executionId, descriptor.name);
             if (diag) lastDiag = diag;
+            recordClassifiedStore(descriptor.name, params, result, context.safety);
             const outcome = context.safety.afterTool(descriptor.name, result);
             outcomeRecorded = true;
             if (outcome.decision === "error") {
@@ -431,11 +441,30 @@ export class PiAgentSessionStore {
   async ensureSession(sessionKey: string, init: PiAgentSessionInit): Promise<PiAgentSessionLike> {
     const existing = this.live.get(sessionKey);
     if (existing) return existing.session;
+    // An empty custom prompt makes Pi fall back to its default coding
+    // preamble and tool docs. Every abtars role has a prompt; fail visibly.
+    if (init.systemPrompt.trim() === "") {
+      throw new Error(`No role system prompt for ${sessionKey} — refusing to open a Pi session with Pi's default prompt`);
+    }
     const factory = await this.factoryOrThrow();
     const runtime = await this.runtimeOrThrow(factory);
     const model = this.modelForCandidate(runtime, init.candidate);
     const sessionManager = factory.SessionManager.inMemory(this.cwd);
     const settingsManager = factory.SettingsManager.inMemory();
+    const placeholder: LivePiAgentSession = {
+      sessionKey,
+      session: null as unknown as PiAgentSessionLike,
+      sessionManager,
+      settingsManager,
+      authority: { current: null, generation: 0 },
+      allToolNames: [],
+      unsubscribe: () => {},
+      settled: null,
+      tap: null,
+      collector: null,
+      safety: null,
+      providerRequests: 0,
+    };
     // Constrained loader: no discovered project context (AGENTS), no
     // SYSTEM files, no skills, no prompt templates, no external extensions.
     // The system prompt is exactly the role SOUL bundle. Pi's built-in
@@ -451,21 +480,12 @@ export class PiAgentSessionStore {
       noPromptTemplates: true,
       noThemes: true,
       noContextFiles: true,
+      // The only extension: abtars' classified-literal scrub (#1446). After a
+      // confidential memory_store, its literal is redacted from every later
+      // provider request of that execution.
+      extensionFactories: [{ name: "abtars-classified-scrub", factory: classifiedScrubExtension(placeholder) }],
     });
     await loader.reload();
-    const placeholder: LivePiAgentSession = {
-      sessionKey,
-      session: null as unknown as PiAgentSessionLike,
-      sessionManager,
-      settingsManager,
-      authority: { current: null, generation: 0 },
-      allToolNames: [],
-      unsubscribe: () => {},
-      settled: null,
-      tap: null,
-      collector: null,
-      safety: null,
-    };
     const customTools = this.buildCustomTools(placeholder, init.sandboxPolicy);
     const toolNames = customTools.map((t) => t.name).filter((n): n is string => typeof n === "string");
     const created = await factory.createAgentSession({
@@ -484,7 +504,7 @@ export class PiAgentSessionStore {
     });
     placeholder.session = created.session;
     placeholder.allToolNames = toolNames;
-    placeholder.unsubscribe = created.session.subscribe((event) => this.handleSessionEvent(sessionKey, event));
+    placeholder.unsubscribe = created.session.subscribe((event) => this.handleSessionEvent(placeholder, event));
     this.live.set(sessionKey, placeholder);
     logDebug(TAG, `AgentSession opened for ${sessionKey} (${toolNames.length} tools)`);
     return placeholder.session;
@@ -510,6 +530,7 @@ export class PiAgentSessionStore {
     record.authority.current = turn.toolContext;
     record.authority.generation += 1;
     record.safety = turn.toolContext.safety;
+    record.providerRequests = 0;
     // #1940: the registered tool set is session-scoped (sandbox allowlist at
     // creation), but authorization is per execution. Activate exactly the
     // tools this turn may present — sandbox plus contextual availability
@@ -587,16 +608,16 @@ export class PiAgentSessionStore {
    * waiting for idleness or disposing the session. The turn settles via
    * agent_settled and reports aborted; a steer/follow-up can still land.
    */
-  async abortTurn(sessionKey: string): Promise<void> {
+  abortTurn(sessionKey: string): void {
     const record = this.live.get(sessionKey);
     if (!record) return;
     if (record.collector) record.collector.aborted = true;
     try {
       record.session.clearQueue();
     } catch { /* best effort; abort below still runs */ }
-    try {
-      await record.session.abort();
-    } catch { /* best effort */ }
+    // Pi's abort() also waits for idle; callers that need idleness bound
+    // that wait themselves (interrupt), so do not await it here.
+    record.session.abort().catch(() => { /* best effort */ });
   }
 
   /** Await logical idleness after abort. */
@@ -673,14 +694,31 @@ export class PiAgentSessionStore {
     record.session.setThinkingLevel(level);
   }
 
-  private handleSessionEvent(sessionKey: string, event: { type: string } & Record<string, unknown>): void {
-    const record = this.live.get(sessionKey);
-    if (record?.tap) {
+  /**
+   * #1680 prompt-round bound per provider request. The first request of a
+   * run was admitted in prompt(); every later turn_start is another provider
+   * request (tool continuation or steer) and must pass the same bound. A
+   * stop aborts the run before that request is streamed.
+   */
+  private countProviderRequest(record: LivePiAgentSession): void {
+    record.providerRequests += 1;
+    if (record.providerRequests === 1 || !record.safety) return;
+    const decision = record.safety.beginProviderTurn(record.sessionKey);
+    if (decision.decision === "continue") return;
+    if (decision.decision === "pause") record.safety.requestPause();
+    else record.safety.requestStop(decision.reason ?? "Provider turn stopped");
+    record.session.abort().catch(() => { /* best effort */ });
+  }
+
+  private handleSessionEvent(record: LivePiAgentSession, event: { type: string } & Record<string, unknown>): void {
+    if (this.live.get(record.sessionKey) !== record) return;
+    if (event.type === "turn_start") this.countProviderRequest(record);
+    if (record.tap) {
       try {
         record.tap(event);
       } catch { /* observer isolation */ }
     }
-    if (!record?.collector) return;
+    if (!record.collector) return;
     const collector = record.collector;
     if (event.type === "message_update") {
       const streamEv = event.assistantMessageEvent as { type?: string; delta?: string } | null | undefined;
@@ -739,7 +777,7 @@ export class PiAgentSessionStore {
       // only Pi's own terminal verdict surfaces here.
       if (collector.text === "" && collector.terminalError !== null && !collector.aborted) {
         const terminal = new ProviderExecutionError({
-          code: "all_candidates_failed",
+          code: terminalFailureCodeFor(collector.terminalError),
           retryable: false,
           attemptedCandidates: 1,
           message: `The configured model candidate failed: ${collector.terminalError}`,
@@ -763,4 +801,35 @@ export class PiAgentSessionStore {
     // agent_end is an intermediate terminal before retries: not the run's
     // end. The terminal point is agent_settled (Pi's full settlement).
   }
+}
+
+/** Record a confidential memory_store literal for scrubbing (#1446). */
+function recordClassifiedStore(
+  toolName: string,
+  params: Record<string, unknown>,
+  result: string,
+  safety: PiExecutionSafetyController,
+): void {
+  if (toolName !== "memory_store") return;
+  try {
+    const parsed = JSON.parse(result) as { stored?: boolean };
+    const classification = Number(params["classification"] ?? params["class"] ?? 1);
+    if (parsed.stored === true && classification >= 2 && typeof params["translated"] === "string") {
+      safety.recordClassifiedStoreLiteral(params["translated"]);
+    }
+  } catch {
+    // Only valid success envelopes create a scrub literal.
+  }
+}
+
+/** Inline Pi extension: redact the current execution's classified literals
+ *  from each provider request's context (Pi's `context` hook). */
+export function classifiedScrubExtension(record: { safety: PiExecutionSafetyController | null }) {
+  return (pi: { on(event: "context", handler: (event: { messages: unknown[] }) => { messages: unknown[] } | undefined): void }): void => {
+    pi.on("context", (event) => {
+      const safety = record.safety;
+      if (!safety) return undefined;
+      return { messages: safety.scrubClassifiedLiterals(event.messages as never) };
+    });
+  };
 }

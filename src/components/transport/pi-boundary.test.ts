@@ -94,16 +94,12 @@ describe("official type compatibility (#1425)", () => {
 
 // ── 3. Retry/fallback ownership ───────────────────────────────────────────────
 
-describe("retry/fallback ownership (#1425)", () => {
-  it("adapter passes maxRetries: 0 to pi-ai — abtars L2 owns the retry budget", async () => {
-    const src = readFileSync(resolve(ROOT, "src", "components", "transport", "pi-ai-adapter.ts"), "utf-8");
-    expect(src).toContain("maxRetries: 0");
-    // No local retry loop, retry budget, or fallback in the adapter
-    // (only passes maxRetries to pi-ai; L2 owns the retry budget)
-    expect(src).not.toContain("withRetry(");
+describe("retry ownership (#1940 R6)", () => {
+  it("Pi owns provider retries: the session store neither disables them nor replaces Pi's stream function", () => {
+    const src = readFileSync(resolve(ROOT, "src", "components", "transport", "pi-agent-session-store.ts"), "utf-8");
+    expect(src).not.toMatch(/maxRetries\s*:\s*0/);
+    expect(src).not.toMatch(/streamFn\s*:|streamFunction\s*=/);
   });
-
-
 });
 
 // ── 4. No provider-specific wire format copies ────────────────────────────────

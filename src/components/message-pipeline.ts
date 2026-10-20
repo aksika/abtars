@@ -10,8 +10,6 @@ import { logAndSwallow } from "./log-and-swallow.js";
 import { cleanResponse, extractSupportIds, SUPPORT_STRIP_RE } from "./clean-response.js";
 import { loadUsers } from "./user-registry.js";
 import { ModelNotFoundError } from "./transport/acp-transport.js";
-import { DurableContextUnavailableError } from "./transport/pi-core-context.js";
-import { isContextOverflowFailure, isProviderUnavailable } from "./transport/provider-failure.js";
 import type { SttConfig } from "./stt.js";
 import { synthesizeSpeech, type TtsConfig } from "./tts.js";
 import { attemptMemoryMutation } from "./memory-runtime.js";
@@ -361,14 +359,18 @@ export async function handleInboundMessage(
     // No queueing needed
 
     // --- Build prompt ---
-    // #1529: buildPrompt classifies the turn's durable-context intent (durable,
-    // not-required, or required-unavailable). We forward it to spin as part of
-    // the spec; the chokepoint at spin.ts#sendPrompt carries it through to the
-    // transport, which fails closed when durable context is required but
-    // unavailable.
-    const { prompt: builtPrompt, imageContent, recalledHits, durableContextIntent, currentTurn } = await buildPrompt(msg, text, {
+    // #1940: the Pi route is identified positively by the serving transport;
+    // a missing live Pi session makes this turn a session start.
+    const routeTransport = (effectiveSession.transport ?? transport) as IKiroTransport & {
+      piAgentSessionRoute?: boolean;
+      hasLiveSession?: (sessionKey: string) => boolean;
+    };
+    const piRoute = routeTransport.piAgentSessionRoute === true;
+    const { prompt: builtPrompt, imageContent, recalledHits, currentTurn } = await buildPrompt(msg, text, {
       memoryRuntime: deps.memoryRuntime, memoryConfig, sessionManager: deps.sessionManager, conversationBuffer, contextPercent: ctxPct, maxContext: deps.maxContext,
       isAcp: transport.getRuntimeStatus?.().route === "acp",
+      piRoute,
+      ...(piRoute ? { piSessionLive: routeTransport.hasLiveSession?.(activeSessionId) ?? false } : {}),
     }, registry, effectiveSession);
 
     if (builtPrompt === "__INJECTION_BLOCKED__") {
@@ -599,7 +601,6 @@ export async function handleInboundMessage(
       prompt,
       imageContent,
       userId,
-      durableContextIntent,
       directContextTurn,
       settlementOwner: "spin",
       await: true,
@@ -955,32 +956,11 @@ export async function handleInboundMessage(
     const notifyUser = !SYNTHETIC_PREFIXES.some(p => text.startsWith(p));
     const isTimeout = errStr.includes("timed out") || errStr.includes("Prompt already in progress");
 
-    if (isContextOverflowFailure(err)) {
-      // #1745: overflow is reported by the transport as a terminal failure
-      // code. Never re-derive it from error text here — the transport holds
-      // the provider message and the model's context window; this layer holds
-      // neither. The previous four-substring sniff reset the live conversation
-      // on the weakest evidence in the pipeline.
-      logWarn(TAG, `Context overflow reported by transport — auto-resetting session`);
-      await resetAndPrepare({ transport, sessionKey: activeSessionId, reason: "ctx-overflow" });
-      if (notifyUser) await adapter.sendMessage(channelId, "Context window full — session reset. Send your message again.", { threadId: msg.threadId }).catch(err => logAndSwallow(TAG, "adapter call", err));
-    } else if (isTimeout) {
+    // #1940: Pi owns overflow recovery (compact and retry); there is no
+    // pipeline overflow reset ahead of it.
+    if (isTimeout) {
       logWarn(TAG, `Request timeout — not resetting session`);
       if (notifyUser) await adapter.sendMessage(channelId, "❌ Model timed out.", { threadId: msg.threadId }).catch(err => logAndSwallow(TAG, "adapter call", err));
-    } else if (err instanceof DurableContextUnavailableError) {
-      // #1529: required durable context is unavailable — fail closed with a
-      // bounded, stable response. No session reset, no candidate-health impact.
-      logWarn(TAG, `Durable context unavailable for ${activeSessionId} (${err.reason}) — failing closed`);
-      if (notifyUser) await adapter.sendMessage(channelId, "Memory context is temporarily unavailable. Please retry.", { threadId: msg.threadId }).catch(err => logAndSwallow(TAG, "adapter call", err));
-    } else if (isProviderUnavailable(err)) {
-      // #1932: bounded reason with the memo's retry time; no session reset
-      // and no health impact — the provider's own state decides.
-      const retryAt = err.failure.retryAt;
-      logWarn(TAG, `Provider unavailable for ${activeSessionId} — retry after ${retryAt ? new Date(retryAt).toISOString() : "unknown"}`);
-      if (notifyUser) {
-        const retryText = retryAt ? ` Retry after ${new Date(retryAt).toISOString()}.` : "";
-        await adapter.sendMessage(channelId, `Providers are cooling down.${retryText}`, { threadId: msg.threadId }).catch(err => logAndSwallow(TAG, "adapter call", err));
-      }
     } else {      logError(TAG, `Pipeline error: ${errStr.slice(0, 500)}`);
       const reason = errStr.includes("credits") ? "OpenRouter credits exhausted — top up at openrouter.ai/credits"
         : errStr.includes("rate") || errStr.includes("429") ? "Rate limited."

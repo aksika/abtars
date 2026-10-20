@@ -242,16 +242,6 @@ export async function phasePipelineDeps(ctx: BootCtx): Promise<PhaseResult> {
     }
   }
 
-  // #998: Set system prompt AFTER memory state is known
-  if (transport && "setSystemPrompt" in transport && typeof (transport as any).setSystemPrompt === "function") {
-    const { assembleMainSoulBundleText, buildSoulBundle } = await import("../components/soul-bundle.js");
-    const masterUserId = registry.users.find(u => u.role === "master")?.userId ?? "master";
-    const bundle = ctx.memoryRuntime.state === "ready"
-      ? await assembleMainSoulBundleText(ctx.memoryRuntime, masterUserId)
-      : buildSoulBundle("A", null);
-    if (bundle) (transport as { setSystemPrompt: (p: string) => void }).setSystemPrompt(bundle);
-  }
-
   // #1552: compose the memory-tool dependency holder (runtime + durable
   // quota) once memory initialization has resolved. A stale quota service
   // from a prior boot is closed first; tool turns always read the current

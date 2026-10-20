@@ -42,7 +42,6 @@ describe("buildPrompt", () => {
       masterRegistry(),
     );
     expect(result.prompt).toContain("hello");
-    expect(result.durableContextIntent).toEqual({ mode: "not_required" });
   });
 });
 
@@ -187,117 +186,38 @@ describe("#1928 — fast recall carries the verbatim turn", () => {
 });
 
 
-describe("buildPrompt durable-context classification (#1529)", () => {
-  it("maps a numeric record ID to durable intent with that exact cursor", async () => {
+describe("buildPrompt inbound archive write (#1940 R1)", () => {
+  const masterMsg = (id: string) => ({ userId: "master", channelId: "1", platform: "telegram", isGroup: false, messageId: id } as never);
+
+  it("records a master turn when memory is ready", async () => {
     const recordMessage = vi.fn().mockResolvedValue({ id: 42 });
-    const result = await buildPrompt(
-      { userId: "master", channelId: "1", platform: "telegram", isGroup: false, messageId: "m1" } as never,
-      "hello",
-      baseDeps(readyRuntime(recordMessage)),
-      masterRegistry(),
-    );
-    expect(result.durableContextIntent).toEqual({ mode: "durable", beforeMessageId: 42 });
+    await buildPrompt(masterMsg("m1"), "hello", baseDeps(readyRuntime(recordMessage)), masterRegistry());
     expect(recordMessage).toHaveBeenCalledTimes(1);
   });
 
-  it("maps a rejected inbound write to required_unavailable/record_failed", async () => {
+  it("a failed archive write never blocks the turn", async () => {
     const recordMessage = vi.fn().mockRejectedValue(new Error("owner down"));
-    const result = await buildPrompt(
-      { userId: "master", channelId: "1", platform: "telegram", isGroup: false, messageId: "m2" } as never,
-      "hello",
-      baseDeps(readyRuntime(recordMessage)),
-      masterRegistry(),
-    );
-    expect(result.durableContextIntent).toEqual({ mode: "required_unavailable", reason: "record_failed" });
+    const result = await buildPrompt(masterMsg("m2"), "hello", baseDeps(readyRuntime(recordMessage)), masterRegistry());
+    expect(result.prompt).toContain("hello");
+    expect(recordMessage).toHaveBeenCalledTimes(1);
   });
 
-  it("#1940: no outbox — a failed archive write reports its own failure, no retry subsystem", async () => {
-    const recordMessage = vi.fn(async (input: unknown, key: string) => {
-      if ((input as { role?: string })?.role === "assistant") throw new Error("owner down");
-      return { id: 9 };
-    });
-    const result = await buildPrompt(
-      { userId: "master", channelId: "1", platform: "telegram", isGroup: false, messageId: "m5" } as never,
-      "hello",
-      baseDeps(readyRuntime(recordMessage)),
-      masterRegistry(),
-    );
-    // The inbound write succeeds on its own key; the failure belongs to the
-    // assistant write, which the pipeline reports per turn. No pending retry
-    // is queued: the next turn starts clean.
-    expect(result.durableContextIntent).toEqual({ mode: "durable", beforeMessageId: 9 });
-  });
-
-  it("maps a null record ID to required_unavailable/cursor_missing", async () => {
-    const recordMessage = vi.fn().mockResolvedValue({ id: null });
-    const result = await buildPrompt(
-      { userId: "master", channelId: "1", platform: "telegram", isGroup: false, messageId: "m3" } as never,
-      "hello",
-      baseDeps(readyRuntime(recordMessage)),
-      masterRegistry(),
-    );
-    expect(result.durableContextIntent).toEqual({ mode: "required_unavailable", reason: "cursor_missing" });
-  });
-
-  it("maps a configured durable turn with a not-ready runtime to required_unavailable/runtime_unavailable", async () => {
+  it("memory not ready: no write attempt and no rejection", async () => {
     const notReady = { state: "unavailable" as const, capabilities: new Set<string>() } as never;
-    const result = await buildPrompt(
-      { userId: "master", channelId: "1", platform: "telegram", isGroup: false, messageId: "m4" } as never,
-      "hello",
-      baseDeps(notReady),
-      masterRegistry(),
-    );
-    expect(result.durableContextIntent).toEqual({ mode: "required_unavailable", reason: "runtime_unavailable" });
+    const result = await buildPrompt(masterMsg("m4"), "hello", baseDeps(notReady), masterRegistry());
+    expect(result.prompt).toContain("hello");
   });
 
-  it("maps disabled memory to not_required even for a master turn", async () => {
-    const result = await buildPrompt(
-      { userId: "master", channelId: "1", platform: "telegram", isGroup: false, messageId: "m5" } as never,
-      "hello",
-      baseDeps(createDisabledRuntime(), false),
-      masterRegistry(),
-    );
-    expect(result.durableContextIntent).toEqual({ mode: "not_required" });
-  });
-
-  it("maps guest turns to not_required", async () => {
+  it("guests, [SESSION START] and skill-isolated turns are not recorded", async () => {
     const recordMessage = vi.fn().mockResolvedValue({ id: 1 });
-    const result = await buildPrompt(
+    await buildPrompt(
       { userId: "guest1", channelId: "1", platform: "telegram", isGroup: false, messageId: "m6" } as never,
-      "hello",
-      baseDeps(readyRuntime(recordMessage)),
+      "hello", baseDeps(readyRuntime(recordMessage)),
       { byUserId: new Map([["guest1", { role: "guest" }]]) } as never,
     );
-    expect(result.durableContextIntent).toEqual({ mode: "not_required" });
-    expect(recordMessage).not.toHaveBeenCalled();
-  });
-
-  it("maps [SESSION START] synthetic turns to not_required", async () => {
-    const recordMessage = vi.fn().mockResolvedValue({ id: 1 });
-    const result = await buildPrompt(
-      { userId: "master", channelId: "1", platform: "telegram", isGroup: false, messageId: "m7" } as never,
-      "[SESSION START] You just came online.",
-      baseDeps(readyRuntime(recordMessage)),
-      masterRegistry(),
-    );
-    expect(result.durableContextIntent).toEqual({ mode: "not_required" });
-    expect(recordMessage).not.toHaveBeenCalled();
-  });
-
-  it("maps skill-isolated K sessions to not_required", async () => {
-    const recordMessage = vi.fn().mockResolvedValue({ id: 1 });
-    const kSession = {
-      id: "master_K_1", userId: "master", platform: "telegram", chatId: 100,
-      seen: true, pendingStart: false,
-    } as never;
-    const result = await buildPrompt(
-      { userId: "master", channelId: "1", platform: "telegram", isGroup: false, messageId: "m8" } as never,
-      "hello",
-      baseDeps(readyRuntime(recordMessage)),
-      masterRegistry(),
-      kSession,
-    );
-    expect(result.durableContextIntent).toEqual({ mode: "not_required" });
+    await buildPrompt(masterMsg("m7"), "[SESSION START] You just came online.", baseDeps(readyRuntime(recordMessage)), masterRegistry());
+    const kSession = { id: "master_K_1", userId: "master", platform: "telegram", chatId: 100, seen: true, pendingStart: false } as never;
+    await buildPrompt(masterMsg("m8"), "hello", baseDeps(readyRuntime(recordMessage)), masterRegistry(), kSession);
     expect(recordMessage).not.toHaveBeenCalled();
   });
 });
@@ -407,10 +327,10 @@ describe("#1869 — session-start owns profile/notes/coreFacts via parts", () =>
     const result = await buildPrompt(
       sessionMsg(),
       "hello",
-      baseDeps(partsRuntime({
+      { ...(baseDeps(partsRuntime({
         coreKnowledge: "LEGACY-1869", recall: "RECALL-1869", wakeUp: "WAKE-1869",
         soulBundle: PARTS, parts: PARTS,
-      })),
+      })) as unknown as Record<string, unknown>), piRoute: true, piSessionLive: false } as never,
       masterRegistry(),
     );
     const prompt = result.prompt;
@@ -423,99 +343,35 @@ describe("#1869 — session-start owns profile/notes/coreFacts via parts", () =>
   });
 });
 
-describe("#1869 — post-compaction core rehydration is core-only", () => {
-  const PARTS = {
-    soul: "SOUL-REHY", profile: "PROFILE-REHY", notes: "NOTES-REHY",
-    memoryTools: "TOOLS-REHY", coreFacts: "FACTS-REHY",
-  };
+describe("#1940 — a new Pi session is a session start", () => {
+  const seenSession = () => ({
+    id: "master_A_1", userId: "master", platform: "telegram", chatId: 100, seen: true, pendingStart: false,
+  } as never);
+  const runtime = () => ({
+    state: "ready",
+    capabilities: new Set(["durableContext"]),
+    recordMessage: vi.fn().mockResolvedValue({ id: 1 }),
+    assembleSessionContext: vi.fn().mockResolvedValue({ coreKnowledge: "", recall: "RECALL-NEW", wakeUp: "WAKE-NEW" }),
+  } as never);
+  const msg = () => ({ userId: "master", channelId: "1", platform: "telegram", isGroup: false, messageId: "new-1" } as never);
 
-  /** An established session: already seen, no pending start, but flagged for
-   *  core rehydration by a completed compaction. */
-  function rehydrateSession(overrides: Record<string, unknown> = {}) {
-    return {
-      id: "master_A_1", userId: "master", platform: "telegram", chatId: 100,
-      seen: true, pendingStart: false, pendingCoreRehydrate: true,
-      ...overrides,
-    } as never;
-  }
-
-  function runtimeFor(shape: unknown, assemble = vi.fn().mockResolvedValue(shape)) {
-    return {
-      runtime: {
-        state: "ready",
-        capabilities: new Set(["durableContext"]),
-        recordMessage: vi.fn().mockResolvedValue({ id: 1 }),
-        assembleSessionContext: assemble,
-      } as never,
-      assemble,
-    };
-  }
-
-  const msg = () => ({ userId: "master", channelId: "1", platform: "telegram", isGroup: false, messageId: "rehy-1" } as never);
-
-  it("re-injects the core parts without the history hydration that compaction just reduced (ACP)", async () => {
-    const { runtime, assemble } = runtimeFor({
-      coreKnowledge: "", recall: "RECALL-REHY", wakeUp: "WAKE-REHY",
-      soulBundle: PARTS, parts: PARTS,
-    });
-    const session = rehydrateSession();
+  it("hydrates a seen session whose Pi session is gone (restart, rebuild, reset)", async () => {
     const result = await buildPrompt(
       msg(), "hello",
-      { ...(baseDeps(runtime) as unknown as Record<string, unknown>), isAcp: true } as never,
-      masterRegistry(), session,
+      { ...(baseDeps(runtime()) as unknown as Record<string, unknown>), piRoute: true, piSessionLive: false } as never,
+      masterRegistry(), seenSession(),
     );
-
-    expect(result.isSessionStart).toBe(false);
-    for (const marker of ["PROFILE-REHY", "NOTES-REHY", "FACTS-REHY"]) {
-      expect(result.prompt).toContain(marker);
-    }
-    // The point of the narrow path: no consolidations, no message pairs, no
-    // flashback re-added on top of a summary that already covers them.
-    expect(result.prompt).not.toContain("RECALL-REHY");
-    expect(result.prompt).not.toContain("WAKE-REHY");
-    // Immutable parts stay in the compaction-immune system prompt.
-    expect(result.prompt).not.toContain("SOUL-REHY");
-    expect(result.prompt).not.toContain("TOOLS-REHY");
-    // Structural guarantee, not a filter: abmind never builds the hydration.
-    expect(assemble.mock.calls[0]![0]).toMatchObject({ includeHistory: false });
-    // One-shot.
-    expect((session as unknown as { pendingCoreRehydrate: boolean }).pendingCoreRehydrate).toBe(false);
+    expect(result.isSessionStart).toBe(true);
+    expect(result.prompt).toContain("RECALL-NEW");
   });
 
-  it("is a no-op against an older daemon, whose system prompt still carries the parts", async () => {
-    const { runtime } = runtimeFor({ coreKnowledge: "LEGACY-REHY", recall: "", wakeUp: "" });
+  it("does not repeat hydration while the Pi session is live", async () => {
     const result = await buildPrompt(
       msg(), "hello",
-      { ...(baseDeps(runtime) as unknown as Record<string, unknown>), isAcp: true } as never,
-      masterRegistry(), rehydrateSession(),
+      { ...(baseDeps(runtime()) as unknown as Record<string, unknown>), piRoute: true, piSessionLive: true } as never,
+      masterRegistry(), seenSession(),
     );
-    // Re-injecting here would duplicate what the legacy system prompt holds.
-    expect(result.prompt).not.toContain("LEGACY-REHY");
-  });
-
-  it("#1940: on the Pi route there is no post-compaction rehydration — Pi owns compaction", async () => {
-    const { runtime, assemble } = runtimeFor({
-      coreKnowledge: "", recall: "RECALL-REHY", wakeUp: "WAKE-REHY",
-      soulBundle: PARTS, parts: PARTS,
-    });
-    const session = rehydrateSession();
-    const result = await buildPrompt(msg(), "hello", baseDeps(runtime), masterRegistry(), session);
     expect(result.isSessionStart).toBe(false);
-    expect(result.prompt).not.toContain("PROFILE-REHY");
-    expect(result.prompt).not.toContain("FACTS-REHY");
-    expect(assemble).not.toHaveBeenCalled();
-    expect((session as unknown as { pendingCoreRehydrate: boolean }).pendingCoreRehydrate).toBe(false);
-  });
-
-  it("does not fire on an ordinary turn", async () => {
-    const { runtime, assemble } = runtimeFor({
-      coreKnowledge: "", recall: "", wakeUp: "", soulBundle: PARTS, parts: PARTS,
-    });
-    const result = await buildPrompt(
-      msg(), "hello", baseDeps(runtime), masterRegistry(),
-      rehydrateSession({ pendingCoreRehydrate: false }),
-    );
-    expect(assemble).not.toHaveBeenCalled();
-    expect(result.prompt).not.toContain("PROFILE-REHY");
+    expect(result.prompt).not.toContain("RECALL-NEW");
   });
 });

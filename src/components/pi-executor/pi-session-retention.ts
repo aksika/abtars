@@ -1,21 +1,17 @@
 /**
  * pi-session-retention.ts — #1932 R8 production retention wiring.
  *
- * One boot entry point over three disjoint mechanisms:
+ * One boot entry point over two disjoint mechanisms:
  *
  * - Row-driven sweep: ended coding sessions and terminal supervised runs.
  *   A file is removed only when the durable row proves it (expected ID +
  *   header match + containment), the file itself is aged out, and no live
  *   writer holds it.
- * - Binding sweep: SDK conversation bindings (Main/worker chats) carry no
- *   end signal, so their Pi files are the working store and are never pruned
- *   here — absence is handled by resume/recovery at open. Only dead weight
- *   goes: binding records with no Pi file older than retention.
  * - Quarantine sweep: quarantined files older than retention are removed
  *   (they were verified at quarantine time and carry the session ID).
  *
- * Standalone Pi files are invisible to all sweeps: neither a row nor a
- * binding claims them. Everything is best-effort and never throws:
+ * In-process Pi sessions are in memory (#1940) and write no files. Standalone
+ * Pi files are invisible to both sweeps: no row claims them. Everything is best-effort and never throws:
  * a retention failure must not break boot or a turn. Incomplete removals
  * keep their records so a later sweep retries.
  */
@@ -24,7 +20,6 @@ import type { Dirent } from "node:fs";
 import { join } from "node:path";
 import { logDebug, logWarn } from "../logger.js";
 import { isPathWithinRoot } from "../workspace-paths.js";
-import { listSdkBindings, deleteSdkBinding } from "../pi-session/pi-conversation-identity.js";
 import { validatePersistedSession } from "./config.js";
 import type { PiCodingSessionRecord, PiCodingSessionStore } from "./pi-coding-session-store.js";
 import type { PiRunStore } from "./pi-run-store.js";
@@ -146,23 +141,21 @@ export function sweepRpcSessionFiles(
 export interface PiSessionSweepReport {
   rpcRemoved: string[];
   rpcKept: string[];
-  bindingsPruned: string[];
   quarantineRemoved: string[];
 }
 
 /**
- * Boot-time sweep entry point. Row-driven pruning for terminal RPC files,
- * dead-weight binding cleanup, and aged quarantine removal. Never throws.
+ * Boot-time sweep entry point. Row-driven pruning for terminal RPC files
+ * and aged quarantine removal. Never throws.
  */
 export function sweepPiSessionsAtBoot(args: {
-  stateDir: string;
   sessionStorageRoot: string;
   codingStore: PiCodingSessionStore;
   runStore: PiRunStore;
   now?: number;
 }): PiSessionSweepReport {
   const now = args.now ?? Date.now();
-  const empty: PiSessionSweepReport = { rpcRemoved: [], rpcKept: [], bindingsPruned: [], quarantineRemoved: [] };
+  const empty: PiSessionSweepReport = { rpcRemoved: [], rpcKept: [], quarantineRemoved: [] };
   try {
     let codingRows: PiCodingSessionRecord[] = [];
     try {
@@ -200,55 +193,20 @@ export function sweepPiSessionsAtBoot(args: {
       })),
     ];
     const rpc = sweepRpcSessionFiles(args.sessionStorageRoot, refs, now);
-    const bindingsPruned = sweepStaleBindings(args.stateDir, now);
     const quarantineRemoved = sweepQuarantineFiles(args.sessionStorageRoot, now);
-    const pruned = [...rpc.removed, ...bindingsPruned, ...quarantineRemoved];
+    const pruned = [...rpc.removed, ...quarantineRemoved];
     if (pruned.length > 0) {
-      logDebug(TAG, `retention pruned rpc=[${rpc.removed.join(",")}] bindings=[${bindingsPruned.join(",")}] quarantine=[${quarantineRemoved.join(",")}]`);
+      logDebug(TAG, `retention pruned rpc=[${rpc.removed.join(",")}] quarantine=[${quarantineRemoved.join(",")}]`);
     }
     return {
       rpcRemoved: rpc.removed,
       rpcKept: rpc.kept,
-      bindingsPruned,
       quarantineRemoved,
     };
   } catch (err) {
     logWarn(TAG, `retention sweep failed: ${err instanceof Error ? err.message : String(err)}`);
     return empty;
   }
-}
-
-/**
- * Drop binding records whose Pi file is gone and whose record is older
- * than retention. Pi files of bound conversations are the working store
- * and are never removed here.
- */
-export function sweepStaleBindings(stateDir: string, now: number): string[] {
-  const pruned: string[] = [];
-  let bindings: ReturnType<typeof listSdkBindings>;
-  try {
-    bindings = listSdkBindings(stateDir);
-  } catch (err) {
-    logWarn(TAG, `retention could not list bindings: ${err instanceof Error ? err.message : String(err)}`);
-    return pruned;
-  }
-  for (const binding of bindings) {
-    const file = binding.binding.sessionFile;
-    if (file !== undefined) {
-      try {
-        if (lstatSync(file).isFile()) continue;
-      } catch {
-        // Gone — fall through to the age check.
-      }
-    }
-    if (now - binding.binding.updatedAt < ENDED_RETENTION_MS) continue;
-    try {
-      if (deleteSdkBinding(stateDir, binding.sessionKey)) pruned.push(binding.sessionKey);
-    } catch (err) {
-      logWarn(TAG, `retention could not prune binding: ${err instanceof Error ? err.message : String(err)}`);
-    }
-  }
-  return pruned;
 }
 
 /**

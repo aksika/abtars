@@ -44,8 +44,8 @@ function session(): ManagedSession {
     delivery: "streaming", active: true, status: "ready", idleTimeoutMs: 0,
     lastActiveAt: Date.now(), messageCount: 0, tokenCount: 0, toolCallCount: 0,
     log: [], shortIndex: 1, showThinking: false, busy: false, queue: [], fullMode: false,
-    pendingStart: false, seen: true, compactFailures: 0, ctxWarned: false, steeringAccepting: false,
-    compacting: false, primingTerms: [], completions: [], instructionQueue: [] };
+    pendingStart: false, seen: true, steeringAccepting: false,
+    primingTerms: [], completions: [], instructionQueue: [] };
 }
 
 const JOKE_EN = "Tuesday means Belgium as an inside joke";

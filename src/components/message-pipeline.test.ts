@@ -2,7 +2,6 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { setUserRegistryOverride, type UserRegistry } from "./user-registry.js";
 import { classifyContent } from "./clean-response.js";
 import type { ManagedSession } from "./spin-types.js";
-import { DurableContextUnavailableError } from "./transport/pi-core-context.js";
 import { ProviderExecutionError, type ProviderTerminalFailure } from "./transport/provider-failure.js";
 import { SCHEDULED_ANNOUNCEMENT_TOKEN } from "../types/platform.js";
 import { composeScheduledAnnouncementText, composeScheduledAnnouncementHistoryText } from "./main-conversation-ingress.js";
@@ -82,7 +81,7 @@ function mockDeps(transport: IKiroTransport, overrides: Partial<PipelineDeps> = 
     idleTimeoutMs: 0, lastActiveAt: Date.now(), messageCount: 0, tokenCount: 0, toolCallCount: 0,
     log: [], shortIndex: 1, showThinking: false,
     busy: false, queue: [], fullMode: false, pendingStart: false, seen: true,
-    compacting: false, ctxWarned: false, compactFailures: 0, primingTerms: [], completions: [],
+    primingTerms: [], completions: [],
     instructionQueue: [], steeringAccepting: false,
   };
   return {
@@ -155,7 +154,7 @@ describe("handleInboundMessage", () => {
       idleTimeoutMs: 0, lastActiveAt: Date.now(), messageCount: 0, tokenCount: 0, toolCallCount: 0,
       log: [], shortIndex: 1, showThinking: false,
       busy: false, queue: [], fullMode: false, pendingStart: false, seen: true,
-      compacting: false, ctxWarned: false, compactFailures: 0, primingTerms: [], completions: [],
+      primingTerms: [], completions: [],
       instructionQueue: [], steeringAccepting: false,
     };
     // #1348: Pipeline calls ensureSessionTransport if session.transport is missing.
@@ -333,10 +332,9 @@ describe("handleInboundMessage", () => {
     expect((deps as any)._session.busy).toBe(false);
   });
 
-  // #1529: a configured durable turn whose inbound write rejects must fail
-  // closed at the Pi boundary — bounded response, no normal model response,
-  // busy state released.
-  it("fails closed with a bounded response when the inbound durable write rejects (#1529)", async () => {
+  // #1940 R1: memory is decided at abtars start; a failed inbound archive
+  // write is reported but never blocks the turn.
+  it("runs the turn when the inbound archive write rejects (#1940 R1)", async () => {
     const adapter = mockAdapter();
     const recordMessage = vi.fn().mockRejectedValue(new Error("owner down"));
     const deps = mockDeps(transport, {
@@ -356,21 +354,11 @@ describe("handleInboundMessage", () => {
         close: vi.fn().mockResolvedValue(undefined),
       } as any,
     } as any);
-    // Stub spin() forwards the intent to the transport boundary so the Pi
-    // preflight can fail closed before any provider work.
-    (deps.sessionManager as any).spin = async (spec: any) => {
-      const context = { userId: spec.userId, durableContextIntent: spec.durableContextIntent };
-      if (context.durableContextIntent?.mode === "required_unavailable") {
-        throw new DurableContextUnavailableError("cursor_unavailable");
-      }
-      const result = await transport.sendPrompt(spec.sessionId ?? "test_A_01", spec.prompt, spec.imageContent, context);
-      return { sessionId: spec.sessionId ?? "test_A_01", result: result ?? "" };
-    };
 
     await handleInboundMessage(makeMsg(), adapter, deps);
 
-    expect(adapter.sendMessage).toHaveBeenCalledWith("100", "Memory context is temporarily unavailable. Please retry.", expect.any(Object));
-    expect(transport.sendPrompt).not.toHaveBeenCalled();
+    expect(recordMessage).toHaveBeenCalled();
+    expect(transport.sendPrompt).toHaveBeenCalledTimes(1);
     expect((deps as any)._session.busy).toBe(false);
   });
 
@@ -420,19 +408,6 @@ describe("handleInboundMessage", () => {
 
   // ── Context-overflow recovery (#1745) ─────────────────────────────────────
 
-  it("resets the session on ProviderExecutionError with code context_overflow", async () => {
-    const failure: ProviderTerminalFailure = { code: "context_overflow", retryable: false, attemptedCandidates: 2, message: "The request exceeds the context window of every configured model" };
-    transport.sendPrompt = vi.fn().mockRejectedValue(new ProviderExecutionError(failure)) as any;
-    const adapter = mockAdapter();
-    const deps = mockDeps(transport);
-
-    await handleInboundMessage(makeMsg(), adapter, deps);
-
-    expect(transport.resetSession).toHaveBeenCalledTimes(1);
-    expect(adapter.sendMessage).toHaveBeenCalledWith("100", "Context window full — session reset. Send your message again.", expect.any(Object));
-    expect((deps as any)._session.busy).toBe(false);
-  });
-
   it("does NOT reset the session for a plain Error whose message mentions token limit", async () => {
     transport.sendPrompt = vi.fn().mockRejectedValue(new Error("API error 429: token limit reached")) as any;
     const adapter = mockAdapter();
@@ -443,18 +418,6 @@ describe("handleInboundMessage", () => {
     // The four-substring sniff is gone — overflow must travel as the typed code.
     expect(transport.resetSession).not.toHaveBeenCalled();
     expect(adapter.sendMessage).toHaveBeenCalled();
-  });
-
-  it("resets on overflow without notifying for synthetic-prefixed prompts", async () => {
-    const failure: ProviderTerminalFailure = { code: "context_overflow", retryable: false, attemptedCandidates: 1, message: "The request exceeds the context window of every configured model" };
-    transport.sendPrompt = vi.fn().mockRejectedValue(new ProviderExecutionError(failure)) as any;
-    const adapter = mockAdapter();
-    const deps = mockDeps(transport);
-
-    await handleInboundMessage(makeMsg({ text: "[SESSION START] You just came online. Greet the user." }), adapter, deps);
-
-    expect(transport.resetSession).toHaveBeenCalledTimes(1);
-    expect(adapter.sendMessage).not.toHaveBeenCalled();
   });
 
   it("handles command and returns early", async () => {
@@ -503,7 +466,7 @@ describe("handleInboundMessage", () => {
           idleTimeoutMs: 0, lastActiveAt: Date.now(), messageCount: 0, tokenCount: 0, toolCallCount: 0,
           log: [], shortIndex: 1, showThinking: false,
           busy: false, queue: [], fullMode: false, pendingStart: false, seen: true,
-          compacting: false, ctxWarned: false, compactFailures: 0, primingTerms: [], completions: [],
+          primingTerms: [], completions: [],
       instructionQueue: [], steeringAccepting: false,
         };
         sessions.set(id, s);
@@ -564,7 +527,7 @@ describe("#1724 submitTrustedInternalMessage — receipt-bearing internal submis
       idleTimeoutMs: 0, lastActiveAt: Date.now(), messageCount: 0, tokenCount: 0, toolCallCount: 0,
       log: [], shortIndex: 1, showThinking: false,
       busy: false, queue: [], fullMode: false, pendingStart: false, seen: true,
-      compacting: false, ctxWarned: false, compactFailures: 0, primingTerms: [], completions: [],
+      primingTerms: [], completions: [],
       instructionQueue: [], steeringAccepting: false,
     };
     vi.spyOn(spinMod.spin, "ensureSessionTransport").mockImplementation(async (session) => {
@@ -765,7 +728,7 @@ describe("citation detection (#1270)", () => {
       idleTimeoutMs: 0, lastActiveAt: Date.now(), messageCount: 0, tokenCount: 0, toolCallCount: 0,
       log: [], shortIndex: 1, showThinking: false,
       busy: false, queue: [], fullMode: false, pendingStart: false, seen: true,
-      compacting: false, ctxWarned: false, compactFailures: 0, primingTerms: [], completions: [],
+      primingTerms: [], completions: [],
       instructionQueue: [], steeringAccepting: false,
     }));
     vi.spyOn(spinMod.spin, "getActiveSession").mockImplementation((_userId, _platform): ManagedSession => ({
@@ -774,7 +737,7 @@ describe("citation detection (#1270)", () => {
       idleTimeoutMs: 0, lastActiveAt: Date.now(), messageCount: 0, tokenCount: 0, toolCallCount: 0,
       log: [], shortIndex: 1, showThinking: false,
       busy: false, queue: [], fullMode: false, pendingStart: false, seen: true,
-      compacting: false, ctxWarned: false, compactFailures: 0, primingTerms: [], completions: [],
+      primingTerms: [], completions: [],
       instructionQueue: [], steeringAccepting: false,
     }));
     vi.spyOn(spinMod.spin, "resolveSession").mockImplementation(
@@ -784,7 +747,7 @@ describe("citation detection (#1270)", () => {
         idleTimeoutMs: 0, lastActiveAt: Date.now(), messageCount: 0, tokenCount: 0, toolCallCount: 0,
         log: [], shortIndex: 1, showThinking: false,
         busy: false, queue: [], fullMode: false, pendingStart: false, seen: true,
-        compacting: false, ctxWarned: false, compactFailures: 0, primingTerms: [], completions: [],
+        primingTerms: [], completions: [],
       instructionQueue: [], steeringAccepting: false,
       }),
     );
@@ -887,7 +850,7 @@ describe("citation detection (#1270)", () => {
         idleTimeoutMs: 0, lastActiveAt: Date.now(), messageCount: 0, tokenCount: 0, toolCallCount: 0,
         log: [], shortIndex: 1, showThinking: false,
         busy: false, queue: [], fullMode: false, pendingStart: false, seen: true,
-        compacting: false, ctxWarned: false, compactFailures: 0, primingTerms: [], completions: [],
+        primingTerms: [], completions: [],
       instructionQueue: [], steeringAccepting: false,
       }));
       vi.spyOn(spinMod.spin, "getActiveSession").mockImplementation((_userId, _platform): ManagedSession => ({
@@ -896,7 +859,7 @@ describe("citation detection (#1270)", () => {
         idleTimeoutMs: 0, lastActiveAt: Date.now(), messageCount: 0, tokenCount: 0, toolCallCount: 0,
         log: [], shortIndex: 1, showThinking: false,
         busy: false, queue: [], fullMode: false, pendingStart: false, seen: true,
-        compacting: false, ctxWarned: false, compactFailures: 0, primingTerms: [], completions: [],
+        primingTerms: [], completions: [],
       instructionQueue: [], steeringAccepting: false,
       }));
       vi.spyOn(spinMod.spin, "resolveSession").mockImplementation(
@@ -906,7 +869,7 @@ describe("citation detection (#1270)", () => {
           idleTimeoutMs: 0, lastActiveAt: Date.now(), messageCount: 0, tokenCount: 0, toolCallCount: 0,
           log: [], shortIndex: 1, showThinking: false,
           busy: false, queue: [], fullMode: false, pendingStart: false, seen: true,
-          compacting: false, ctxWarned: false, compactFailures: 0, primingTerms: [], completions: [],
+          primingTerms: [], completions: [],
       instructionQueue: [], steeringAccepting: false,
         }),
       );
@@ -953,36 +916,6 @@ describe("citation detection (#1270)", () => {
         (c: unknown[]) => (c[0] as { role?: string })?.role === "assistant",
       );
       expect(assistantCalls).toHaveLength(0);
-    });
-
-    it("reports a bounded cooling-down reason when the provider is unavailable (#1932)", async () => {
-      const retryAt = Date.now() + 60_000;
-      transport.sendPrompt = vi.fn().mockRejectedValue(new ProviderExecutionError({
-        code: "provider_unavailable",
-        retryable: false,
-        attemptedCandidates: 2,
-        message: "All configured providers are cooling down",
-        retryAt,
-      })) as any;
-      const recordMessage = vi.fn().mockResolvedValue({ id: 1 });
-      const adapter = mockAdapter();
-      const deps = mockDeps(transport, {
-        memoryConfig: { memoryEnabled: true, memoryDir: "/tmp" },
-        memoryRuntime: mockMemoryRuntime({ recordMessage }),
-      } as any);
-
-      await handleInboundMessage(makeMsg({ messageId: 14 }), adapter, deps);
-
-      expect(adapter.sendMessage).toHaveBeenCalledWith(
-        expect.anything(),
-        expect.stringContaining("cooling down"),
-        expect.anything(),
-      );
-      expect(adapter.sendMessage).toHaveBeenCalledWith(
-        expect.anything(),
-        expect.stringContaining(new Date(retryAt).toISOString()),
-        expect.anything(),
-      );
     });
 
     it("delivers despite a failed assistant archive write — the gap is accepted (#1940 R1)", async () => {
@@ -1085,7 +1018,7 @@ describe("#1619 incremental block delivery wiring", () => {
       log: [], shortIndex: 1,
       showThinking: true, // #1654: wiring evidence tests need the feed enabled
       busy: false, queue: [], fullMode: false, pendingStart: false, seen: true,
-      compacting: false, ctxWarned: false, compactFailures: 0, primingTerms: [], completions: [],
+      primingTerms: [], completions: [],
       instructionQueue: [], steeringAccepting: false,
     };
     vi.spyOn(spinMod.spin, "ensureSessionTransport").mockImplementation(async (session) => {
@@ -1157,7 +1090,7 @@ describe("#1619 incremental block delivery wiring", () => {
       log: [], shortIndex: 1,
       showThinking: false, // #1654: default-hidden
       busy: false, queue: [], fullMode: false, pendingStart: false, seen: true,
-      compacting: false, ctxWarned: false, compactFailures: 0, primingTerms: [], completions: [],
+      primingTerms: [], completions: [],
       instructionQueue: [], steeringAccepting: false,
     });
     vi.spyOn(spinMod.spin, "getSessionById").mockImplementation((id: string): ManagedSession => hiddenSession(id));
@@ -1236,7 +1169,7 @@ describe("session-start hydration lifecycle (#1776)", () => {
       idleTimeoutMs: 0, lastActiveAt: Date.now(), messageCount: 0, tokenCount: 0, toolCallCount: 0,
       log: [], shortIndex: 1, showThinking: false,
       busy: false, queue: [], fullMode: false, pendingStart: false, seen: false,
-      compacting: false, ctxWarned: false, compactFailures: 0, primingTerms: [], completions: [],
+      primingTerms: [], completions: [],
       instructionQueue: [], steeringAccepting: false,
     };
     vi.spyOn(spinMod.spin, "getActiveSession").mockImplementation((): ManagedSession => session);
@@ -1304,7 +1237,7 @@ describe("#1913 answer records", () => {
       idleTimeoutMs: 0, lastActiveAt: Date.now(), messageCount: 0, tokenCount: 0, toolCallCount: 0,
       log: [], shortIndex: 1, showThinking: false,
       busy: false, queue: [], fullMode: false, pendingStart: false, seen: true,
-      compacting: false, ctxWarned: false, compactFailures: 0, primingTerms: [], completions: [],
+      primingTerms: [], completions: [],
       instructionQueue: [], steeringAccepting: false,
     };
   }

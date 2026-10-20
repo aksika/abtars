@@ -4,16 +4,10 @@
  */
 
 import type { ToolExecutionScope } from "../tasks/task-package.js";
-import type { DurableContextIntent } from "../spin-types.js";
 
 /**
  * Per-call request metadata threaded from the pipeline through to the
- * transport. #1529: `durableContextIntent` is the explicit discriminated
- * durable-context intent computed in prompt construction. An omitted intent
- * means the caller is outside the inbound durable pipeline and defaults to
- * not-required — it never implies a failed durable cursor.
- *
- * `userId` replaces the previous positional 4th argument so call-site
+ * transport. `userId` replaces the previous positional 4th argument so call-site
  * readability and tool-execution delivery are preserved.
  */
 export interface PromptRequestContext {
@@ -21,8 +15,6 @@ export interface PromptRequestContext {
   /** #1552: trusted session type from Spin's allocated ManagedSession. Never
    *  selectable by model arguments; transports may use it to scope tools. */
   sessionType?: import("../spin-types.js").SessionType;
-  /** #1529: explicit durable-context intent for Pi transport enforcement. */
-  durableContextIntent?: DurableContextIntent;
   /** #1445: execution ID for Pi-core host correlation. */
   executionId?: string;
   /** #1506: caller-owned absolute execution deadline. */

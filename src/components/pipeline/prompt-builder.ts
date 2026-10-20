@@ -4,7 +4,7 @@
  * active recall, large-message interception, injection scan.
  */
 
-import { logInfo, logDebug, logTrace } from "../logger.js";
+import { logInfo, logDebug, logTrace, logWarn } from "../logger.js";
 import { estimateTokensFromChars } from "../transport/token-budget.js";
 import { localTime } from "../../utils/local-time.js";
 import { interceptLargeMessage } from "../message-interceptor.js";
@@ -16,7 +16,7 @@ import { inboundExecutionKey, inboundMessageKey } from "../memory-operation-key.
 import type { ConversationBuffer } from "../conversation-buffer.js";
 import { isTrustedScheduledAnnouncement, type InboundMessage } from "../../types/platform.js";
 import type { UserRegistry } from "../user-registry.js";
-import { sessionTypeOf, type DurableContextIntent } from "../spin-types.js";
+import { sessionTypeOf } from "../spin-types.js";
 
 
 const TAG = "pipeline";
@@ -30,6 +30,12 @@ export interface BuildPromptDeps {
   contextPercent: number;
   maxContext?: number;
   isAcp?: boolean;
+  /** #1940: the turn runs on the Pi AgentSession route (role SOUL lives in
+   *  the Pi session system prompt, never in turn text). */
+  piRoute?: boolean;
+  /** #1940: the Pi route already holds a live Pi session for this key. A
+   *  missing one is a session start: its first message carries hydration. */
+  piSessionLive?: boolean;
 }
 
 export interface BuildPromptResult {
@@ -37,8 +43,6 @@ export interface BuildPromptResult {
   isSessionStart: boolean;
   imageContent?: { mime: string; base64: string; path: string };
   recalledHits?: Array<{ ref: string; contentEn: string }>;
-  /** #1529: explicit durable-context intent — never an ambiguous optional cursor. */
-  durableContextIntent: DurableContextIntent;
   /** #1335: structured current turn components for Pi cache-stable assembly. */
   currentTurn?: {
     rawText: string;
@@ -124,41 +128,13 @@ export async function buildPrompt(
 
   // --- Session-start injection (skipped for K — no A SOUL/session assembly) ---
   const entry = pSession;
-  const isSessionStart = !entry || entry.pendingStart || !entry.seen;
-  // #1869 — post-compaction core rehydration: the compaction summarized the
-  // core parts away, so re-inject only those. Never the history hydration,
-  // which would partly undo the compaction that just ran.
-  const isCoreRehydrate = !isSessionStart && entry?.pendingCoreRehydrate === true;
-  logDebug(TAG, `session-state: key=${sessionKey} seen=${entry?.seen} pendingStart=${entry?.pendingStart} isSessionStart=${isSessionStart} coreRehydrate=${isCoreRehydrate} memoryMode=${memoryMode}`);
-  // #1940: on the Pi route the role SOUL bundle is the AgentSession system
+  const isSessionStart = !entry || entry.pendingStart || !entry.seen
+    || (deps.piRoute === true && deps.piSessionLive === false);
+  logDebug(TAG, `session-state: key=${sessionKey} seen=${entry?.seen} pendingStart=${entry?.pendingStart} isSessionStart=${isSessionStart} memoryMode=${memoryMode}`);
+  // #1940: on the Pi route the role SOUL bundle is the Pi session system
   // prompt (captured once at session creation, surviving Pi compaction), so
-  // per-turn text must not repeat it. The ACP route (isAcp) keeps the
-  // session-start bundle behavior unchanged.
-  const omitSoulForPiRoute = !deps.isAcp;
-  if (isCoreRehydrate && memoryRuntime?.state === "ready" && memoryMode !== "skill-isolated" && !omitSoulForPiRoute) {
-    try {
-      // includeHistory: false — abmind does not even build the hydration
-      // block, so core-only is structural rather than a filter we could
-      // forget to apply.
-      const sessionCtx = await memoryRuntime.assembleSessionContext({
-        identity: { principalId: userId, executionId: sessionKey },
-        modelContextTokens: deps.maxContext,
-        includeHistory: false,
-      });
-      const parts = asSessionSoulBundle(sessionCtx.parts);
-      // Legacy daemons keep the mutable parts in the compaction-immune system
-      // prompt, so there is nothing to restore — injecting here would create
-      // the duplication #1869 exists to remove.
-      const coreBlocks = parts !== undefined ? [parts.profile, parts.notes, parts.coreFacts].filter(Boolean) : [];
-      if (coreBlocks.length > 0) {
-        prompt = `[CONTEXT — do not respond to this section]\n${coreBlocks.join("\n\n")}\n[/CONTEXT]\n\n${prompt}`;
-      }
-      logDebug(TAG, `core-rehydrate: key=${sessionKey} outcome=${coreBlocks.length > 0 ? "ok" : (parts !== undefined ? "empty" : "legacy-noop")} coreChars=${coreBlocks.join("").length}`);
-    } catch (err) {
-      logDebug(TAG, `core-rehydrate: key=${sessionKey} outcome=failed`);
-      logDebug(TAG, `Core rehydration unavailable: ${err instanceof Error ? err.message : String(err)}`);
-    }
-  }
+  // turn text never repeats it. Other routes keep the session-start bundle.
+  const omitSoulForPiRoute = deps.piRoute === true;
   if (isSessionStart && memoryRuntime?.state === "ready" && memoryMode !== "skill-isolated") {
     try {
       const sessionCtx = await memoryRuntime.assembleSessionContext({
@@ -193,29 +169,20 @@ export async function buildPrompt(
   if (entry) {
     entry.seen = true;
     entry.pendingStart = false;
-    // #1869 — one-shot: consumed by either branch above, and a full session
-    // start already delivered the core parts.
-    entry.pendingCoreRehydrate = false;
   }
 
-  // #1529: classify durable-context intent from configuration and message
-  // policy, independently of the memory runtime's instantaneous readiness.
-  // A required-but-unavailable intent must never degrade to ephemeral.
+  // #1940 R1: memory is decided at abtars start. The inbound archive write is
+  // attempted when memory applies to this turn; a failure is reported and
+  // logged, never turned into a turn rejection or a retry subsystem.
   const userRole = registry.byUserId.get(userId)?.role;
   logTrace(TAG, `recordMessage gate: memory=${memoryRuntime?.state === "ready"} userId=${userId} userRole=${userRole} memoryMode=${memoryMode}`);
-  const durableRequired =
+  const recordInbound =
     deps.memoryConfig.memoryEnabled
+    && memoryRuntime?.state === "ready"
     && memoryMode !== "skill-isolated"
     && userRole !== "guest"
     && !text.startsWith("[SESSION START]");
-  let durableContextIntent: DurableContextIntent = { mode: "not_required" };
-  if (durableRequired && memoryRuntime?.state !== "ready") {
-    durableContextIntent = { mode: "required_unavailable", reason: "runtime_unavailable" };
-  }
-  // #1940 R1: no outbox or retry subsystem — after boot, memory operations
-  // (recall, tools, archive writes) report their own failures and any gap
-  // is accepted.
-  if (durableContextIntent.mode === "not_required" && durableRequired) {
+  if (recordInbound) {
     // #1724: a trusted scheduled-announcement event carries its durable,
     // card-derived identity — delivery retries must deduplicate against the
     // same inbound row instead of recording a fresh turn per attempt.
@@ -238,15 +205,7 @@ export async function buildPrompt(
         operationKey,
       ),
     });
-    if (result.ok) {
-      const r = result as { ok: true; value: { id: number | null } };
-      const id = r.value.id;
-      durableContextIntent = typeof id === "number"
-        ? { mode: "durable", beforeMessageId: id }
-        : { mode: "required_unavailable", reason: "cursor_missing" };
-    } else {
-      durableContextIntent = { mode: "required_unavailable", reason: "record_failed" };
-    }
+    if (!result.ok) logWarn(TAG, `Inbound archive write failed for ${sessionKey} — not recorded`);
   }
 
   // --- Active recall (skipped for K — skill-isolated memory boundary) ---
@@ -294,7 +253,7 @@ export async function buildPrompt(
       const scan = scanFn(text);
       if (!scan.safe) {
         logInfo(TAG, `Injection blocked from ${userId}: ${scan.flags.map((f: { category: string }) => f.category).join(", ")}`);
-      return { prompt: "__INJECTION_BLOCKED__", isSessionStart, imageContent: undefined, recalledHits: undefined, durableContextIntent };
+      return { prompt: "__INJECTION_BLOCKED__", isSessionStart, imageContent: undefined, recalledHits: undefined };
     }
     }
   }
@@ -305,5 +264,5 @@ export async function buildPrompt(
     volatileContext,
   };
 
-  return { prompt, isSessionStart, imageContent, recalledHits, durableContextIntent, currentTurn };
+  return { prompt, isSessionStart, imageContent, recalledHits, currentTurn };
 }

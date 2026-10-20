@@ -38,7 +38,7 @@ function allocateSession(
     shortIndex: idx + 1,
     showThinking: false,
     busy: false, queue: [], fullMode: false, pendingStart: false,
-    seen: false, compacting: false, ctxWarned: false, compactFailures: 0,
+    seen: false,
     primingTerms: [], completions: [],
     instructionQueue: [],
     steeringAccepting: false,

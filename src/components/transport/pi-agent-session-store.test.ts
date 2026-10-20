@@ -553,4 +553,84 @@ describe("PiAgentSessionStore (#1940)", () => {
     expect(store.hasLive("main")).toBe(false);
     expect(store.hasLive("worker")).toBe(true);
   });
+
+  function simpleFactory(sessions: FakeSession[], runtime?: { getModel: (...args: string[]) => unknown; registerProvider: (...args: unknown[]) => void }) {
+    return {
+      createAgentSession: vi.fn(async () => {
+        const session = makeFakeSession(["memory_recall"]);
+        sessions.push(session);
+        return { session };
+      }),
+      SessionManager: { inMemory: vi.fn(() => ({})) },
+      SettingsManager: { inMemory: vi.fn(() => ({})) },
+      ModelRuntime: {
+        create: vi.fn(async () => runtime ?? ({ getModel: vi.fn(() => ({ id: "m1" })), registerProvider: vi.fn() })),
+      },
+      DefaultResourceLoader: class {
+        constructor(_options: Record<string, unknown>) {}
+        async reload(): Promise<void> {}
+      },
+    };
+  }
+  const init = {
+    systemPrompt: "sys",
+    candidate: { model: "m1", provider: "openai", endpoint: "https://x", maxContext: 1000, source: "primary" as const },
+    sandboxPolicy: buildPolicy("owner", { allowedTools: ["memory_recall"] }),
+  };
+
+  it("#1680: every provider request of a run counts against the prompt-round bound", async () => {
+    const sessions: FakeSession[] = [];
+    const store = new PiAgentSessionStore({ loadFactory: async () => simpleFactory(sessions) });
+    await store.ensureSession("k1", init);
+    const safety = createPiExecutionSafetyController({ maxPromptRounds: 2 });
+    const pending = store.prompt("k1", "go", { executionId: "e1", toolContext: makeContext("e1", { safety }) });
+    const session = sessions[0]!;
+    session.emit({ type: "turn_start" }); // first request: admitted by prompt()
+    session.emit({ type: "turn_start" }); // tool continuation: round 2
+    expect(session.calls).not.toContain("abort");
+    session.emit({ type: "turn_start" }); // round 3 exceeds the bound
+    expect(session.calls).toContain("abort");
+    expect(safety.terminalSafetyFailure).toBe(true);
+    session.emit({ type: "agent_settled", aborted: true });
+    await pending;
+  });
+
+  it("late events from a disposed session never reach its successor", async () => {
+    const sessions: FakeSession[] = [];
+    const store = new PiAgentSessionStore({ loadFactory: async () => simpleFactory(sessions) });
+    await store.ensureSession("k1", init);
+    await store.disposeSession("k1");
+    await store.ensureSession("k1", init);
+    const pending = store.prompt("k1", "hello", { executionId: "e2", toolContext: makeContext("e2") });
+    sessions[0]!.emit({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "stale" }] } });
+    sessions[0]!.emit({ type: "agent_settled", aborted: false });
+    sessions[1]!.emit({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "fresh" }] } });
+    sessions[1]!.emit({ type: "agent_settled", aborted: false });
+    expect((await pending).text).toBe("fresh");
+  });
+
+  it("abortTurn signals without waiting for Pi to go idle", async () => {
+    const sessions: FakeSession[] = [];
+    const store = new PiAgentSessionStore({ loadFactory: async () => simpleFactory(sessions) });
+    await store.ensureSession("k1", init);
+    sessions[0]!.abort = () => new Promise<void>(() => { /* wedged provider: never idle */ });
+    expect(store.abortTurn("k1")).toBeUndefined();
+  });
+
+  it("a Pi-managed model Pi already knows keeps Pi's own provider definition", async () => {
+    const registerProvider = vi.fn();
+    const sessions: FakeSession[] = [];
+    const store = new PiAgentSessionStore({
+      loadFactory: async () => simpleFactory(sessions, { getModel: vi.fn(() => ({ id: "m1" })), registerProvider }),
+    });
+    await store.ensureSession("k1", { ...init, candidate: { ...init.candidate, authSource: "pi" } });
+    expect(registerProvider).not.toHaveBeenCalled();
+  });
+
+  it("refuses to open a session with an empty system prompt", async () => {
+    const sessions: FakeSession[] = [];
+    const store = new PiAgentSessionStore({ loadFactory: async () => simpleFactory(sessions) });
+    await expect(store.ensureSession("k1", { ...init, systemPrompt: "  " })).rejects.toThrow(/No role system prompt/);
+    expect(sessions).toHaveLength(0);
+  });
 });

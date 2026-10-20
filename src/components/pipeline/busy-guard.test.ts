@@ -10,7 +10,7 @@ function makeSession(overrides: Partial<ManagedSession> = {}): ManagedSession {
     idleTimeoutMs: 0, lastActiveAt: Date.now(), messageCount: 0, tokenCount: 0, toolCallCount: 0,
     log: [], shortIndex: 1, showThinking: false,
     busy: false, queue: [], fullMode: false, pendingStart: false, seen: false,
-    compacting: false, ctxWarned: false, compactFailures: 0, primingTerms: [], completions: [],
+    primingTerms: [], completions: [],
     instructionQueue: [], steeringAccepting: false,
     ...overrides,
   };
@@ -62,14 +62,6 @@ describe("busyGuardMiddleware", () => {
     expect(next).not.toHaveBeenCalled();
     expect(ctx.adapter.sendMessage).not.toHaveBeenCalled();
     expect(ctx._session.queue).toHaveLength(1);
-  });
-
-  it("shows coffee message when compacting", async () => {
-    const ctx = makeCtx({ busy: true, compacting: true });
-    await mockSpin(ctx._session);
-    const next = vi.fn();
-    await busyGuardMiddleware(ctx, next);
-    expect(ctx.adapter.sendMessage).toHaveBeenCalledWith("100", expect.stringContaining("coffee"), expect.any(Object));
   });
 
   it("bare wait interrupts through the session-aware Spin operation (legacy compat)", async () => {

@@ -7,9 +7,6 @@ import { describe, it, expect, vi, beforeEach, beforeAll } from "vitest";
 import { clampThinkingLevel } from "@earendil-works/pi-ai";
 import { PiCoreTransport, extractAssistantText } from "./pi-core-transport.js";
 import { ensurePiThinkingClamp } from "./pi-ai-adapter.js";
-import { DurableContextUnavailableError } from "./pi-core-context.js";
-import { convertCurrentTurnToLlm } from "./pi-core-types.js";
-import type { AbtarsCurrentTurnMessage } from "./pi-core-types.js";
 import type { ModelCandidate } from "./model-candidates.js";
 import type { PiAgentSessionFactoryLoader } from "./pi-agent-session-store.js";
 
@@ -42,9 +39,12 @@ class FakeAgentSession {
     for (const listener of [...this.listeners]) listener(event);
   }
 
-  async prompt(text: string): Promise<void> {
+  promptOptions: Array<Record<string, unknown> | undefined> = [];
+
+  async prompt(text: string, options?: Record<string, unknown>): Promise<void> {
     this.calls.push("prompt");
     this.prompted.push(text);
+    this.promptOptions.push(options);
     this.streaming = true;
     const turn = FakeAgentSessionStore.queued.get(this);
     if (turn?.error) {
@@ -500,24 +500,16 @@ describe("PiCoreTransport", () => {
     expect(session.calls).toContain("compact");
   });
 
-  it("image input emits text+image parts in the pi-ai message", () => {
-    // The transport's internal image plumbing was previously asserted through
-    // sendPrompt with a bare rejection — which observed nothing about images.
-    // The pure conversion that carries the image shape into the pi-ai message
-    // is asserted directly (#1582).
-    const msg: AbtarsCurrentTurnMessage = {
-      role: "abtars_current_turn",
-      executionId: "exec_1",
-      sessionId: "sess_1",
-      content: "Look at this",
-      timestamp: 123,
-      images: [{ type: "image", mimeType: "image/png", data: "iVBOR=" }],
-    };
-    const m = convertCurrentTurnToLlm(msg);
-    expect(m.role).toBe("user");
-    if (typeof m.content === "string") throw new Error("expected content parts for an image turn");
-    expect(m.content[0]).toMatchObject({ type: "text", text: "Look at this" });
-    expect(m.content[1]).toMatchObject({ type: "image", data: "iVBOR=", mimeType: "image/png" });
+  it("an image on a later turn reaches Pi as an image (#1940 R4)", async () => {
+    const t = makeTransport();
+    await t.initialize();
+    await sendWithQueuedTurn(t, "sess_1", "first", { text: "ok" });
+    const pending = t.sendPrompt("sess_1", "Look at this", { mime: "image/png", base64: "iVBOR=" });
+    const session = FakeAgentSessionStore.sessionForCreateIndex(0);
+    for (let i = 0; i < 1000 && session.promptOptions.length < 2; i++) await Promise.resolve();
+    FakeAgentSessionStore.settle(session, { text: "seen" });
+    await expect(pending).resolves.toBe("seen");
+    expect(session.promptOptions[1]).toMatchObject({ images: [{ type: "image", mimeType: "image/png", data: "iVBOR=" }] });
   });
 
   it("factory failure clears the slot", async () => {
@@ -535,39 +527,74 @@ describe("PiCoreTransport", () => {
     expect((t as unknown as Record<string, unknown>).activeSlot).toBeNull();
   });
 
-  it("rejects required_unavailable intent before any host/provider work (#1529)", async () => {
-    const t = makeTransport();
-    await t.initialize();
-    const promise = t.sendPrompt("sess_1", "hello", undefined, {
-      userId: "user-1",
-      durableContextIntent: { mode: "required_unavailable", reason: "record_failed" },
+  async function warmMainSoulImports(): Promise<void> {
+    // The Main SOUL fetch lazily imports these; warm them so the queued-turn
+    // helper's microtask polling sees the prompt.
+    await import("../soul-bundle.js");
+    await import("../user-registry.js");
+  }
+
+  function mainTransport(runtime: { state: string; assembleSessionContext: (input: unknown) => Promise<unknown> }) {
+    return new PiCoreTransport({
+      role: "main",
+      systemPrompt: "",
+      candidate: makeCandidates()[0]!,
+      sandboxPolicy: { allowedTools: ["*"], allowedRead: ["*"], allowedWrite: ["*"], canExecuteBash: true },
+      sessionFactoryLoader: makeFactoryLoader(),
+      memoryToolDeps: { current: { runtime, quota: {} } } as never,
     });
-    await expect(promise).rejects.toBeInstanceOf(DurableContextUnavailableError);
-    // #1932: the preflight propagates the intent's reason instead of
-    // masking every pre-provider failure as cursor_unavailable.
-    await expect(promise).rejects.toMatchObject({ reason: "record_failed" });
-    expect((t as unknown as Record<string, unknown>).activeSlot).toBeNull();
+  }
+
+  function createdSystemPrompt(index: number): string {
+    const loader = FakeAgentSessionStore.created[index]!.resourceLoader as { options: { systemPrompt: string } };
+    return loader.options.systemPrompt;
+  }
+
+  it("#1940 R3: a new Main session gets abmind's complete SOUL bundle as its system prompt, once", async () => {
+    const assembleSessionContext = vi.fn(async () => ({
+      soulBundle: { soul: "SOUL-1940", profile: "PROFILE-1940", notes: "NOTES-1940", memoryTools: "TOOLS-1940", coreFacts: "FACTS-1940" },
+    }));
+    await warmMainSoulImports();
+    const t = mainTransport({ state: "ready", assembleSessionContext });
+    await t.initialize();
+    await sendWithQueuedTurn(t, "sess_a", "hi", { text: "one" }, { sessionType: "A" });
+    await sendWithQueuedTurn(t, "sess_a", "again", { text: "two" }, { sessionType: "A" });
+    expect(FakeAgentSessionStore.created).toHaveLength(1);
+    expect(assembleSessionContext).toHaveBeenCalledTimes(1);
+    const prompt = createdSystemPrompt(0);
+    for (const marker of ["SOUL-1940", "PROFILE-1940", "NOTES-1940", "TOOLS-1940", "FACTS-1940"]) {
+      expect(prompt).toContain(marker);
+    }
   });
 
-  it("rejects durable intent without caller identity before any host/provider work (#1529)", async () => {
-    const t = makeTransport();
+  it("#1940 R3: with ready memory a failed SOUL fetch fails session creation visibly", async () => {
+    const t = mainTransport({ state: "ready", assembleSessionContext: async () => { throw new Error("abmind down"); } });
     await t.initialize();
-    const promise = t.sendPrompt("sess_1", "hello", undefined, {
-      durableContextIntent: { mode: "durable", beforeMessageId: 42 },
-    });
-    await expect(promise).rejects.toBeInstanceOf(DurableContextUnavailableError);
-    await expect(promise).rejects.toMatchObject({ reason: "identity_unavailable" });
-    expect((t as unknown as Record<string, unknown>).activeSlot).toBeNull();
+    await expect(t.sendPrompt("sess_a", "hi", undefined, { sessionType: "A" })).rejects.toThrow(/abmind down/);
+    expect(FakeAgentSessionStore.created).toHaveLength(0);
   });
 
-  it("runs a valid durable intent through Pi without a context provider — history stays Pi-owned (#1940)", async () => {
-    const t = makeTransport();
+  it("#1940 R1/R3: without ready memory Main runs on the minimal bundle, never Pi's default prompt", async () => {
+    const assembleSessionContext = vi.fn();
+    await warmMainSoulImports();
+    const t = mainTransport({ state: "unavailable", assembleSessionContext });
     await t.initialize();
-    const text = await sendWithQueuedTurn(t, "sess_1", "hello", { text: "durable ok" }, {
-      userId: "user-1",
-      durableContextIntent: { mode: "durable", beforeMessageId: 42 },
+    await sendWithQueuedTurn(t, "sess_a", "hi", { text: "ok" }, { sessionType: "A" });
+    expect(assembleSessionContext).not.toHaveBeenCalled();
+    expect(createdSystemPrompt(0).trim()).not.toBe("");
+  });
+
+  it("#1940 R3: a role with no system prompt never opens a Pi session", async () => {
+    const t = new PiCoreTransport({
+      role: "specialist",
+      systemPrompt: "",
+      candidate: makeCandidates()[0]!,
+      sandboxPolicy: { allowedTools: ["*"], allowedRead: ["*"], allowedWrite: ["*"], canExecuteBash: true },
+      sessionFactoryLoader: makeFactoryLoader(),
     });
-    expect(text).toBe("durable ok");
+    await t.initialize();
+    await expect(t.sendPrompt("sess_w", "hi", undefined, { sessionType: "W" })).rejects.toThrow(/No role system prompt/);
+    expect(FakeAgentSessionStore.created).toHaveLength(0);
   });
 
   it("lets omitted intent (not-required) past preflight — intentional ephemeral stays operable (#1529)", async () => {

@@ -247,9 +247,7 @@ export async function buildTransport(ctx: BootCtx): Promise<PhaseResult> {
 
     // #1932: exactly one candidate per transport — the boot-selected primary.
     // Configured route fallbacks are inert for Pi dispatch (tolerant parsing
-    // keeps old configs loading); unavailability surfaces as a typed
-    // provider_unavailable failure with the memo's retry time instead of an
-    // in-turn model switch.
+    // keeps old configs loading); Pi retries the provider itself.
     const candidate: ModelCandidate = {
       model: resolved.model,
       provider: resolved.providerName,

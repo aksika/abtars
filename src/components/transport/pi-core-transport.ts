@@ -3,7 +3,6 @@ import type { IKiroTransport, PromptRequestContext, ReasoningEffort, ReasoningEf
 import type { CandidateSpec, ModelCandidate } from "./model-candidates.js";
 import { PiAgentSessionStore } from "./pi-agent-session-store.js";
 import type { PiAgentSessionTurnResult } from "./pi-agent-session-store.js";
-import { DurableContextUnavailableError } from "./pi-core-context.js";
 import { createPiExecutionSafetyController } from "./pi-core-safety.js";
 import type { PiCoreToolContext } from "./pi-core-tools.js";
 import type { SandboxPolicy } from "../tool-sandbox.js";
@@ -201,9 +200,30 @@ export class PiCoreTransport implements IKiroTransport {
     this.config.systemPrompt = prompt;
   }
 
-  /** #1940: Pi owns compaction, so there is no post-compaction bundle
-   *  refresh. Kept because boot probes for it; always clears. */
-  setCompactionRefresh(_fn: ((sessionKey: string) => void) | undefined): void {
+  /**
+   * #1940 R3: the role system prompt, fetched once when a Pi session is
+   * created. Main (A) gets its complete SOUL bundle from abmind (soul,
+   * profile, notes, memory tools, core facts) — it stays the session system
+   * prompt through Pi compaction. Without ready memory Main gets the minimal
+   * bundle; with ready memory a failed fetch fails session creation visibly.
+   * Every other role keeps the prompt installed for its type.
+   */
+  private async systemPromptForNewSession(type: import("../spin-types.js").SessionType | undefined): Promise<string> {
+    if (type !== "A") return this.config.systemPrompt;
+    const { buildSoulBundle, fetchMainSoulBundle } = await import("../soul-bundle.js");
+    const runtime = this._memoryToolDeps.current?.runtime;
+    if (!runtime || runtime.state !== "ready") return buildSoulBundle("A", null) ?? "";
+    // Main's bundle is the owner's (master) bundle, as at boot.
+    const { loadUsers } = await import("../user-registry.js");
+    const principal = loadUsers().users.find((u) => u.role === "master")?.userId ?? "master";
+    const bundle = await fetchMainSoulBundle(runtime, principal);
+    return buildSoulBundle("A", bundle, "system-prompt") ?? "";
+  }
+
+  /** #1940: whether this transport holds a live Pi session for the key; a
+   *  new Pi session is a session start (hydration in its first message). */
+  hasLiveSession(sessionKey: string): boolean {
+    return this.agentSessions?.hasLive(sessionKey) ?? false;
   }
 
   /** #1940 marker for the Pi AgentSession route (spin-profiles SOUL skip). */
@@ -423,23 +443,6 @@ export class PiCoreTransport implements IKiroTransport {
       this._toolCallsSucceeded = 0;
       this._lastToolFailure = null;
 
-      // #1529: fail closed when durable context is required but unavailable.
-      // The intent is computed in prompt construction; an omitted intent means
-      // the caller is outside the inbound durable pipeline (not-required). The
-      // rejection happens before Pi loading, session opening, or any
-      // provider request. Memory itself is decided once at abtars start
-      // (#1940 R1): no per-turn admission or health probing here.
-      const durableIntent = context?.durableContextIntent ?? { mode: "not_required" as const };
-      const callerUserId = context?.userId;
-      if (durableIntent.mode === "required_unavailable") {
-        logDebug(TAG, "durable intent required_unavailable — rejecting before provider boundary");
-        throw new DurableContextUnavailableError(durableIntent.reason);
-      }
-      if (durableIntent.mode === "durable" && !callerUserId) {
-        logDebug(TAG, "durable intent without caller identity — rejecting before provider boundary");
-        throw new DurableContextUnavailableError("identity_unavailable");
-      }
-
       const safety = createPiExecutionSafetyController({
         // #1680: the intent-policy prompt bound overrides transport defaults
         // when the caller carries it (contract authoring keeps its narrow
@@ -486,8 +489,11 @@ export class PiCoreTransport implements IKiroTransport {
       // instead of hanging.
       const store = this.sessionStore();
       try {
+        const systemPrompt = store.hasLive(sessionKey)
+          ? ""
+          : await this.systemPromptForNewSession(context?.sessionType);
         await store.ensureSession(sessionKey, {
-          systemPrompt: this.config.systemPrompt,
+          systemPrompt,
           candidate: this.config.candidate,
           sandboxPolicy: context?.sandboxPolicy ?? this.sandboxPolicy,
           ...(context?.sessionType !== undefined ? { sessionType: context.sessionType } : {}),
@@ -507,7 +513,7 @@ export class PiCoreTransport implements IKiroTransport {
         const delay = Math.max(0, deadlineAt - Date.now());
         deadlineTimer = setTimeout(() => {
           deadlineExceeded = true;
-          void store.abortTurn(sessionKey).catch(() => { /* teardown errors never fail the interrupt */ });
+          store.abortTurn(sessionKey);
         }, delay);
         if (typeof deadlineTimer.unref === "function") deadlineTimer.unref();
       }
@@ -764,7 +770,7 @@ export class PiCoreTransport implements IKiroTransport {
     // observe teardown up to a bound so a wedged provider cannot stall
     // the interrupt. Cancel keeps the conversation so a steer/follow-up
     // can still land; dispose is reserved for reset/destroy.
-    await store.abortTurn(slot.sessionKey).catch(() => { /* teardown errors never fail the interrupt */ });
+    store.abortTurn(slot.sessionKey);
     const bound = this.interruptIdleTimeoutMs;
     await Promise.race([
       store.waitForIdle(slot.sessionKey).catch(() => { /* teardown errors never fail the interrupt */ }),
@@ -775,7 +781,7 @@ export class PiCoreTransport implements IKiroTransport {
   destroy(): void {
     const slot = this.activeSlot;
     if (slot && this.agentSessions?.hasLive(slot.sessionKey)) {
-      void this.agentSessions.abortTurn(slot.sessionKey).catch(() => { /* teardown never fails destroy */ });
+      this.agentSessions.abortTurn(slot.sessionKey);
     }
     if (this.agentSessions) {
       void this.agentSessions.disposeAll().catch(() => { /* teardown never fails destroy */ });
