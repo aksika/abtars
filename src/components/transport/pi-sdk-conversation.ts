@@ -20,7 +20,7 @@
  * Pi packages resolve at runtime through installed-Pi discovery (never a
  * static runtime import — see check-pi-boundary).
  */
-import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, renameSync, rmSync, writeFileSync, lstatSync, readdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createHash, randomUUID } from "node:crypto";
@@ -30,10 +30,18 @@ import {
   isValidPiConversationId,
   mintPiConversationId,
   resolvePiConversationDir,
-  verifyPiConversationFile,
   type PiConversationRole,
   type PiMemoryScope,
 } from "../pi-session/pi-conversation-identity.js";
+import {
+  inspectOwnedConversationFile,
+  quarantineOwnedConversationFile,
+} from "../pi-session/pi-owned-files.js";
+import {
+  recoverPiConversation,
+  type PiRecoveryArchiveMessage,
+  type PiRecoveryArchiveQuery,
+} from "../pi-session/pi-session-recovery.js";
 
 const TAG = "pi-sdk-conversation";
 
@@ -155,6 +163,76 @@ export async function loadPiSdkConversationSurface(): Promise<PiSdkConversationS
 /** Loader for the Pi SDK surface (injectable for hermetic tests). */
 export type PiSdkConversationSurfaceLoader = () => Promise<PiSdkConversationSurface | null>;
 
+export interface SdkStoredBinding {
+  sessionKey: string;
+  binding: SdkConversationBinding;
+}
+
+/**
+ * List all durable bindings (tolerant: skips unreadable entries).
+ * Retention's binding sweep is the only production consumer.
+ */
+export function listSdkBindings(stateDir: string): SdkStoredBinding[] {
+  const dir = join(stateDir, BINDINGS_DIRNAME);
+  let names: string[];
+  try {
+    names = readdirSync(dir);
+  } catch {
+    return [];
+  }
+  const bindings: SdkStoredBinding[] = [];
+  for (const name of names) {
+    if (!name.endsWith(".json")) continue;
+    const path = join(dir, name);
+    let stat: ReturnType<typeof lstatSync> | null = null;
+    try {
+      stat = lstatSync(path);
+    } catch {
+      continue;
+    }
+    if (!stat || stat.isSymbolicLink() || !stat.isFile()) continue;
+    let raw: string;
+    try {
+      raw = readFileSync(path, "utf-8");
+    } catch {
+      continue;
+    }
+    if (raw.length > MAX_BINDING_BYTES) continue;
+    try {
+      const parsed = JSON.parse(raw) as Partial<BindingFileShape>;
+      if (parsed.version !== BINDING_VERSION || typeof parsed.sessionKey !== "string") continue;
+      const binding = parsed.binding;
+      if (!binding || typeof binding !== "object" || !isValidPiConversationId(binding.conversationId)) continue;
+      bindings.push({ sessionKey: parsed.sessionKey, binding: binding as SdkConversationBinding });
+    } catch {
+      continue;
+    }
+  }
+  return bindings;
+}
+
+/** Delete one binding record (retention only; never touches Pi files). */
+export function deleteSdkBinding(stateDir: string, sessionKey: string): boolean {
+  const name = createHash("sha256").update(sessionKey, "utf8").digest("hex");
+  const path = join(stateDir, BINDINGS_DIRNAME, `${name}.json`);
+  try {
+    rmSync(path);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** Recovery inputs for a missing/corrupt owned file (R5). Only used when
+ * the conversation requires abmind; ephemeral sessions mint fresh. */
+export interface SdkRecoveryInputs {
+  archive: PiRecoveryArchiveQuery;
+  archiveSource: {
+    projectArchive(input: PiRecoveryArchiveQuery): Promise<{ messages: readonly PiRecoveryArchiveMessage[] }>;
+  };
+  current: { text: string; timestamp: number; operationKey: string };
+  taskEvidence?: readonly string[];
+}
 /** Agent pieces the caller (transport) assembles per conversation. */
 export interface SdkAgentAssembly {
   /** Fully built Agent: model, streamFn, tools, abtars transformContext. */
@@ -257,7 +335,11 @@ export class PiSdkConversationStore {
   }
 
   /** Open (or create) the live SDK conversation for a session key. */
-  async ensureConversation(key: SdkConversationKey, assembly: SdkAgentAssembly): Promise<{ conversationId: string; resumed: boolean }> {
+  async ensureConversation(
+    key: SdkConversationKey,
+    assembly: SdkAgentAssembly,
+    opts?: { recovery?: SdkRecoveryInputs },
+  ): Promise<{ conversationId: string; resumed: boolean; recovered?: "reconstructed" | "fresh" }> {
     const existing = this.live.get(key.sessionKey);
     if (existing) {
       existing.lastUsed = Date.now();
@@ -281,29 +363,86 @@ export class PiSdkConversationStore {
       getSessionFile(): string | undefined;
     };
     let resumed = false;
+    let recovered: "reconstructed" | "fresh" | undefined;
 
     if (bound && isValidPiConversationId(bound.conversationId)) {
+      // Cross-role/principal denial: a binding never authorizes a different
+      // role or principal, even under a reused session key.
+      if (bound.role !== key.role || bound.principal !== key.principal) {
+        throw new Error(
+          `SDK conversation binding mismatch for ${key.sessionKey}: bound ${bound.principal}/${bound.role}, requested ${key.principal}/${key.role}`,
+        );
+      }
       conversationId = bound.conversationId;
       sessionDir = bound.sessionDir;
-      const found = surface.SessionManager.findById(cwd, conversationId, sessionDir);
-      if (!found) {
-        throw new Error(`SDK conversation file missing for ${conversationId} (no silent fallback)`);
+      const inspection = inspectOwnedConversationFile(this.sessionStorageRoot, sessionDir, conversationId, bound.sessionFile);
+      if (inspection.status === "intact" && inspection.canonicalFile !== null) {
+        sessionManager = surface.SessionManager.open(inspection.canonicalFile, sessionDir) as typeof sessionManager;
+        if (sessionManager.getSessionId() !== conversationId) {
+          throw new Error(`SDK conversation header mismatch for ${conversationId}`);
+        }
+        resumed = true;
+      } else if (inspection.status === "ambiguous") {
+        throw new Error(
+          `SDK conversation file ambiguous for ${conversationId} (${inspection.reason ?? "duplicate claimants"})`,
+        );
+      } else if (key.memoryScope === "abmind" && opts?.recovery) {
+        // Degraded reconstruction (R5) under a fresh successor ID; the
+        // binding is updated only after the successor is ready.
+        const result = await recoverPiConversation({
+          sessionManager: surface.SessionManager as never,
+          sessionStorageRoot: this.sessionStorageRoot,
+          progressDir: join(this.stateDir, "pi-sdk-reseed"),
+          predecessor: { conversationId, sessionDir, cwd, sessionFile: bound.sessionFile },
+          archive: opts.recovery.archive,
+          archiveSource: opts.recovery.archiveSource,
+          current: opts.recovery.current,
+          taskEvidence: opts.recovery.taskEvidence,
+        });
+        conversationId = result.successorId;
+        sessionDir = result.successorDir;
+        this.saveBinding(key.sessionKey, {
+          conversationId,
+          sessionDir,
+          sessionFile: undefined,
+          role: key.role,
+          principal: key.principal,
+          platform: key.platform,
+          workspaceAlias: key.workspaceAlias,
+          updatedAt: Date.now(),
+        });
+        sessionManager = surface.SessionManager.open(
+          this.requireSuccessorFile(sessionDir, conversationId),
+          sessionDir,
+        ) as typeof sessionManager;
+        recovered = "reconstructed";
+        logDebug(TAG, `SDK conversation reconstructed ${conversationId} from ${result.taskEvidenceCount} evidence lines, losses=[${result.losses.join(";")}]`);
+      } else {
+        // Ephemeral (or recovery-less) sessions have no authorized source
+        // to rebuild from: quarantine evidence when present, then mint a
+        // fresh conversation rather than wedge the session.
+        if (inspection.status === "corrupt" && inspection.canonicalFile !== null) {
+          try {
+            quarantineOwnedConversationFile(this.sessionStorageRoot, inspection.canonicalFile);
+          } catch (err) {
+            logWarn(TAG, `quarantine failed for ${conversationId}: ${err instanceof Error ? err.message : String(err)}`);
+          }
+        }
+        conversationId = mintPiConversationId();
+        sessionDir = resolvePiConversationDir(this.sessionStorageRoot, key.principal, key.role, key.canonicalWorkspace);
+        sessionManager = surface.SessionManager.create(cwd, sessionDir, { id: conversationId }) as typeof sessionManager;
+        this.saveBinding(key.sessionKey, {
+          conversationId,
+          sessionDir,
+          sessionFile: sessionManager.getSessionFile(),
+          role: key.role,
+          principal: key.principal,
+          platform: key.platform,
+          workspaceAlias: key.workspaceAlias,
+          updatedAt: Date.now(),
+        });
+        recovered = "fresh";
       }
-      const proof = verifyPiConversationFile(
-        this.sessionStorageRoot,
-        sessionDir,
-        conversationId,
-        found,
-        (file) => this.readFileHeaderId(file),
-      );
-      if (!proof.ok) {
-        throw new Error(`SDK conversation file unverified for ${conversationId}: ${proof.reason}`);
-      }
-      sessionManager = surface.SessionManager.open(proof.canonicalFile, sessionDir) as typeof sessionManager;
-      if (sessionManager.getSessionId() !== conversationId) {
-        throw new Error(`SDK conversation header mismatch for ${conversationId}`);
-      }
-      resumed = true;
     } else {
       conversationId = mintPiConversationId();
       sessionDir = resolvePiConversationDir(this.sessionStorageRoot, key.principal, key.role, key.canonicalWorkspace);
@@ -349,7 +488,7 @@ export class PiSdkConversationStore {
     // Lazily record the session file once Pi flushes it (first message).
     this.refreshBindingFile(key.sessionKey, sessionManager);
     logDebug(TAG, `SDK conversation ${resumed ? "reopened" : "created"} ${conversationId} for ${key.sessionKey}`);
-    return { conversationId, resumed };
+    return { conversationId, resumed, ...(recovered !== undefined ? { recovered } : {}) };
   }
 
   /** Send one user turn through the live SDK session; resolves on agent_settled.
@@ -603,6 +742,21 @@ export class PiSdkConversationStore {
     renameSync(tmp, path);
   }
 
+  /**
+   * Resolve the freshly seeded successor file. Seeding appends through the
+   * public SessionManager API, which flushes eagerly; a missing file means
+   * the seed never landed and opening would invent empty continuity.
+   */
+  private requireSuccessorFile(sessionDir: string, conversationId: string): string {
+    const inspection = inspectOwnedConversationFile(this.sessionStorageRoot, sessionDir, conversationId);
+    if (inspection.status !== "intact" || inspection.canonicalFile === null) {
+      throw new Error(
+        `reconstructed successor has no verifiable file (${inspection.status}${inspection.reason ? `: ${inspection.reason}` : ""})`,
+      );
+    }
+    return inspection.canonicalFile;
+  }
+
   private refreshBindingFile(
     sessionKey: string,
     sessionManager: { getSessionFile(): string | undefined },
@@ -622,22 +776,6 @@ export class PiSdkConversationStore {
       this.writeBinding(sessionKey, bound);
     } catch {
       // best effort; the ID binding is already durable
-    }
-  }
-
-  private readFileHeaderId(file: string): string | null {
-    let raw: string;
-    try {
-      raw = readFileSync(file, "utf-8");
-    } catch {
-      return null;
-    }
-    const firstLine = raw.split("\n", 1)[0] ?? "";
-    try {
-      const header = JSON.parse(firstLine) as { id?: unknown };
-      return typeof header.id === "string" ? header.id : null;
-    } catch {
-      return null;
     }
   }
 

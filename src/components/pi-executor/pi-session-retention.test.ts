@@ -2,29 +2,36 @@
  * pi-session-retention.test.ts — #1932 R8 production retention wiring.
  *
  * Proves the boot sweep prunes only aged files of terminal sessions with a
- * proven identity and no live writer, and that explicit erasure removes
- * owned files without touching anything else.
+ * proven identity and no live writer, drops only dead-weight bindings,
+ * removes only aged quarantine, and that explicit erasure removes owned
+ * files without touching anything else.
  */
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { createHash } from "node:crypto";
 import { mkdtempSync, mkdirSync, rmSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
+  ENDED_RETENTION_MS,
   eraseCodingSessionFiles,
   removeProvenSessionFile,
   sweepPiSessionsAtBoot,
+  sweepQuarantineFiles,
   sweepRpcSessionFiles,
+  sweepStaleBindings,
 } from "./pi-session-retention.js";
-import { ENDED_RETENTION_MS } from "../pi-session/pi-session-adapter.js";
 
 let root: string;
+let stateDir: string;
 
 beforeEach(() => {
   root = mkdtempSync(join(tmpdir(), "pi-retention-"));
+  stateDir = mkdtempSync(join(tmpdir(), "pi-retention-state-"));
 });
 
 afterEach(() => {
   rmSync(root, { recursive: true, force: true });
+  rmSync(stateDir, { recursive: true, force: true });
 });
 
 function writeSession(dir: string, file: string, id: string): string {
@@ -37,6 +44,13 @@ function writeSession(dir: string, file: string, id: string): string {
 function ageFile(path: string, ms: number): void {
   const past = new Date(Date.now() - ms);
   utimesSync(path, past, past);
+}
+
+function writeBinding(sessionKey: string, binding: Record<string, unknown>): void {
+  const name = createHash("sha256").update(sessionKey, "utf8").digest("hex");
+  const dir = join(stateDir, "pi-sdk-conversations-v1");
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, `${name}.json`), JSON.stringify({ version: 1, sessionKey, binding }));
 }
 
 describe("removeProvenSessionFile", () => {
@@ -98,9 +112,45 @@ describe("eraseCodingSessionFiles", () => {
     expect(removed).toEqual([file]);
   });
 
+  it("removes quarantine siblings carrying the same session ID", () => {
+    const file = writeSession(root, "2026-01-01T00-00-00-000Z_sess-9.jsonl", "sess-9");
+    const quarantined = `${file}.quarantined-123`;
+    writeFileSync(quarantined, "quarantined transcript\n");
+    const removed = eraseCodingSessionFiles({ sessionStorageRoot: root, piSessionId: "sess-9", piSessionFile: file });
+    expect(removed.sort()).toEqual([file, quarantined].sort());
+  });
+
   it("returns empty when nothing is removable", () => {
     expect(eraseCodingSessionFiles({ sessionStorageRoot: root, piSessionId: "gone", piSessionFile: join(root, "gone.jsonl") })).toEqual([]);
     expect(eraseCodingSessionFiles({ sessionStorageRoot: root })).toEqual([]);
+  });
+});
+
+describe("sweepStaleBindings", () => {
+  it("drops only file-less bindings older than retention, never live Pi files", () => {
+    const liveFile = writeSession(root, "live.jsonl", "live-1");
+    writeBinding("live-key", { conversationId: "live-1", sessionDir: root, sessionFile: liveFile, role: "main", principal: "u", platform: "t", workspaceAlias: "chat", updatedAt: Date.now() });
+    writeBinding("gone-old", { conversationId: "gone-1", sessionDir: root, sessionFile: join(root, "gone.jsonl"), role: "main", principal: "u", platform: "t", workspaceAlias: "chat", updatedAt: Date.now() - ENDED_RETENTION_MS - 1_000 });
+    writeBinding("gone-fresh", { conversationId: "gone-2", sessionDir: root, sessionFile: join(root, "gone2.jsonl"), role: "main", principal: "u", platform: "t", workspaceAlias: "chat", updatedAt: Date.now() });
+
+    const pruned = sweepStaleBindings(stateDir, Date.now());
+    expect(pruned).toEqual(["gone-old"]);
+  });
+});
+
+describe("sweepQuarantineFiles", () => {
+  it("removes only aged quarantine files, never live transcripts or symlinks", () => {
+    const part = join(root, "abc", "main", "def");
+    const oldQ = join(part, "2026-01-01T00-00-00-000Z_sess-1.jsonl.quarantined-1");
+    writeSession(part, "2026-01-01T00-00-00-000Z_sess-1.jsonl.quarantined-1", "sess-1");
+    ageFile(oldQ, ENDED_RETENTION_MS + 1_000);
+    const freshQ = join(part, "2026-02-02T00-00-00-000Z_sess-2.jsonl.quarantined-2");
+    writeSession(part, "2026-02-02T00-00-00-000Z_sess-2.jsonl.quarantined-2", "sess-2");
+    const live = writeSession(part, "2026-03-03T00-00-00-000Z_sess-3.jsonl", "sess-3");
+
+    const removed = sweepQuarantineFiles(root, Date.now());
+    expect(removed).toEqual([oldQ]);
+    expect(freshQ && live).toBeTruthy();
   });
 });
 
@@ -120,6 +170,7 @@ describe("sweepPiSessionsAtBoot", () => {
         : [],
     };
     const report = sweepPiSessionsAtBoot({
+      stateDir,
       sessionStorageRoot: root,
       codingStore: codingStore as never,
       runStore: runStore as never,
@@ -128,6 +179,8 @@ describe("sweepPiSessionsAtBoot", () => {
     // Non-terminal rows never enter the sweep; the file-less terminal row
     // is evaluated and kept.
     expect(report.rpcKept).toContain("r-done");
+    expect(report.bindingsPruned).toEqual([]);
+    expect(report.quarantineRemoved).toEqual([]);
   });
 
   it("returns empty reports when both stores fail", () => {
@@ -138,10 +191,11 @@ describe("sweepPiSessionsAtBoot", () => {
       list: () => { throw new Error("db locked"); },
     };
     const report = sweepPiSessionsAtBoot({
+      stateDir,
       sessionStorageRoot: root,
       codingStore: codingStore as never,
       runStore: runStore as never,
     });
-    expect(report).toEqual({ registryRemoved: [], registryKept: [], rpcRemoved: [], rpcKept: [] });
+    expect(report).toEqual({ rpcRemoved: [], rpcKept: [], bindingsPruned: [], quarantineRemoved: [] });
   });
 });

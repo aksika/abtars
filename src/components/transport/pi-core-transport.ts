@@ -711,7 +711,13 @@ export class PiCoreTransport implements IKiroTransport {
           const assembly = await this.buildSdkAssembly(
             tools, piModel, streamFn, gate, generation, Boolean(image),
           );
-          await store.ensureConversation(conversationKey, assembly);
+          await store.ensureConversation(conversationKey, assembly, {
+            recovery: this.recoveryInputsFor(sessionKey, source, message, executionId),
+          }).then((opened) => {
+            if (opened.recovered) {
+              logInfo(TAG, `sendPrompt: conversation ${opened.recovered} under ${opened.conversationId} for ${sessionKey}`);
+            }
+          });
           this.assemblyFingerprints.set(sessionKey, fingerprint);
         }
       } catch (err) {
@@ -1156,6 +1162,53 @@ export class PiCoreTransport implements IKiroTransport {
         if (this.turnState && this.turnState.denied === null) this.turnState.denied = err;
       },
     })(messages, signal);
+  }
+
+  /**
+   * #1932 R5: recovery inputs for a missing/corrupt owned file. Only
+   * durable (abmind) conversations carry an authorized archive source;
+   * ephemeral sessions mint fresh. The archive mapping mirrors the
+   * retired projection's row conversion (user/assistant/tool text).
+   */
+  private recoveryInputsFor(
+    sessionKey: string,
+    source: { mode: "durable"; sessionKey: string; beforeMessageId: number; maxContext: number; userId: string } | { mode: "ephemeral"; sessionKey: string },
+    message: string,
+    executionId: string,
+  ): import("./pi-sdk-conversation.js").SdkRecoveryInputs | undefined {
+    if (source.mode !== "durable") return undefined;
+    const runtime = this._memoryToolDeps.current?.runtime;
+    if (!runtime) return undefined;
+    const archive = {
+      userId: source.userId,
+      archiveSessionId: sessionKey,
+      beforeMessageId: source.beforeMessageId,
+      maxContext: source.maxContext,
+    };
+    return {
+      archive,
+      archiveSource: {
+        projectArchive: async (input) => {
+          const projected = await runtime.projectDurableContext({
+            userId: input.userId,
+            sessionId: input.archiveSessionId,
+            beforeMessageId: input.beforeMessageId,
+            maxContext: input.maxContext,
+          });
+          const messages: Array<{ role: "user" | "assistant" | "tool"; content: string }> = [];
+          for (const row of projected.messages ?? []) {
+            const record = row as { role?: unknown; content?: unknown };
+            const role = typeof record.role === "string" ? record.role : "user";
+            const content = typeof record.content === "string" ? record.content : "";
+            if (role === "assistant" || role === "user" || role === "tool") {
+              messages.push({ role, content });
+            }
+          }
+          return { messages };
+        },
+      },
+      current: { text: message, timestamp: Date.now(), operationKey: executionId },
+    };
   }
 
   lastUsage(): RuntimeUsageSnapshot | null {

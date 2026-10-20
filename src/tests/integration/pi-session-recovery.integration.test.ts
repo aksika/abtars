@@ -3,7 +3,7 @@
  * real abmind archive and current input through the production recovery path.
  */
 import { describe, expect, it, beforeAll, afterAll } from "vitest";
-import { mkdtempSync, rmSync, readFileSync, existsSync, writeFileSync } from "node:fs";
+import { mkdtempSync, rmSync, readFileSync, existsSync, writeFileSync, readdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -17,12 +17,12 @@ import {
 } from "abmind";
 import { SessionManager } from "@earendil-works/pi-coding-agent";
 import { createClientRuntime, type AbtarsMemoryRuntime } from "../../components/memory-runtime.js";
-import { allocatePiBinding, openPiConversation, type PiSessionManagerCtor } from "../../components/pi-session/pi-session-adapter.js";
+import { mintPiConversationId, resolvePiConversationDir } from "../../components/pi-session/pi-conversation-identity.js";
+import { readPiSessionHeaderId } from "../../components/pi-session/pi-owned-files.js";
 import { recoverPiConversation } from "../../components/pi-session/pi-session-recovery.js";
 
 const USER_ID = "local-user";
 const ARCHIVE_SESSION = "recovery-archive";
-const realSessionManager = SessionManager as unknown as PiSessionManagerCtor;
 
 describe("live Pi conversation recovery (R5)", () => {
   let tmpDir: string;
@@ -97,21 +97,11 @@ describe("live Pi conversation recovery (R5)", () => {
 
     const stateRoot = mkdtempSync(join(tmpDir, "pi-recovery-state-"));
     const workspace = mkdtempSync(join(tmpDir, "pi-recovery-workspace-"));
-    const predecessor = allocatePiBinding(stateRoot, {
-      principal: USER_ID,
-      platform: "telegram",
-      role: "worker",
-      workspaceAlias: "repo-a",
-      canonicalWorkspace: workspace,
-      memoryScope: "abmind",
-    });
-    const direct = realSessionManager.create(workspace, predecessor.sessionDir, { id: predecessor.conversationId });
-    const opened = openPiConversation(
-      realSessionManager,
-      stateRoot,
-      predecessor,
-    );
-    expect(opened.canonicalFile).toBeNull();
+    const progressDir = mkdtempSync(join(tmpDir, "pi-recovery-progress-"));
+    const predecessorId = mintPiConversationId();
+    const predecessorDir = resolvePiConversationDir(stateRoot, USER_ID, "worker", workspace);
+    const predecessor = { conversationId: predecessorId, sessionDir: predecessorDir, cwd: workspace };
+    const direct = SessionManager.create(workspace, predecessorDir, { id: predecessorId });
     if (typeof direct.appendMessage !== "function") {
       throw new Error("real Pi session cannot accept seeded history");
     }
@@ -122,12 +112,12 @@ describe("live Pi conversation recovery (R5)", () => {
     });
     const predecessorFile = direct.getSessionFile();
     if (!predecessorFile) throw new Error("real Pi session did not flush history");
-    openPiConversation(realSessionManager, stateRoot, predecessor);
     writeFileSync(predecessorFile, "corrupt\n");
 
     const result = await recoverPiConversation({
-      manager: realSessionManager,
-      stateRoot,
+      sessionManager: SessionManager as never,
+      sessionStorageRoot: stateRoot,
+      progressDir,
       predecessor,
       archive: {
         userId: USER_ID,
@@ -149,14 +139,19 @@ describe("live Pi conversation recovery (R5)", () => {
     });
 
     expect(result.status).toBe("reconstructed");
-    expect(result.handle.binding.predecessorId).toBe(predecessor.conversationId);
-    expect(result.predecessorQuarantined).toBe(`${predecessorFile}.quarantined`);
+    expect(result.successorId).not.toBe(predecessor.conversationId);
+    expect(result.successorDir).toBe(predecessor.sessionDir);
+    expect(result.predecessorQuarantined ?? "").toMatch(new RegExp(`^${predecessorFile.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\.quarantined-`));
     expect(existsSync(predecessorFile)).toBe(false);
     expect(result.archiveTotal).toBe(3);
     expect(result.taskEvidenceCount).toBe(1);
     expect(result.currentInputAdmitted).toBe(true);
     expect(result.losses).toContain("branch structure");
-    const successorFile = result.handle.session.getSessionFile();
+    // The successor session flushed seeded history under its own ID.
+    const successorFiles = readdirSync(predecessor.sessionDir).filter((name) => name.endsWith(".jsonl"));
+    const successorFile = successorFiles
+      .map((name) => join(predecessor.sessionDir, name))
+      .find((file) => readPiSessionHeaderId(file) === result.successorId && !file.startsWith(`${predecessorFile}.quarantined`));
     if (!successorFile) throw new Error("reconstructed Pi session did not flush history");
     const successorText = readFileSync(successorFile, "utf-8");
     for (const marker of ["PI-RECOVERY-FIRST", "PI-RECOVERY-SECOND", "durable task evidence", "PI-RECOVERY-CURRENT"]) {

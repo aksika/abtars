@@ -1,26 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { existsSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { type PiConversationParams } from "./pi-conversation-identity.js";
-import {
-  allocatePiBinding,
-  erasePiConversation,
-  openPiConversation,
-  type PiSessionManagerCtor,
-} from "./pi-session-adapter.js";
-import { recoverPiConversation } from "./pi-session-recovery.js";
-
-function params(canonicalWorkspace: string): PiConversationParams {
-  return {
-    principal: "user-1",
-    platform: "telegram",
-    role: "worker",
-    workspaceAlias: "repo-a",
-    canonicalWorkspace,
-    memoryScope: "abmind",
-  };
-}
+import { mintPiConversationId, resolvePiConversationDir } from "./pi-conversation-identity.js";
+import { recoverPiConversation, type PiRecoveryRequest } from "./pi-session-recovery.js";
 
 function stamp(id: string): string {
   return `2026-01-01T00-00-00-000Z_${id}.jsonl`;
@@ -38,11 +21,9 @@ function readId(file: string): string | null {
 
 /** Fake mirrors real SDK file semantics and records seeded history appends. */
 function makeManager(appended: unknown[]) {
-  function baseShape(id: string, file: string | undefined) {
+  function baseShape(id: string) {
     return {
       getSessionId: () => id,
-      getSessionFile: () => file,
-      getSessionDir: () => (file ? join(file, "..") : ""),
       appendMessage: (message: unknown) => {
         appended.push(message);
         return `entry-${appended.length}`;
@@ -50,40 +31,20 @@ function makeManager(appended: unknown[]) {
     };
   }
 
-  const manager: PiSessionManagerCtor = {
-    create(_cwd: string, sessionDir?: string, options?: { id?: string }) {
-      const id = options?.id ?? "minted";
-      return baseShape(id, join(sessionDir ?? "", stamp(id)));
+  const manager = {
+    create(_cwd: string, _sessionDir?: string, options?: { id?: string }) {
+      return baseShape(options?.id ?? "minted");
     },
     open(path: string) {
-      return baseShape(readId(path) ?? "unknown", path);
+      return { ...baseShape(readId(path) ?? "unknown"), getSessionFile: () => path };
     },
-    findById(_cwd: string, id: string, sessionDir?: string) {
-      let names: string[];
-      try {
-        names = readdirSync(sessionDir ?? "");
-      } catch {
-        return undefined;
-      }
-      for (const name of names) {
-        if (!name.endsWith(".jsonl")) continue;
-        const candidate = join(sessionDir ?? "", name);
-        if (readId(candidate) === id) return candidate;
-      }
+    findById(_cwd: string, _id: string, _sessionDir?: string) {
       return undefined;
-    },
-    forkFrom(sourcePath: string, _targetCwd: string, sessionDir?: string, options?: { id?: string }) {
-      const id = options?.id ?? "minted";
-      if (!existsSync(sourcePath)) throw new Error("missing source");
-      const file = join(sessionDir ?? "", stamp(id));
-      const lines = readFileSync(sourcePath, "utf-8").split("\n").filter((line) => line.length > 0);
-      writeFileSync(file, JSON.stringify({ type: "session", id }) + "\n");
-      for (const entry of lines.slice(1)) writeFileSync(file, `${entry}\n`, { flag: "a" });
-      return baseShape(id, file);
     },
   };
 
   function flush(id: string, sessionDir: string): string {
+    mkdirSync(sessionDir, { recursive: true });
     const file = join(sessionDir, stamp(id));
     writeFileSync(file, `${JSON.stringify({ type: "session", id })}\n`);
     return file;
@@ -99,13 +60,40 @@ function appendedTexts(appended: unknown[]): string[] {
   });
 }
 
+function predecessorFor(storageRoot: string, workspace: string, sessionFile?: string) {
+  const conversationId = mintPiConversationId();
+  return {
+    conversationId,
+    sessionDir: resolvePiConversationDir(storageRoot, "user-1", "worker", workspace),
+    cwd: workspace,
+    ...(sessionFile !== undefined ? { sessionFile } : {}),
+  };
+}
+
+function baseRequest(overrides?: Partial<PiRecoveryRequest>): PiRecoveryRequest {
+  const storageRoot = mkdtempSync(join(tmpdir(), "pi-recovery-"));
+  const workspace = mkdtempSync(join(tmpdir(), "pi-recovery-ws-"));
+  const progressDir = mkdtempSync(join(tmpdir(), "pi-recovery-prog-"));
+  return {
+    sessionManager: makeManager([]).manager as never,
+    sessionStorageRoot: storageRoot,
+    progressDir,
+    predecessor: predecessorFor(storageRoot, workspace),
+    archive: { userId: "user-1", archiveSessionId: "archive-1", beforeMessageId: 7, maxContext: 1000 },
+    archiveSource: { projectArchive: async () => ({ messages: [] }) },
+    current: { text: "live", timestamp: 123, operationKey: "op-live" },
+    ...overrides,
+  };
+}
+
 describe("pi-session-recovery", () => {
-  it("rebuilds a missing conversation from authorized archive, tool, task, and current input", async () => {
+  it("rebuilds a missing conversation from authorized archive, task evidence, and current input", async () => {
     const appended: unknown[] = [];
-    const stateRoot = mkdtempSync(join(tmpdir(), "pi-recovery-"));
+    const storageRoot = mkdtempSync(join(tmpdir(), "pi-recovery-"));
     const workspace = mkdtempSync(join(tmpdir(), "pi-recovery-ws-"));
+    const progressDir = mkdtempSync(join(tmpdir(), "pi-recovery-prog-"));
     const { manager } = makeManager(appended);
-    const predecessor = allocatePiBinding(stateRoot, params(workspace));
+    const predecessor = predecessorFor(storageRoot, workspace);
     const archiveSource = {
       projectArchive: async (input: { userId: string; archiveSessionId: string; beforeMessageId: number; maxContext: number }) => {
         expect(input).toEqual({ userId: "user-1", archiveSessionId: "archive-1", beforeMessageId: 7, maxContext: 1000 });
@@ -119,21 +107,22 @@ describe("pi-session-recovery", () => {
         };
       },
     };
-    const request = {
-      manager,
-      stateRoot,
+
+    const result = await recoverPiConversation({
+      sessionManager: manager as never,
+      sessionStorageRoot: storageRoot,
+      progressDir,
       predecessor,
       archive: { userId: "user-1", archiveSessionId: "archive-1", beforeMessageId: 7, maxContext: 1000 },
       archiveSource,
       current: { text: "live", timestamp: 123, operationKey: "op-live" },
       taskEvidence: ["durable task evidence"],
       now: () => 123,
-    };
-
-    const result = await recoverPiConversation(request);
+    });
 
     expect(result.status).toBe("reconstructed");
-    expect(result.handle.binding.predecessorId).toBe(predecessor.conversationId);
+    expect(result.successorId).not.toBe(predecessor.conversationId);
+    expect(result.successorDir).toBe(predecessor.sessionDir);
     expect(result.archiveTotal).toBe(3);
     expect(result.currentInputAdmitted).toBe(true);
     expect(result.taskEvidenceCount).toBe(1);
@@ -141,26 +130,68 @@ describe("pi-session-recovery", () => {
     expect(result.losses).toContain("branch structure");
     expect(appendedTexts(appended)).toEqual(["user:first", "assistant:second", "user:durable task evidence", "user:live"]);
 
-    // A retry resumes the same registered successor instead of reseeding it.
-    const retry = await recoverPiConversation(request);
-    expect(retry.handle.binding.conversationId).toBe(result.handle.binding.conversationId);
+    // A retry resumes the same successor instead of reseeding it.
+    const retry = await recoverPiConversation({
+      sessionManager: manager as never,
+      sessionStorageRoot: storageRoot,
+      progressDir,
+      predecessor,
+      archive: { userId: "user-1", archiveSessionId: "archive-1", beforeMessageId: 7, maxContext: 1000 },
+      archiveSource,
+      current: { text: "live", timestamp: 123, operationKey: "op-live" },
+      taskEvidence: ["durable task evidence"],
+      now: () => 123,
+    });
+    expect(retry.successorId).toBe(result.successorId);
     expect(appended).toHaveLength(4);
+  });
+
+  it("returns intact without touching the archive when the file verifies", async () => {
+    const appended: unknown[] = [];
+    const storageRoot = mkdtempSync(join(tmpdir(), "pi-recovery-"));
+    const workspace = mkdtempSync(join(tmpdir(), "pi-recovery-ws-"));
+    const progressDir = mkdtempSync(join(tmpdir(), "pi-recovery-prog-"));
+    const { manager, flush } = makeManager(appended);
+    const predecessor = predecessorFor(storageRoot, workspace);
+    flush(predecessor.conversationId, predecessor.sessionDir);
+
+    const result = await recoverPiConversation({
+      sessionManager: manager as never,
+      sessionStorageRoot: storageRoot,
+      progressDir,
+      predecessor,
+      archive: { userId: "user-1", archiveSessionId: "archive-1", beforeMessageId: 7, maxContext: 1000 },
+      archiveSource: {
+        projectArchive: async () => { throw new Error("archive must not be read on the intact path"); },
+      },
+      current: { text: "live", timestamp: 123, operationKey: "op-live" },
+    });
+
+    expect(result.status).toBe("intact");
+    expect(result.successorId).toBe(predecessor.conversationId);
+    expect(appended).toEqual([]);
   });
 
   it("quarantines a corrupt predecessor without overwriting source data", async () => {
     const appended: unknown[] = [];
-    const stateRoot = mkdtempSync(join(tmpdir(), "pi-recovery-"));
+    const storageRoot = mkdtempSync(join(tmpdir(), "pi-recovery-"));
     const workspace = mkdtempSync(join(tmpdir(), "pi-recovery-ws-"));
+    const progressDir = mkdtempSync(join(tmpdir(), "pi-recovery-prog-"));
     const { manager, flush } = makeManager(appended);
-    const predecessor = allocatePiBinding(stateRoot, params(workspace));
-    openPiConversation(manager, stateRoot, predecessor);
-    const file = flush(predecessor.conversationId, predecessor.sessionDir);
-    openPiConversation(manager, stateRoot, predecessor);
+    const preliminary = predecessorFor(storageRoot, workspace);
+    const file = flush(preliminary.conversationId, preliminary.sessionDir);
     writeFileSync(file, "corrupt\n");
+    const predecessor = {
+      ...predecessorFor(storageRoot, workspace),
+      conversationId: preliminary.conversationId,
+      sessionDir: preliminary.sessionDir,
+      sessionFile: file,
+    };
 
     const result = await recoverPiConversation({
-      manager,
-      stateRoot,
+      sessionManager: manager as never,
+      sessionStorageRoot: storageRoot,
+      progressDir,
       predecessor,
       archive: { userId: "user-1", archiveSessionId: "archive-1", beforeMessageId: 7, maxContext: 1000 },
       archiveSource: {
@@ -171,41 +202,38 @@ describe("pi-session-recovery", () => {
     });
 
     expect(result.status).toBe("reconstructed");
-    expect(result.predecessorQuarantined).toBe(`${file}.quarantined`);
+    expect(result.predecessorQuarantined).toMatch(new RegExp(`^${file.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\.quarantined-`));
     expect(existsSync(file)).toBe(false);
-    expect(readFileSync(`${file}.quarantined`, "utf-8")).toBe("corrupt\n");
+    const quarantined = result.predecessorQuarantined!;
+    expect(readFileSync(quarantined, "utf-8")).toBe("corrupt\n");
     expect(appendedTexts(appended)).toEqual(["user:archived", "user:live"]);
   });
 
-  it("refuses to reconstruct an erased predecessor", async () => {
+  it("starts explicitly fresh (current input only) when the archive is empty", async () => {
     const appended: unknown[] = [];
-    const stateRoot = mkdtempSync(join(tmpdir(), "pi-recovery-"));
-    const workspace = mkdtempSync(join(tmpdir(), "pi-recovery-ws-"));
-    const { manager, flush } = makeManager(appended);
-    const predecessor = allocatePiBinding(stateRoot, params(workspace));
-    openPiConversation(manager, stateRoot, predecessor);
-    flush(predecessor.conversationId, predecessor.sessionDir);
-    openPiConversation(manager, stateRoot, predecessor);
-    erasePiConversation(stateRoot, predecessor.conversationId);
+    const request = baseRequest();
+    const { manager } = makeManager(appended);
 
-    await expect(recoverPiConversation({
-      manager,
-      stateRoot,
-      predecessor,
-      archive: { userId: "user-1", archiveSessionId: "archive-1", beforeMessageId: 7, maxContext: 1000 },
+    const result = await recoverPiConversation({
+      ...request,
+      sessionManager: manager as never,
       archiveSource: { projectArchive: async () => ({ messages: [] }) },
-      current: { text: "live", timestamp: 123, operationKey: "op-live" },
-    })).rejects.toThrow(/erased/);
-    expect(appended).toEqual([]);
+    });
+
+    expect(result.status).toBe("reconstructed");
+    expect(result.archiveTotal).toBe(0);
+    expect(result.currentInputAdmitted).toBe(true);
+    expect(result.losses.length).toBeGreaterThan(0);
+    expect(appendedTexts(appended)).toEqual(["user:live"]);
   });
 
   it("refuses to reconstruct from an ambiguous predecessor", async () => {
     const appended: unknown[] = [];
-    const stateRoot = mkdtempSync(join(tmpdir(), "pi-recovery-"));
+    const storageRoot = mkdtempSync(join(tmpdir(), "pi-recovery-"));
     const workspace = mkdtempSync(join(tmpdir(), "pi-recovery-ws-"));
+    const progressDir = mkdtempSync(join(tmpdir(), "pi-recovery-prog-"));
     const { manager, flush } = makeManager(appended);
-    const predecessor = allocatePiBinding(stateRoot, params(workspace));
-    openPiConversation(manager, stateRoot, predecessor);
+    const predecessor = predecessorFor(storageRoot, workspace);
     flush(predecessor.conversationId, predecessor.sessionDir);
     writeFileSync(
       join(predecessor.sessionDir, `2026-02-02T00-00-00-000Z_${predecessor.conversationId}.jsonl`),
@@ -213,13 +241,31 @@ describe("pi-session-recovery", () => {
     );
 
     await expect(recoverPiConversation({
-      manager,
-      stateRoot,
+      sessionManager: manager as never,
+      sessionStorageRoot: storageRoot,
+      progressDir,
       predecessor,
       archive: { userId: "user-1", archiveSessionId: "archive-1", beforeMessageId: 7, maxContext: 1000 },
       archiveSource: { projectArchive: async () => ({ messages: [] }) },
       current: { text: "live", timestamp: 123, operationKey: "op-live" },
     })).rejects.toThrow(/ambiguous/);
     expect(appended).toEqual([]);
+  });
+
+  it("fails closed when the archive source rejects (never silent fresh start)", async () => {
+    const request = baseRequest();
+    const { manager } = makeManager([]);
+    await expect(recoverPiConversation({
+      ...request,
+      sessionManager: manager as never,
+      archiveSource: { projectArchive: async () => { throw new Error("abmind down"); } },
+    })).rejects.toThrow(/abmind down/);
+  });
+
+  it("readdir sanity: claimant scan only matches jsonl headers", () => {
+    const dir = mkdtempSync(join(tmpdir(), "pi-recovery-scan-"));
+    writeFileSync(join(dir, "notes.txt"), "x");
+    const names = readdirSync(dir);
+    expect(names).toEqual(["notes.txt"]);
   });
 });

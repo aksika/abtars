@@ -1,37 +1,39 @@
 /**
  * pi-session-retention.ts — #1932 R8 production retention wiring.
  *
- * Two complementary sweeps, one boot entry point:
+ * One boot entry point over three disjoint mechanisms:
  *
- * - Adapter-registry sweep (`sweepPiRetention`): registered abtars-owned
- *   conversations (recovery successors today; SDK-managed sessions after
- *   cutover). A conversation counts as active when a live executor row
- *   still references its conversation ID, so recovery successors of live
- *   RPC sessions are never pruned regardless of age.
- * - Row-driven sweep: ended coding sessions and terminal supervised runs
- *   whose Pi files were never adapter-registered (all RPC launches today).
+ * - Row-driven sweep: ended coding sessions and terminal supervised runs.
  *   A file is removed only when the durable row proves it (expected ID +
  *   header match + containment), the file itself is aged out, and no live
- *   writer holds it. Standalone Pi files are invisible to both sweeps:
- *   neither the registry nor an executor row claims them.
+ *   writer holds it.
+ * - Binding sweep: SDK conversation bindings (Main/worker chats) carry no
+ *   end signal, so their Pi files are the working store and are never pruned
+ *   here — absence is handled by resume/recovery at open. Only dead weight
+ *   goes: binding records with no Pi file older than retention.
+ * - Quarantine sweep: quarantined files older than retention are removed
+ *   (they were verified at quarantine time and carry the session ID).
  *
- * Everything is best-effort and never throws: a retention failure must not
- * break boot or a turn. Incomplete removals keep their records so a later
- * sweep retries.
+ * Standalone Pi files are invisible to all sweeps: neither a row nor a
+ * binding claims them. Everything is best-effort and never throws:
+ * a retention failure must not break boot or a turn. Incomplete removals
+ * keep their records so a later sweep retries.
  */
-import { lstatSync, rmSync, statSync } from "node:fs";
+import { lstatSync, rmSync, readdirSync, statSync, unlinkSync } from "node:fs";
+import type { Dirent } from "node:fs";
+import { join } from "node:path";
 import { logDebug, logWarn } from "../logger.js";
-import {
-  ENDED_RETENTION_MS,
-  erasePiConversation,
-  sweepPiRetention,
-} from "../pi-session/pi-session-adapter.js";
+import { isPathWithinRoot } from "../workspace-paths.js";
+import { listSdkBindings, deleteSdkBinding } from "../transport/pi-sdk-conversation.js";
 import { validatePersistedSession } from "./config.js";
 import type { PiCodingSessionRecord, PiCodingSessionStore } from "./pi-coding-session-store.js";
 import type { PiRunStore } from "./pi-run-store.js";
 import type { PiRunRecord } from "./types.js";
 
 const TAG = "pi-session-retention";
+
+/** Seven-day ended-session retention. */
+export const ENDED_RETENTION_MS = 7 * 24 * 60 * 60 * 1000;
 
 /** Terminal supervised generations never resume; interrupted ones may. */
 const TERMINAL_RUN_STATUSES: ReadonlyArray<PiRunRecord["status"]> = ["completed", "failed", "cancelled"];
@@ -142,35 +144,31 @@ export function sweepRpcSessionFiles(
 }
 
 export interface PiSessionSweepReport {
-  registryRemoved: string[];
-  registryKept: string[];
   rpcRemoved: string[];
   rpcKept: string[];
+  bindingsPruned: string[];
+  quarantineRemoved: string[];
 }
 
 /**
- * Boot-time sweep entry point. Registry sweep first (adapter-managed
- * conversations, with live executor rows as the activity fence), then the
- * row-driven sweep for unregistered RPC files. Never throws.
+ * Boot-time sweep entry point. Row-driven pruning for terminal RPC files,
+ * dead-weight binding cleanup, and aged quarantine removal. Never throws.
  */
 export function sweepPiSessionsAtBoot(args: {
+  stateDir: string;
   sessionStorageRoot: string;
   codingStore: PiCodingSessionStore;
   runStore: PiRunStore;
   now?: number;
 }): PiSessionSweepReport {
   const now = args.now ?? Date.now();
-  const empty: PiSessionSweepReport = { registryRemoved: [], registryKept: [], rpcRemoved: [], rpcKept: [] };
+  const empty: PiSessionSweepReport = { rpcRemoved: [], rpcKept: [], bindingsPruned: [], quarantineRemoved: [] };
   try {
-    const liveIds = new Set<string>();
     let codingRows: PiCodingSessionRecord[] = [];
     try {
       codingRows = args.codingStore.listSessionFiles();
     } catch (err) {
       logWarn(TAG, `retention could not list coding sessions: ${err instanceof Error ? err.message : String(err)}`);
-    }
-    for (const row of codingRows) {
-      if (row.state !== "ended" && row.piSessionId) liveIds.add(row.piSessionId);
     }
     const runRows: PiRunRecord[] = [];
     for (const status of TERMINAL_RUN_STATUSES) {
@@ -180,17 +178,6 @@ export function sweepPiSessionsAtBoot(args: {
         logWarn(TAG, `retention could not list ${status} runs: ${err instanceof Error ? err.message : String(err)}`);
       }
     }
-    let liveRuns: PiRunRecord[] = [];
-    try {
-      liveRuns = args.runStore.list().filter((run) => !(TERMINAL_RUN_STATUSES as readonly string[]).includes(run.status));
-    } catch (err) {
-      logWarn(TAG, `retention could not list live runs: ${err instanceof Error ? err.message : String(err)}`);
-    }
-    for (const run of liveRuns) {
-      if (run.piSessionId) liveIds.add(run.piSessionId);
-    }
-
-    const registry = sweepPiRetention(args.sessionStorageRoot, now, (id) => liveIds.has(id));
 
     const refs: RpcSessionFileRef[] = [
       ...codingRows
@@ -213,14 +200,17 @@ export function sweepPiSessionsAtBoot(args: {
       })),
     ];
     const rpc = sweepRpcSessionFiles(args.sessionStorageRoot, refs, now);
-    if (registry.removed.length > 0 || rpc.removed.length > 0) {
-      logDebug(TAG, `retention pruned registry=[${registry.removed.join(",")}] rpc=[${rpc.removed.join(",")}]`);
+    const bindingsPruned = sweepStaleBindings(args.stateDir, now);
+    const quarantineRemoved = sweepQuarantineFiles(args.sessionStorageRoot, now);
+    const pruned = [...rpc.removed, ...bindingsPruned, ...quarantineRemoved];
+    if (pruned.length > 0) {
+      logDebug(TAG, `retention pruned rpc=[${rpc.removed.join(",")}] bindings=[${bindingsPruned.join(",")}] quarantine=[${quarantineRemoved.join(",")}]`);
     }
     return {
-      registryRemoved: registry.removed,
-      registryKept: registry.kept,
       rpcRemoved: rpc.removed,
       rpcKept: rpc.kept,
+      bindingsPruned,
+      quarantineRemoved,
     };
   } catch (err) {
     logWarn(TAG, `retention sweep failed: ${err instanceof Error ? err.message : String(err)}`);
@@ -229,11 +219,89 @@ export function sweepPiSessionsAtBoot(args: {
 }
 
 /**
- * Explicit erasure of one coding session's owned files. The adapter sweep
- * covers registered conversation IDs (recovery successors); the row's own
- * proven file covers the common unregistered RPC case. Returns the removed
- * file list; empty means nothing was removed (never an error by itself —
- * the caller reports row state accordingly).
+ * Drop binding records whose Pi file is gone and whose record is older
+ * than retention. Pi files of bound conversations are the working store
+ * and are never removed here.
+ */
+export function sweepStaleBindings(stateDir: string, now: number): string[] {
+  const pruned: string[] = [];
+  let bindings: ReturnType<typeof listSdkBindings>;
+  try {
+    bindings = listSdkBindings(stateDir);
+  } catch (err) {
+    logWarn(TAG, `retention could not list bindings: ${err instanceof Error ? err.message : String(err)}`);
+    return pruned;
+  }
+  for (const binding of bindings) {
+    const file = binding.binding.sessionFile;
+    if (file !== undefined) {
+      try {
+        if (lstatSync(file).isFile()) continue;
+      } catch {
+        // Gone — fall through to the age check.
+      }
+    }
+    if (now - binding.binding.updatedAt < ENDED_RETENTION_MS) continue;
+    try {
+      if (deleteSdkBinding(stateDir, binding.sessionKey)) pruned.push(binding.sessionKey);
+    } catch (err) {
+      logWarn(TAG, `retention could not prune binding: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
+  return pruned;
+}
+
+/**
+ * Remove quarantined files older than retention. They were verified at
+ * quarantine time; the name carries the session ID and the root bounds
+ * the walk. Symlinks are never followed.
+ */
+export function sweepQuarantineFiles(sessionStorageRoot: string, now: number): string[] {
+  const removed: string[] = [];
+  const walk = (dir: string): void => {
+    let entries: Dirent[];
+    try {
+      entries = readdirSync(dir, { withFileTypes: true });
+    } catch {
+      // Unreadable directory — skip the subtree.
+      return;
+    }
+    for (const entry of entries) {
+      const path = join(dir, entry.name);
+      if (entry.isSymbolicLink()) continue;
+      if (entry.isDirectory()) {
+        if (isPathWithinRoot(sessionStorageRoot, path)) walk(path);
+        continue;
+      }
+      if (!entry.isFile() || !entry.name.includes(".quarantined-")) continue;
+      let age: number | null = null;
+      try {
+        age = now - statSync(path).mtimeMs;
+      } catch {
+        continue;
+      }
+      if (age === null || age < ENDED_RETENTION_MS) continue;
+      try {
+        unlinkSync(path);
+        removed.push(path);
+      } catch {
+        // A later sweep retries.
+      }
+    }
+  };
+  try {
+    walk(sessionStorageRoot);
+  } catch (err) {
+    logWarn(TAG, `retention quarantine walk failed: ${err instanceof Error ? err.message : String(err)}`);
+  }
+  return removed;
+}
+
+/**
+ * Explicit erasure of one coding session's owned files: the row's proven
+ * transcript file plus aged quarantine siblings carrying the same session
+ * ID. Returns the removed file list; empty means nothing was removed
+ * (never an error by itself — the caller reports row state accordingly).
  */
 export function eraseCodingSessionFiles(args: {
   sessionStorageRoot: string;
@@ -241,18 +309,43 @@ export function eraseCodingSessionFiles(args: {
   piSessionFile?: string;
 }): string[] {
   const removed: string[] = [];
-  if (args.piSessionId) {
-    try {
-      const report = erasePiConversation(args.sessionStorageRoot, args.piSessionId);
-      removed.push(...report.removedFiles);
-    } catch (err) {
-      logWarn(TAG, `explicit erasure could not sweep registry files: ${err instanceof Error ? err.message : String(err)}`);
-    }
+  if (args.piSessionFile && args.piSessionId && removeProvenSessionFile(args.sessionStorageRoot, args.piSessionId, args.piSessionFile)) {
+    removed.push(args.piSessionFile);
   }
-  if (args.piSessionFile && !removed.includes(args.piSessionFile)) {
-    if (removeProvenSessionFile(args.sessionStorageRoot, args.piSessionId, args.piSessionFile)) {
-      removed.push(args.piSessionFile);
+  if (args.piSessionId) {
+    const dir = args.piSessionFile !== undefined ? dirnameOf(args.piSessionFile) : undefined;
+    if (dir !== undefined) {
+      for (const sibling of quarantineSiblings(dir, args.piSessionId)) {
+        try {
+          unlinkSync(sibling);
+          removed.push(sibling);
+        } catch {
+          // Best effort; the transcript removal above already succeeded.
+        }
+      }
     }
   }
   return removed;
+}
+
+function dirnameOf(file: string): string | undefined {
+  const index = file.lastIndexOf("/");
+  return index > 0 ? file.slice(0, index) : undefined;
+}
+
+/** Quarantine siblings carrying the session ID, inside the owned directory. */
+function quarantineSiblings(dir: string, sessionId: string): string[] {
+  let entries: Dirent[];
+  try {
+    entries = readdirSync(dir, { withFileTypes: true });
+  } catch {
+    return [];
+  }
+  const siblings: string[] = [];
+  for (const entry of entries) {
+    if (entry.isSymbolicLink() || !entry.isFile()) continue;
+    if (!entry.name.includes(sessionId) || !entry.name.includes(".quarantined-")) continue;
+    siblings.push(join(dir, entry.name));
+  }
+  return siblings;
 }

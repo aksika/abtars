@@ -10,7 +10,7 @@
  */
 import { describe, it, expect } from "vitest";
 import { createHash } from "node:crypto";
-import { readFileSync, writeFileSync } from "node:fs";
+import { readFileSync, rmSync, writeFileSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import { Agent } from "@earendil-works/pi-agent-core";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
@@ -259,7 +259,7 @@ describe("PiSdkConversationStore (real SDK)", () => {
     broken.dispose();
   });
 
-  it("fails closed on header mismatch (never opens the wrong conversation)", async () => {
+  it("mints fresh when the bound file is missing and no archive exists (ephemeral)", async () => {
     const { stateDir, sessionRoot } = testScratchDirs();
     const key = makeKey();
     const store = testStore(stateDir, sessionRoot);
@@ -268,8 +268,10 @@ describe("PiSdkConversationStore (real SDK)", () => {
     await store.prompt(key.sessionKey, "marker-EEE");
     store.dispose();
 
-    // Corrupt the binding to point at a valid-format but wrong ID: findById
-    // finds nothing → fail closed, never mint-and-continue silently.
+    // Corrupt the binding to point at a valid-format but unknown ID: the
+    // file is missing and ephemeral sessions carry no authorized source to
+    // rebuild from, so a fresh conversation mints rather than wedging.
+    // (Ambiguous duplicates still fail closed — see below.)
     const bindingPath = bindingPathFor(stateDir, "test-session");
     const binding = JSON.parse(readFileSync(bindingPath, "utf-8")) as {
       sessionKey: string; binding: { conversationId: string };
@@ -277,10 +279,120 @@ describe("PiSdkConversationStore (real SDK)", () => {
     binding.binding.conversationId = "00000000-0000-0000-0000-000000000000";
     writeFileSync(bindingPath, JSON.stringify({ version: 1, sessionKey: binding.sessionKey, binding: binding.binding }));
     const reopened = testStore(stateDir, sessionRoot);
+    const next = await reopened.ensureConversation(key, makeAssembly(cannedStreamFn(["x"], seen)));
+    expect(next.resumed).toBe(false);
+    expect(next.recovered).toBe("fresh");
+    expect(next.conversationId).not.toBe("00000000-0000-0000-0000-000000000000");
+    expect(opened.conversationId).not.toBe("00000000-0000-0000-0000-000000000000");
+    reopened.dispose();
+  });
+
+  it("denies a binding that authorizes a different role or principal", async () => {
+    const { stateDir, sessionRoot } = testScratchDirs();
+    const store = testStore(stateDir, sessionRoot);
+    const seen: unknown[] = [];
+    await store.ensureConversation(makeKey(), makeAssembly(cannedStreamFn(["x"], seen)));
+    store.dispose();
+
+    const reopened = testStore(stateDir, sessionRoot);
+    await expect(
+      reopened.ensureConversation(makeKey({ role: "task" }), makeAssembly(cannedStreamFn(["x"], seen))),
+    ).rejects.toThrow(/binding mismatch/);
+    await expect(
+      reopened.ensureConversation(makeKey({ principal: "someone-else" }), makeAssembly(cannedStreamFn(["x"], seen))),
+    ).rejects.toThrow(/binding mismatch/);
+    reopened.dispose();
+  });
+
+  it("fails closed on ambiguous duplicate files", async () => {
+    const { stateDir, sessionRoot } = testScratchDirs();
+    const store = testStore(stateDir, sessionRoot);
+    const key = makeKey();
+    const seen: unknown[] = [];
+    const opened = await store.ensureConversation(key, makeAssembly(cannedStreamFn(["x"], seen)));
+    await store.prompt(key.sessionKey, "marker-FFF");
+    // Duplicate the flushed transcript under a second name: two claimants.
+    const binding = JSON.parse(readFileSync(bindingPathFor(stateDir, "test-session"), "utf-8")) as {
+      sessionKey: string; binding: { conversationId: string; sessionFile?: string };
+    };
+    const original = binding.binding.sessionFile!;
+    const dir = original.slice(0, original.lastIndexOf("/"));
+    writeFileSync(join(dir, `2026-02-02T00-00-00-000Z_${opened.conversationId}.jsonl`), readFileSync(original, "utf-8"));
+    store.dispose();
+
+    const reopened = testStore(stateDir, sessionRoot);
     await expect(
       reopened.ensureConversation(key, makeAssembly(cannedStreamFn(["x"], seen))),
-    ).rejects.toThrow(/missing|mismatch|unverified/i);
-    expect(opened.conversationId).not.toBe("00000000-0000-0000-0000-000000000000");
+    ).rejects.toThrow(/ambiguous/);
+    reopened.dispose();
+  });
+
+  it("reconstructs a missing durable file from the archive under a fresh ID (R5)", async () => {
+    const { stateDir, sessionRoot } = testScratchDirs();
+    const key = makeKey({ memoryScope: "abmind" });
+    const store = testStore(stateDir, sessionRoot);
+    const seen: unknown[] = [];
+    const opened = await store.ensureConversation(key, makeAssembly(cannedStreamFn(["x"], seen)));
+    await store.prompt(key.sessionKey, "live marker-GGG");
+    store.dispose();
+
+    // Delete the Pi file: the binding still claims the conversation.
+    const binding = JSON.parse(readFileSync(bindingPathFor(stateDir, "test-session"), "utf-8")) as {
+      sessionKey: string; binding: { conversationId: string; sessionFile?: string };
+    };
+    rmSync(binding.binding.sessionFile!);
+
+    const reopened = testStore(stateDir, sessionRoot);
+    const archiveSource = {
+      projectArchive: async () => ({
+        messages: [
+          { role: "user" as const, content: "archived-first" },
+          { role: "assistant" as const, content: "archived-second" },
+        ],
+      }),
+    };
+    const next = await reopened.ensureConversation(key, makeAssembly(cannedStreamFn(["y"], seen)), {
+      recovery: {
+        archive: { userId: "u", archiveSessionId: "test-session", beforeMessageId: 2, maxContext: 128000 },
+        archiveSource,
+        current: { text: "current input", timestamp: 5, operationKey: "op-1" },
+        taskEvidence: ["task snapshot"],
+      },
+    });
+    expect(next.resumed).toBe(false);
+    expect(next.recovered).toBe("reconstructed");
+    expect(next.conversationId).not.toBe(opened.conversationId);
+    // The successor file carries archive history, evidence, and the current
+    // input exactly once — and the reopened conversation serves from it.
+    const successorFile = (JSON.parse(readFileSync(bindingPathFor(stateDir, "test-session"), "utf-8")) as {
+      binding: { sessionFile?: string };
+    }).binding.sessionFile!;
+    const transcript = readFileSync(successorFile, "utf-8");
+    for (const marker of ["archived-first", "archived-second", "task snapshot", "current input"]) {
+      expect(transcript).toContain(marker);
+    }
+    const result = await reopened.prompt(key.sessionKey, "follow-up");
+    expect(result.text).toBe("y");
+    reopened.dispose();
+  });
+
+  it("quarantines a corrupt ephemeral file and mints fresh", async () => {
+    const { stateDir, sessionRoot } = testScratchDirs();
+    const key = makeKey();
+    const store = testStore(stateDir, sessionRoot);
+    const seen: unknown[] = [];
+    await store.ensureConversation(key, makeAssembly(cannedStreamFn(["x"], seen)));
+    await store.prompt(key.sessionKey, "marker-HHH");
+    const binding = JSON.parse(readFileSync(bindingPathFor(stateDir, "test-session"), "utf-8")) as {
+      binding: { conversationId: string; sessionFile?: string };
+    };
+    writeFileSync(binding.binding.sessionFile!, "corrupt\n");
+    store.dispose();
+
+    const reopened = testStore(stateDir, sessionRoot);
+    const next = await reopened.ensureConversation(key, makeAssembly(cannedStreamFn(["x"], seen)));
+    expect(next.recovered).toBe("fresh");
+    expect(existsSync(binding.binding.sessionFile!)).toBe(false);
     reopened.dispose();
   });
 
