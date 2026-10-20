@@ -13,8 +13,12 @@
  *   1. a `compatible` installation state;
  *   2. `@earendil-works/pi-agent-core` with the `Agent` prototype methods the
  *      send path requires (reuses `validatePiAgentCoreModule()`);
- *   3. `@earendil-works/pi-ai` with a callable `createProvider`;
- *   4. every uniquely configured API family (`openai-completions`,
+ *   3. `@earendil-works/pi-coding-agent` with the session-factory surface the
+ *      piTARS route depends on (#1940): `createAgentSession`, `AgentSession`,
+ *      `SessionManager` (`create` + `inMemory`), `SettingsManager` (`create` +
+ *      `inMemory`), `ModelRuntime.create`, and `DefaultResourceLoader`;
+ *   4. `@earendil-works/pi-ai` with a callable `createProvider`;
+ *   5. every uniquely configured API family (`openai-completions`,
  *      `openai-responses`, `anthropic-messages`) with callable `stream` and
  *      `streamSimple`.
  *
@@ -36,6 +40,7 @@ import type { ModelCandidate } from "./model-candidates.js";
 export type PiRuntimeComponent =
   | "installation"
   | "pi-agent-core"
+  | "pi-coding-agent"
   | "pi-ai"
   | "openai-completions"
   | "openai-responses"
@@ -134,6 +139,46 @@ export async function validatePiRuntimeContract(
     throw new PiRuntimeContractError(
       contractMessage(installation.version, "pi-agent-core", "contract", "missing"),
       { component: "pi-agent-core", capability: "contract", installationVersion: installation.version, cause },
+    );
+  }
+
+/** First missing session-factory capability on the pi-coding-agent root, if any. */
+function missingSessionFactoryCapability(mod: unknown): string | null {
+  if (!mod || typeof mod !== "object") return "module-shape";
+  const record = mod as Record<string, unknown>;
+  if (typeof record.createAgentSession !== "function") return "createAgentSession";
+  if (typeof record.AgentSession !== "function") return "AgentSession";
+  const sessionManager = record.SessionManager as Record<string, unknown> | undefined;
+  if (!sessionManager || typeof sessionManager.create !== "function") return "SessionManager.create";
+  if (typeof sessionManager.inMemory !== "function") return "SessionManager.inMemory";
+  const settingsManager = record.SettingsManager as Record<string, unknown> | undefined;
+  if (!settingsManager || typeof settingsManager.create !== "function") return "SettingsManager.create";
+  if (typeof settingsManager.inMemory !== "function") return "SettingsManager.inMemory";
+  const modelRuntime = record.ModelRuntime as Record<string, unknown> | undefined;
+  if (!modelRuntime || typeof modelRuntime.create !== "function") return "ModelRuntime.create";
+  if (typeof record.DefaultResourceLoader !== "function") return "DefaultResourceLoader";
+  return null;
+}
+
+  const codingAgentSpec: PiModuleSpecifier = { package: "@earendil-works/pi-coding-agent" };
+  let codingAgentModule: unknown;
+  try {
+    codingAgentModule = await loadModule(installation, codingAgentSpec);
+  } catch (cause) {
+    throw new PiRuntimeContractError(
+      contractMessage(installation.version, "pi-coding-agent", "module-load", "load"),
+      { component: "pi-coding-agent", capability: "module-load", installationVersion: installation.version, cause },
+    );
+  }
+  // Side-effect-free: only typeof checks, never invoked. The piTARS route
+  // (#1940) builds every session through createAgentSession with an in-memory
+  // SessionManager, an in-memory SettingsManager, Pi's ModelRuntime, and a
+  // constrained DefaultResourceLoader (systemPrompt + no context/skills).
+  const missingFactory = missingSessionFactoryCapability(codingAgentModule);
+  if (missingFactory !== null) {
+    throw new PiRuntimeContractError(
+      contractMessage(installation.version, "pi-coding-agent", missingFactory, "missing"),
+      { component: "pi-coding-agent", capability: missingFactory, installationVersion: installation.version },
     );
   }
 

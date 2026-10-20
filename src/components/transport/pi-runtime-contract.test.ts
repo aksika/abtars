@@ -47,6 +47,17 @@ function makeAiModule(): Record<string, unknown> {
   return { createProvider: vi.fn(), normalizeContext: vi.fn() };
 }
 
+function makeCodingAgentModule(): Record<string, unknown> {
+  return {
+    createAgentSession: vi.fn(),
+    AgentSession: class FakeAgentSession {},
+    SessionManager: { create: vi.fn(), inMemory: vi.fn() },
+    SettingsManager: { create: vi.fn(), inMemory: vi.fn() },
+    ModelRuntime: { create: vi.fn() },
+    DefaultResourceLoader: class FakeResourceLoader {},
+  };
+}
+
 function makeApiModule(): Record<string, unknown> {
   return { stream: vi.fn(), streamSimple: vi.fn() };
 }
@@ -95,6 +106,7 @@ describe("validatePiRuntimeContract (#1573)", () => {
     const boundary = makeDependencies({
       modules: {
         "@earendil-works/pi-agent-core": makeAgentCoreModule(),
+        "@earendil-works/pi-coding-agent": makeCodingAgentModule(),
         "@earendil-works/pi-ai": makeAiModule(),
         "@earendil-works/pi-ai/api/openai-completions": makeApiModule(),
         "@earendil-works/pi-ai/api/openai-responses": makeApiModule(),
@@ -112,6 +124,7 @@ describe("validatePiRuntimeContract (#1573)", () => {
     expect(boundary.resolveInstallation).toHaveBeenCalledTimes(1);
     expect(boundary.calls).toEqual([
       "@earendil-works/pi-agent-core",
+      "@earendil-works/pi-coding-agent",
       "@earendil-works/pi-ai",
       "@earendil-works/pi-ai/api/openai-completions",
       "@earendil-works/pi-ai/api/openai-responses",
@@ -163,6 +176,7 @@ describe("validatePiRuntimeContract (#1573)", () => {
     const boundary = makeDependencies({
       modules: {
         "@earendil-works/pi-agent-core": makeAgentCoreModule(),
+        "@earendil-works/pi-coding-agent": makeCodingAgentModule(),
         "@earendil-works/pi-ai": { createProvider: "not-a-function" },
       },
     });
@@ -179,6 +193,7 @@ describe("validatePiRuntimeContract (#1573)", () => {
     const boundary = makeDependencies({
       modules: {
         "@earendil-works/pi-agent-core": makeAgentCoreModule(),
+        "@earendil-works/pi-coding-agent": makeCodingAgentModule(),
         "@earendil-works/pi-ai": { createProvider: vi.fn(), normalizeContext: "not-a-function" },
       },
     });
@@ -194,6 +209,7 @@ describe("validatePiRuntimeContract (#1573)", () => {
     const boundary = makeDependencies({
       modules: {
         "@earendil-works/pi-agent-core": makeAgentCoreModule(),
+        "@earendil-works/pi-coding-agent": makeCodingAgentModule(),
         "@earendil-works/pi-ai": makeAiModule(),
         "@earendil-works/pi-ai/api/openai-completions": { stream: vi.fn() },
       },
@@ -209,6 +225,7 @@ describe("validatePiRuntimeContract (#1573)", () => {
     const boundary = makeDependencies({
       modules: {
         "@earendil-works/pi-agent-core": makeAgentCoreModule(),
+        "@earendil-works/pi-coding-agent": makeCodingAgentModule(),
         "@earendil-works/pi-ai": makeAiModule(),
       },
     });
@@ -222,6 +239,7 @@ describe("validatePiRuntimeContract (#1573)", () => {
 
   it("invokes none of the inspected functions or constructors", async () => {
     const createProvider = vi.fn();
+    const createAgentSession = vi.fn();
     const stream = vi.fn();
     const streamSimple = vi.fn();
     const subscribe = vi.fn();
@@ -229,6 +247,14 @@ describe("validatePiRuntimeContract (#1573)", () => {
       modules: {
         "@earendil-works/pi-agent-core": {
           Agent: class FakeAgent { subscribe(): void { subscribe(); } prompt(): void {} steer(): void {} followUp(): void {} clearAllQueues(): void {} abort(): void {} waitForIdle(): void {} },
+        },
+        "@earendil-works/pi-coding-agent": {
+          createAgentSession,
+          AgentSession: class FakeAgentSession {},
+          SessionManager: { create: vi.fn(), inMemory: vi.fn() },
+          SettingsManager: { create: vi.fn(), inMemory: vi.fn() },
+          ModelRuntime: { create: vi.fn() },
+          DefaultResourceLoader: class FakeResourceLoader {},
         },
         "@earendil-works/pi-ai": { createProvider, normalizeContext: vi.fn() },
         "@earendil-works/pi-ai/api/openai-completions": { stream, streamSimple },
@@ -240,6 +266,7 @@ describe("validatePiRuntimeContract (#1573)", () => {
       contractDeps(boundary),
     );
     expect(createProvider).not.toHaveBeenCalled();
+    expect(createAgentSession).not.toHaveBeenCalled();
     expect(stream).not.toHaveBeenCalled();
     expect(streamSimple).not.toHaveBeenCalled();
     expect(subscribe).not.toHaveBeenCalled();
@@ -250,6 +277,7 @@ describe("validatePiRuntimeContract (#1573)", () => {
     const boundary = makeDependencies({
       modules: {
         "@earendil-works/pi-agent-core": makeAgentCoreModule(),
+        "@earendil-works/pi-coding-agent": makeCodingAgentModule(),
         "@earendil-works/pi-ai": aiModule,
         "@earendil-works/pi-ai/api/openai-completions": { stream: vi.fn() },
       },
@@ -266,6 +294,7 @@ describe("validatePiRuntimeContract (#1573)", () => {
     const boundary = makeDependencies({
       modules: {
         "@earendil-works/pi-agent-core": makeAgentCoreModule(),
+        "@earendil-works/pi-coding-agent": makeCodingAgentModule(),
         "@earendil-works/pi-ai": { createProvider: vi.fn(), clampThinkingLevel, normalizeContext: vi.fn() },
         "@earendil-works/pi-ai/api/openai-completions": makeApiModule(),
       },
@@ -290,5 +319,45 @@ describe("validatePiRuntimeContract (#1573)", () => {
     expect(transport.getRuntimeStatus().reasoning).toBe("high");
     expect(transport.getRuntimeStatus().reasoningRequested).toBe("xhigh");
     transport.destroy();
+  });
+
+  it("#1940 — rejects a missing session-factory surface without leaking the loader message", async () => {
+    const boundary = makeDependencies({
+      modules: {
+        "@earendil-works/pi-agent-core": makeAgentCoreModule(),
+        "@earendil-works/pi-coding-agent": {
+          createAgentSession: vi.fn(),
+          AgentSession: class FakeAgentSession {},
+          SessionManager: { create: vi.fn() },
+          SettingsManager: { create: vi.fn(), inMemory: vi.fn() },
+          ModelRuntime: { create: vi.fn() },
+          DefaultResourceLoader: class FakeResourceLoader {},
+        },
+      },
+    });
+    const error = await validatePiRuntimeContract([], contractDeps(boundary)).catch((err: unknown) => err);
+    expect(error).toBeInstanceOf(PiRuntimeContractError);
+    const contractError = error as PiRuntimeContractError;
+    expect(contractError.component).toBe("pi-coding-agent");
+    expect(contractError.capability).toBe("SessionManager.inMemory");
+    expect(contractError.message).toContain("missing SessionManager.inMemory");
+    expect(contractError.message).toContain(PINNED_INSTALL_COMMAND);
+  });
+
+  it("#1940 — rejects a coding-agent import failure with cause retained", async () => {
+    const boundary = makeDependencies({
+      modules: {
+        "@earendil-works/pi-agent-core": makeAgentCoreModule(),
+      },
+    });
+    const error = await validatePiRuntimeContract([], contractDeps(boundary)).catch((err: unknown) => err);
+    // Agent-core resolves, so the failure surfaces on the coding-agent load.
+    expect(error).toBeInstanceOf(PiRuntimeContractError);
+    const contractError = error as PiRuntimeContractError;
+    expect(contractError.component).toBe("pi-coding-agent");
+    expect(contractError.capability).toBe("module-load");
+    expect(contractError.message).toContain("load failed");
+    expect(contractError.message).not.toContain("module not present");
+    expect(contractError.cause).toBeInstanceOf(Error);
   });
 });
