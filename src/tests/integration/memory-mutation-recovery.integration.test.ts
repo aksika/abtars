@@ -3,7 +3,7 @@
  * the bridge tools.
  *
  * A real MemoryManager + AbmindService + LocalEndpointServer + LocalTransport
- * + AbmindClient feed createClientRuntime, and memory_store / memory_edit tool
+ * + AbmindClient feed createClientRuntime, and the memory_store tool
  * executions project the structured failure contract end-to-end: bridge tool
  * JSON keeps code/requestId/action/stage/retryable, and the tool-failure
  * diagnostic maps them to the memory_* reason family — never `unknown`.
@@ -125,35 +125,6 @@ describe("#1659 memory mutation recovery integration", () => {
     });
   });
 
-  it("a stale revision edit projects memory_conflict with re_recall", async () => {
-    const stored = JSON.parse(await executeToolCall(
-      "memory_store",
-      { translated: `Conflict target ${Date.now()}`, type: "fact" },
-      storeContext(),
-    )) as { memoryId: number; semanticRevision: number };
-
-    const firstEdit = JSON.parse(await executeToolCall(
-      "memory_edit",
-      { memory_id: String(stored.memoryId), expected_revision: String(stored.semanticRevision), translated: "edited once" },
-      storeContext(),
-    ));
-    expect(firstEdit.ok).toBe(true);
-
-    const staleEdit = JSON.parse(await executeToolCall(
-      "memory_edit",
-      { memory_id: String(stored.memoryId), expected_revision: String(stored.semanticRevision), translated: "stale edit" },
-      storeContext(),
-    ));
-    expect(staleEdit.ok).toBe(false);
-    expect(staleEdit).toMatchObject({
-      code: "memory_conflict",
-      retryable: false,
-      action: "re_recall",
-      stage: "pre_dispatch",
-    });
-    expect(typeof staleEdit.requestId).toBe("string");
-  });
-
   it("a response-lost committed store is recovered by exact-key replay through the real client", async () => {
     const { AbmindClientError } = await import("abmind");
     // Real replay path: same key twice on the real ledger executes once.
@@ -174,7 +145,7 @@ describe("#1659 memory mutation recovery integration", () => {
     if (first.stored && second.stored) {
       expect(second.memoryId).toBe(first.memoryId);
     }
-    const rows = db.prepare("SELECT COUNT(*) AS n FROM extracted_memories WHERE content_en = ?").get(payload.contentEn) as { n: number };
+    const rows = db.prepare("SELECT COUNT(*) AS n FROM long_term_memories WHERE content = ?").get(payload.contentEn) as { n: number };
     expect(rows.n).toBe(1);
 
     // A replay of an already-completed key is indistinguishable from success;

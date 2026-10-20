@@ -174,7 +174,7 @@ abmind itself exposes an MCP server for other tools (Cursor, Windsurf, Claude Co
 abmind mcp
 ```
 
-This gives external tools access to `memory_recall`, `memory_store`, `memory_edit`, `memory_status`. Used by the Claude Code and Gemini CLI integrations.
+This gives external tools access to `memory_recall`, `memory_store`, `memory_status`, `memory_context`. Used by the Claude Code and Gemini CLI integrations.
 
 ## Troubleshooting
 

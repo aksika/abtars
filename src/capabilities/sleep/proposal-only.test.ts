@@ -72,12 +72,11 @@ async function settleTicks(): Promise<void> {
 describe("#1859 proposal-only host enforcement", () => {
   beforeEach(() => { vi.clearAllMocks(); });
 
-  it("derives an empty execute_bash boolean, denies memory_store/memory_edit, and allows read-only recall", () => {
+  it("derives an empty execute_bash boolean, denies memory writes, and allows read-only recall", () => {
     // The exported policy is the single source both presentation and dispatch
     // read through the transport sandbox.
     expect(checkTool("execute_bash", PROPOSAL_ONLY_TOOLS).allowed).toBe(false);
     expect(checkTool("memory_store", PROPOSAL_ONLY_TOOLS).allowed).toBe(false);
-    expect(checkTool("memory_edit", PROPOSAL_ONLY_TOOLS).allowed).toBe(false);
     expect(checkTool("task_manage", PROPOSAL_ONLY_TOOLS).allowed).toBe(false);
     expect(checkTool("memory_recall", PROPOSAL_ONLY_TOOLS).allowed).toBe(true);
   });

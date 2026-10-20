@@ -226,7 +226,6 @@ export class AbtarsSignedWssClient implements AbmindClientLike {
 
     this.privateMemory = {
       instantStore: (p, key) => this.call("private.instantStore", p, key),
-      editMemory: (p, key) => this.callPrivateMutation("private.edit", p, key),
       recall: (p) => this.call("private.recall", p),
       rebuildFtsIndexes: () => this.call("private.rebuildFts", {}),
       embed: (p) => this.call("private.embed", p),
@@ -344,21 +343,6 @@ export class AbtarsSignedWssClient implements AbmindClientLike {
   /** Raw method call with an explicit caller-supplied idempotency key. */
   async callRaw<T>(method: string, payload: unknown, idempotencyKey?: string): Promise<T> {
     return (await this.call(method, payload, idempotencyKey)) as T;
-  }
-
-  /**
-   * Semantic mutations surface their bounded failure contract exactly like
-   * the local abmind client: a structural AbmindClientErrorLike is thrown
-   * (code, requestId, retryable, action, stage, current). The memory runtime
-   * normalizes it; nothing here flattens the contract into message text.
-   */
-  private async callPrivateMutation(
-    method: "private.edit",
-    payload: unknown,
-    idempotencyKey?: string,
-  ): Promise<Record<string, unknown>> {
-    const result = await this.call(method, payload, idempotencyKey);
-    return (result && typeof result === "object" ? result : {}) as Record<string, unknown>;
   }
 
   private async call(method: string, payload: unknown, idempotencyKey?: string): Promise<unknown> {

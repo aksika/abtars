@@ -131,7 +131,6 @@ Use the CLI instead of touching SQLite:
 ```text
 abmind recall ...
 abmind store ...
-abmind edit ...
 abmind messages ...
 abmind bundle
 abmind wake-up
@@ -160,14 +159,12 @@ Use the supported commands for recovery:
 
 ```bash
 abmind restore <backup>
-abmind repair-attribution
 abmind passwd
 abmind rekey
 ```
 
-Treat restore, attribution repair, passphrase changes, and rekeying as
-operator-level operations. Inspect dry-run output and backup verification before
-applying changes.
+Treat restore, passphrase changes, and rekeying as operator-level operations.
+Inspect dry-run output and backup verification before applying changes.
 
 Never open or display key files. If encryption health is uncertain, use:
 

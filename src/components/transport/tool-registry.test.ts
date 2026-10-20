@@ -41,7 +41,6 @@ function mockAbmindClient(caps: { methods: string[]; features: Record<string, st
         omissionReasons: [],
       }),
       instantStore: vi.fn().mockResolvedValue({ stored: true, memoriesCount: 1 }),
-      editMemory: vi.fn().mockResolvedValue({ ok: true }),
       rebuildFtsIndexes: vi.fn().mockResolvedValue({ rebuilt: [] }),
       assembleSessionContext: vi.fn().mockResolvedValue({ wakeUp: "", recall: "", coreKnowledge: "", soulBundle: { soul: "", profile: "", notes: "", memoryTools: "", coreFacts: "" } }),
       getRecentConversation: vi.fn().mockResolvedValue([]),
@@ -233,15 +232,6 @@ describe("memory tools with no runtime wired (#1266 / #1507)", () => {
     expect(parsed.stored).toBe(false);
   });
 
-  it("memory_edit returns private_write_unavailable, no RPC", async () => {
-    const tool = getToolDefinitions().find(t => t.name === "memory_edit");
-    expect(tool).toBeDefined();
-    const result = await tool!.execute({ memory_id: "1" }, storeContext());
-    const parsed = JSON.parse(result);
-    expect(parsed.code).toBe("private_write_unavailable");
-    expect(parsed.retryable).toBe(false);
-  });
-
   it("executeToolCall routes to the same null-runtime path", async () => {
     const result = await executeToolCall("memory_recall", { query: "x" });
     const parsed = JSON.parse(result);
@@ -333,14 +323,6 @@ describe("memory tools with runtime wired (#1507)", () => {
       expect(countQuotaRows()).toBe(0);
     });
 
-    it("memory_edit returns private_write_unavailable, no RPC", async () => {
-      const result = await executeToolCall("memory_edit", { memory_id: "1", translated: "updated" }, storeContext());
-      const parsed = JSON.parse(result);
-      expect(parsed.code).toBe("private_write_unavailable");
-      expect(parsed.retryable).toBe(false);
-      expect(client.privateMemory.editMemory).not.toHaveBeenCalled();
-    });
-
     it("memory_recall still dispatches", async () => {
       const result = await executeToolCall("memory_recall", { query: "apples" }, storeContext());
       const parsed = JSON.parse(result);
@@ -377,13 +359,6 @@ describe("memory tools with runtime wired (#1507)", () => {
       expect(client.privateMemory.instantStore).toHaveBeenCalledTimes(1);
     });
 
-    it("memory_edit dispatches normally", async () => {
-      const result = await executeToolCall("memory_edit", { memory_id: "1", expected_revision: "1", translated: "updated" }, storeContext());
-      const parsed = JSON.parse(result);
-      expect(parsed.ok).toBe(true);
-      expect(client.privateMemory.editMemory).toHaveBeenCalledTimes(1);
-    });
-
     it("genuine store error surfaces as a structured failure, never a bare error string", async () => {
       client.privateMemory.instantStore = vi.fn().mockRejectedValue(new Error("disk full"));
       const result = await executeToolCall("memory_store", { translated: "test", type: "fact" }, storeContext());
@@ -391,15 +366,6 @@ describe("memory tools with runtime wired (#1507)", () => {
       expect(parsed.stored).toBe(false);
       expect(parsed.code).toBe("unknown");
       expect(parsed.message).toMatch(/disk full/);
-    });
-
-    it("genuine edit error surfaces as a structured failure, never a bare error string", async () => {
-      client.privateMemory.editMemory = vi.fn().mockRejectedValue(new Error("not found"));
-      const result = await executeToolCall("memory_edit", { memory_id: "999", expected_revision: "1" }, storeContext());
-      const parsed = JSON.parse(result);
-      expect(parsed.ok).toBe(false);
-      expect(parsed.code).toBe("unknown");
-      expect(parsed.message).toMatch(/not found/);
     });
   });
 

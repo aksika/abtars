@@ -369,13 +369,6 @@ function preDispatchRequestId(): string {
   return `pre-dispatch-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
 }
 
-const EDIT_UNAVAILABLE = {
-  edited: false,
-  code: "private_write_unavailable",
-  retryable: false,
-  message: "Explicit memory editing is unavailable in this runtime. Do not retry this call.",
-};
-
 const memoryStoreTool: ToolDefinition = {
   name: "memory_store",
   description: "Store a memory. Use after learning something about the user, their preferences, decisions, or facts worth remembering. For credentials (classification=3) provide the EXACT value in 'original' and a short descriptive 'label' — never a paraphrase of the value; the label is what you will search by later.",
@@ -612,70 +605,6 @@ const memoryRecallTool: ToolDefinition = {
       return JSON.stringify(result);
     } catch (err) {
       return JSON.stringify({ error: err instanceof Error ? err.message : String(err) });
-    }
-  },
-};
-
-const memoryEditTool: ToolDefinition = {
-  name: "memory_edit",
-  description: "Edit an existing memory by ID. Requires the expected_revision from a prior recall call to avoid stale overwrites. Change content, type, emotion, confidence, or classification.",
-  parameters: {
-    type: "object",
-    properties: {
-      memory_id: { type: "integer", description: "Memory ID to edit" },
-      expected_revision: { type: "integer", description: "Semantic revision from the most recent recall read of this memory. Required for safe concurrent edits." },
-      translated: { type: "string", description: "New English content" },
-      original: { type: "string", description: "New original language content" },
-      type: { type: "string", description: "New memory type" },
-      emotion: { type: "integer", description: "New emotion score" },
-      confidence: { type: "integer", description: "New confidence" },
-      classification: { type: "integer", description: "New classification" },
-      label: { type: "string", description: "Required when promoting to classification=3: a short descriptive label that does NOT contain the value." },
-      keyword: { type: "string", description: "Optional for classification=3: non-sensitive retrieval keyword." },
-    },
-    required: ["memory_id", "expected_revision"],
-  },
-  async execute(args, context): Promise<string> {
-    const runtime = memoryDeps(context)?.runtime;
-    if (!runtime || !runtime.supports("editMemory")) {
-      return JSON.stringify(EDIT_UNAVAILABLE);
-    }
-    try {
-      const expectedRevision = parseInt(stringValue(args["expected_revision"] ?? "0"), 10);
-      if (!Number.isSafeInteger(expectedRevision) || expectedRevision < 1) {
-        return JSON.stringify({ ok: false, error: "expected_revision must be a positive integer" });
-      }
-      const rawClassification = args["classification"];
-      const classification = rawClassification === undefined || rawClassification === null || stringValue(rawClassification).trim() === ""
-        ? undefined
-        : Number(rawClassification);
-      if (classification !== undefined && (!Number.isSafeInteger(classification) || classification < 0 || classification > 3)) {
-        return JSON.stringify({ ok: false, error: "classification must be an integer from 0 to 3" });
-      }
-      const isPromotingToSecret = classification === 3;
-      const label = optionalStringValue(args["label"])?.trim() ?? "";
-      if (isPromotingToSecret && !label) {
-        return JSON.stringify({ ok: false, error: "promoting to classification=3 requires a descriptive label that does not contain the value" });
-      }
-      const result = await runtime.editMemory({
-        memoryId: parseInt(stringValue(args["memory_id"] ?? "0"), 10),
-        expectedRevision,
-        userId: context?.userId ?? getMasterUserId(),
-        contentEn: optionalStringValue(args["translated"]),
-        contentOriginal: optionalStringValue(args["original"]),
-        memoryType: optionalStringValue(args["type"]),
-        emotionScore: args["emotion"] ? parseInt(stringValue(args["emotion"]), 10) : undefined,
-        confidence: args["confidence"] ? parseInt(stringValue(args["confidence"]), 10) : undefined,
-        classification,
-        // #1660: class-3 promotion needs the label in the same CAS.
-        sealedLabel: isPromotingToSecret ? label : undefined,
-        sealedKeyword: isPromotingToSecret ? optionalStringValue(args["keyword"]) : undefined,
-      });
-      // The runtime returns the structured failure unchanged; the model gets
-      // code/requestId/action/stage/retryable without message flattening.
-      return JSON.stringify(result);
-    } catch (err) {
-      return JSON.stringify({ error: boundedMemoryToolError(err) });
     }
   },
 };
@@ -1000,7 +929,7 @@ import { kanbanTool } from "./kanban-tool.js";
 import { channelPostTool, channelReadTool } from "./channel-tool.js";
 import { artifactPushTool, artifactPullTool, artifactAttachTool } from "./artifact-tools.js";
 
-const ALL_TOOLS: ToolDefinition[] = [bashTool, memoryStoreTool, memoryRecallTool, memoryEditTool, todoTool, taskTool, sendDocumentTool, peerSessionTool, peerDoorbellTool, secretGetTool, secretFindTool, skillCreateTool, skillUpdateTool, skillPatchTool, skillRemoveTool, mcpTool, kanbanTool, channelPostTool, channelReadTool, artifactAttachTool, ...getDelegationTools(), ...getPeerHelpTools(), ...getOrcTools()];
+const ALL_TOOLS: ToolDefinition[] = [bashTool, memoryStoreTool, memoryRecallTool, todoTool, taskTool, sendDocumentTool, peerSessionTool, peerDoorbellTool, secretGetTool, secretFindTool, skillCreateTool, skillUpdateTool, skillPatchTool, skillRemoveTool, mcpTool, kanbanTool, channelPostTool, channelReadTool, artifactAttachTool, ...getDelegationTools(), ...getPeerHelpTools(), ...getOrcTools()];
 
 // Conditional: artifact store tools (#929)
 if (process.env["ARTIFACT_S3_ENDPOINT"]) {

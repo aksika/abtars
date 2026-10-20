@@ -82,12 +82,10 @@ export async function handleMemory(text: string, ctx: CommandContext): Promise<b
     "🧠 Memory Status", "",
     `💬 Raw messages: ${stats.totalMessages}`,
     `🧩 Extracted memories: ${stats.extractedMemories}`, types,
-    `🔑 Preserved keywords: ${stats.preservedKeywords}`, "",
     `📄 Consolidations:`,
     `  daily: ${stats.consolidationFiles.daily}`,
     `  weekly: ${stats.consolidationFiles.weekly}`,
     `  quarterly: ${stats.consolidationFiles.quarterly}`, "",
-    `📄 Ingested documents: ${stats.ingestedDocuments}`,
     `💾 DB size: ${dbMb} MB`, "",
     `📚 Layer 6 (NotebookLM): ${ctx.nlmConfig.enabled ? "enabled" : "disabled"}`,
   ].join("\n");

@@ -76,7 +76,6 @@ export class RecomposableMemoryRuntime implements RecomposableMemoryRuntimeContr
       embed: (input) => resolve().embed(input),
       runMaintenance: (input) => resolve().runMaintenance(input),
       instantStore: (input) => resolve().instantStore(input),
-      editMemory: (input) => resolve().editMemory(input),
       rebuildFtsIndexes: () => resolve().rebuildFtsIndexes(),
 
       // Stable nested object: a consumer that captures `facade.dreamQuestions`

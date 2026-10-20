@@ -18,7 +18,6 @@ export type MemoryRuntimeCapability =
   | "recall"
   | "recordMessage"
   | "instantStore"
-  | "editMemory"
   | "rebuildFts"
   | "coreKnowledge"
   | "status"
@@ -43,9 +42,9 @@ export interface InstantStoreInput {
 }
 
 /**
- * #1659: normalized structural mutation failure shared by store and edit
- * paths. Fields are preserved from the protocol contract; the bridge code
- * keeps its own stable `memory_*` classification.
+ * #1659: normalized structural mutation failure shared by mutation paths.
+ * Fields are preserved from the protocol contract; the bridge code keeps its
+ * own stable `memory_*` classification.
  */
 export interface MemoryMutationFailureFields {
   readonly code: string;
@@ -82,26 +81,6 @@ export type InstantStoreResult =
       readonly semanticRevision: number;
     }
   | ({ readonly stored: false; readonly memoriesCount: 0 } & MemoryMutationFailureFields);
-
-export interface EditMemoryInput {
-  memoryId: number;
-  expectedRevision: number;
-  userId: string;
-  contentEn?: string;
-  contentOriginal?: string;
-  memoryType?: string;
-  emotionScore?: number;
-  confidence?: number;
-  classification?: number;
-  /** #1660: class-3 promotion label (content_en), never the value. */
-  sealedLabel?: string;
-  /** #1660: class-3 promotion keyword. */
-  sealedKeyword?: string;
-}
-
-export type EditMemoryResult =
-  | { readonly ok: true; readonly semanticRevision?: number }
-  | ({ readonly ok: false } & MemoryMutationFailureFields);
 
 export interface RecordMessageInput {
   userId: string;
@@ -263,8 +242,6 @@ export interface RuntimeStatusResult {
   extractedMemories: number;
   extractedByType: Record<string, number>;
   consolidationFiles: { daily: number; weekly: number; quarterly: number };
-  ingestedDocuments: number;
-  preservedKeywords: number;
   dbSizeBytes: number;
   rejectedByScanner: number;
   uptimeMs?: number;
@@ -437,7 +414,6 @@ export interface AbtarsMemoryRuntime {
   embed(input: EmbeddingInput): Promise<EmbeddingResult>;
   runMaintenance(input: MaintenanceInput): Promise<MaintenanceResult>;
   instantStore(input: InstantStoreInput): Promise<InstantStoreResult>;
-  editMemory(input: EditMemoryInput): Promise<EditMemoryResult>;
   rebuildFtsIndexes(): Promise<{ rebuilt: string[] }>;
   /** #1515: optional owner-scoped dream-question lifecycle. Presence of the
    *  `dreamQuestions` capability is checked independently of core recall. */
@@ -483,7 +459,6 @@ function projectCapabilities(client: AbmindClientLike): Set<MemoryRuntimeCapabil
   if (methods.has("private.recall") && features["private_read"] === "true") result.add("recall");
   if (methods.has("private.recordMessage")) result.add("recordMessage");
   if (methods.has("private.instantStore") && features["private_write"] === "true" && revisionContract) result.add("instantStore");
-  if (methods.has("private.edit") && features["private_write"] === "true" && revisionContract) result.add("editMemory");
   if (methods.has("private.rebuildFts") && features["private_write"] === "true") result.add("rebuildFts");
   if (methods.has("private.getCoreKnowledge")) result.add("coreKnowledge");
   if (methods.has("private.getRuntimeStatus")) result.add("status");
@@ -805,8 +780,6 @@ export function createClientRuntime(client: AbmindClientLike): AbtarsMemoryRunti
           weekly: typeof consolidation["weekly"] === "number" ? consolidation["weekly"] : 0,
           quarterly: typeof consolidation["quarterly"] === "number" ? consolidation["quarterly"] : 0,
         },
-        ingestedDocuments: typeof stats["ingestedDocuments"] === "number" ? stats["ingestedDocuments"] : 0,
-        preservedKeywords: typeof stats["preservedKeywords"] === "number" ? stats["preservedKeywords"] : 0,
         dbSizeBytes: typeof stats["dbSizeBytes"] === "number" ? stats["dbSizeBytes"] : 0,
         rejectedByScanner: typeof stats["rejectedByScanner"] === "number" ? stats["rejectedByScanner"] : 0,
         // #1869 — older daemons omit the mode; absence means full bundle.
@@ -868,32 +841,6 @@ export function createClientRuntime(client: AbmindClientLike): AbtarsMemoryRunti
       } catch (err) {
         // #1659: never flatten a protocol failure back to a bare string.
         return { stored: false, memoriesCount: 0, ...failureFields(err) };
-      }
-    },
-
-    async editMemory(input: EditMemoryInput): Promise<EditMemoryResult> {
-      requireClientCapability(capabilities, "editMemory");
-      try {
-        const result = (await pm.editMemory({
-          memoryId: input.memoryId,
-          userId: input.userId,
-          expectedRevision: input.expectedRevision,
-          contentEn: input.contentEn,
-          contentOriginal: input.contentOriginal,
-          memoryType: input.memoryType as string,
-          emotionScore: input.emotionScore,
-          confidence: input.confidence,
-          classification: input.classification,
-          sealedLabel: input.sealedLabel,
-          sealedKeyword: input.sealedKeyword,
-        })) as Record<string, unknown>;
-        const ref = (result["ref"] ?? result) as Record<string, unknown>;
-        return {
-          ok: true,
-          semanticRevision: typeof ref["semanticRevision"] === "number" ? ref["semanticRevision"] : undefined,
-        };
-      } catch (err) {
-        return { ok: false, ...failureFields(err) };
       }
     },
 
@@ -1067,13 +1014,12 @@ export function createDisabledRuntime(): AbtarsMemoryRuntime {
     recall: async () => { unavailable("recall"); return { hits: [], context: "", status: "unavailable" }; },
     assembleSessionContext: async () => { unavailable("assembleSessionContext"); return { wakeUp: "", recall: "", coreKnowledge: "", soulBundle: emptySoulBundle() }; },
     getRecentConversation: async () => { unavailable("getRecentConversation"); return []; },
-    getStatus: async () => { unavailable("getStatus"); return { totalMessages: 0, extractedMemories: 0, extractedByType: {}, consolidationFiles: { daily: 0, weekly: 0, quarterly: 0 }, ingestedDocuments: 0, preservedKeywords: 0, dbSizeBytes: 0, rejectedByScanner: 0, memoryTest: false }; },
+    getStatus: async () => { unavailable("getStatus"); return { totalMessages: 0, extractedMemories: 0, extractedByType: {}, consolidationFiles: { daily: 0, weekly: 0, quarterly: 0 }, dbSizeBytes: 0, rejectedByScanner: 0, memoryTest: false }; },
     getSleepStatus: async () => { unavailable("getSleepStatus"); return { state: "idle" }; },
     getCoreKnowledge: async () => { unavailable("getCoreKnowledge"); return ""; },
     embed: async () => { unavailable("embed"); return { vectors: [], model: "" }; },
     runMaintenance: async () => { unavailable("runMaintenance"); return { ok: false, summary: "Memory disabled" }; },
     instantStore: async () => { unavailable("instantStore"); return { stored: false, memoriesCount: 0, code: "memory_unavailable", message: "Memory is disabled", requestId: "", retryable: false, action: "stop" as const, stage: "pre_dispatch" as const }; },
-    editMemory: async () => { unavailable("editMemory"); return { ok: false, code: "memory_unavailable", message: "Memory is disabled", requestId: "", retryable: false, action: "stop" as const, stage: "pre_dispatch" as const }; },
     rebuildFtsIndexes: async () => { unavailable("rebuildFtsIndexes"); return { rebuilt: [] }; },
     dreamQuestions: {
       nextPending: async () => { unavailable("dreamQuestions.nextPending"); return null; },
@@ -1100,13 +1046,12 @@ export function createUnavailableRuntime(): AbtarsMemoryRuntime {
     recall: async () => { unavailable("recall"); return { hits: [], context: "", status: "unavailable" }; },
     assembleSessionContext: async () => { unavailable("assembleSessionContext"); return { wakeUp: "", recall: "", coreKnowledge: "", soulBundle: emptySoulBundle() }; },
     getRecentConversation: async () => { unavailable("getRecentConversation"); return []; },
-    getStatus: async () => { unavailable("getStatus"); return { totalMessages: 0, extractedMemories: 0, extractedByType: {}, consolidationFiles: { daily: 0, weekly: 0, quarterly: 0 }, ingestedDocuments: 0, preservedKeywords: 0, dbSizeBytes: 0, rejectedByScanner: 0, memoryTest: false }; },
+    getStatus: async () => { unavailable("getStatus"); return { totalMessages: 0, extractedMemories: 0, extractedByType: {}, consolidationFiles: { daily: 0, weekly: 0, quarterly: 0 }, dbSizeBytes: 0, rejectedByScanner: 0, memoryTest: false }; },
     getSleepStatus: async () => { unavailable("getSleepStatus"); return { state: "idle" }; },
     getCoreKnowledge: async () => { unavailable("getCoreKnowledge"); return ""; },
     embed: async () => { unavailable("embed"); return { vectors: [], model: "" }; },
     runMaintenance: async () => { unavailable("runMaintenance"); return { ok: false, summary: "Memory disabled" }; },
     instantStore: async () => { unavailable("instantStore"); return { stored: false, memoriesCount: 0, code: "memory_unavailable", message: "Memory unavailable", requestId: "", retryable: false, action: "stop" as const, stage: "pre_dispatch" as const }; },
-    editMemory: async () => { unavailable("editMemory"); return { ok: false, code: "memory_unavailable", message: "Memory unavailable", requestId: "", retryable: false, action: "stop" as const, stage: "pre_dispatch" as const }; },
     rebuildFtsIndexes: async () => { unavailable("rebuildFtsIndexes"); return { rebuilt: [] }; },
     dreamQuestions: {
       nextPending: async () => { unavailable("dreamQuestions.nextPending"); return null; },

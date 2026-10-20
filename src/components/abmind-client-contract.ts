@@ -44,7 +44,6 @@ export interface AbmindClientErrorLike extends Error {
 
 export interface AbmindPrivateMemoryLike {
   instantStore(params: unknown, idempotencyKey?: string): Promise<unknown>;
-  editMemory(params: unknown, idempotencyKey?: string): Promise<unknown>;
   recall(params: unknown): Promise<unknown>;
   rebuildFtsIndexes(): Promise<unknown>;
   embed(input: { texts: string[] }): Promise<unknown>;

@@ -48,7 +48,6 @@ function mockClient(caps: AbmindCapabilitiesV1, overrides?: Partial<import("abmi
       embed: vi.fn().mockResolvedValue({ vectors: [], model: "" }),
       rebuildFtsIndexes: vi.fn().mockResolvedValue({ rebuilt: [] }),
       instantStore: vi.fn().mockResolvedValue({ stored: true, memoriesCount: 1 }),
-      editMemory: vi.fn().mockResolvedValue({ ok: true }),
       adjustRelevance: vi.fn().mockResolvedValue({ ok: true }),
       mergeMemories: vi.fn().mockResolvedValue({ merged: true }),
       cascadeDelete: vi.fn().mockResolvedValue({ ok: true }),
@@ -78,7 +77,7 @@ describe("capability projection", () => {
     {
       methods: ALL_METHODS,
       features: { private_read: "true", private_write: "true", private_mutation_contract: "revision-v1" },
-      expected: ["recall", "recordMessage", "instantStore", "editMemory", "rebuildFts", "coreKnowledge", "status"],
+      expected: ["recall", "recordMessage", "instantStore", "rebuildFts", "coreKnowledge", "status"],
     },
     {
       methods: ALL_METHODS,
@@ -103,7 +102,7 @@ describe("capability projection", () => {
     {
       methods: ["private.instantStore", "private.edit", "private.rebuildFts"],
       features: { private_write: "true", private_mutation_contract: "revision-v1" },
-      expected: ["instantStore", "editMemory", "rebuildFts"],
+      expected: ["instantStore", "rebuildFts"],
     },
     {
       methods: [],
@@ -116,7 +115,7 @@ describe("capability projection", () => {
     for (const cap of expected) {
       expect(rt.supports(cap)).toBe(true);
     }
-    const allCaps: MemoryRuntimeCapability[] = ["recall", "recordMessage", "instantStore", "editMemory", "rebuildFts", "coreKnowledge", "status"];
+    const allCaps: MemoryRuntimeCapability[] = ["recall", "recordMessage", "instantStore", "rebuildFts", "coreKnowledge", "status"];
     for (const cap of allCaps) {
       if (expected.includes(cap)) {
         expect(rt.supports(cap), `${cap} should be supported`).toBe(true);
@@ -177,14 +176,6 @@ describe("createClientRuntime", () => {
     const result = await rt.instantStore({ userId: "u1", contentEn: "test", contentOriginal: "test", memoryType: "fact", emotionScore: 0, confidence: 3, classification: 1 });
     expect(result.stored).toBe(true);
     expect(client.privateMemory.instantStore).toHaveBeenCalled();
-  });
-
-  it("editMemory dispatches when supported", async () => {
-    const client = mockClient(caps(ALL_METHODS, { private_read: "true", private_write: "true", private_mutation_contract: "revision-v1" }));
-    const rt = createClientRuntime(client);
-    const result = await rt.editMemory({ memoryId: 1, expectedRevision: 1, userId: "u1" });
-    expect(result.ok).toBe(true);
-    expect(client.privateMemory.editMemory).toHaveBeenCalled();
   });
 
   it("supports recall when private_read=true", async () => {
@@ -279,20 +270,6 @@ describe("#1659 runtime failure contract", () => {
         action,
         stage,
       });
-    }
-  });
-
-  it("editMemory surfaces a conflict as memory_conflict/re_recall without flattening", async () => {
-    const client = mockClient(WRITE_CAPS);
-    (client.privateMemory.editMemory as ReturnType<typeof vi.fn>)
-      .mockRejectedValue(structuralError("conflict", "Semantic revision conflict", "pre_dispatch", false, "re_recall"));
-    const rt = createClientRuntime(client);
-    const result = await rt.editMemory({ memoryId: 7, expectedRevision: 2, userId: "u1" });
-    expect(result.ok).toBe(false);
-    if (!result.ok) {
-      expect(result.code).toBe("memory_conflict");
-      expect(result.action).toBe("re_recall");
-      expect(result.retryable).toBe(false);
     }
   });
 

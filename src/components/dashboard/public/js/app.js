@@ -127,7 +127,6 @@ function updateDashboard(snap) {
       setText("mem-messages", s.totalMessages);
       setText("mem-extracted", s.extractedMemories);
       setText("mem-consolidations", s.consolidationFiles.daily + " / " + s.consolidationFiles.weekly + " / " + s.consolidationFiles.quarterly);
-      setText("mem-documents", s.ingestedDocuments);
       setText("mem-dbsize", formatBytes(s.dbSizeBytes));
     }
   }

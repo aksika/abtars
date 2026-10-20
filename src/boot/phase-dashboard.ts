@@ -99,9 +99,7 @@ export async function phaseDashboard(ctx: BootCtx): Promise<PhaseResult> {
               totalMessages: memoryStats.totalMessages,
               extractedMemories: memoryStats.extractedMemories,
               extractedByType: memoryStats.extractedByType,
-              preservedKeywords: memoryStats.preservedKeywords,
               consolidationFiles: memoryStats.consolidationFiles,
-              ingestedDocuments: memoryStats.ingestedDocuments,
               dbSizeBytes: memoryStats.dbSizeBytes,
             } : null,
           }

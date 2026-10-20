@@ -91,10 +91,8 @@ export type SubsystemRefs = {
       totalMessages: number;
       extractedMemories: number;
       extractedByType: Record<string, number>;
-      preservedKeywords: number;
-      consolidationFiles: { daily: number; weekly: number; quarterly: number };
-      ingestedDocuments: number;
-      dbSizeBytes: number;
+        consolidationFiles: { daily: number; weekly: number; quarterly: number };
+        dbSizeBytes: number;
     } | null;
   } | null;
   heartbeat: {

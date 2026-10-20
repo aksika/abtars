@@ -21,7 +21,7 @@ function makeCtx(overrides: Record<string, unknown> = {}) {
       getStatus: vi.fn().mockResolvedValue({
         totalMessages: 5, extractedMemories: 3, extractedByType: { fact: 3 },
         consolidationFiles: { daily: 1, weekly: 0, quarterly: 0 },
-        ingestedDocuments: 0, preservedKeywords: 0, dbSizeBytes: 1024, rejectedByScanner: 0,
+        dbSizeBytes: 1024, rejectedByScanner: 0,
       }),
       dreamQuestions: {
         list: vi.fn().mockResolvedValue({ questions: [] }),

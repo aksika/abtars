@@ -36,7 +36,7 @@ function makeReadyRuntime(overrides: Partial<AbtarsMemoryRuntime> = {}): AbtarsM
     getStatus: vi.fn(async () => ({
       totalMessages: 1, extractedMemories: 0, extractedByType: {},
       consolidationFiles: { daily: 0, weekly: 0, quarterly: 0 },
-      ingestedDocuments: 0, preservedKeywords: 0, dbSizeBytes: 0, rejectedByScanner: 0,
+      dbSizeBytes: 0, rejectedByScanner: 0,
       memoryTest: false,
     })),
     getSleepStatus: vi.fn(async () => ({ state: "idle" as const })),
@@ -44,7 +44,6 @@ function makeReadyRuntime(overrides: Partial<AbtarsMemoryRuntime> = {}): AbtarsM
     embed: vi.fn(async () => ({ vectors: [], model: "m" })),
     runMaintenance: vi.fn(async () => ({ ok: true, summary: "ok" })),
     instantStore: vi.fn(async () => ({ stored: true as const, memoriesCount: 1, memoryId: 5, semanticRevision: 1 })),
-    editMemory: vi.fn(async () => ({ ok: true as const, semanticRevision: 2 })),
     rebuildFtsIndexes: vi.fn(async () => ({ rebuilt: [] })),
     dreamQuestions: {
       nextPending: vi.fn(async () => null),
