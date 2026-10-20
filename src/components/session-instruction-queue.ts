@@ -7,8 +7,8 @@ const TAG = "steer-queue";
 /**
  * #1445: Narrowest shape actually read/written by markConsumed/failAfterDelivery —
  * only session.instructionQueue. Callers that don't have a full ManagedSession
- * (e.g. pi-core-host.ts, which is not yet wired to a real Spin session) can pass
- * this instead of fabricating a fake ManagedSession via an unsafe cast.
+ * (e.g. the Pi transport, which is not wired to a full ManagedSession) can
+ * pass this instead of fabricating a fake ManagedSession via an unsafe cast.
  */
 export type InstructionQueueHolder = Pick<ManagedSession, "instructionQueue">;
 

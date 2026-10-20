@@ -1,14 +1,21 @@
 /**
- * probe-projection-journey.ts — #1527 escaped-regression consumer journey.
+ * probe-projection-journey.ts — #1527 escaped-regression consumer journey,
+ * re-pointed at the #1932 SDK transform contract.
  *
  * Runs against a REAL abmind daemon (local Unix or signed WSS) through the
- * REAL abtars memory runtime and REAL Pi context projection. Records a
- * recognizable first exchange plus a second current turn, then proves:
- *   1. the second Pi provider request contains the first exchange exactly,
- *   2. the current turn is appended exactly once,
+ * REAL abtars memory runtime and the REAL request-scoped SDK transform.
+ * Records a recognizable first exchange plus a second current turn, then
+ * proves:
+ *   1. the transform admits the request and attaches exactly one marked
+ *      bundle (system message replaced request-scoped);
+ *   2. Pi history passes through byte-identical — the archive is NEVER
+ *      reconstructed into provider requests on the intact path (R9);
  *   3. removing the provider fails the same journey before model invocation.
  */
-import { createDurableContextProvider, PiCoreContextProjection, DurableContextUnavailableError } from "../src/components/transport/pi-core-context.js";
+import { createDurableContextProvider, DurableContextUnavailableError } from "../src/components/transport/pi-core-context.js";
+import { buildSdkTransform } from "../src/components/transport/pi-sdk-transform.js";
+import { createPiExecutionSafetyController } from "../src/components/transport/pi-core-safety.js";
+import { PiSoulGate } from "../src/components/pi-session/pi-soul-gate.js";
 import type { AbtarsMemoryRuntime } from "../src/components/memory-runtime.js";
 
 export async function runProjectionJourney(runtime: AbtarsMemoryRuntime, user: string, runId: string, failures: string[]): Promise<void> {
@@ -36,40 +43,66 @@ export async function runProjectionJourney(runtime: AbtarsMemoryRuntime, user: s
   }
 
   const provider = createDurableContextProvider(runtime);
-  const marker = {
-    role: "abtars_current_turn" as const,
-    executionId: `${runId}-exec`,
-    sessionId,
-    content: "probe second user turn",
-    timestamp: Date.now(),
-  };
-  const seed = {
-    source: { mode: "durable" as const, sessionKey: sessionId, beforeMessageId: current.id, maxContext: 100_000, userId: user },
-    executionId: `${runId}-exec`,
-    currentTurn: marker,
+  // Pi-owned history as the agent loop would hold it (structural system
+  // entry plus the live transcript — never archive reconstruction).
+  const history = [
+    { role: "system", content: "structural", timestamp: Date.now() - 3000 },
+    { role: "user", content: "probe second user turn", timestamp: Date.now() },
+  ];
+  const gate = new PiSoulGate();
+  gate.beginSession();
+  const transform = buildSdkTransform({
+    safety: createPiExecutionSafetyController(),
+    source: { mode: "durable", sessionKey: sessionId, beforeMessageId: current.id, maxContext: 100_000, userId: user },
     volatileBlocks: [],
-  };
-  const projection = new PiCoreContextProjection(seed, "system");
-
-  // Escaped regression: the second Pi provider request must contain the first
-  // exchange and exactly one second turn.
-  const result = await projection.transform([marker as never], { hostGeneration: 0, contextProvider: provider });
-  const texts = result.messages.map((m) => {
-    const content = (m as { content?: unknown }).content;
-    return typeof content === "string" ? content : JSON.stringify(content);
+    executionId: `${runId}-exec`,
+    candidateKey: "probe@probe",
+    contextProvider: provider,
+    projectContext: (input) => provider.projectContext(input),
+    memoryState: () => runtime.state,
+    outboxHas: () => false,
+    gate,
+    generation: 1,
+    getSystemPrompt: () => "probe bundle",
   });
-  if (!texts.some((t) => t === "probe first user turn") || !texts.some((t) => t.includes("probe first assistant turn"))) {
-    failures.push(`projection missing the first exchange: ${JSON.stringify(texts)}`);
+
+  // New contract: admission succeeds, exactly one marked bundle is attached
+  // request-scoped, and history passes through byte-identical.
+  const result = await transform(history as never, undefined);
+  const system = result.find((m) => (m as { role?: string }).role === "system") as { content?: unknown } | undefined;
+  const systemText = typeof system?.content === "string" ? system.content : JSON.stringify(system?.content);
+  if (!systemText.includes("probe bundle")) {
+    failures.push(`request system missing the bundle: ${systemText.slice(0, 200)}`);
   }
-  if (texts.filter((t) => t === "probe second user turn").length !== 1) {
-    failures.push(`current turn not appended exactly once: ${JSON.stringify(texts)}`);
+  const nonSystem = result.filter((m) => (m as { role?: string }).role !== "system");
+  if (nonSystem.length !== 1 || JSON.stringify(nonSystem[0]) !== JSON.stringify(history[1])) {
+    failures.push(`Pi history not passed through byte-identical: ${JSON.stringify(nonSystem).slice(0, 300)}`);
+  }
+  const texts = result.map((m) => JSON.stringify((m as { content?: unknown }).content));
+  if (texts.some((t) => t.includes("probe first user turn") || t.includes("probe first assistant turn"))) {
+    failures.push(`archive history reconstructed into the request (R9 violation): ${JSON.stringify(texts).slice(0, 300)}`);
   }
 
   // Fail-closed: without a provider, the same journey must fail before model
   // invocation — never a plausible suffix-only answer.
+  const gate2 = new PiSoulGate();
+  gate2.beginSession();
+  const denied = buildSdkTransform({
+    safety: createPiExecutionSafetyController(),
+    source: { mode: "durable", sessionKey: sessionId, beforeMessageId: current.id, maxContext: 100_000, userId: user },
+    volatileBlocks: [],
+    executionId: `${runId}-exec`,
+    candidateKey: "probe@probe",
+    projectContext: async () => { throw new Error("must not probe without a provider"); },
+    memoryState: () => runtime.state,
+    outboxHas: () => false,
+    gate: gate2,
+    generation: 1,
+    getSystemPrompt: () => "probe bundle",
+  });
   try {
-    await projection.transform([marker as never], { hostGeneration: 0 });
-    failures.push("durable projection without a provider should have thrown");
+    await denied(history as never, undefined);
+    failures.push("durable transform without a provider should have thrown");
   } catch (err) {
     if (!(err instanceof DurableContextUnavailableError)) {
       failures.push(`expected DurableContextUnavailableError, got ${(err as Error).name}: ${(err as Error).message}`);

@@ -5,11 +5,7 @@ import { tmpdir } from "node:os";
 import { randomUUID } from "node:crypto";
 import type { ScheduledTask } from "../src/components/tasks/task-types.js";
 import type {
-  AgentEvent,
   ModelApi,
-  PiAgentCoreModule,
-  PiAgentListener,
-  PiAgentOptions,
   StreamFn,
 } from "../src/components/transport/pi-core-types.js";
 import type { ModelCandidate } from "../src/components/transport/model-candidates.js";
@@ -349,38 +345,64 @@ async function main(): Promise<void> {
   // ── M15-M23: Execution (deterministic interface testing) ─────────────────
 
   scenario("Execution (provider-agnostic boundaries)");
-  await checkpoint("M15", "Pi host can be imported and validates contract", "execution", "module loads, contract shape", async () => {
-    const { PiCoreExecutionHost } = await import("../src/components/transport/pi-core-host.js");
+  await checkpoint("M15", "SDK conversation opens with an abtars ID and settles provider refusal", "execution", "abmars-minted ID, settled error turn, safe cancel", async () => {
+    // #1932: the in-process conversation is a real Pi AgentSession over a
+    // real SessionManager. The throwing provider boundary settles the turn
+    // as an error turn (empty text); the lifecycle proof is clean
+    // settlement + safe cancel-after-settle + a durable abtars ID binding.
+    const CONV = await import("../src/components/transport/pi-sdk-conversation.js");
     const real = await import("@earendil-works/pi-agent-core");
+    const codingAgent = await import("@earendil-works/pi-coding-agent");
     const piTypes: typeof import("../src/components/transport/pi-core-types.js") = await import("../src/components/transport/pi-core-types.js");
     piTypes.validatePiAgentCoreModule(real, "acceptance");
-    const realModule: PiAgentCoreModule = {
-      Agent: class extends real.Agent {
-        constructor(options?: PiAgentOptions) {
-          super(options ?? { streamFn: noProviderStream });
-        }
-      },
-    };
-    const acceptanceExec = `acceptance-exec-${Date.now()}`;
-    const host = new PiCoreExecutionHost({
-      seed: {
-        source: { mode: "ephemeral" as const, sessionKey: "acceptance-session" },
-        executionId: acceptanceExec,
-        currentTurn: piTypes.createCurrentTurnMessage("acceptance probe", acceptanceExec, "acceptance-session"),
-        volatileBlocks: [],
-      },
-      initialState: { systemPrompt: "acceptance", model: acceptanceModel, tools: [] },
-      streamFn: noProviderStream,
+    const runDir = mkdtempSync(join(tmpdir(), "m15-sdk-"));
+    const store = new CONV.PiSdkConversationStore({
+      stateDir: join(runDir, "state"),
+      sessionStorageRoot: join(runDir, "sessions"),
+      loadSurface: async () => ({
+        SessionManager: codingAgent.SessionManager,
+        AgentSession: codingAgent.AgentSession,
+        SettingsManager: codingAgent.SettingsManager,
+        ModelRuntime: codingAgent.ModelRuntime,
+        DefaultResourceLoader: codingAgent.DefaultResourceLoader,
+      }) as never,
     });
-    await host.start({ module: realModule, installation: { executable: "", packageRoot: "", version: "installed", source: "path", pinStatus: "at-pin", moduleRoots: { ai: "", tui: "", agentCore: "" } } });
-    // #1777: startup always prompts the seed's current turn, so the throwing
-    // provider boundary terminates the turn instead of leaving the host
-    // running. The lifecycle proof is clean termination + safe cancel.
-    if (!host.isSettled) return `Pi host did not settle after provider refusal: ${host.state}`;
-    host.cancel();
-    await host.waitForSettlement();
-    if (!host.isSettled) return `Pi host did not settle after cancellation`;
-    return { observed: "real public Pi Agent constructed, provider refusal terminated the turn, cancel-after-settle safe", evidence: ["provider_refused", "host_state=settled"] };
+    const agent = new real.Agent({
+      initialState: { systemPrompt: "acceptance", model: acceptanceModel, messages: [], tools: [], thinkingLevel: "off" },
+      streamFn: noProviderStream,
+      steeringMode: "one-at-a-time",
+      followUpMode: "one-at-a-time",
+      toolExecution: "sequential",
+      convertToLlm: (messages) => piTypes.convertMessagesToLlm(messages),
+      transformContext: async (messages) => messages,
+    });
+    const key = {
+      sessionKey: "acceptance-session",
+      principal: "acceptance",
+      platform: "acceptance",
+      role: "main",
+      workspaceAlias: "chat",
+      canonicalWorkspace: "chat",
+      memoryScope: "none",
+    } as const;
+    const opened = await store.ensureConversation(key, {
+      agent,
+      baseTools: {},
+      toolNames: [],
+      provider: { providerId: "acceptance", baseUrl: "https://acceptance.invalid", apiKey: "acceptance-key" },
+    });
+    if (!opened.conversationId) return `SDK conversation opened without an ID`;
+    const result = await store.prompt("acceptance-session", "acceptance probe");
+    // The throwing provider boundary terminates the turn instead of leaving
+    // the conversation running: settled, empty, not aborted.
+    if (result.text !== "") return `refused turn should settle empty, got ${JSON.stringify(result.text).slice(0, 120)}`;
+    if (result.aborted) return `refused turn must not report aborted`;
+    store.cancel("acceptance-session");
+    await store.waitForIdle("acceptance-session");
+    const bound = store.conversationId("acceptance-session");
+    if (bound !== opened.conversationId) return `binding lost the conversation ID`;
+    store.dispose();
+    return { observed: "real Pi AgentSession opened with an abtars ID, provider refusal settled the turn, cancel-after-settle safe", evidence: ["provider_refused", "conversation_bound"] };
   });
 
   await checkpoint("M16", "Provider/model selection is interface-driven", "execution", "SessionProfile lookup works", async () => {
@@ -524,77 +546,70 @@ async function main(): Promise<void> {
     return true;
   });
 
-  const PH = await import("../src/components/transport/pi-core-host.js");
-  const { createCurrentTurnMessage } = await import("../src/components/transport/pi-core-types.js");
   const EC = await import("../src/components/execution-control.js");
 
-  await checkpoint("M30", "Non-settling provider: forced terminal + slot release + cleanup timeout", "timeout", "Non-settling Pi provider forces terminal settlement within 5s bound", async () => {
+  await checkpoint("M30", "Ignoring provider: cancel claims terminal promptly + slot release", "timeout", "Signal-only cancel never awaits acquisition; late turn settles independently", async () => {
     const executionId = `m30-${Date.now()}`;
-    let subscribed = false;
-
-    // Build a PiCoreExecutionHost with a mock Agent whose waitForIdle() never
-    // resolves — this simulates a provider that ignores abort. The #1506 fix
-    // must make waitForSettlement() resolve immediately on cancel regardless.
-    const subs: PiAgentListener[] = [];
-    const pi = await import("@earendil-works/pi-agent-core");
-    const mockModule: PiAgentCoreModule = {
-      Agent: class extends pi.Agent {
-        constructor(options?: PiAgentOptions) {
-          super(options ?? { streamFn: noProviderStream });
-          this.subscribe = (listener: PiAgentListener) => {
-            subs.push(listener);
-            subscribed = true;
-            return () => {
-              const i = subs.indexOf(listener);
-              if (i >= 0) subs.splice(i, 1);
-            };
-          };
-          this.prompt = async () => {};
-          this.steer = () => {};
-          this.followUp = () => {};
-          this.clearAllQueues = () => {};
-          this.abort = () => {};
-          this.waitForIdle = () => new Promise<void>(() => {}); // NEVER resolves
-        }
-      },
-    };
-    const mockInstallation = { executable: "/pi", packageRoot: "/pi", version: "0.80.7", source: "path" as const, pinStatus: "at-pin" as const, moduleRoots: { ai: "", tui: "", agentCore: "" } };
-    const host = new PH.PiCoreExecutionHost({
-      seed: {
-        source: { mode: "ephemeral" as const, sessionKey: "m30-session" },
-        executionId,
-        currentTurn: createCurrentTurnMessage("m30 probe", executionId, "m30-session"),
-        volatileBlocks: [],
-      },
-      initialState: { systemPrompt: "test", model: acceptanceModel, tools: [] },
-      streamFn: noProviderStream,
+    // A provider that ignores abort: the stream factory never resolves, so
+    // no iterator exists for any watchdog to observe. Cancel must claim
+    // terminal immediately (signal-only) rather than await acquisition.
+    const CONV = await import("../src/components/transport/pi-sdk-conversation.js");
+    const real = await import("@earendil-works/pi-agent-core");
+    const codingAgent = await import("@earendil-works/pi-coding-agent");
+    const piTypesM30: typeof import("../src/components/transport/pi-core-types.js") = await import("../src/components/transport/pi-core-types.js");
+    const runDir = mkdtempSync(join(tmpdir(), "m30-sdk-"));
+    const store = new CONV.PiSdkConversationStore({
+      stateDir: join(runDir, "state"),
+      sessionStorageRoot: join(runDir, "sessions"),
+      loadSurface: async () => ({
+        SessionManager: codingAgent.SessionManager,
+        AgentSession: codingAgent.AgentSession,
+        SettingsManager: codingAgent.SettingsManager,
+        ModelRuntime: codingAgent.ModelRuntime,
+        DefaultResourceLoader: codingAgent.DefaultResourceLoader,
+      }) as never,
     });
-    try {
-      await host.start({ module: mockModule, installation: mockInstallation });
-    } catch (err) {
-      return { observed: `mock Pi host failed to start: ${err instanceof Error ? err.message : String(err)}`, evidence: [] };
-    }
-    if (!subscribed) return { observed: `agent not subscribed after start`, evidence: [] };
-    // Capture the listener BEFORE cancel: settlement unsubscribes the host,
-    // which would otherwise empty `subs` and silently skip the late-event check.
-    const listener = subs[0];
-    if (!listener) return { observed: `agent listener missing after start`, evidence: [] };
-
-    // Cancel — must claim terminal immediately even though waitForIdle hangs
-    host.cancel();
-    await host.waitForSettlement();
-
-    if (!host.isSettled) return { observed: `not settled after cancel`, evidence: [] };
-    // Cleanup must time out (waitForIdle never resolves)
-    const cleanup = await host.waitForCleanup();
-    if (cleanup !== "timed_out") return { observed: `expected cleanup timed_out but got ${cleanup}`, evidence: [] };
-
-    // Late agent_end must be rejected — check via internal state;
-    // handleAgentEnd is no-op when settled, state unchanged
-    const stateBefore = host.state;
-    const lateAgentEnd: AgentEvent = { type: "agent_end", messages: [] };
-    await listener(lateAgentEnd, new AbortController().signal);
-    if (host.state !== stateBefore) return { observed: `late agent_end changed state from ${stateBefore} to ${host.state}`, evidence: [] };
+    const hangingStream = () => new Promise<never>(() => {});
+    const agent = new real.Agent({
+      initialState: { systemPrompt: "test", model: acceptanceModel, messages: [], tools: [], thinkingLevel: "off" },
+      streamFn: hangingStream,
+      steeringMode: "one-at-a-time",
+      followUpMode: "one-at-a-time",
+      toolExecution: "sequential",
+      convertToLlm: (messages) => piTypesM30.convertMessagesToLlm(messages),
+      transformContext: async (messages) => messages,
+    });
+    await store.ensureConversation({
+      sessionKey: "m30-session",
+      principal: "acceptance",
+      platform: "acceptance",
+      role: "main",
+      workspaceAlias: "chat",
+      canonicalWorkspace: "chat",
+      memoryScope: "none",
+    }, {
+      agent,
+      baseTools: {},
+      toolNames: [],
+      provider: { providerId: "acceptance", baseUrl: "https://acceptance.invalid", apiKey: "acceptance-key" },
+    });
+    const turnP = store.prompt("m30-session", "m30 probe");
+    // Let the run reach acquisition, then cancel: must return promptly even
+    // though the provider ignores abort and acquisition never completes.
+    await new Promise((r) => setTimeout(r, 200));
+    const cancelStart = Date.now();
+    store.cancel("m30-session");
+    const cancelElapsed = Date.now() - cancelStart;
+    if (cancelElapsed > 100) return { observed: `cancel blocked for ${cancelElapsed}ms on an ignoring provider`, evidence: [] };
+    // The turn itself stays pending on the hung acquisition (bounded in
+    // production by the attempt inactivity timeout, not here); evict to
+    // release the harness without awaiting it.
+    let turnSettled = false;
+    void turnP.then(() => { turnSettled = true; }, () => { turnSettled = true; });
+    await new Promise((r) => setTimeout(r, 200));
+    store.evict("m30-session");
+    store.dispose();
+    if (turnSettled) return { observed: `hung turn should not settle without acquisition`, evidence: [] };
 
     // signalCancel must be non-blocking (never await the bound handler)
     const sv = EC.createExecutionSupervisor({ maxConcurrent: { T: 1 } });
@@ -611,7 +626,7 @@ async function main(): Promise<void> {
     if (!handlerCalled) return { observed: `signalCancel handler not queued`, evidence: [] };
 
     sv.remove(`sig-${executionId}`);
-    return { observed: `terminal: clean, cleanup: ${cleanup}, signalCancel: non-blocking (${elapsed}ms), late agent_end rejected`, evidence: [`executionId=${executionId}`] };
+    return { observed: `cancel: prompt (${cancelElapsed}ms), hung turn independent, signalCancel: non-blocking (${elapsed}ms)`, evidence: [`executionId=${executionId}`] };
   }, ["M15"]);
 
   await checkpoint("M30A", "Acquisition hang: never-resolving attempt factory is bounded", "timeout", "provider_attempt_timeout phase=acquiring within the inactivity bound", async () => {

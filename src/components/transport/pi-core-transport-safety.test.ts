@@ -1,46 +1,30 @@
-import { describe, expect, it, vi } from "vitest";
+/**
+ * pi-core-transport-safety.test.ts — #1595: the safety terminal cause leads.
+ *
+ * With maxPromptRounds 0 the SDK transform's round gate stops the turn; the
+ * fake store settles it empty (production behavior) and the transport
+ * surfaces the terminal diagnostic instead of prior assistant text.
+ */
+import { describe, expect, it, vi, beforeEach } from "vitest";
+import {
+  FakeSdkAgent,
+  FakeSdkConversationStore,
+} from "../../test-support/fake-sdk-conversation.js";
 
-const { FakeHost } = vi.hoisted(() => {
-  class FakeHost {
-    isSettled = false;
-    state = "created";
-    ready = Promise.resolve();
-    private readonly options: { safety: { beginProviderTurn: (key: string) => unknown; }; onEvent?: (event: unknown) => unknown };
-
-    constructor(options: { safety: { beginProviderTurn: (key: string) => unknown }; onEvent?: (event: unknown) => unknown }) {
-      this.options = options;
-    }
-
-    async start(): Promise<void> {
-      this.state = "running";
-      // Simulate the last assistant/tool-call text that would otherwise be
-      // mistaken for a completed response after the safety controller stops.
-      this.options.onEvent?.({ type: "message_end", message: { role: "assistant", content: "partial tool call" } });
-      this.options.safety.beginProviderTurn("test-model@https://api.test/v1");
-      this.isSettled = true;
-      this.state = "settled";
-    }
-
-    async waitForSettlement(): Promise<void> {}
-    cancel(): void { this.isSettled = true; }
-    async steer(): Promise<void> {}
-    async followUp(): Promise<void> {}
-  }
-
-  return { FakeHost };
-});
-
-vi.mock("./pi-core-host.js", () => ({ PiCoreExecutionHost: FakeHost }));
+vi.mock("./pi-sdk-conversation.js", () => ({ PiSdkConversationStore: FakeSdkConversationStore }));
 vi.mock("./pi-core-types.js", async (importOriginal) => {
   const actual = await importOriginal<typeof import("./pi-core-types.js")>();
   return {
     ...actual,
     loadAndValidatePiAgentCore: vi.fn().mockResolvedValue({
-      module: {},
+      module: { Agent: FakeSdkAgent },
       installation: { executable: "/usr/bin/pi", packageRoot: "/usr/lib/pi", version: "0.85.1", source: "path", pinStatus: "at-pin", moduleRoots: { ai: "", tui: "", agentCore: "" } },
     }),
   };
 });
+vi.mock("./pi-stream-fn.js", () => ({
+  createPiStreamFn: vi.fn(),
+}));
 
 // #1573: initialize() gates readiness on the runtime contract probe; unrelated
 // safety tests receive a successful probe.
@@ -70,9 +54,16 @@ function makeTransport(): PiCoreTransport {
 }
 
 describe("PiCoreTransport terminal safety precedence (#1595)", () => {
+  beforeEach(() => {
+    FakeSdkConversationStore.resetAll();
+  });
+
   it("reports the safety terminal cause instead of returning prior assistant text", async () => {
     const transport = makeTransport();
     await transport.initialize();
+    // The transform stops at the round bound and records the incident; the
+    // fake settles the turn empty and the tail leads with the terminal cause.
+    FakeSdkConversationStore.queueTurn("session", { text: "partial tool call" });
 
     await expect(transport.sendPrompt("session", "continue")).rejects.toMatchObject({
       diagnostic: expect.objectContaining({

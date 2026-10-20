@@ -23,7 +23,7 @@
 import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { logDebug, logWarn } from "../logger.js";
 import { resolvePiInstallation, loadPiModule } from "../pi-installation.js";
 import {
@@ -37,11 +37,11 @@ import {
 
 const TAG = "pi-sdk-conversation";
 
-/** Durable binding file beneath the abtars state dir. */
-const BINDING_FILENAME = "pi-sdk-conversations-v1.json";
+/** Durable bindings directory beneath the abtars state dir (one file per session key). */
+const BINDINGS_DIRNAME = "pi-sdk-conversations-v1";
 const BINDING_VERSION = 1;
-/** Bounded read: the binding file is a small index, never a transcript. */
-const MAX_BINDING_BYTES = 256 * 1024;
+/** Bounded read: a binding is a small record, never a transcript. */
+const MAX_BINDING_BYTES = 64 * 1024;
 /** Bounded live conversations per store; overflow evicts the oldest. */
 const MAX_LIVE_CONVERSATIONS = 32;
 
@@ -71,7 +71,8 @@ export interface SdkConversationBinding {
 
 interface BindingFileShape {
   version: number;
-  bindings: Record<string, SdkConversationBinding>;
+  sessionKey: string;
+  binding: SdkConversationBinding;
 }
 
 /** Structural Pi SDK surface used here (loaded dynamically). */
@@ -150,6 +151,9 @@ export async function loadPiSdkConversationSurface(): Promise<PiSdkConversationS
     return null;
   }
 }
+
+/** Loader for the Pi SDK surface (injectable for hermetic tests). */
+export type PiSdkConversationSurfaceLoader = () => Promise<PiSdkConversationSurface | null>;
 
 /** Agent pieces the caller (transport) assembles per conversation. */
 export interface SdkAgentAssembly {
@@ -269,8 +273,7 @@ export class PiSdkConversationStore {
     });
 
     const cwd = key.cwd ?? process.cwd();
-    const bindings = this.loadBindings();
-    const bound = bindings[key.sessionKey];
+    const bound = this.loadBinding(key.sessionKey);
     let conversationId: string;
     let sessionDir: string;
     let sessionManager: {
@@ -305,7 +308,7 @@ export class PiSdkConversationStore {
       conversationId = mintPiConversationId();
       sessionDir = resolvePiConversationDir(this.sessionStorageRoot, key.principal, key.role, key.canonicalWorkspace);
       sessionManager = surface.SessionManager.create(cwd, sessionDir, { id: conversationId }) as typeof sessionManager;
-      this.saveBinding(key, {
+      this.saveBinding(key.sessionKey, {
         conversationId,
         sessionDir,
         sessionFile: sessionManager.getSessionFile(),
@@ -349,22 +352,31 @@ export class PiSdkConversationStore {
     return { conversationId, resumed };
   }
 
-  /** Send one user turn through the live SDK session; resolves on agent_settled. */
-  async prompt(key: SdkConversationKey, text: string, assembly: SdkAgentAssembly, options?: SdkPromptOptions): Promise<SdkTurnResult> {
-    await this.ensureConversation(key, assembly);
-    const record = this.live.get(key.sessionKey);
-    if (!record) throw new Error(`SDK conversation missing after ensure for ${key.sessionKey}`);
+  /** Send one user turn through the live SDK session; resolves on agent_settled.
+   * The conversation must already be opened via ensureConversation: the
+   * agent persists per conversation while the provider boundary (streamFn)
+   * is supplied fresh per turn. */
+  async prompt(sessionKey: string, text: string, options?: SdkPromptOptions): Promise<SdkTurnResult> {
+    const record = this.live.get(sessionKey);
+    if (!record) throw new Error(`Cannot prompt — no live SDK conversation for ${sessionKey}`);
     if (record.session.isStreaming) {
       throw new Error(`SDK conversation ${record.conversationId} already streaming — overlapping prompt rejected`);
     }
     record.collector = freshCollector();
+    let resolveDone!: (result: SdkTurnResult) => void;
+    let rejectDone!: (err: unknown) => void;
     const done = new Promise<SdkTurnResult>((resolve, reject) => {
-      record.settled = { resolve, reject };
+      resolveDone = resolve;
+      rejectDone = reject;
     });
+    // Pre-attached: a pre-run session.prompt() throw rejects `done` below,
+    // and this guard prevents an unhandled rejection on that path.
+    void done.catch(() => { /* observed via the prompt throw; prevents unhandled-rejection surfacing */ });
+    record.settled = { resolve: resolveDone, reject: rejectDone };
     if (options?.streamFn !== undefined) {
       record.session.agent.streamFunction = options.streamFn;
     }
-    // Per-turn event tap (mirrors every session event to the caller).
+    // Per-turn event mirror, cleared at settle.
     record.tap = options?.onEvent ?? null;
     try {
       await record.session.prompt(text, {
@@ -372,13 +384,25 @@ export class PiSdkConversationStore {
         ...(options?.images !== undefined ? { images: options.images } : {}),
       });
     } catch (err) {
+      // Pre-run failure (auth gate, compaction in progress): agent_settled
+      // never fires, so reject the pending turn explicitly. A post-run
+      // throw finds settled already consumed and only propagates.
+      const pending = record.settled;
       record.settled = null;
+      record.tap = null;
       record.collector = null;
+      pending?.reject(err);
       throw err;
     }
+    // prompt() returned: the run started, so agent_settled will fire.
     const result = await done;
-    this.refreshBindingFile(key.sessionKey, record.sessionManager);
+    this.refreshBindingFile(sessionKey, record.sessionManager);
     return result;
+  }
+
+  /** True when a live (subscribed) conversation exists for the key. */
+  hasLive(sessionKey: string): boolean {
+    return this.live.has(sessionKey);
   }
 
   /** Direct agent steer (instruction-queue leases; role never persisted by Pi). */
@@ -447,7 +471,7 @@ export class PiSdkConversationStore {
   }
 
   conversationId(sessionKey: string): string | null {
-    return this.live.get(sessionKey)?.conversationId ?? this.loadBindings()[sessionKey]?.conversationId ?? null;
+    return this.live.get(sessionKey)?.conversationId ?? this.loadBinding(sessionKey)?.conversationId ?? null;
   }
 
   private handleSessionEvent(
@@ -536,42 +560,45 @@ export class PiSdkConversationStore {
     return this.managers;
   }
 
-  private bindingPath(): string {
-    return join(this.stateDir, BINDING_FILENAME);
+  private bindingPath(sessionKey: string): string {
+    // One file per session key: concurrent transports never share a
+    // read-modify-write index, so no binding update can lose another's.
+    const name = createHash("sha256").update(sessionKey, "utf8").digest("hex");
+    return join(this.stateDir, BINDINGS_DIRNAME, `${name}.json`);
   }
 
-  private loadBindings(): Record<string, SdkConversationBinding> {
+  private loadBinding(sessionKey: string): SdkConversationBinding | null {
     let raw: string;
     try {
-      raw = readFileSync(this.bindingPath(), "utf-8");
+      raw = readFileSync(this.bindingPath(sessionKey), "utf-8");
     } catch {
-      return {};
+      return null;
     }
     if (raw.length > MAX_BINDING_BYTES) {
-      logWarn(TAG, "SDK conversation bindings exceed size bound; using empty index");
-      return {};
+      logWarn(TAG, "SDK conversation binding exceeds size bound; ignoring");
+      return null;
     }
     try {
       const parsed = JSON.parse(raw) as Partial<BindingFileShape>;
-      if (parsed.version !== BINDING_VERSION || typeof parsed.bindings !== "object" || parsed.bindings === null) return {};
-      return parsed.bindings;
+      if (parsed.version !== BINDING_VERSION || parsed.sessionKey !== sessionKey) return null;
+      const binding = parsed.binding;
+      if (!binding || typeof binding !== "object" || !isValidPiConversationId(binding.conversationId)) return null;
+      return binding as SdkConversationBinding;
     } catch {
-      logWarn(TAG, "SDK conversation bindings unreadable; using empty index");
-      return {};
+      logWarn(TAG, "SDK conversation binding unreadable; ignoring");
+      return null;
     }
   }
 
-  private saveBinding(key: SdkConversationKey, binding: SdkConversationBinding): void {
-    const bindings = this.loadBindings();
-    bindings[key.sessionKey] = binding;
-    this.writeBindings(bindings);
+  private saveBinding(sessionKey: string, binding: SdkConversationBinding): void {
+    this.writeBinding(sessionKey, binding);
   }
 
-  private writeBindings(bindings: Record<string, SdkConversationBinding>): void {
-    mkdirSync(this.stateDir, { recursive: true });
-    const path = this.bindingPath();
+  private writeBinding(sessionKey: string, binding: SdkConversationBinding): void {
+    mkdirSync(join(this.stateDir, BINDINGS_DIRNAME), { recursive: true });
+    const path = this.bindingPath(sessionKey);
     const tmp = `${path}.${randomUUID()}.tmp`;
-    const shape: BindingFileShape = { version: BINDING_VERSION, bindings };
+    const shape: BindingFileShape = { version: BINDING_VERSION, sessionKey, binding };
     writeFileSync(tmp, JSON.stringify(shape), { mode: 0o600 });
     renameSync(tmp, path);
   }
@@ -587,13 +614,12 @@ export class PiSdkConversationStore {
       return;
     }
     if (!file) return;
-    const bindings = this.loadBindings();
-    const bound = bindings[sessionKey];
+    const bound = this.loadBinding(sessionKey);
     if (!bound || bound.sessionFile === file) return;
     bound.sessionFile = file;
     bound.updatedAt = Date.now();
     try {
-      this.writeBindings(bindings);
+      this.writeBinding(sessionKey, bound);
     } catch {
       // best effort; the ID binding is already durable
     }

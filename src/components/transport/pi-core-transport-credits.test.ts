@@ -6,60 +6,34 @@
  * verified against the real settlement precedence chain.
  */
 import { describe, expect, it, vi, beforeEach } from "vitest";
-
-const { FakeHost, hostBehavior } = vi.hoisted(() => {
-  const hostBehavior: { emitMessageEnd: boolean } = { emitMessageEnd: false };
-  class FakeHost {
-    isSettled = false;
-    state = "created";
-    ready = Promise.resolve();
-    private readonly options: { onEvent?: (event: unknown) => unknown };
-
-    constructor(options: { onEvent?: (event: unknown) => unknown }) {
-      this.options = options;
-    }
-
-    async start(): Promise<void> {
-      this.state = "running";
-      if (hostBehavior.emitMessageEnd) {
-        this.options.onEvent?.({ type: "message_end", message: { role: "assistant", content: "committed output" } });
-      }
-      this.isSettled = true;
-      this.state = "settled";
-    }
-
-    async waitForSettlement(): Promise<void> {}
-    cancel(): void { this.isSettled = true; }
-    async steer(): Promise<void> {}
-    async followUp(): Promise<void> {}
-  }
-  return { FakeHost, hostBehavior };
-});
+import {
+  FakeSdkAgent,
+  FakeSdkConversationStore,
+} from "../../test-support/fake-sdk-conversation.js";
 
 const { terminalFailureMode } = vi.hoisted(() => ({
   terminalFailureMode: { fire: true },
 }));
 
-vi.mock("./pi-core-host.js", () => ({ PiCoreExecutionHost: FakeHost }));
+vi.mock("./pi-sdk-conversation.js", () => ({ PiSdkConversationStore: FakeSdkConversationStore }));
 vi.mock("./pi-core-types.js", async (importOriginal) => {
   const actual = await importOriginal<typeof import("./pi-core-types.js")>();
   return {
     ...actual,
     loadAndValidatePiAgentCore: vi.fn().mockResolvedValue({
-      module: {},
+      module: { Agent: FakeSdkAgent },
       installation: { executable: "/usr/bin/pi", packageRoot: "/usr/lib/pi", version: "0.85.1", source: "path", pinStatus: "at-pin", moduleRoots: { ai: "", tui: "", agentCore: "" } },
     }),
   };
 });
-vi.mock("./pi-stream-fn.js", async () => {
-  // Real stream class: a structural fake cannot satisfy AssistantMessageEventStream
-  // (private run state), and the transport for-awaits + reads result() off it.
-  const { createAssistantMessageEventStream } = await import("@earendil-works/pi-ai");
-  return {
-    createPiStreamFn: vi.fn(
-      (
-        options: import("./pi-stream-fn.js").AbtarsPiStreamFnOptions,
-      ): import("./pi-core-types.js").StreamFn => {
+vi.mock("./pi-stream-fn.js", () => ({
+  // The stream is never consumed (the fake store resolves turns); only the
+  // onTerminalFailure side effect matters, fired synchronously at factory
+  // creation like the production boundary does after a failed attempt.
+  createPiStreamFn: vi.fn(
+    (
+      options: import("./pi-stream-fn.js").AbtarsPiStreamFnOptions,
+    ): import("./pi-core-types.js").StreamFn => {
       if (terminalFailureMode.fire) {
         options.onTerminalFailure?.({
           code: "credits_exhausted",
@@ -68,25 +42,12 @@ vi.mock("./pi-stream-fn.js", async () => {
           message: "All model candidates are blocked by provider credit exhaustion",
         });
       }
-      const stream = createAssistantMessageEventStream();
-      const terminal: import("@earendil-works/pi-ai").AssistantMessage = {
-        role: "assistant",
-        content: [],
-        api: "openai-completions",
-        provider: "test-provider",
-        model: "test-model",
-        usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
-        stopReason: "error",
-        errorMessage: "All model candidates failed",
-        timestamp: 0,
-      };
-      stream.push({ type: "error", reason: "error", error: terminal });
-      stream.end(terminal);
-      return () => stream;
-      },
-    ),
-  };
-});
+      return (() => {
+        throw new Error("fake store never invokes the stream function");
+      }) as unknown as import("./pi-core-types.js").StreamFn;
+    },
+  ),
+}));
 
 // #1573: initialize() gates readiness on the runtime contract probe; unrelated
 // credit tests receive a successful probe.
@@ -98,8 +59,6 @@ import { PiCoreTransport } from "./pi-core-transport.js";
 import { ProviderExecutionError } from "./provider-failure.js";
 import type { ModelCandidate } from "./model-candidates.js";
 import { createPiStreamFn } from "./pi-stream-fn.js";
-import { createAssistantMessageEventStream } from "@earendil-works/pi-ai";
-import type { AssistantMessage } from "@earendil-works/pi-ai";
 
 function makeTransport(): PiCoreTransport {
   const candidate: ModelCandidate = {
@@ -120,8 +79,8 @@ function makeTransport(): PiCoreTransport {
 
 describe("PiCoreTransport terminal provider failure (#1297)", () => {
   beforeEach(() => {
+    FakeSdkConversationStore.resetAll();
     terminalFailureMode.fire = true;
-    hostBehavior.emitMessageEnd = false;
   });
 
   it("throws ProviderExecutionError carrying the typed failure when no committed output supersedes it", async () => {
@@ -138,7 +97,7 @@ describe("PiCoreTransport terminal provider failure (#1297)", () => {
   });
 
   it("returns committed successful output, never overridden by the captured terminal failure", async () => {
-    hostBehavior.emitMessageEnd = true;
+    FakeSdkConversationStore.queueTurn("session", { text: "committed output" });
     const transport = makeTransport();
     await transport.initialize();
 
@@ -156,21 +115,9 @@ describe("PiCoreTransport terminal provider failure (#1297)", () => {
         attemptedCandidates: 2,
         message: "The request exceeds the context window of every configured model",
       });
-      const stream = createAssistantMessageEventStream();
-      const terminal: AssistantMessage = {
-        role: "assistant",
-        content: [],
-        api: "openai-completions",
-        provider: "test-provider",
-        model: "test-model",
-        usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
-        stopReason: "error",
-        errorMessage: "All model candidates failed",
-        timestamp: 0,
-      };
-      stream.push({ type: "error", reason: "error", error: terminal });
-      stream.end(terminal);
-      return () => stream;
+      return (() => {
+        throw new Error("fake store never invokes the stream function");
+      }) as never;
     });
 
     const err = await transport.sendPrompt("session", "continue").catch((e: unknown) => e);

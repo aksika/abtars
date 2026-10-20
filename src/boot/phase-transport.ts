@@ -273,6 +273,8 @@ export async function buildTransport(ctx: BootCtx): Promise<PhaseResult> {
       // is known. The endpoint is transport configuration, never a prompt.
       systemPrompt: "",
       candidate,
+      // #1932: Main conversations partition under the main role; the
+      // post-compaction bundle refresh is wired below after memory lands.
       sandboxPolicy: { allowedTools: ["*"], allowedRead: ["*"], allowedWrite: ["*"], canExecuteBash: true },
       maxPromptRounds: tc?.maxToolRounds,
       // #1932: candidate rotation is retired — the single configured

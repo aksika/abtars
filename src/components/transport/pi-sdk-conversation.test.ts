@@ -9,6 +9,7 @@
  * fail-closed (never silent fallback) on missing/unverified files.
  */
 import { describe, it, expect } from "vitest";
+import { createHash } from "node:crypto";
 import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { Agent } from "@earendil-works/pi-agent-core";
@@ -83,7 +84,10 @@ function cannedStreamFn(replies: string[], seen: unknown[]) {
   };
 }
 
-function makeAssembly(streamFn: ReturnType<typeof cannedStreamFn>): SdkAgentAssembly {
+function makeAssembly(
+  streamFn: ReturnType<typeof cannedStreamFn>,
+  transformContext?: (messages: AgentMessage[]) => Promise<AgentMessage[]>,
+): SdkAgentAssembly {
   const agent = new Agent({
     initialState: {
       systemPrompt: "test system",
@@ -108,7 +112,7 @@ function makeAssembly(streamFn: ReturnType<typeof cannedStreamFn>): SdkAgentAsse
     followUpMode: "one-at-a-time",
     toolExecution: "sequential",
     convertToLlm: (messages: AgentMessage[]) => messages as unknown as Message[],
-    transformContext: async (messages: AgentMessage[]) => messages,
+    transformContext: transformContext ?? (async (messages: AgentMessage[]) => messages),
   });
   return {
     agent,
@@ -116,6 +120,11 @@ function makeAssembly(streamFn: ReturnType<typeof cannedStreamFn>): SdkAgentAsse
     toolNames: [],
     provider: { providerId: "spike-provider", baseUrl: "https://spike.invalid/v1", apiKey: "k", api: "openai-completions" },
   };
+}
+
+function bindingPathFor(stateDir: string, sessionKey: string): string {
+  const name = createHash("sha256").update(sessionKey, "utf8").digest("hex");
+  return join(stateDir, "pi-sdk-conversations-v1", `${name}.json`);
 }
 
 function contextTexts(context: unknown): string {
@@ -143,7 +152,7 @@ describe("PiSdkConversationStore (real SDK)", () => {
     expect(opened.resumed).toBe(false);
     expect(opened.conversationId).toMatch(/^[A-Za-z0-9-]{36}$/);
 
-    const result = await store.prompt(key, "first question", makeAssembly(cannedStreamFn(["hello world"], seen)));
+    const result = await store.prompt(key.sessionKey, "first question");
     expect(result.text).toBe("hello world");
     expect(result.aborted).toBe(false);
     expect(result.usage).toMatchObject({ input: 5, output: 3 });
@@ -151,11 +160,12 @@ describe("PiSdkConversationStore (real SDK)", () => {
 
     // The binding is durable and the Pi session file exists with history.
     const binding = JSON.parse(
-      readFileSync(join(stateDir, "pi-sdk-conversations-v1.json"), "utf-8"),
-    ) as { bindings: Record<string, { conversationId: string; sessionFile?: string }> };
-    const boundId = binding.bindings["test-session"]?.conversationId;
+      readFileSync(bindingPathFor(stateDir, "test-session"), "utf-8"),
+    ) as { sessionKey: string; binding: { conversationId: string; sessionFile?: string } };
+    expect(binding.sessionKey).toBe("test-session");
+    const boundId = binding.binding.conversationId;
     expect(boundId).toBe(opened.conversationId);
-    const sessionFile = binding.bindings["test-session"]?.sessionFile;
+    const sessionFile = binding.binding.sessionFile;
     expect(sessionFile).toBeTruthy();
     const transcript = readFileSync(sessionFile!, "utf-8");
     expect(transcript).toContain("first question");
@@ -169,10 +179,11 @@ describe("PiSdkConversationStore (real SDK)", () => {
     const seen: unknown[] = [];
     const key = makeKey();
     const streamFn = cannedStreamFn(["first reply", "second reply"], seen);
-    const assembly = () => makeAssembly(streamFn);
+    const assembly = makeAssembly(streamFn);
+    await store.ensureConversation(key, assembly);
 
-    await store.prompt(key, "first question marker-AAA", assembly());
-    const second = await store.prompt(key, "second question marker-BBB", assembly());
+    await store.prompt(key.sessionKey, "first question marker-AAA");
+    const second = await store.prompt(key.sessionKey, "second question marker-BBB");
     expect(second.text).toBe("second reply");
     expect(seen).toHaveLength(2);
     // The second provider request carries the first exchange from Pi history.
@@ -187,7 +198,7 @@ describe("PiSdkConversationStore (real SDK)", () => {
     const first = testStore(stateDir, sessionRoot);
     const seen1: unknown[] = [];
     const opened = await first.ensureConversation(key, makeAssembly(cannedStreamFn(["x"], seen1)));
-    await first.prompt(key, "persisted marker-CCC", makeAssembly(cannedStreamFn(["reply-CCC"], seen1)));
+    await first.prompt(key.sessionKey, "persisted marker-CCC");
     first.dispose();
 
     // A fresh store (simulated restart) reopens the same ID from the binding.
@@ -200,7 +211,7 @@ describe("PiSdkConversationStore (real SDK)", () => {
     // The live agent persists per conversation: the same assembly serves the
     // reopened turn (production rebuilds per-turn inputs through the
     // transport-owned streamFn holder, not by replacing the agent).
-    const result = await second.prompt(key, "follow-up marker-DDD", assembly2);
+    const result = await second.prompt(key.sessionKey, "follow-up marker-DDD");
     expect(result.text).toBe("y");
     expect(contextTexts(seen2[0])).toContain("marker-CCC");
     second.dispose();
@@ -225,10 +236,10 @@ describe("PiSdkConversationStore (real SDK)", () => {
       };
     };
     const assembly = makeAssembly(blockingStream as never);
-    // Bypass ensure (same assembly object reused would rebuild agent; use prompt twice instead).
-    const first = store.prompt(key, "one", assembly);
+    await store.ensureConversation(key, assembly);
+    const first = store.prompt(key.sessionKey, "one");
     await new Promise((resolve) => setTimeout(resolve, 50));
-    await expect(store.prompt(key, "two", assembly)).rejects.toThrow(/already streaming|overlapping/i);
+    await expect(store.prompt(key.sessionKey, "two")).rejects.toThrow(/already streaming|overlapping/i);
     release();
     await first;
     store.dispose();
@@ -239,9 +250,9 @@ describe("PiSdkConversationStore (real SDK)", () => {
     const store = testStore(stateDir, sessionRoot);
     const key = makeKey();
     const seen: unknown[] = [];
-    // No binding yet and SessionManager unusable → surface failure propagates.
+    // No live conversation and SessionManager unusable → surface failure propagates.
     const broken = testStore(stateDir, sessionRoot, { loadSurface: async () => null });
-    await expect(broken.prompt(key, "hi", makeAssembly(cannedStreamFn(["x"], seen)))).rejects.toThrow(
+    await expect(broken.ensureConversation(key, makeAssembly(cannedStreamFn(["x"], seen)))).rejects.toThrow(
       /surface unavailable/i,
     );
     store.dispose();
@@ -254,17 +265,17 @@ describe("PiSdkConversationStore (real SDK)", () => {
     const store = testStore(stateDir, sessionRoot);
     const seen: unknown[] = [];
     const opened = await store.ensureConversation(key, makeAssembly(cannedStreamFn(["x"], seen)));
-    await store.prompt(key, "marker-EEE", makeAssembly(cannedStreamFn(["reply"], seen)));
+    await store.prompt(key.sessionKey, "marker-EEE");
     store.dispose();
 
     // Corrupt the binding to point at a valid-format but wrong ID: findById
     // finds nothing → fail closed, never mint-and-continue silently.
-    const bindingPath = join(stateDir, "pi-sdk-conversations-v1.json");
+    const bindingPath = bindingPathFor(stateDir, "test-session");
     const binding = JSON.parse(readFileSync(bindingPath, "utf-8")) as {
-      bindings: Record<string, { conversationId: string }>;
+      sessionKey: string; binding: { conversationId: string };
     };
-    binding.bindings["test-session"]!.conversationId = "00000000-0000-0000-0000-000000000000";
-    writeFileSync(bindingPath, JSON.stringify({ version: 1, bindings: binding.bindings }));
+    binding.binding.conversationId = "00000000-0000-0000-0000-000000000000";
+    writeFileSync(bindingPath, JSON.stringify({ version: 1, sessionKey: binding.sessionKey, binding: binding.binding }));
     const reopened = testStore(stateDir, sessionRoot);
     await expect(
       reopened.ensureConversation(key, makeAssembly(cannedStreamFn(["x"], seen))),
@@ -292,7 +303,8 @@ describe("PiSdkConversationStore (real SDK)", () => {
       };
     };
     const assembly = makeAssembly(blockingStream as never);
-    const pending = store.prompt(key, "abort me", assembly);
+    await store.ensureConversation(key, assembly);
+    const pending = store.prompt(key.sessionKey, "abort me");
     await new Promise((resolve) => setTimeout(resolve, 100));
     // Signal-only cancel (never awaited): acquisition may still be gated on
     // the provider timeout, which abort does not break out of.
@@ -300,6 +312,29 @@ describe("PiSdkConversationStore (real SDK)", () => {
     release();
     const result = await pending;
     expect(result.aborted).toBe(true);
+    store.dispose();
+  });
+
+  it("settles a denied request as an error turn without throwing (callers read the denial)", async () => {
+    // Pi settles a transform denial as an error turn instead of propagating
+    // the throw: prompt() resolves empty here, and the transport surfaces
+    // the denial it recorded. Pinned against Pi behavior drift — if a Pi
+    // uplift starts propagating, this fails loudly and the tail mapping
+    // must be revisited.
+    const { stateDir, sessionRoot } = testScratchDirs();
+    const store = testStore(stateDir, sessionRoot);
+    const key = makeKey();
+    let calls = 0;
+    const assembly = makeAssembly(cannedStreamFn(["ok"], []), async (messages) => {
+      calls++;
+      if (calls >= 2) throw new Error("denied by test transform");
+      return messages;
+    });
+    await store.ensureConversation(key, assembly);
+    const first = await store.prompt(key.sessionKey, "one");
+    expect(first.text).toBe("ok");
+    const second = await store.prompt(key.sessionKey, "two");
+    expect(second.text).toBe("");
     store.dispose();
   });
 

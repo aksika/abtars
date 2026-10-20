@@ -18,11 +18,15 @@ import { saveAvailabilityMemo } from "../pi-session/provider-availability-memo.j
 import type { AbtarsPiStreamFnOptions } from "./pi-stream-fn.js";
 import type { StreamFn } from "./pi-core-types.js";
 import { ensurePiThinkingClamp } from "./pi-ai-adapter.js";
-import { PiCoreContextProjection, DurableContextUnavailableError, createDurableContextProvider } from "./pi-core-context.js";
-import { PiCoreContractError, convertCurrentTurnToLlm } from "./pi-core-types.js";
+import { DurableContextUnavailableError, createDurableContextProvider } from "./pi-core-context.js";
+import { convertCurrentTurnToLlm } from "./pi-core-types.js";
 import type { DurableContextProviderHolder } from "./pi-core-context.js";
-import type { PiExecutionContextSeed, AbtarsCurrentTurnMessage, AgentMessage } from "./pi-core-types.js";
+import type { AbtarsCurrentTurnMessage } from "./pi-core-types.js";
 import type { ModelCandidate } from "./model-candidates.js";
+import {
+  FakeSdkAgent,
+  FakeSdkConversationStore,
+} from "../../test-support/fake-sdk-conversation.js";
 
 const mockCreatePiStreamFn = vi.hoisted(() =>
   vi.fn((..._args: [AbtarsPiStreamFnOptions]): StreamFn => vi.fn() as unknown as StreamFn),
@@ -45,6 +49,21 @@ vi.mock("../pi-installation.js", async (importOriginal) => {
     resolvePiInstallation: () => ({ state: "absent" as const }),
   };
 });
+vi.mock("./pi-sdk-conversation.js", async () => {
+  const helper = await import("../../test-support/fake-sdk-conversation.js");
+  return { PiSdkConversationStore: helper.FakeSdkConversationStore };
+});
+vi.mock("./pi-core-types.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("./pi-core-types.js")>();
+  const helper = await import("../../test-support/fake-sdk-conversation.js");
+  return {
+    ...actual,
+    loadAndValidatePiAgentCore: vi.fn().mockResolvedValue({
+      module: { Agent: helper.FakeSdkAgent },
+      installation: { executable: "/usr/bin/pi", packageRoot: "/usr/lib/pi", version: "0.85.1", source: "path", pinStatus: "at-pin", moduleRoots: { ai: "", tui: "", agentCore: "" } },
+    }),
+  };
+});
 // #1573: the readiness probe is the external boundary of initialize(). Unrelated
 // tests receive a successful probe; readiness tests override it per case.
 vi.mock("./pi-runtime-contract.js", async (importOriginal) => {
@@ -56,6 +75,10 @@ vi.mock("./pi-runtime-contract.js", async (importOriginal) => {
 });
 
 import { validatePiRuntimeContract, PiRuntimeContractError } from "./pi-runtime-contract.js";
+
+beforeEach(() => {
+  FakeSdkConversationStore.resetAll();
+});
 
 function makeCandidates(): ModelCandidate[] {
   return [{
@@ -128,11 +151,11 @@ describe("PiCoreTransport", () => {
         memoStateDir,
       });
       mockCreatePiStreamFn.mockClear();
-      // The host is never reached here: Pi installation resolves absent in
-      // this file, so the test only asserts the preflight lets dispatch
-      // through to stream-fn construction. A full dispatch is covered by
-      // the Pi production lanes.
-      await expect(transport.sendPrompt("test-session", "hello")).rejects.toThrow(PiCoreContractError);
+      // The preflight lets dispatch through to stream-fn construction and
+      // the SDK conversation delivers. A live-provider dispatch is covered
+      // by the Pi production lanes.
+      FakeSdkConversationStore.queueTurn("test-session", { text: "admitted" });
+      await expect(transport.sendPrompt("test-session", "hello")).resolves.toBe("admitted");
       expect(mockCreatePiStreamFn).toHaveBeenCalled();
     });
   });
@@ -231,10 +254,12 @@ describe("PiCoreTransport", () => {
     expect(t.isReady).toBe(false);
   });
 
-  it("sendPrompt without Pi installation throws", async () => {
+  it("sendPrompt without an SDK surface fails closed (never silent fallback)", async () => {
     const t = makeTransport();
     await t.initialize();
-    await expect(t.sendPrompt("test_session", "hello")).rejects.toThrow(PiCoreContractError);
+    FakeSdkConversationStore.failNextEnsureError = new Error("Pi SDK conversation surface unavailable");
+    await expect(t.sendPrompt("test_session", "hello")).rejects.toThrow(/surface unavailable/);
+    expect((t as unknown as { activeSlot: unknown }).activeSlot).toBeNull();
   });
 
   it("interrupt on inactive host does not throw", async () => {
@@ -293,15 +318,13 @@ describe("PiCoreTransport", () => {
     expect(result.messages).toEqual([{ role: "user", content: "prior turn" }]);
   });
 
-  it("sendPrompt with no context does not crash — returns text via onEvent", async () => {
+  it("sendPrompt with no context does not crash — returns text via the session tap", async () => {
     const t = makeTransport();
     await t.initialize();
-    const promise = t.sendPrompt("sess_1", "hello");
-    // Pi resolution is mocked absent — it must reject with the typed contract
-    // error, and we just want no crash
-    await expect(promise).rejects.toThrow(PiCoreContractError);
-    // activeHost should be null after failure
-    expect((t as unknown as Record<string, unknown>).activeHost).toBeNull();
+    FakeSdkConversationStore.queueTurn("sess_1", { text: "hello back" });
+    const text = await t.sendPrompt("sess_1", "hello");
+    expect(text).toBe("hello back");
+    expect((t as unknown as { activeSlot: unknown }).activeSlot).toBeNull();
   });
 
   it("#1619: threads the session's requested reasoning effort into the streamFn", async () => {
@@ -309,8 +332,8 @@ describe("PiCoreTransport", () => {
     const t = makeTransport();
     t.setReasoningEffort("high");
     await t.initialize();
-    const promise = t.sendPrompt("sess_1", "sleep");
-    await expect(promise).rejects.toThrow(PiCoreContractError);
+    FakeSdkConversationStore.queueTurn("sess_1", {});
+    await t.sendPrompt("sess_1", "sleep");
     expect(mockCreatePiStreamFn).toHaveBeenCalledWith(expect.objectContaining({
       reasoningEffort: "high",
     }));
@@ -322,8 +345,10 @@ describe("PiCoreTransport", () => {
     mockCreatePiStreamFn.mockClear();
     const t = makeTransport();
     await t.initialize();
-    await expect(t.sendPrompt("sess_1", "first")).rejects.toThrow(PiCoreContractError);
-    await expect(t.sendPrompt("sess_1", "second")).rejects.toThrow(PiCoreContractError);
+    FakeSdkConversationStore.queueTurn("sess_1", {});
+    FakeSdkConversationStore.queueTurn("sess_1", {});
+    await t.sendPrompt("sess_1", "first");
+    await t.sendPrompt("sess_1", "second");
 
     expect(mockCreatePiStreamFn).toHaveBeenCalledTimes(2);
     const firstCall = streamFnCallOptions(0);
@@ -338,8 +363,10 @@ describe("PiCoreTransport", () => {
     const b = makeTransport();
     await a.initialize();
     await b.initialize();
-    await expect(a.sendPrompt("sess_a", "x")).rejects.toThrow(PiCoreContractError);
-    await expect(b.sendPrompt("sess_b", "x")).rejects.toThrow(PiCoreContractError);
+    FakeSdkConversationStore.queueTurn("sess_a", {});
+    FakeSdkConversationStore.queueTurn("sess_b", {});
+    await a.sendPrompt("sess_a", "x");
+    await b.sendPrompt("sess_b", "x");
     const idA = streamFnCallOptions(0).cacheIdentity;
     const idB = streamFnCallOptions(1).cacheIdentity;
     expect(idA).not.toBe(idB);
@@ -357,8 +384,10 @@ describe("PiCoreTransport", () => {
     });
     await main.initialize();
     await sub.initialize();
-    await expect(main.sendPrompt("sess_1", "x")).rejects.toThrow(PiCoreContractError);
-    await expect(sub.sendPrompt("sess_1", "x")).rejects.toThrow(PiCoreContractError);
+    FakeSdkConversationStore.queueTurn("sess_1", {});
+    FakeSdkConversationStore.queueTurn("sess_1", {});
+    await main.sendPrompt("sess_1", "x");
+    await sub.sendPrompt("sess_1", "x");
     const mainId = streamFnCallOptions(0).cacheIdentity;
     const subId = streamFnCallOptions(1).cacheIdentity;
     expect(mainId).not.toBe(subId);
@@ -377,8 +406,10 @@ describe("PiCoreTransport", () => {
     const b = makeSub();
     await a.initialize();
     await b.initialize();
-    await expect(a.sendPrompt("sess_1", "x")).rejects.toThrow(PiCoreContractError);
-    await expect(b.sendPrompt("sess_1", "x")).rejects.toThrow(PiCoreContractError);
+    FakeSdkConversationStore.queueTurn("sess_1", {});
+    FakeSdkConversationStore.queueTurn("sess_1", {});
+    await a.sendPrompt("sess_1", "x");
+    await b.sendPrompt("sess_1", "x");
     const idA = streamFnCallOptions(0).cacheIdentity;
     const idB = streamFnCallOptions(1).cacheIdentity;
     expect(idA).toBe(idB);
@@ -388,9 +419,11 @@ describe("PiCoreTransport", () => {
     mockCreatePiStreamFn.mockClear();
     const t = makeTransport();
     await t.initialize();
-    await expect(t.sendPrompt("sess_old", "x")).rejects.toThrow(PiCoreContractError);
+    FakeSdkConversationStore.queueTurn("sess_old", {});
+    FakeSdkConversationStore.queueTurn("sess_new", {});
+    await t.sendPrompt("sess_old", "x");
     await t.resetSession("sess_old");
-    await expect(t.sendPrompt("sess_new", "x")).rejects.toThrow(PiCoreContractError);
+    await t.sendPrompt("sess_new", "x");
     const idOld = streamFnCallOptions(0).cacheIdentity;
     const idNew = streamFnCallOptions(1).cacheIdentity;
     expect(idOld).not.toBe(idNew);
@@ -400,7 +433,8 @@ describe("PiCoreTransport", () => {
     mockCreatePiStreamFn.mockClear();
     const t = makeTransport();
     await t.initialize();
-    await expect(t.sendPrompt("sess_1", "x")).rejects.toThrow(PiCoreContractError);
+    FakeSdkConversationStore.queueTurn("sess_1", {});
+    await t.sendPrompt("sess_1", "x");
     expect(mockCreatePiStreamFn).toHaveBeenCalledWith(expect.objectContaining({
       cacheRetention: "short",
     }));
@@ -416,7 +450,8 @@ describe("PiCoreTransport", () => {
       cacheRetention: "long",
     });
     await t.initialize();
-    await expect(t.sendPrompt("sess_1", "x")).rejects.toThrow(PiCoreContractError);
+    FakeSdkConversationStore.queueTurn("sess_1", {});
+    await t.sendPrompt("sess_1", "x");
     expect(mockCreatePiStreamFn).toHaveBeenCalledWith(expect.objectContaining({
       cacheRetention: "long",
     }));
@@ -426,11 +461,11 @@ describe("PiCoreTransport", () => {
     mockCreatePiStreamFn.mockClear();
     const t = makeTransport();
     await t.initialize();
-    const promise = t.sendPrompt("sess_1", "sleep", undefined, {
+    FakeSdkConversationStore.queueTurn("sess_1", {});
+    await t.sendPrompt("sess_1", "sleep", undefined, {
       deadlineAt: Date.now() + 600_000,
       providerInactivityTimeoutMs: 570_000,
     });
-    await expect(promise).rejects.toThrow(PiCoreContractError);
     expect(mockCreatePiStreamFn).toHaveBeenCalledWith(expect.objectContaining({
       deadlineAt: expect.any(Number),
       providerInactivityTimeoutMs: 570_000,
@@ -474,9 +509,11 @@ describe("PiCoreTransport", () => {
   it("host-load failure clears activeHost", async () => {
     const t = makeTransport();
     await t.initialize();
+    FakeSdkConversationStore.failNextEnsureError = new Error("SDK conversation surface unavailable");
     const err = await t.sendPrompt("s", "hi").catch((e: unknown) => e);
-    expect(err).toBeInstanceOf(PiCoreContractError);
-    expect((t as unknown as Record<string, unknown>).activeHost).toBeNull();
+    expect(err).toBeInstanceOf(Error);
+    expect((err as Error).message).toMatch(/surface unavailable/);
+    expect((t as unknown as Record<string, unknown>).activeSlot).toBeNull();
   });
 
   it("rejects required_unavailable intent before any host/provider work (#1529)", async () => {
@@ -490,7 +527,7 @@ describe("PiCoreTransport", () => {
     // #1932: the preflight propagates the intent's reason instead of
     // masking every pre-provider failure as cursor_unavailable.
     await expect(promise).rejects.toMatchObject({ reason: "record_failed" });
-    expect((t as unknown as Record<string, unknown>).activeHost).toBeNull();
+    expect((t as unknown as Record<string, unknown>).activeSlot).toBeNull();
   });
 
   it("rejects durable intent without caller identity before any host/provider work (#1529)", async () => {
@@ -501,26 +538,59 @@ describe("PiCoreTransport", () => {
     });
     await expect(promise).rejects.toBeInstanceOf(DurableContextUnavailableError);
     await expect(promise).rejects.toMatchObject({ reason: "identity_unavailable" });
-    expect((t as unknown as Record<string, unknown>).activeHost).toBeNull();
+    expect((t as unknown as Record<string, unknown>).activeSlot).toBeNull();
   });
 
-  it("lets a valid durable intent past preflight — failure comes from Pi loading, not the intent (#1529)", async () => {
-    const t = makeTransport();
+  it("runs a valid durable intent through the transform probe — history stays Pi-owned (#1529)", async () => {
+    const t = new PiCoreTransport({
+      role: "main",
+      systemPrompt: "system",
+      candidate: makeCandidates()[0]!,
+      sandboxPolicy: { allowedTools: ["*"], allowedRead: ["*"], allowedWrite: ["*"], canExecuteBash: true },
+      memoryToolDeps: { current: { runtime: { state: "ready" } } as never },
+    });
     await t.initialize();
+    FakeSdkConversationStore.queueTurn("sess_1", { text: "durable ok" });
+    const text = await t.sendPrompt("sess_1", "hello", undefined, {
+      userId: "user-1",
+      durableContextIntent: { mode: "durable", beforeMessageId: 42 },
+      contextProvider: {
+        projectContext: async () => ({
+          messages: [{ role: "user", content: "prior" }],
+          estimatedTokens: 4,
+          sourceMessageCount: 1,
+        }),
+      },
+    });
+    expect(text).toBe("durable ok");
+  });
+
+  it("denies a durable turn without a context provider at the transform (no_provider)", async () => {
+    const t = new PiCoreTransport({
+      role: "main",
+      systemPrompt: "system",
+      candidate: makeCandidates()[0]!,
+      sandboxPolicy: { allowedTools: ["*"], allowedRead: ["*"], allowedWrite: ["*"], canExecuteBash: true },
+      memoryToolDeps: { current: { runtime: { state: "ready" } } as never },
+    });
+    await t.initialize();
+    FakeSdkConversationStore.queueTurn("sess_1", {});
     const err = await t.sendPrompt("sess_1", "hello", undefined, {
       userId: "user-1",
       durableContextIntent: { mode: "durable", beforeMessageId: 42 },
     }).catch((e: unknown) => e);
-    expect(err).toBeInstanceOf(PiCoreContractError);
+    expect(err).toBeInstanceOf(DurableContextUnavailableError);
+    expect((err as DurableContextUnavailableError).reason).toBe("no_provider");
   });
 
   it("lets omitted intent (not-required) past preflight — intentional ephemeral stays operable (#1529)", async () => {
     const t = makeTransport();
     await t.initialize();
-    const err = await t.sendPrompt("sess_1", "hello", undefined, {
+    FakeSdkConversationStore.queueTurn("sess_1", { text: "ephemeral ok" });
+    const text = await t.sendPrompt("sess_1", "hello", undefined, {
       userId: "user-1",
-    }).catch((e: unknown) => e);
-    expect(err).toBeInstanceOf(PiCoreContractError);
+    });
+    expect(text).toBe("ephemeral ok");
   });
 });
 
@@ -565,112 +635,6 @@ describe("extractAssistantText", () => {
   });
 });
 
-// ── Context projection wiring at transport level ────────────────────────────
-
-function makeProjectionSeed(overrides?: Partial<PiExecutionContextSeed>): PiExecutionContextSeed {
-  return {
-    source: { mode: "ephemeral", sessionKey: "test_session" },
-    executionId: "exec_1",
-    currentTurn: {
-      role: "abtars_current_turn",
-      executionId: "exec_1",
-      sessionId: "session_1",
-      content: "Hello!",
-      timestamp: Date.now(),
-    },
-    volatileBlocks: [],
-    ...overrides,
-  };
-}
-
-function makeMarkerMessages(): AgentMessage[] {
-  return [
-    {
-      role: "assistant",
-      content: [{ type: "text", text: "How can I help?" }],
-      api: "openai-completions",
-      provider: "test-provider",
-      model: "test-model",
-      usage: { input: 1, output: 2, cacheRead: 0, cacheWrite: 0, totalTokens: 3, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
-      stopReason: "stop",
-      timestamp: 0,
-    },
-    {
-      role: "abtars_current_turn",
-      executionId: "exec_1",
-      sessionId: "session_1",
-      content: "Hello!",
-      timestamp: Date.now(),
-    } as AbtarsCurrentTurnMessage,
-  ];
-}
-
-// AgentMessage is a union and not every member carries content — read it
-// through an `in` guard instead of asserting a shape the type never promised.
-function messageContent(msg: AgentMessage | undefined): unknown {
-  return msg && "content" in msg ? msg.content : undefined;
-}
-
-describe("context projection at transport level", () => {
-  it("durable seed carries the caller identity into the projection request", async () => {
-    const seed = makeProjectionSeed({
-      source: { mode: "durable", sessionKey: "test_session", beforeMessageId: 0, maxContext: 8000, userId: "user-1" },
-    });
-    const projection = new PiCoreContextProjection(seed, "system");
-    let capturedInput: unknown = null;
-    const result = await projection.transform(makeMarkerMessages(), {
-      hostGeneration: 0,
-      contextProvider: {
-        async projectContext(input: unknown) {
-          capturedInput = input;
-          return { messages: [{ role: "user", content: "prior" }], estimatedTokens: 4, sourceMessageCount: 1 };
-        },
-      },
-    });
-    expect(capturedInput).toEqual({ userId: "user-1", sessionId: "test_session", beforeMessageId: 0, maxContext: 8000 });
-    expect(result.messages.some((m) => "content" in m && m.content === "prior")).toBe(true);
-  });
-
-  it("durable request without a provider throws a typed error — no degraded suffix answer", async () => {
-    const seed = makeProjectionSeed({
-      source: { mode: "durable", sessionKey: "test_session", beforeMessageId: 100, maxContext: 8000, userId: "user-1" },
-    });
-    const projection = new PiCoreContextProjection(seed, "system");
-    await expect(projection.transform(makeMarkerMessages(), { hostGeneration: 0 }))
-      .rejects.toBeInstanceOf(DurableContextUnavailableError);
-  });
-
-  it("durable seed without a user identity is impossible by construction; production supplies both", async () => {
-    const seed = makeProjectionSeed({
-      source: { mode: "durable", sessionKey: "test_session", beforeMessageId: 42, maxContext: 8000, userId: "user-1" },
-    });
-    const projection = new PiCoreContextProjection(seed, "system");
-    const result = await projection.transform(makeMarkerMessages(), {
-      hostGeneration: 0,
-      contextProvider: {
-        async projectContext() {
-          return {
-            messages: [
-              { role: "user", content: "first" },
-              { role: "assistant", content: "second" },
-              { role: "user", content: "third" },
-            ],
-            estimatedTokens: 12,
-            sourceMessageCount: 3,
-          };
-        },
-      },
-    });
-    expect(result.contextDegraded).toBe(false);
-    expect(result.messages).toHaveLength(4); // 3 historical + 1 current-turn marker
-    expect(result.messages[0]?.role).toBe("user");
-    expect(messageContent(result.messages[0])).toBe("first");
-    expect(result.messages[1]?.role).toBe("assistant");
-    expect(messageContent(result.messages[1])).toEqual([{ type: "text", text: "second" }]);
-    expect(result.messages[2]?.role).toBe("user");
-    expect(messageContent(result.messages[2])).toBe("third");
-  });
-});
 
 describe("#1619 reasoning effort (session-scoped)", () => {
   // #1746: resolveCandidateModel reads pi's clamp from the runtime slot now.

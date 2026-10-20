@@ -47,6 +47,16 @@ export async function phaseSessionControl(ctx: BootCtx): Promise<PhaseResult> {
     },
   });
 
+  // #1932: a Pi-session compaction (threshold/overflow inside the SDK
+  // session) invalidates the transport's cached bundle the same way: refresh
+  // the Main bundle so the next request carries current content. The gate
+  // already re-pended hydration; the refresh is best effort.
+  if (ctx.transport && typeof (ctx.transport as { setCompactionRefresh?: unknown }).setCompactionRefresh === "function") {
+    (ctx.transport as unknown as { setCompactionRefresh: (fn: (sessionKey: string) => void) => void }).setCompactionRefresh(() => {
+      void refreshMainSoulPrompt(ctx.transport, ctx.memoryRuntime);
+    });
+  }
+
   // Durable conversation compaction needs the daemon-backed runtime plus the
   // provider summarizer. The adapter self-gates per call; registering it even
   // with a degraded runtime keeps the target resolvable.

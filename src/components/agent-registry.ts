@@ -117,6 +117,8 @@ export async function createSubagentTransport(role: SubagentRole, contextProvide
       role: "specialist",
       systemPrompt: `You are an abtars ${agentName} agent.`,
       candidate,
+      // #1932: SDK conversation partitioning follows the worker role.
+      piRole: role === "sleep" ? "dreamy" : role === "browse" ? "browsing" : role === "coding" ? "coding" : "task",
       sandboxPolicy: { allowedTools: ["*"], allowedRead: ["*"], allowedWrite: ["*"], canExecuteBash: true },
       maxPromptRounds: tc?.maxToolRounds,
       // #1748: subagent cache scope = agent role name (all workers of one role
