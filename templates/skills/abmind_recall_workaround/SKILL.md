@@ -6,7 +6,7 @@ user-invocable: false
 
 # abmind recall — direct DB workaround
 
-When `abmind recall` errors out (daemon down, embedding provider missing, tool not registered), memories can still be read **directly** from the memory database. Read-only sqlite3 queries — macOS ships `sqlite3`. Durables live in `long_term_memories`; the legacy `extracted_memories` table is frozen and unread for serving.
+When `abmind recall` errors out (daemon down, embedding provider missing, tool not registered), memories can still be read **directly** from the memory database. Read-only sqlite3 queries — macOS ships `sqlite3`. Durables live in `long_term_memories`; do not query any other table — anything else is frozen, unread for serving, or removed.
 
 DB path (Molty): `~/.abmind/memory/memory.db`
 
