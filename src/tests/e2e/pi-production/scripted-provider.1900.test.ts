@@ -175,3 +175,79 @@ describe("#1900 provider full-request recognition", () => {
     release();
   });
 });
+
+describe("stale speculative holds (#1940)", () => {
+  it("discards the unserved hold so a later recall-augmented turn reaches its own script", async () => {
+    provider = new ScriptedProvider();
+    await provider.start();
+    const C1 = "PI-E2E-C1-recall";
+    const M1 = "PI-E2E-M1-turn";
+    // A session-start turn carries recall hydration in its user text, so the
+    // M1 turn's text contains the older C1 marker after the M1 marker.
+    const recallTurn = `${M1} recall: ${C1}`;
+
+    // Prove the hazard first: a stale C1 hold queued ahead of the M1 text
+    // matches the recall-augmented M1 turn (queue order wins) and hangs it
+    // on its never-released gate.
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    provider.enqueue({
+      candidate: FIXTURE_MODEL_B,
+      expectation: { candidate: FIXTURE_MODEL_B, currentTurn: C1 },
+      action: { kind: "hold", release: gate },
+    });
+    provider.enqueue({
+      candidate: FIXTURE_MODEL_B,
+      expectation: { candidate: FIXTURE_MODEL_B, currentTurn: M1 },
+      action: { kind: "text", chunks: ["A1"] },
+    });
+    const pendingHold = postChat(provider.baseUrl, FIXTURE_MODEL_B, recallTurn);
+    const holdDeadline = Date.now() + 5_000;
+    while (provider.requestCount === 0 && Date.now() < holdDeadline) {
+      await new Promise((r) => setTimeout(r, 50));
+    }
+    expect(provider.requestCount).toBe(1);
+    expect(provider.summariesFor(FIXTURE_MODEL_B)[0]?.action).toBe("hold");
+    release();
+    await pendingHold;
+
+    // The scenario-hygiene path: reset, re-enqueue both, discard the stale
+    // hold, and the same turn shape reaches its text script.
+    provider.clear();
+    let release2!: () => void;
+    const gate2 = new Promise<void>((resolve) => {
+      release2 = resolve;
+    });
+    void release2;
+    provider.enqueue({
+      candidate: FIXTURE_MODEL_B,
+      expectation: { candidate: FIXTURE_MODEL_B, currentTurn: C1 },
+      action: { kind: "hold", release: gate2 },
+    });
+    provider.enqueue({
+      candidate: FIXTURE_MODEL_B,
+      expectation: { candidate: FIXTURE_MODEL_B, currentTurn: M1 },
+      action: { kind: "text", chunks: ["A1"] },
+    });
+    const removed = provider.removeQueuedScripts(
+      FIXTURE_MODEL_B,
+      (s) => (s.action.kind === "hold" || s.action.kind === "acquisitionHold") && s.expectation?.currentTurn === C1,
+    );
+    expect(removed).toBe(1);
+    // Nothing left matching the predicate; the M1 text survives.
+    expect(
+      provider.removeQueuedScripts(
+        FIXTURE_MODEL_B,
+        (s) => (s.action.kind === "hold" || s.action.kind === "acquisitionHold") && s.expectation?.currentTurn === C1,
+      ),
+    ).toBe(0);
+
+    const served = await postChat(provider.baseUrl, FIXTURE_MODEL_B, recallTurn);
+    expect(served.status).toBe(200);
+    const summaries = provider.summariesFor(FIXTURE_MODEL_B);
+    expect(summaries.length).toBe(1);
+    expect(summaries[0]?.action).toBe("text");
+  });
+});

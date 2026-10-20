@@ -8,7 +8,6 @@ import type {
 } from "./abmind-client-contract.js";
 
 import { logDebug, logTrace, logWarn, isLogLevel, redactSecrets } from "./logger.js";
-import { estimateTokensFromChars } from "./transport/token-budget.js";
 import type { MemoryMutationFamily } from "./memory-operation-key.js";
 
 // ── Types ──────────────────────────────────────────────────────────────────
@@ -23,8 +22,6 @@ export type MemoryRuntimeCapability =
   | "rebuildFts"
   | "coreKnowledge"
   | "status"
-  | "durableContext"
-  | "compaction"
   | "dreamQuestions"
   | "dreamQuestionsNextPending"
   // #1660: composite local sealed-secret capability (find + resolve on a
@@ -320,77 +317,6 @@ export interface ResolveSealedSecretInput {
   readonly expectedRevision: number;
 }
 
-// ── #1527: durable context projection ────────────────────────────────────────
-
-export interface DurableContextProjectionInput {
-  userId: string;
-  sessionId: string;
-  beforeMessageId: number;
-  maxContext: number;
-}
-
-export interface DurableContextProjectionResult {
-  messages: Array<{ role: "user" | "assistant" | "tool"; content: string }>;
-  estimatedTokens: number;
-  sourceMessageCount: number;
-}
-
-/**
- * Read-only provider contract consumed by Pi durable projection. The runtime
- * supplies an adapter; disabled/unavailable runtimes reject instead of
- * returning an empty successful projection.
- */
-export interface DurableContextProvider {
-  projectContext(input: DurableContextProjectionInput): Promise<DurableContextProjectionResult>;
-}
-
-// ── #1406: durable conversation compaction ───────────────────────────────────
-
-export interface CompactionCandidateLike {
-  version: 1;
-  expectedGeneration: number;
-  previousCheckpointId: number | null;
-  sourceMessageStart: number;
-  sourceMessageEnd: number;
-  firstKeptMessageId: number;
-  sourceDigest: string;
-  sourceTokenCount: number;
-  serializedTurns: string;
-  priorCheckpoint: string;
-  summaryTokenBudget: number;
-}
-
-export interface PrepareConversationCompactionInput {
-  userId: string;
-  sessionId: string;
-  beforeMessageId?: number;
-  maxHistoryTokens: number;
-  minRecentTokens: number;
-  reason: "manual" | "automatic";
-}
-
-export type PrepareConversationCompactionResult =
-  | { status: "nothing_to_compact" }
-  | { status: "busy" }
-  | { status: "ready"; candidate: CompactionCandidateLike };
-
-export interface CommitConversationCompactionInput {
-  userId: string;
-  sessionId: string;
-  candidate: Omit<CompactionCandidateLike, "serializedTurns" | "priorCheckpoint" | "summaryTokenBudget">;
-  summary: string;
-  summaryTokenCount: number;
-  summarizer: { provider: string | null; model: string | null };
-  activeRequestModel: string | null;
-  reason: "manual" | "automatic";
-  customInstructionsDigest?: string;
-}
-
-export type CommitConversationCompactionResult =
-  | { status: "committed"; checkpointId: number; generation: number }
-  | { status: "stale" }
-  | { status: "rejected" };
-
 // ── #1515: durable Dreamy clarification questions ─────────────────────────────
 
 export interface DreamQuestionWireLike {
@@ -405,8 +331,6 @@ export interface DreamQuestionWireLike {
 }
 
 export type DreamQuestionStatusLike = "pending" | "asked" | "resolved" | "expired" | "dismissed";
-
-const PROJECTION_ROLES: ReadonlySet<string> = new Set(["user", "assistant", "tool"]);
 
 // ── #1659: structural failure normalization ─────────────────────────────────
 
@@ -450,30 +374,6 @@ export function isDefinitivePreDispatchFailure(code: string, stage: string): boo
   if (stage === "pre_dispatch") return true;
   return code === "memory_not_found" || code === "memory_conflict" || code === "memory_validation"
     || code === "memory_unauthorized" || code === "memory_idempotency_conflict";
-}
-
-function normalizeProjectionResult(value: unknown): DurableContextProjectionResult {
-  if (!value || typeof value !== "object" || Array.isArray(value)) {
-    throw new Error("Durable context projection returned a non-object response");
-  }
-  const record = value as Record<string, unknown>;
-  if (!Array.isArray(record["messages"])) {
-    throw new Error("Durable context projection response has no messages array");
-  }
-  const messages: Array<{ role: "user" | "assistant" | "tool"; content: string }> = [];
-  for (const raw of record["messages"] as unknown[]) {
-    if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
-      throw new Error("Durable context projection returned a malformed message");
-    }
-    const m = raw as Record<string, unknown>;
-    if (typeof m["role"] !== "string" || !PROJECTION_ROLES.has(m["role"]) || typeof m["content"] !== "string") {
-      throw new Error("Durable context projection returned a malformed message");
-    }
-    messages.push({ role: m["role"] as "user" | "assistant" | "tool", content: m["content"] });
-  }
-  const estimatedTokens = typeof record["estimatedTokens"] === "number" ? record["estimatedTokens"] : 0;
-  const sourceMessageCount = typeof record["sourceMessageCount"] === "number" ? record["sourceMessageCount"] : 0;
-  return { messages, estimatedTokens, sourceMessageCount };
 }
 
 /** Normalize an unknown recordMessage response to RecordMessageResult.
@@ -539,12 +439,6 @@ export interface AbtarsMemoryRuntime {
   instantStore(input: InstantStoreInput): Promise<InstantStoreResult>;
   editMemory(input: EditMemoryInput): Promise<EditMemoryResult>;
   rebuildFtsIndexes(): Promise<{ rebuilt: string[] }>;
-  /** #1527: daemon-owned durable context projection. Rejects when unavailable. */
-  projectDurableContext(input: DurableContextProjectionInput): Promise<DurableContextProjectionResult>;
-  /** #1406: daemon-owned durable compaction prepare (bounded read). */
-  prepareConversationCompaction(input: PrepareConversationCompactionInput): Promise<PrepareConversationCompactionResult>;
-  /** #1406: daemon-owned durable compaction commit (generation CAS). */
-  commitConversationCompaction(input: CommitConversationCompactionInput, operationKey: string): Promise<CommitConversationCompactionResult>;
   /** #1515: optional owner-scoped dream-question lifecycle. Presence of the
    *  `dreamQuestions` capability is checked independently of core recall. */
   dreamQuestions: {
@@ -593,10 +487,6 @@ function projectCapabilities(client: AbmindClientLike): Set<MemoryRuntimeCapabil
   if (methods.has("private.rebuildFts") && features["private_write"] === "true") result.add("rebuildFts");
   if (methods.has("private.getCoreKnowledge")) result.add("coreKnowledge");
   if (methods.has("private.getRuntimeStatus")) result.add("status");
-  if (methods.has("private.projectConversationContext") && features["private_read"] === "true") result.add("durableContext");
-  if (methods.has("private.prepareConversationCompaction")
-    && methods.has("private.commitConversationCompaction")
-    && features["private_write"] === "true") result.add("compaction");
   if (methods.has("private.dreamQuestions.nextPending")) result.add("dreamQuestionsNextPending");
   if (methods.has("private.dreamQuestions.nextPending")
     && methods.has("private.dreamQuestions.list")
@@ -1012,36 +902,6 @@ export function createClientRuntime(client: AbmindClientLike): AbtarsMemoryRunti
       return (await pm.rebuildFtsIndexes()) as { rebuilt: string[] };
     },
 
-    async projectDurableContext(input: DurableContextProjectionInput): Promise<DurableContextProjectionResult> {
-      // #1527: route loss clears capabilities immediately; recovery re-projects
-      // them after renegotiation. Every call checks the current route state.
-      requireClientCapability(capabilities, "durableContext");
-      try {
-        const result = await pm.projectConversationContext(input);
-        return normalizeProjectionResult(result);
-      } catch (err) {
-        // Bounded, content-free diagnostic: route state + protocol reason code.
-        const code = err && typeof err === "object" && "code" in err
-          ? String((err as { code: unknown }).code)
-          : "unknown";
-        const route = client.routeSnapshot?.state ?? "unknown";
-        logWarn("memory-runtime", `durable_projection_failed route=${route} reason=${code}`);
-        throw err;
-      }
-    },
-
-    async prepareConversationCompaction(input: PrepareConversationCompactionInput): Promise<PrepareConversationCompactionResult> {
-      requireClientCapability(capabilities, "compaction");
-      const result = await pm.prepareConversationCompaction(input) as unknown;
-      return normalizePrepareResult(result);
-    },
-
-    async commitConversationCompaction(input: CommitConversationCompactionInput, operationKey: string): Promise<CommitConversationCompactionResult> {
-      requireClientCapability(capabilities, "compaction");
-      const result = await pm.commitConversationCompaction(input, operationKey) as unknown;
-      return normalizeCommitResult(result);
-    },
-
     dreamQuestions: {
       async nextPending(userId: string): Promise<DreamQuestionWireLike | null> {
         requireClientCapability(capabilities, "dreamQuestionsNextPending");
@@ -1113,93 +973,6 @@ export function createClientRuntime(client: AbmindClientLike): AbtarsMemoryRunti
     },
   };
   return self;
-}
-
-const COMPACTION_CANDIDATE_MAX_BYTES = 240_000;
-const COMPACTION_BUDGET_MIN_TOKENS = 2_000;
-const COMPACTION_BUDGET_MAX_TOKENS = 12_000;
-
-function safeInteger(value: unknown, field: string, opts: { min: number; max?: number }): number {
-  if (!Number.isSafeInteger(value) || (value as number) < opts.min || (opts.max !== undefined && (value as number) > opts.max)) {
-    throw new Error(`Compaction response field ${field} is malformed`);
-  }
-  return value as number;
-}
-
-/** Normalize an unknown prepare response. Every candidate proof field is
- * required and bounded; malformed values must fail closed, never become a
- * fake ready candidate through defaults. */
-function normalizePrepareResult(value: unknown): PrepareConversationCompactionResult {
-  if (!value || typeof value !== "object" || Array.isArray(value)) {
-    throw new Error("Compaction prepare returned a non-object response");
-  }
-  const record = value as Record<string, unknown>;
-  const status = record["status"];
-  if (status === "nothing_to_compact") return { status: "nothing_to_compact" };
-  if (status === "busy") return { status: "busy" };
-  if (status === "ready") {
-    const c = record["candidate"] as Record<string, unknown> | null | undefined;
-    if (!c || typeof c !== "object" || Array.isArray(c)) throw new Error("Compaction prepare candidate malformed");
-    if (typeof c["serializedTurns"] !== "string") throw new Error("Compaction prepare candidate has no serialized source");
-    if (Buffer.byteLength(c["serializedTurns"], "utf-8") > COMPACTION_CANDIDATE_MAX_BYTES) {
-      throw new Error("Compaction prepare candidate source is too large");
-    }
-    if (c["version"] !== 1) throw new Error("Compaction prepare candidate version is unsupported");
-    const expectedGeneration = safeInteger(c["expectedGeneration"], "expectedGeneration", { min: 0 });
-    const previousCheckpointId = c["previousCheckpointId"] === null
-      ? null
-      : safeInteger(c["previousCheckpointId"], "previousCheckpointId", { min: 1 });
-    const sourceMessageStart = safeInteger(c["sourceMessageStart"], "sourceMessageStart", { min: 1 });
-    const sourceMessageEnd = safeInteger(c["sourceMessageEnd"], "sourceMessageEnd", { min: sourceMessageStart });
-    const firstKeptMessageId = safeInteger(c["firstKeptMessageId"], "firstKeptMessageId", { min: sourceMessageEnd + 1 });
-    if (typeof c["sourceDigest"] !== "string" || !/^[0-9a-f]{16}$/.test(c["sourceDigest"])) {
-      throw new Error("Compaction prepare candidate digest is malformed");
-    }
-    const sourceTokenCount = safeInteger(c["sourceTokenCount"], "sourceTokenCount", { min: 1 });
-    if (sourceTokenCount !== estimateTokensFromChars(c["serializedTurns"].length)) {
-      throw new Error("Compaction prepare candidate token estimate is inconsistent");
-    }
-    const sourceDigest = createHash("sha256").update(c["serializedTurns"], "utf-8").digest("hex").slice(0, 16);
-    if (sourceDigest !== c["sourceDigest"]) throw new Error("Compaction prepare candidate digest is inconsistent");
-    if (typeof c["priorCheckpoint"] !== "string") throw new Error("Compaction prepare prior checkpoint is malformed");
-    const summaryTokenBudget = safeInteger(c["summaryTokenBudget"], "summaryTokenBudget", {
-      min: COMPACTION_BUDGET_MIN_TOKENS,
-      max: COMPACTION_BUDGET_MAX_TOKENS,
-    });
-    return {
-      status: "ready",
-      candidate: {
-        version: 1,
-        expectedGeneration,
-        previousCheckpointId,
-        sourceMessageStart,
-        sourceMessageEnd,
-        firstKeptMessageId,
-        sourceDigest,
-        sourceTokenCount,
-        serializedTurns: c["serializedTurns"],
-        priorCheckpoint: c["priorCheckpoint"],
-        summaryTokenBudget,
-      },
-    };
-  }
-  throw new Error(`Compaction prepare returned unknown status: ${String(status)}`);
-}
-
-function normalizeCommitResult(value: unknown): CommitConversationCompactionResult {
-  if (!value || typeof value !== "object" || Array.isArray(value)) {
-    throw new Error("Compaction commit returned a non-object response");
-  }
-  const record = value as Record<string, unknown>;
-  const status = record["status"];
-  if (status === "committed") {
-    const checkpointId = safeInteger(record["checkpointId"], "checkpointId", { min: 1 });
-    const generation = safeInteger(record["generation"], "generation", { min: 1 });
-    return { status: "committed", checkpointId, generation };
-  }
-  if (status === "stale") return { status: "stale" };
-  if (status === "rejected") return { status: "rejected" };
-  throw new Error(`Compaction commit returned unknown status: ${String(status)}`);
 }
 
 // ── #1515: dream-question response normalization ────────────────────────────
@@ -1302,9 +1075,6 @@ export function createDisabledRuntime(): AbtarsMemoryRuntime {
     instantStore: async () => { unavailable("instantStore"); return { stored: false, memoriesCount: 0, code: "memory_unavailable", message: "Memory is disabled", requestId: "", retryable: false, action: "stop" as const, stage: "pre_dispatch" as const }; },
     editMemory: async () => { unavailable("editMemory"); return { ok: false, code: "memory_unavailable", message: "Memory is disabled", requestId: "", retryable: false, action: "stop" as const, stage: "pre_dispatch" as const }; },
     rebuildFtsIndexes: async () => { unavailable("rebuildFtsIndexes"); return { rebuilt: [] }; },
-    projectDurableContext: async () => { unavailable("projectDurableContext"); throw new Error("Memory is disabled: projectDurableContext not available"); },
-    prepareConversationCompaction: async () => { unavailable("prepareConversationCompaction"); throw new Error("Memory is disabled: prepareConversationCompaction not available"); },
-    commitConversationCompaction: async () => { unavailable("commitConversationCompaction"); throw new Error("Memory is disabled: commitConversationCompaction not available"); },
     dreamQuestions: {
       nextPending: async () => { unavailable("dreamQuestions.nextPending"); return null; },
       list: async () => { unavailable("dreamQuestions.list"); return { questions: [] }; },
@@ -1338,9 +1108,6 @@ export function createUnavailableRuntime(): AbtarsMemoryRuntime {
     instantStore: async () => { unavailable("instantStore"); return { stored: false, memoriesCount: 0, code: "memory_unavailable", message: "Memory unavailable", requestId: "", retryable: false, action: "stop" as const, stage: "pre_dispatch" as const }; },
     editMemory: async () => { unavailable("editMemory"); return { ok: false, code: "memory_unavailable", message: "Memory unavailable", requestId: "", retryable: false, action: "stop" as const, stage: "pre_dispatch" as const }; },
     rebuildFtsIndexes: async () => { unavailable("rebuildFtsIndexes"); return { rebuilt: [] }; },
-    projectDurableContext: async () => { unavailable("projectDurableContext"); throw new Error("Memory unavailable: projectDurableContext not available"); },
-    prepareConversationCompaction: async () => { unavailable("prepareConversationCompaction"); throw new Error("Memory unavailable: prepareConversationCompaction not available"); },
-    commitConversationCompaction: async () => { unavailable("commitConversationCompaction"); throw new Error("Memory unavailable: commitConversationCompaction not available"); },
     dreamQuestions: {
       nextPending: async () => { unavailable("dreamQuestions.nextPending"); return null; },
       list: async () => { unavailable("dreamQuestions.list"); return { questions: [] }; },

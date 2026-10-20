@@ -193,18 +193,16 @@ describe("SubagentRuntime composed holders", () => {
     await runtime.complete("dreamy", "test");
 
     const { createSubagentTransport } = await import("./agent-registry.js");
-    // #1527: the late-bound durable context provider holder is the 2nd arg;
-    // #1552: the memory-tool deps holder is the 3rd.
+    // #1552: the memory-tool deps holder is the 2nd arg.
     // --- the transport factory's trailing workingDir override (#1807) is
     // undefined here; the assertion pins forwarding of the first args.
-    expect(createSubagentTransport).toHaveBeenCalledWith("sleep", { current: null }, { current: null }, undefined, undefined);
+    // #1932: the 5th arg carries the SDK conversation role (dreamy here).
+    expect(createSubagentTransport).toHaveBeenCalledWith("sleep", { current: null }, undefined, undefined, "dreamy");
   });
 
-  it("forwards the composed durable context provider holder to lazy transports (#1527)", async () => {
+  it("#1552: forwards the composed memory-tool deps holder to lazy transports", async () => {
     const runtime = new SubagentRuntime();
 
-    const holder = { current: { projectContext: () => Promise.resolve({ messages: [], estimatedTokens: 0, sourceMessageCount: 0 }) } };
-    runtime.setContextProvider(holder);
     const memoryDepsHolder = { current: null };
     runtime.setMemoryToolDependencies(memoryDepsHolder);
 
@@ -212,7 +210,7 @@ describe("SubagentRuntime composed holders", () => {
     await runtime.complete("dreamy", "test");
 
     const { createSubagentTransport } = await import("./agent-registry.js");
-    expect(createSubagentTransport).toHaveBeenCalledWith("sleep", holder, memoryDepsHolder, undefined, undefined);
+    expect(createSubagentTransport).toHaveBeenCalledWith("sleep", memoryDepsHolder, undefined, undefined, "dreamy");
   });
 
   it("#1611: a persistent session rejects conflicting candidate-policy reuse — never broadens configured-only", async () => {

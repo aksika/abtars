@@ -3,7 +3,6 @@
  * Both ACP and tmux transports implement this contract.
  */
 
-import type { PiDurableContextProvider } from "./pi-core-context.js";
 import type { ToolExecutionScope } from "../tasks/task-package.js";
 import type { DurableContextIntent } from "../spin-types.js";
 
@@ -47,8 +46,6 @@ export interface PromptRequestContext {
   executionTelemetry?: import("../execution-telemetry.js").ExecutionTelemetryScope;
   /** #1502 Task 10: task-local cwd/env; never mutate process.env. */
   executionScope?: ToolExecutionScope;
-  /** #1527: durable context provider for Pi-core's exclusive before-message projection. */
-  contextProvider?: PiDurableContextProvider;
   /**
    * #1786: per-execution sandbox override from Spin (`spec.tools`). When
    * present the transport must prefer it over its constructed default for

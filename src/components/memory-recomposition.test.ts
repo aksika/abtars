@@ -46,9 +46,6 @@ function makeReadyRuntime(overrides: Partial<AbtarsMemoryRuntime> = {}): AbtarsM
     instantStore: vi.fn(async () => ({ stored: true as const, memoriesCount: 1, memoryId: 5, semanticRevision: 1 })),
     editMemory: vi.fn(async () => ({ ok: true as const, semanticRevision: 2 })),
     rebuildFtsIndexes: vi.fn(async () => ({ rebuilt: [] })),
-    projectDurableContext: vi.fn(async () => ({ messages: [], estimatedTokens: 0, sourceMessageCount: 0 })),
-    prepareConversationCompaction: vi.fn(async () => ({ status: "nothing_to_compact" as const })),
-    commitConversationCompaction: vi.fn(async () => ({ status: "committed" as const, checkpointId: 1, generation: 1 })),
     dreamQuestions: {
       nextPending: vi.fn(async () => null),
       list: vi.fn(async () => ({ questions: [] })),
@@ -109,19 +106,6 @@ describe("RecomposableMemoryRuntime — stable reference across upgrade (#1706)"
     expect(ready.dreamQuestions.nextPending).toHaveBeenCalledWith("u");
     await capturedDreams.markAsked("u", "q1", "d1");
     expect(ready.dreamQuestions.markAsked).toHaveBeenCalledWith("u", "q1", "d1");
-
-    await rt.commitConversationCompaction({
-      userId: "u", sessionId: "s",
-      candidate: {
-        version: 1, expectedGeneration: 0, previousCheckpointId: null,
-        sourceMessageStart: 0, sourceMessageEnd: 1, firstKeptMessageId: 0,
-        sourceDigest: "d", sourceTokenCount: 10,
-      },
-      summary: "sum", summaryTokenCount: 3,
-      summarizer: { provider: null, model: null }, activeRequestModel: null,
-      reason: "manual",
-    }, "op-key");
-    expect(ready.commitConversationCompaction).toHaveBeenCalledTimes(1);
 
     await rt.close();
     expect(ready.close).toHaveBeenCalledTimes(1);
@@ -455,26 +439,3 @@ describe("createUnrefTimeoutScheduler — production timer factory", () => {
   });
 });
 
-describe("#1706: durable-context provider over the facade", () => {
-  it("a provider composed before upgrade rejects closed, then succeeds through the same object", async () => {
-    const { createDurableContextProvider } = await import("./transport/pi-core-context.js");
-    const controller = new RecomposableMemoryRuntime();
-    const provider = createDurableContextProvider(controller.runtime);
-    const input = { userId: "u", sessionId: "s", beforeMessageId: 0, maxContext: 1000 };
-
-    await expect(provider.projectContext(input)).rejects.toThrow(/unavailable/i);
-
-    const ready = makeReadyRuntime({
-      projectDurableContext: vi.fn(async () => ({
-        messages: [{ role: "user" as const, content: "ctx" }],
-        estimatedTokens: 3,
-        sourceMessageCount: 1,
-      })),
-    });
-    controller.upgrade(ready);
-
-    const result = await provider.projectContext(input);
-    expect(result.messages).toHaveLength(1);
-    expect(ready.projectDurableContext).toHaveBeenCalledTimes(1);
-  });
-});

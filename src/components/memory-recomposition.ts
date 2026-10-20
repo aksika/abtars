@@ -78,9 +78,6 @@ export class RecomposableMemoryRuntime implements RecomposableMemoryRuntimeContr
       instantStore: (input) => resolve().instantStore(input),
       editMemory: (input) => resolve().editMemory(input),
       rebuildFtsIndexes: () => resolve().rebuildFtsIndexes(),
-      projectDurableContext: (input) => resolve().projectDurableContext(input),
-      prepareConversationCompaction: (input) => resolve().prepareConversationCompaction(input),
-      commitConversationCompaction: (input, operationKey) => resolve().commitConversationCompaction(input, operationKey),
 
       // Stable nested object: a consumer that captures `facade.dreamQuestions`
       // before the upgrade must not retain the unavailable delegate.

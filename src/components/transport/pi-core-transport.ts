@@ -4,7 +4,6 @@ import type { CandidateSpec, ModelCandidate } from "./model-candidates.js";
 import { PiAgentSessionStore } from "./pi-agent-session-store.js";
 import type { PiAgentSessionTurnResult } from "./pi-agent-session-store.js";
 import { DurableContextUnavailableError } from "./pi-core-context.js";
-import type { DurableContextProviderHolder } from "./pi-core-context.js";
 import type { PiConversationRole } from "../pi-session/pi-conversation-identity.js";
 import { createPiExecutionSafetyController } from "./pi-core-safety.js";
 import type { PiCoreToolContext } from "./pi-core-tools.js";
@@ -49,8 +48,6 @@ export interface PiCoreTransportOptions {
   candidate: ModelCandidate;
   sandboxPolicy: SandboxPolicy;
   session?: { instructionQueue: Array<import("../spin-types.js").QueuedSessionInstruction>; id: string };
-  /** #1527: late-bound durable context provider holder (parallel boot composition). */
-  contextProvider?: DurableContextProviderHolder;
   /** #1552: late-bound memory-tool dependencies holder (runtime + quota). */
   memoryToolDeps?: import("../memory-store-quota.js").MemoryToolDependenciesHolder;
   /** #1932: state directory for the durable provider-availability memo.
@@ -78,9 +75,6 @@ export interface PiCoreTransportOptions {
   /** #1932: SDK session-file storage root. Absent → state/pi-sessions.
    *  Tests inject an isolated dir. */
   sdkSessionRoot?: string;
-  /** #1932: injectable SDK surface loader (tests). Production uses
-   *  installed-Pi discovery and fails closed when unavailable. */
-  sdkLoadSurface?: import("./pi-sdk-conversation.js").PiSdkConversationSurfaceLoader;
   /** #1932: post-compaction bundle refresh (wired by boot for Main;
    *  subagents re-read their spawn-time bundle). Never throws.
    *  Retired with the bridge-built conversation (#1940: Pi owns compaction
@@ -179,17 +173,6 @@ export class PiCoreTransport implements IKiroTransport {
     this.session = opts.session;
     this._memoryToolDeps = opts.memoryToolDeps ?? { current: null };
     this.maxPromptRounds = opts.maxPromptRounds;
-    if (opts.sdkLoadSurface !== undefined) {
-      // Legacy option kept for signature compatibility; the session store
-      // takes its own factory loader via sessionFactoryLoader.
-      void opts.sdkLoadSurface;
-    }
-    if (opts.contextProvider !== undefined) {
-      // Late-bound durable provider is retired with the bridge-built
-      // conversation (#1940); accepted and ignored so boot composition
-      // keeps compiling while callers are migrated.
-      void opts.contextProvider;
-    }
     if (opts.cacheScope !== undefined || opts.memoStateDir !== undefined || opts.cacheRetention !== undefined
       || opts.piRole !== undefined || opts.onCompactionRefresh !== undefined
       || opts.sdkStateDir !== undefined || opts.sdkSessionRoot !== undefined) {

@@ -91,6 +91,29 @@ export class ScriptedProvider {
     this.scripts.set(script.candidate, queue);
   }
 
+  /**
+   * Drop queued (not-yet-matched) scripts for a candidate. Scenarios that
+   * enqueue speculative scripts on several candidates (e.g. a hold on both
+   * A and B when the serving model is not known yet) must discard the
+   * losers once the serving candidate is known. A stale hold whose
+   * current-turn marker survives inside a later turn's recall hydration
+   * would otherwise shadow that turn's own script: popScript matches the
+   * first fully-matching constrained script in queue order. Returns the
+   * number of removed scripts.
+   */
+  removeQueuedScripts(candidate: string, predicate: (script: ProviderScript) => boolean): number {
+    const queue = this.scripts.get(candidate);
+    if (!queue || queue.length === 0) return 0;
+    const kept: ProviderScript[] = [];
+    let removed = 0;
+    for (const script of queue) {
+      if (predicate(script)) removed++;
+      else kept.push(script);
+    }
+    this.scripts.set(candidate, kept);
+    return removed;
+  }
+
   /** #1900: register one exact synthetic goal for full-text recognition.
    *  Bounded: at most 8 markers, each at most 256 chars. */
   registerMarker(marker: string): void {
@@ -176,6 +199,8 @@ export class ScriptedProvider {
       // never receives real content) so scenarios can substring-match.
       markerTexts: request.userTexts.map((t) => t.slice(0, 300)),
       matchedMarkers,
+      systemTexts: request.systemTexts,
+      declaredTools: request.declaredTools,
     };
 
     const queue = this.scripts.get(request.model);
@@ -325,9 +350,24 @@ export class ScriptedProvider {
     toolCalls: string[];
     markerHashes: string[];
     userTexts: string[];
+    systemTexts: string[];
+    declaredTools: string[];
   } {
     const rec = payload as Record<string, unknown>;
     const model = typeof rec["model"] === "string" ? rec["model"] : "unknown";
+    // #1940: Pi's tool declarations ride alongside messages. Capture the
+    // declared function names so scenarios can prove exactly the authorized
+    // abtars tools are declared (no Pi built-ins).
+    const declaredTools: string[] = [];
+    const rawTools = rec["tools"];
+    if (Array.isArray(rawTools)) {
+      for (const rawTool of rawTools) {
+        const tool = rawTool as Record<string, unknown>;
+        const fn = tool["function"] as Record<string, unknown> | undefined;
+        const name = typeof fn?.["name"] === "string" ? fn["name"] : typeof tool["name"] === "string" ? tool["name"] : null;
+        if (name) declaredTools.push(name);
+      }
+    }
     const rawMessages = Array.isArray(rec["messages"]) ? rec["messages"] as unknown[] : [];
     const messages: NormalizedMessage[] = [];
     const roleCounts: Record<string, number> = {};
@@ -375,7 +415,8 @@ export class ScriptedProvider {
       .map((m) => normalizedText(stripVolatileContext(m.text)));
     const markerHashes = userTexts.map((t) => createHash("sha256").update(t).digest("hex").slice(0, 16));
 
-    return { model, messages, roleCounts, toolCalls, markerHashes, userTexts };
+    const systemTexts = messages.filter((m) => m.role === "system").map((m) => m.text.slice(0, 2000));
+    return { model, messages, roleCounts, toolCalls, markerHashes, userTexts, systemTexts, declaredTools };
   }
 
   // ── Semantic expectation validation ───────────────────────────────────────

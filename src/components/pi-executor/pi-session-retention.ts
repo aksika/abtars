@@ -24,7 +24,7 @@ import type { Dirent } from "node:fs";
 import { join } from "node:path";
 import { logDebug, logWarn } from "../logger.js";
 import { isPathWithinRoot } from "../workspace-paths.js";
-import { listSdkBindings, deleteSdkBinding } from "../transport/pi-sdk-conversation.js";
+import { listSdkBindings, deleteSdkBinding } from "../pi-session/pi-conversation-identity.js";
 import { validatePersistedSession } from "./config.js";
 import type { PiCodingSessionRecord, PiCodingSessionStore } from "./pi-coding-session-store.js";
 import type { PiRunStore } from "./pi-run-store.js";

@@ -1,7 +1,7 @@
 import type { CommandContext } from "./types.js";
 import { PiRunService } from "../pi-executor/pi-run-service.js";
 import type { PiRunView, PiRunOrigin } from "../pi-executor/types.js";
-import { MAX_COMPACT_INSTRUCTIONS_BYTES } from "../compact-summarizer.js";
+import { MAX_COMPACT_INSTRUCTIONS_BYTES } from "../session-control/types.js";
 
 let piService: PiRunService | null = null;
 

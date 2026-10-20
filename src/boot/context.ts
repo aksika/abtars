@@ -76,12 +76,6 @@ export interface BootCtx {
    */
   memoryRecomposition: MemoryRecompositionSupervisor | null;
   /**
-   * #1527: late-bound durable context provider. Transport construction and
-   * memory negotiation boot in parallel, so phase-pipeline-deps populates
-   * this holder once memory is ready; Pi transports read it per call.
-   */
-  durableContextProvider: import("../components/transport/pi-core-context.js").DurableContextProviderHolder;
-  /**
    * #1552: bridge-owned durable memory_store quota service. Created and
    * closed by phase-pipeline-deps / bridge shutdown; read by every Pi
    * transport through the memory-tool dependency holder.
@@ -236,7 +230,6 @@ export function createBootCtx(overrides: Partial<BootCtx> = {}): BootCtx {
     client: null,
     memoryRuntime: createDisabledRuntime(),
     memoryRecomposition: null,
-    durableContextProvider: { current: null },
     memoryStoreQuota: null,
     memoryToolDependencies: { current: null },
     transport: null,

@@ -281,9 +281,6 @@ export async function buildTransport(ctx: BootCtx): Promise<PhaseResult> {
       // candidate serves every turn, so maxFallbackToolRounds is inert.
       // #1748: per-provider cache-retention preference (absent → "short").
       cacheRetention: resolved.provider.cacheRetention,
-      // #1527: late-bound holder — memory negotiates in parallel; the
-      // composition point (phase-pipeline-deps) populates it afterwards.
-      contextProvider: ctx.durableContextProvider,
       // #1552: late-bound memory-tool deps holder — same composition point.
       memoryToolDeps: ctx.memoryToolDependencies,
     });

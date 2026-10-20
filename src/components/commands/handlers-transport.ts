@@ -2,7 +2,7 @@ import { logInfo, logError } from "../logger.js";
 import { logAndSwallow } from "../log-and-swallow.js";
 import type { CommandContext } from "./types.js";
 import { triggerResetSession} from "./registry.js";
-import { MAX_COMPACT_INSTRUCTIONS_BYTES } from "../compact-summarizer.js";
+import { MAX_COMPACT_INSTRUCTIONS_BYTES } from "../session-control/types.js";
 import { modelHealthProbeBody } from "../transport/model-health-probe.js";
 
 const TAG = "cmd";
@@ -165,20 +165,12 @@ export async function handleModels(text: string, ctx: CommandContext): Promise<b
     return true;
   }
 
-  // /models health reset — explicit reset of the durable provider
-  // availability memo (#1932 R6): clears every cooldown so the next turn
-  // dispatches normally. Entries also expire on their own; a successful
-  // turn clears only its own namespace.
+  // /models health reset — retired with the provider-availability memo
+  // (#1940 R1: no memo, no cooldown gate — Pi owns retry and availability).
+  // The command shape stays so existing muscle memory lands on a truthful
+  // reply instead of an unknown-subcommand fallthrough.
   if (arg === "health reset" || arg === "primary" || arg === "reset") {
-    const { abtarsHome } = await import("../../paths.js");
-    const { join } = await import("node:path");
-    const { rmSync } = await import("node:fs");
-    try {
-      rmSync(join(abtarsHome(), "state", "provider-availability-v1.json"), { force: true });
-    } catch {
-      // Best effort — an absent or locked memo already admits everything.
-    }
-    await ctx.reply("Availability cooldowns cleared — all configured providers available.");
+    await ctx.reply("No provider cooldowns are tracked — Pi owns retry and availability, so there is nothing to clear.");
     return true;
   }
 

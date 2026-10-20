@@ -793,13 +793,14 @@ describe("#1724 scheduler E2E — journey 13: complete Main-owned announcement j
     await j.handleInboundMessage(followUp as never, j.adapter as never, j.pipelineDeps);
     expect(j.mem.rows.length).toBeGreaterThanOrEqual(3);
 
-    // …and a FRESH durable-context assembly exposes the announcement to that turn.
-    const provider = (await import("../../components/transport/pi-core-context.js")).createDurableContextProvider(j.mem.runtime as never);
-    const projected = await provider.projectContext({ userId: "master", sessionId: j.session.id, beforeMessageId: Number.MAX_SAFE_INTEGER, maxContext: 100000 });
-    const contents = projected.messages.map(m => m.content);
+    // …and the durable archive exposes the announcement to later hydration.
+    // #1940: no durable-context projection — continuity comes from abmind
+    // hydration (recorded archive), which the next session-start carries.
+    const recent = await j.mem.runtime.getRecentConversation({ userId: "master", since: 0, limit: 50 });
+    const contents = recent.map(m => m.content);
     expect(contents.some(c => c.includes("[SCHEDULED TASK COMPLETED]") && c.includes(ANNOUNCE_GREETING))).toBe(true);
     expect(contents.some(c => c.includes("morning briefing"))).toBe(true);
-    // #1873: the follow-up projection carries the historical record and no
+    // #1873: the archived record carries the historical form and no
     // system-composed announcement instruction from the recorded event.
     expect(contents.some(c => c.includes("Historical scheduled-task handoff record."))).toBe(true);
     expect(contents.every(c => !c.includes("Announce this result"))).toBe(true);

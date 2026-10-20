@@ -17,7 +17,7 @@ import type { ConversationBuffer } from "../conversation-buffer.js";
 import { isTrustedScheduledAnnouncement, type InboundMessage } from "../../types/platform.js";
 import type { UserRegistry } from "../user-registry.js";
 import { sessionTypeOf, type DurableContextIntent } from "../spin-types.js";
-import { sharedArchiveOutbox, type PiArchiveOutbox } from "../pi-session/pi-archive-outbox.js";
+
 
 const TAG = "pipeline";
 const ACTIVE_MEMORY_LIMIT = 5;
@@ -30,9 +30,6 @@ export interface BuildPromptDeps {
   contextPercent: number;
   maxContext?: number;
   isAcp?: boolean;
-  /** #1932: archive outbox for pending terminal writes. Tests inject an
-   *  isolated instance; production defaults to the shared one. */
-  archiveOutbox?: PiArchiveOutbox;
 }
 
 export interface BuildPromptResult {
@@ -214,20 +211,10 @@ export async function buildPrompt(
   let durableContextIntent: DurableContextIntent = { mode: "not_required" };
   if (durableRequired && memoryRuntime?.state !== "ready") {
     durableContextIntent = { mode: "required_unavailable", reason: "runtime_unavailable" };
-  } else if (durableRequired) {
-    // #1940: no archive outbox or retry subsystem on the Pi route — after
-    // boot, memory operations report their own failures. The ACP route
-    // keeps the outbox flush.
-    if (!omitSoulForPiRoute) {
-      const outbox = deps.archiveOutbox ?? sharedArchiveOutbox;
-      if (outbox.has(sessionKey)) {
-        const flushed = await outbox.flush(sessionKey, (input, key) => memoryRuntime!.recordMessage(input, key));
-        if (!flushed) {
-          durableContextIntent = { mode: "required_unavailable", reason: "record_failed" };
-        }
-      }
-    }
   }
+  // #1940 R1: no outbox or retry subsystem — after boot, memory operations
+  // (recall, tools, archive writes) report their own failures and any gap
+  // is accepted.
   if (durableContextIntent.mode === "not_required" && durableRequired) {
     // #1724: a trusted scheduled-announcement event carries its durable,
     // card-derived identity — delivery retries must deduplicate against the

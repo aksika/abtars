@@ -81,7 +81,7 @@ const SUBAGENT_ACP_ROLE: Record<SubagentRole, AgentRole> = {
 
 /** Unified transport factory for all subagents. Reads from transport.json + models.json. */
 /** @internal Used only by SubagentRuntime. Do not call directly. */
-export async function createSubagentTransport(role: SubagentRole, contextProvider?: import("./transport/pi-core-context.js").DurableContextProviderHolder, memoryToolDeps?: import("./memory-store-quota.js").MemoryToolDependenciesHolder, candidatePolicy: import("./spin-types.js").CandidatePolicy = "fallback-chain", workingDir?: string): Promise<{ transport: IKiroTransport; model: string }> {
+export async function createSubagentTransport(role: SubagentRole, memoryToolDeps?: import("./memory-store-quota.js").MemoryToolDependenciesHolder, candidatePolicy: import("./spin-types.js").CandidatePolicy = "fallback-chain", workingDir?: string, piRole?: import("./pi-session/pi-conversation-identity.js").PiConversationRole): Promise<{ transport: IKiroTransport; model: string }> {
   const { resolveAgent, getEnvFallback, loadTransport } = await import("./transport-config.js");
   const tc = loadTransport();
   const agentName = SUBAGENT_TO_AGENT[role];
@@ -118,7 +118,9 @@ export async function createSubagentTransport(role: SubagentRole, contextProvide
       systemPrompt: `You are an abtars ${agentName} agent.`,
       candidate,
       // #1932: SDK conversation partitioning follows the worker role.
-      piRole: role === "sleep" ? "dreamy" : role === "browse" ? "browsing" : role === "coding" ? "coding" : "task",
+      // Explicit per-agent (professor serves Main chat); falls back to the
+      // config-family role when the caller does not say.
+      piRole: piRole ?? (role === "sleep" ? "dreamy" : role === "browse" ? "browsing" : role === "coding" ? "coding" : "task"),
       sandboxPolicy: { allowedTools: ["*"], allowedRead: ["*"], allowedWrite: ["*"], canExecuteBash: true },
       maxPromptRounds: tc?.maxToolRounds,
       // #1748: subagent cache scope = agent role name (all workers of one role
@@ -126,8 +128,6 @@ export async function createSubagentTransport(role: SubagentRole, contextProvide
       cacheScope: agentName,
       // #1748: per-provider cache-retention preference (absent → "short").
       cacheRetention: agent.provider.cacheRetention,
-      // #1527: late-bound shared provider holder from boot composition.
-      contextProvider: contextProvider ?? { current: null },
       // #1552: late-bound memory-tool deps holder from boot composition.
       memoryToolDeps: memoryToolDeps ?? { current: null },
     });

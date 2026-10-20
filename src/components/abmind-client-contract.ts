@@ -53,12 +53,6 @@ export interface AbmindPrivateMemoryLike {
   assembleSessionContext(input: unknown): Promise<unknown>;
   getRuntimeStatus(input?: unknown): Promise<unknown>;
   getCoreKnowledge(input: unknown): Promise<unknown>;
-  /** #1527: daemon-owned durable context projection (private read). */
-  projectConversationContext(input: unknown): Promise<unknown>;
-  /** #1406: daemon-owned durable compaction prepare (private read). */
-  prepareConversationCompaction(input: unknown): Promise<unknown>;
-  /** #1406: daemon-owned durable compaction commit (private mutate). */
-  commitConversationCompaction(input: unknown, idempotencyKey?: string): Promise<unknown>;
   /** #1515: owner-scoped durable Dreamy clarification questions. */
   dreamQuestions: {
     nextPending(userId: string): Promise<unknown>;

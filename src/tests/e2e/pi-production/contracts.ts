@@ -174,4 +174,12 @@ export interface ProviderSummary {
    *  text before preview truncation. Existing markerHashes retain their
    *  whole-text hash meaning; this field carries only registered identities. */
   matchedMarkers: string[];
+  /** #1940: bounded system-message texts (the session system prompt as Pi
+   *  sent it). Lets scenarios prove the role SOUL bundle rides every
+   *  conversational request and survives compaction. */
+  systemTexts: string[];
+  /** #1940: tool declarations Pi sent with the request, by function name.
+   *  Lets scenarios prove exactly the authorized abtars tools are declared
+   *  (no Pi built-ins). */
+  declaredTools: string[];
 }

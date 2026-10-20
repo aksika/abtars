@@ -112,16 +112,6 @@ export class SubagentRuntime {
   /** Get session manager (may be null before boot completes). */
   get sessionManager(): import("./spin.js").Spin | null { return this._sessionManager; }
 
-  /**
-   * #1527: late-bound durable context provider holder. Set by the boot
-   * composition point once memory is ready; lazy transports created after
-   * that point receive the shared holder.
-   */
-  private _contextProvider: import("./transport/pi-core-context.js").DurableContextProviderHolder = { current: null };
-  setContextProvider(holder: import("./transport/pi-core-context.js").DurableContextProviderHolder): void {
-    this._contextProvider = holder;
-  }
-
   /** #1552: late-bound memory-tool dependencies holder; lazy transports
    *  created after boot composition receive the shared holder. */
   private _memoryToolDeps: import("./memory-store-quota.js").MemoryToolDependenciesHolder = { current: null };
@@ -391,7 +381,7 @@ export class SubagentRuntime {
     // candidate that last produced a non-empty response.
     // #1611: configured-only restricts transport construction to the configured
     // candidate — applied before the first Dreamy prompt, never after the fact.
-    const { transport, model } = await createSubagentTransport(role, this._contextProvider, this._memoryToolDeps, candidatePolicy, workingDir);
+    const { transport, model } = await createSubagentTransport(role, this._memoryToolDeps, candidatePolicy, workingDir, AGENT_TO_PIROLE[agent]);
 
     // #1290: attribute per-turn budget to the agent Spin resolved for this session.
     // External ACP keeps its own agent label; embedded Pi uses this label when
@@ -423,6 +413,20 @@ const AGENT_TO_ROLE: Record<AgentName, import("./agent-registry.js").SubagentRol
   professor: "task",
   dreamy: "sleep",
   browsie: "browse",
+  coding: "coding",
+  task: "task",
+};
+
+/**
+ * #1932: SDK conversation role per agent. Professor is the Main
+ * conversational agent (its one-shots share Main's config); dedicated
+ * worker agents partition under worker roles. Distinct from AGENT_TO_ROLE,
+ * which selects the model/config family.
+ */
+const AGENT_TO_PIROLE: Record<AgentName, import("./pi-session/pi-conversation-identity.js").PiConversationRole> = {
+  professor: "main",
+  dreamy: "dreamy",
+  browsie: "browsing",
   coding: "coding",
   task: "task",
 };

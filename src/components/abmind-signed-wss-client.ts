@@ -235,9 +235,6 @@ export class AbtarsSignedWssClient implements AbmindClientLike {
       assembleSessionContext: (p) => this.call("private.assembleSessionContext", p),
       getRuntimeStatus: (p) => this.call("private.getRuntimeStatus", p ?? {}),
       getCoreKnowledge: (p) => this.call("private.getCoreKnowledge", p),
-      projectConversationContext: (p) => this.call("private.projectConversationContext", p),
-      prepareConversationCompaction: (p) => this.call("private.prepareConversationCompaction", p),
-      commitConversationCompaction: (p, key) => this.call("private.commitConversationCompaction", p, key),
       dreamQuestions: {
         nextPending: (userId) => this.call("private.dreamQuestions.nextPending", { userId }),
         list: (userId, status, limit) => this.call("private.dreamQuestions.list", { userId, status, limit }),
@@ -667,7 +664,7 @@ export class AbtarsSignedWssClient implements AbmindClientLike {
 const METHOD_IS_MUTATING = new Set([
   "private.instantStore", "private.edit", "private.reclassify", "private.adjustRelevance",
   "private.merge", "private.cascadeDelete", "private.rebuildFts", "private.recordMessage",
-  "private.commitConversationCompaction", "private.dreamQuestions.markAsked",
+  "private.dreamQuestions.markAsked",
   "private.dreamQuestions.dismiss", "sleep.start", "sleep.resume", "sleep.cancel",
   "sleep.runtime.open", "sleep.runtime.complete", "sleep.runtime.fail", "sleep.runtime.close",
 ]);

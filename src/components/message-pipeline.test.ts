@@ -30,7 +30,7 @@ const MAIN_NOTICE_REGISTRY: UserRegistry = {
   byUserId: new Map([["master", { userId: "master", role: "master", maxClass: 3, tools: ["all"], platforms: { telegram: 100 } }]]),
 };
 import { handleInboundMessage, submitTrustedInternalMessage, type PipelineDeps } from "./message-pipeline.js";
-import { PiArchiveOutbox } from "./pi-session/pi-archive-outbox.js";
+
 import { lookupAnswerRecord } from "./answer-evidence.js";
 import type { PlatformAdapter, InboundMessage } from "../types/platform.js";
 import type { IKiroTransport } from "./transport/kiro-transport.js";
@@ -122,9 +122,6 @@ function mockDeps(transport: IKiroTransport, overrides: Partial<PipelineDeps> = 
     } as any,
     updateCtxStart: vi.fn(),
     _session: session,
-    // #1932: isolate the live-process archive outbox by default so tests
-    // never share obligations through the production singleton.
-    archiveOutbox: new PiArchiveOutbox(),
     ...overrides,
   } as any;
 }
@@ -988,71 +985,82 @@ describe("citation detection (#1270)", () => {
       );
     });
 
-    it("holds the terminal payload in the outbox when its archive write fails (#1932)", async () => {
+    it("delivers despite a failed assistant archive write — the gap is accepted (#1940 R1)", async () => {
       transport.sendPrompt = vi.fn().mockResolvedValue("done text") as any;
       const recordMessage = vi.fn(async (input: { role: string }) =>
         input.role === "assistant" ? Promise.reject(new Error("owner down")) : { id: 1 },
       );
-      const outbox = new PiArchiveOutbox();
       const adapter = mockAdapter();
       const deps = mockDeps(transport, {
         memoryConfig: { memoryEnabled: true, memoryDir: "/tmp" },
         memoryRuntime: mockMemoryRuntime({ recordMessage }),
-        archiveOutbox: outbox,
       } as any);
 
       await handleInboundMessage(makeMsg({ messageId: 12 }), adapter, deps);
 
-      expect(outbox.has("test_A_01")).toBe(true);
-      expect(outbox.peek("test_A_01")).toMatchObject({ role: "assistant", content: "done text" });
-      expect(outbox.peek("test_A_01")?.operationKey).toEqual(expect.any(String));
+      // Delivery completes; the failed archive write is never reported as
+      // durable, and no retry obligation is queued for the next turn.
+      expect(adapter.sendMessage).toHaveBeenCalledWith(
+        expect.anything(),
+        expect.stringContaining("done text"),
+        expect.anything(),
+      );
+      expect(recordMessage).toHaveBeenCalledWith(
+        expect.objectContaining({ role: "assistant" }),
+        expect.any(String),
+      );
     });
 
-    it("does not hold unrecordable empty replies from aborted turns (#1932)", async () => {
+    it("settles empty aborted turns without recording (#1940)", async () => {
       // Regression: an aborted turn records nothing (the store drops
-      // empty content by policy). Holding that "gap" would fail every
-      // later turn closed, since no retry could ever confirm it.
+      // empty content by policy). With no outbox, there is no obligation
+      // to hold — the turn simply settles.
       transport.sendPrompt = vi.fn().mockResolvedValue("") as any;
       const recordMessage = vi.fn(async (input: { content: string }) =>
         (typeof input.content === "string" && input.content.trim() ? { id: 7 } : { id: null }),
       );
-      const outbox = new PiArchiveOutbox();
       const adapter = mockAdapter();
       const deps = mockDeps(transport, {
         memoryConfig: { memoryEnabled: true, memoryDir: "/tmp" },
         memoryRuntime: mockMemoryRuntime({ recordMessage }),
-        archiveOutbox: outbox,
       } as any);
 
       await handleInboundMessage(makeMsg({ messageId: 14 }), adapter, deps);
 
-      expect(outbox.has("test_A_01")).toBe(false);
+      // Empty turns record nothing and settle with the standard fallback.
+      const assistantCalls = (recordMessage as ReturnType<typeof vi.fn>).mock.calls.filter(
+        (c: unknown[]) => (c[0] as { role?: string })?.role === "assistant",
+      );
+      expect(assistantCalls).toHaveLength(0);
+      expect(adapter.sendMessage).toHaveBeenCalledWith(
+        expect.anything(),
+        expect.stringContaining("empty response"),
+        expect.anything(),
+      );
     });
 
-    it("clears a pre-existing obligation when the terminal write confirms (#1932)", async () => {
+    it("does not retry previous failures — each turn reports its own archive outcome (#1940 R1)", async () => {
       transport.sendPrompt = vi.fn().mockResolvedValue("done text") as any;
       const recordMessage = vi.fn().mockResolvedValue({ id: 7 });
-      const outbox = new PiArchiveOutbox();
-      outbox.note({
-        role: "assistant",
-        content: "stale payload",
-        timestamp: 1,
-        userId: "master",
-        sessionId: "test_A_01",
-        operationKey: "op-stale",
-      });
       const adapter = mockAdapter();
       const deps = mockDeps(transport, {
         memoryConfig: { memoryEnabled: true, memoryDir: "/tmp" },
         memoryRuntime: mockMemoryRuntime({ recordMessage }),
-        archiveOutbox: outbox,
       } as any);
 
       await handleInboundMessage(makeMsg({ messageId: 13 }), adapter, deps);
 
-      // The stale retry is idempotent (same key) and the fresh terminal write
-      // confirms, so no obligation remains.
-      expect(outbox.has("test_A_01")).toBe(false);
+      // One assistant write per turn under its own operation key — no
+      // carried-over retry from an earlier turn.
+      const assistantCalls = (recordMessage as ReturnType<typeof vi.fn>).mock.calls.filter(
+        (c: unknown[]) => (c[0] as { role?: string })?.role === "assistant",
+      );
+      expect(assistantCalls).toHaveLength(1);
+      expect(adapter.sendMessage).toHaveBeenCalledWith(
+        expect.anything(),
+        expect.stringContaining("done text"),
+        expect.anything(),
+      );
     });
   });
 });

@@ -55,23 +55,6 @@ export async function phasePipelineDeps(ctx: BootCtx): Promise<PhaseResult> {
   const { config, memoryConfig, transport } = ctx;
   if (!transport) { ctx.phaseHealth.set(phasePipelineDeps.name, { status: "skipped", error: "no transport" }); logWarn("boot", `${phasePipelineDeps.name}: skipping — transport not available`); return "skipped"; }
 
-  // #1527: a memory-enabled Pi route without the negotiated durable-context
-  // capability is context-blind by construction. Refuse to serve rather than
-  // let durable requests degrade to suffix-only answers. Throwing is required:
-  // bootGraph marks any non-throwing phase "ok" and replaces phaseHealth with
-  // its report, so a "skipped" return would let downstream nodes boot against
-  // a null pipelineDeps and hide the refusal from the degraded-boot report.
-  if (ctx.memoryRuntime.state === "ready" && !ctx.memoryRuntime.supports("durableContext")) {
-    const route = typeof transport.getRuntimeStatus === "function" ? transport.getRuntimeStatus().route : undefined;
-    if (route === "pi-ai") {
-      const { logError } = await import("../components/logger.js");
-      logError("boot", "memory-enabled Pi route negotiated no durable-context capability — refusing to boot context-blind");
-      try { await transport.destroy(); } catch (err) { logWarn("boot", `transport destroy during refusal failed: ${err instanceof Error ? err.message : String(err)}`); }
-      ctx.transport = null;
-      throw new Error("memory-enabled Pi route without durable context capability");
-    }
-  }
-
   ctx.idleSave = new IdleSave(transport, memoryConfig.memoryDir, memoryConfig.memoryEnabled);
 
   // #1539: construct the lifecycle wake scheduler and the scheduled-run
@@ -268,16 +251,6 @@ export async function phasePipelineDeps(ctx: BootCtx): Promise<PhaseResult> {
       : buildSoulBundle("A", null);
     if (bundle) (transport as { setSystemPrompt: (p: string) => void }).setSystemPrompt(bundle);
   }
-
-  // #1527/#1706: compose the durable context provider over the stable memory
-  // facade unconditionally. Transport and memory boot in parallel; before a
-  // late composition the projection rejects closed, after it the same
-  // provider succeeds — Pi transports read the holder per call either way.
-  const { createDurableContextProvider } = await import("../components/transport/pi-core-context.js");
-  ctx.durableContextProvider.current = createDurableContextProvider(ctx.memoryRuntime);
-  spin.setContextProvider(ctx.durableContextProvider);
-  ctx.runtime.setContextProvider(ctx.durableContextProvider);
-  logInfo("boot", "Durable context provider composed into Pi transports");
 
   // #1552: compose the memory-tool dependency holder (runtime + durable
   // quota) once memory initialization has resolved. A stale quota service

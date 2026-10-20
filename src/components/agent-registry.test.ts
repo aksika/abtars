@@ -7,7 +7,6 @@
  * Main inheritance, no route fallbacks, no rotation.
  */
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import type { DurableContextProviderHolder } from "./transport/pi-core-context.js";
 
 const mockLoadTransport = vi.hoisted(() => vi.fn());
 const mockGetEnvFallback = vi.hoisted(() => vi.fn());
@@ -117,12 +116,12 @@ describe("createSubagentTransport #1527", () => {
     expect(transport.isReady).toBe(true);
   });
 
-  it("accepts the retired late-bound provider holder option (ignored, #1940)", async () => {
-    const holder: DurableContextProviderHolder = { current: null };
-    const { transport } = await createSubagentTransport("task", holder);
+  it("wires memory-tool deps through the real factory (api route, #1940)", async () => {
+    const memoryToolDeps = { current: null };
+    const { transport } = await createSubagentTransport("task", memoryToolDeps);
     expect(transport).toBeInstanceOf(PiCoreTransport);
-    // The Pi route no longer reads durable context per turn; the option is
-    // accepted for boot-composition compatibility and ignored.
+    // The Pi route no longer reads durable context per turn; the AgentSession
+    // route marker is the integration evidence.
     expect((transport as unknown as { piAgentSessionRoute: boolean }).piAgentSessionRoute).toBe(true);
   });
 
@@ -147,7 +146,7 @@ describe("createSubagentTransport — single configured candidate (#1932)", () =
   });
 
   it("carries exactly the configured candidate under configured-only", async () => {
-    const { transport, model } = await createSubagentTransport("sleep", undefined, undefined, "configured-only");
+    const { transport, model } = await createSubagentTransport("sleep", undefined, "configured-only");
     expect(model).toBe("dreamy-model");
     expect(candidateOf(transport).model).toBe("dreamy-model");
   });
@@ -155,12 +154,12 @@ describe("createSubagentTransport — single configured candidate (#1932)", () =
   it("carries exactly the configured candidate with no route assignments", async () => {
     mockResolveAgent.mockImplementation((agentName: string) => (agentName === "dreamy" ? dreamyAgent() : null));
     mockRouteAssignments.mockReturnValue(null);
-    const { transport } = await createSubagentTransport("sleep", undefined, undefined, "configured-only");
+    const { transport } = await createSubagentTransport("sleep", undefined, "configured-only");
     expect(candidateOf(transport).model).toBe("dreamy-model");
   });
 
   it("ignores inherited Main and route fallbacks under the default policy", async () => {
-    const { transport } = await createSubagentTransport("sleep", undefined, undefined, "fallback-chain");
+    const { transport } = await createSubagentTransport("sleep", undefined, "fallback-chain");
     expect(candidateOf(transport).model).toBe("dreamy-model");
   });
 
@@ -181,7 +180,7 @@ describe("createSubagentTransport — single configured candidate (#1932)", () =
       return null;
     });
 
-    const { model } = await createSubagentTransport("sleep", undefined, undefined, "configured-only");
+    const { model } = await createSubagentTransport("sleep", undefined, "configured-only");
 
     expect(model).toBe("dreamy-model");
     expect(mockAcpTransport).toHaveBeenCalledTimes(1);
@@ -200,11 +199,11 @@ describe("createSubagentTransport — single configured candidate (#1932)", () =
       return null;
     });
 
-    await createSubagentTransport("sleep", undefined, undefined, "configured-only", "/tmp/sleep-scope");
+    await createSubagentTransport("sleep", undefined, "configured-only", "/tmp/sleep-scope");
     expect(mockAcpTransport.mock.calls[0]![1]).toBe("/tmp/sleep-scope");
 
     vi.clearAllMocks();
-    await createSubagentTransport("sleep", undefined, undefined, "configured-only");
+    await createSubagentTransport("sleep", undefined, "configured-only");
     expect(mockAcpTransport.mock.calls[0]![1]).toBe("/tmp/work");
   });
 });

@@ -1,9 +1,5 @@
 /**
- * phase-pipeline-deps.test — #1527 context-blind refusal.
- *
- * A memory-enabled Pi route that negotiated no durable-context capability is
- * context-blind by construction. The composition point must refuse it instead
- * of letting durable requests degrade to suffix-only answers.
+ * phase-pipeline-deps.test — memory-tool holder ordering + failure payloads.
  */
 import { describe, it, expect, vi } from "vitest";
 import { clearMemoryToolDependencies, createBootCtx } from "./context.js";
@@ -17,21 +13,14 @@ function fakePiTransport() {
   } as never;
 }
 
-function fakeAcpTransport() {
-  return {
-    getRuntimeStatus: () => ({ route: "acp", provider: "x", model: "y" }),
-    destroy: vi.fn().mockResolvedValue(undefined),
-  } as never;
-}
-
-function memoryState(state: "ready" | "disabled" | "unavailable", supportsDurable: boolean) {
+function memoryState(state: "ready" | "disabled" | "unavailable") {
   return {
     state,
-    supports: (cap: string) => cap === "durableContext" ? supportsDurable : false,
+    supports: () => false,
   } as never;
 }
 
-describe("phasePipelineDeps #1527", () => {
+describe("phasePipelineDeps memory composition (#1940 R1)", () => {
   it("clears the holder before closing the old quota", () => {
     const ctx = createBootCtx();
     const order: string[] = [];
@@ -53,49 +42,19 @@ describe("phasePipelineDeps #1527", () => {
     expect(ctx.memoryStoreQuota).toBeNull();
   });
 
-  it("refuses a memory-enabled Pi route without the durable-context capability", async () => {
-    const ctx = createBootCtx({
-      transport: fakePiTransport(),
-      memoryRuntime: memoryState("ready", false),
-    });
-    // The refusal must THROW: bootGraph marks any non-throwing phase "ok" and
-    // replaces phaseHealth with its report, so a skipped return would let
-    // downstream nodes boot against a null pipelineDeps.
-    await expect(phasePipelineDeps(ctx)).rejects.toThrow(/durable context capability/);
-    expect(ctx.transport).toBeNull();
-    expect((ctx.transport as unknown as { destroy: ReturnType<typeof vi.fn> } | null)).toBeNull();
-  });
-
-  it("destroys the refused transport", async () => {
+  it("#1940: no durable-context capability gate — memory readiness is decided at negotiation", async () => {
     const transport = fakePiTransport();
     const ctx = createBootCtx({
       transport,
-      memoryRuntime: memoryState("ready", false),
+      memoryRuntime: memoryState("ready"),
     });
-    await expect(phasePipelineDeps(ctx)).rejects.toThrow();
-    expect((transport as unknown as { destroy: ReturnType<typeof vi.fn> }).destroy).toHaveBeenCalledTimes(1);
-  });
-
-  it("does not refuse when the Pi route negotiated the durable-context capability", async () => {
-    const ctx = createBootCtx({
-      transport: fakePiTransport(),
-      memoryRuntime: memoryState("ready", true),
-    });
-    // The refusal gate is passed; execution continues into the phase body,
-    // which needs a fully configured ctx. The assertion below proves the gate
-    // did not destroy the transport (the phase will throw later on config).
+    // The retired #1527 refusal is gone: a memory-enabled Pi route composes
+    // without any durable-context capability. The phase proceeds into its
+    // body (which needs a fully configured ctx and throws later on config),
+    // and the transport is never destroyed by a capability refusal.
     await expect(phasePipelineDeps(ctx)).rejects.toThrow();
     expect(ctx.transport).not.toBeNull();
-  });
-
-  it("does not refuse non-Pi routes when memory lacks the capability", async () => {
-    const ctx = createBootCtx({
-      transport: fakeAcpTransport(),
-      memoryRuntime: memoryState("ready", false),
-    });
-    await expect(phasePipelineDeps(ctx)).rejects.toThrow();
-    expect(ctx.transport).not.toBeNull();
-    expect((ctx.transport as unknown as { destroy: ReturnType<typeof vi.fn> }).destroy).not.toHaveBeenCalled();
+    expect((transport as unknown as { destroy: ReturnType<typeof vi.fn> }).destroy).not.toHaveBeenCalled();
   });
 });
 

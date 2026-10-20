@@ -82,7 +82,6 @@ export class Spin {
    * current provider directly instead of scraping an optional transport
    * property (which was never set and produced a circular no-op).
    */
-  private contextProvider: import("./transport/pi-core-context.js").DurableContextProviderHolder = { current: null };
 
   /** #1540: compose the closure-backed owners; tests may inject fresh ones. */
   constructor(components?: Partial<SpinComponents>) {
@@ -97,7 +96,6 @@ export class Spin {
   }
 
   setRuntime(runtime: SubagentRuntime): void { this.runtime = runtime; }
-  setContextProvider(holder: import("./transport/pi-core-context.js").DurableContextProviderHolder): void { this.contextProvider = holder; }
   setMemory(memory: Spin["memory"]): void { this.memory = memory; }
   setOrcActivityFeed(feed: OrcActivityFeed): void { this.orcActivityFeed = feed; }
   setSessionOutputFeed(feed: SessionOutputFeed): void { this.sessionOutputFeed = feed; }
@@ -975,9 +973,6 @@ export class Spin {
         orcTurnControl: boundOrcTurnControl ?? session.orcTurnControl,
         maxPromptRounds: boundMaxPromptRounds ?? session.orcMaxPromptRounds,
         executionTelemetry,
-        // #1527: Spin forwards its own provider reference (late-bound holder
-        // populated by boot composition), never a scraped transport property.
-        contextProvider: this.contextProvider.current ?? undefined,
         // #1629: trusted per-execution tool authorization mode.
         authorizationMode,
         // #1786: per-execution sandbox override (peer deny-all). Transports
@@ -1065,7 +1060,6 @@ export class Spin {
           return {
             send: (msg, img, ctx) => observe(sessionTransport!, session.id, msg, img, {
               ...(ctx ?? {}),
-              contextProvider: ctx?.contextProvider ?? this.contextProvider.current ?? undefined,
             }),
             steer: typeof sessionTransport.steer === "function"
               ? (content, lease) => sessionTransport!.steer!(content, lease)
@@ -1092,7 +1086,6 @@ export class Spin {
           send: async (msg, img, ctx) => {
             const enrichedContext = {
               ...(ctx ?? {}),
-              contextProvider: ctx?.contextProvider ?? this.contextProvider.current ?? undefined,
             };
             if ((!this.sessionOutputFeed && !leaseEmitter) || session.activeExecutionId !== capturedExecutionId) {
               return await executor.send(msg, img, enrichedContext);

@@ -18,6 +18,9 @@
  * static runtime import — see check-pi-boundary).
  */
 
+import { mkdirSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { logDebug, logWarn } from "../logger.js";
 import { resolvePiInstallation, loadPiModule } from "../pi-installation.js";
 import type { PiModuleSpecifier } from "../pi-installation.js";
@@ -34,6 +37,7 @@ import {
 } from "./tool-failure-diagnostic.js";
 import type { ToolFailureDiagnosticV1 } from "./tool-failure-diagnostic.js";
 import { limitPiCoreToolResult } from "./pi-core-tools.js";
+import { ProviderExecutionError } from "./provider-failure.js";
 import type { PiCoreToolContext } from "./pi-core-tools.js";
 import { recordDeliveredRecall } from "../answer-evidence.js";
 import type { ModelCandidate } from "./model-candidates.js";
@@ -196,13 +200,15 @@ interface LivePiAgentSession {
     usage: PiAgentSessionTurnResult["usage"];
     contextTokens: number | null;
     aborted: boolean;
+    /** Latest terminal provider error from agent_end (stopReason error). */
+    terminalError: string | null;
   } | null;
   safety: PiExecutionSafetyController | null;
   abortedTurn: boolean;
 }
 
 function freshCollector(): NonNullable<LivePiAgentSession["collector"]> {
-  return { text: "", intermediate: "", toolCallsSucceeded: 0, usage: null, contextTokens: null, aborted: false };
+  return { text: "", intermediate: "", toolCallsSucceeded: 0, usage: null, contextTokens: null, aborted: false, terminalError: null };
 }
 
 /**
@@ -213,7 +219,7 @@ function freshCollector(): NonNullable<LivePiAgentSession["collector"]> {
 export class PiAgentSessionStore {
   private readonly loadFactory: PiAgentSessionFactoryLoader;
   private readonly cwd: string;
-  private readonly agentDir: string | undefined;
+  private readonly agentDir: string;
   private factory: PiAgentSessionFactory | null = null;
   private modelRuntime: PiModelRuntimeLike | null = null;
   private readonly live = new Map<string, LivePiAgentSession>();
@@ -225,7 +231,14 @@ export class PiAgentSessionStore {
   } = {}) {
     this.loadFactory = args.loadFactory ?? loadPiAgentSessionFactory;
     this.cwd = args.cwd ?? process.cwd();
-    this.agentDir = args.agentDir;
+    // Pi's DefaultResourceLoader requires an explicit agentDir (resolution
+    // root for skills/prompts/themes/extension paths); with everything
+    // disabled nothing is read from it. abtars-owned, created on demand.
+    // In-memory managers mean no session state is ever written there.
+    this.agentDir = args.agentDir ?? join(tmpdir(), "abtars-pi-agent");
+    try {
+      mkdirSync(this.agentDir, { recursive: true });
+    } catch { /* best effort; Pi surfaces real failures with context */ }
   }
 
   /** Marker for the Pi AgentSession route (spin-profiles SOUL-skip duck-type). */
@@ -250,29 +263,63 @@ export class PiAgentSessionStore {
 
   /**
    * Resolve the Pi model for the configured candidate, registering custom
-   * endpoints in memory. Never writes operator model files.
+   * endpoints in memory. Pi's catalog covers known providers; anything it
+   * does not know (custom endpoints, fixture/test providers, Pi-managed
+   * selections it has not refreshed) is registered in memory with the role
+   * model definition — abtars never writes operator model files. A model
+   * Pi still does not know after registration fails the session visibly.
    */
   private modelForCandidate(
     runtime: PiModelRuntimeLike,
     candidate: ModelCandidate,
   ): unknown {
     const piProvider = mapProviderName(candidate.provider) ?? candidate.provider;
-    if (candidate.endpoint !== undefined || candidate.apiKey !== undefined) {
-      const config: Record<string, unknown> = {};
-      if (candidate.endpoint !== undefined) config.baseUrl = candidate.endpoint;
-      if (candidate.apiKey !== undefined) config.apiKey = candidate.apiKey;
-      if (candidate.apiFormat !== undefined) config.api = candidate.apiFormat;
+    // Pi API shape: default to completions exactly like the removed
+    // candidate-built model path (pickPiApi default).
+    const api = candidate.apiFormat === "responses"
+      ? "openai-responses"
+      : candidate.apiFormat === "anthropic"
+        ? "anthropic-messages"
+        : "openai-completions";
+    const config: Record<string, unknown> = { api };
+    if (candidate.endpoint !== undefined) config.baseUrl = candidate.endpoint;
+    if (candidate.apiKey !== undefined) config.apiKey = candidate.apiKey;
+    if (Object.keys(config).length > 0) {
       try {
         runtime.registerProvider(piProvider, config);
       } catch (err) {
         logWarn(TAG, `registerProvider failed for ${piProvider}: ${err instanceof Error ? err.message : String(err)}`);
       }
     }
-    const model = runtime.getModel(piProvider, candidate.model) as { id?: string } | undefined;
-    if (!model) {
-      throw new Error(`Model "${candidate.model}" unknown to Pi provider "${candidate.provider}" — pick a model Pi knows`);
+    const known = runtime.getModel(piProvider, candidate.model) as { id?: string } | undefined;
+    if (known) return known;
+    // Pi does not know this model: register the role assignment in memory
+    // with its endpoint, API shape, and window (mirroring the removed
+    // candidate-built model: zero cost, candidate window, resolved max
+    // tokens). Auth stays Pi-owned for authSource:'pi' candidates — only
+    // the endpoint/model shape is registered, never a credential value.
+    if (candidate.endpoint !== undefined) {
+      const inlineModel: Record<string, unknown> = {
+        id: candidate.model,
+        name: candidate.model,
+        api,
+        baseUrl: candidate.endpoint,
+        input: ["text", "image"],
+        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+        reasoning: candidate.thinking?.style === "default"
+          || (candidate.thinking?.style === "effort" && candidate.thinking.default !== "off"),
+        contextWindow: candidate.maxContext,
+        maxTokens: candidate.maxOutput ?? 8192,
+      };
+      try {
+        runtime.registerProvider(piProvider, { ...config, models: [inlineModel] });
+      } catch (err) {
+        logWarn(TAG, `registerProvider with inline model failed for ${piProvider}: ${err instanceof Error ? err.message : String(err)}`);
+      }
+      const registered = runtime.getModel(piProvider, candidate.model) as { id?: string } | undefined;
+      if (registered) return registered;
     }
-    return model;
+    throw new Error(`Model "${candidate.model}" unknown to Pi provider "${candidate.provider}" — pick a model Pi knows`);
   }
 
   /**
@@ -395,7 +442,7 @@ export class PiAgentSessionStore {
     // exactly the authorized abtars tools.
     const loader = new factory.DefaultResourceLoader({
       cwd: this.cwd,
-      ...(this.agentDir !== undefined ? { agentDir: this.agentDir } : {}),
+      agentDir: this.agentDir,
       settingsManager,
       systemPrompt: init.systemPrompt,
       noExtensions: true,
@@ -422,7 +469,7 @@ export class PiAgentSessionStore {
     const toolNames = customTools.map((t) => t.name).filter((n): n is string => typeof n === "string");
     const created = await factory.createAgentSession({
       cwd: this.cwd,
-      ...(this.agentDir !== undefined ? { agentDir: this.agentDir } : {}),
+      agentDir: this.agentDir,
       modelRuntime: runtime,
       model,
       ...(init.thinkingLevel !== undefined && init.thinkingLevel !== "off" ? { thinkingLevel: init.thinkingLevel } : {}),
@@ -663,10 +710,42 @@ export class PiAgentSessionStore {
             : usage.input + usage.output + (usage.cacheRead ?? 0) + (usage.cacheWrite ?? 0);
         }
       }
+    } else if (event.type === "agent_end") {
+      // Terminal provider failures surface here: Pi retries internally and
+      // only the final attempt (willRetry false) settles the run. Record
+      // the latest error; at settle it surfaces only when no committed
+      // text supersedes it (committed output wins, as before).
+      const messages = event.messages;
+      if (Array.isArray(messages)) {
+        for (const message of messages) {
+          const m = message as { role?: string; stopReason?: string; errorMessage?: string };
+          if (m.role === "assistant" && (m.stopReason === "error" || typeof m.errorMessage === "string")) {
+            collector.terminalError = typeof m.errorMessage === "string" && m.errorMessage.length > 0
+              ? m.errorMessage
+              : "provider error";
+          }
+        }
+      }
     } else if (event.type === "agent_settled") {
       const pending = record.settled;
       record.settled = null;
       record.tap = null;
+      // #1940 R6: a terminal provider error with no committed text is a
+      // visible failure, never a silent empty answer. Real provider errors
+      // reach Pi unmodified so its retry and overflow recovery fire first;
+      // only Pi's own terminal verdict surfaces here.
+      if (collector.text === "" && collector.terminalError !== null && !collector.aborted) {
+        const terminal = new ProviderExecutionError({
+          code: "all_candidates_failed",
+          retryable: false,
+          attemptedCandidates: 1,
+          message: `The configured model candidate failed: ${collector.terminalError}`,
+        });
+        record.collector = null;
+        record.authority.current = null;
+        pending?.reject(terminal);
+        return;
+      }
       const result: PiAgentSessionTurnResult = {
         text: collector.text,
         aborted: collector.aborted || event.aborted === true,

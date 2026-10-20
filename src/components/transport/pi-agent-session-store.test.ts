@@ -16,6 +16,7 @@ import type { PiAgentSessionLike } from "./pi-agent-session-store.js";
 import { buildPolicy } from "../tool-sandbox.js";
 import { createPiExecutionSafetyController } from "./pi-core-safety.js";
 import type { PiCoreToolContext } from "./pi-core-tools.js";
+import { ProviderExecutionError } from "./provider-failure.js";
 
 interface FakeSession extends PiAgentSessionLike {
   emit(event: { type: string } & Record<string, unknown>): void;
@@ -256,6 +257,119 @@ describe("PiAgentSessionStore (#1940)", () => {
     // fails closed instead of capturing anything.
     const live = (store as unknown as { live: Map<string, { authority: { current: unknown } }> }).live.get("k1")!;
     expect(live.authority.current).toBeNull();
+  });
+
+  it("registers an inline model when Pi's catalog does not know the role model", async () => {
+    const registered: Array<Record<string, unknown>> = [];
+    const knownModels = new Map<string, unknown>();
+    const factory = {
+      createAgentSession: vi.fn(async (options: Record<string, unknown>) => {
+        const model = options.model as { id?: string } | undefined;
+        expect(model?.id).toBe("fixture-model-a");
+        return { session: makeFakeSession([]) };
+      }),
+      SessionManager: { inMemory: vi.fn(() => ({})) },
+      SettingsManager: { inMemory: vi.fn(() => ({})) },
+      ModelRuntime: {
+        create: vi.fn(async () => ({
+          getModel: vi.fn((providerId: string, modelId: string) => knownModels.get(`${providerId}/${modelId}`)),
+          registerProvider: vi.fn((providerId: string, config: Record<string, unknown>) => {
+            registered.push({ providerId, ...config });
+            for (const m of (config.models as Array<{ id: string }> | undefined) ?? []) {
+              knownModels.set(`${providerId}/${m.id}`, { id: m.id });
+            }
+          }),
+        })),
+      },
+      DefaultResourceLoader: class {
+        constructor(_options: Record<string, unknown>) {}
+        async reload(): Promise<void> {}
+      },
+    };
+    const store = new PiAgentSessionStore({ loadFactory: async () => factory });
+    await store.ensureSession("k1", {
+      systemPrompt: "sys",
+      candidate: { model: "fixture-model-a", provider: "fixture", endpoint: "https://fixture.local/v1", maxContext: 128000, source: "primary" },
+      sandboxPolicy: buildPolicy("owner", { allowedTools: ["*"] }),
+    });
+    expect(registered.length).toBeGreaterThanOrEqual(1);
+    const withModels = registered.find((r) => Array.isArray(r.models));
+    expect(withModels).toBeDefined();
+    expect((withModels!.models as Array<{ id: string }>)[0]!.id).toBe("fixture-model-a");
+  });
+
+  it("surfaces Pi's terminal provider error instead of a silent empty answer", async () => {
+    const factory = {
+      createAgentSession: vi.fn(async () => ({ session: makeFakeSession([]) })),
+      SessionManager: { inMemory: vi.fn(() => ({})) },
+      SettingsManager: { inMemory: vi.fn(() => ({})) },
+      ModelRuntime: {
+        create: vi.fn(async () => ({
+          getModel: vi.fn(() => ({ id: "m1" })),
+          registerProvider: vi.fn(),
+        })),
+      },
+      DefaultResourceLoader: class {
+        constructor(_options: Record<string, unknown>) {}
+        async reload(): Promise<void> {}
+      },
+    };
+    const store = new PiAgentSessionStore({ loadFactory: async () => factory });
+    await store.ensureSession("k1", {
+      systemPrompt: "sys",
+      candidate: { model: "m1", provider: "openai", endpoint: "https://x", maxContext: 1000, source: "primary" },
+      sandboxPolicy: buildPolicy("owner", { allowedTools: ["*"] }),
+    });
+    const pending = store.prompt("k1", "hi", { executionId: "e1", toolContext: makeContext("e1") });
+    const live = (store as unknown as { live: Map<string, { session: FakeSession }> }).live.get("k1")!;
+    live.session.emit({
+      type: "agent_end",
+      willRetry: false,
+      messages: [{ role: "assistant", content: [], stopReason: "error", errorMessage: "500 fixture blowup" }],
+    });
+    live.session.emit({ type: "agent_settled", aborted: false });
+    const err = await pending.catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(ProviderExecutionError);
+    expect((err as ProviderExecutionError).failure.code).toBe("all_candidates_failed");
+    expect((err as Error).message).toContain("candidate failed");
+    expect((err as Error).message).toContain("500 fixture blowup");
+  });
+
+  it("committed text wins over a recorded terminal error", async () => {
+    const factory = {
+      createAgentSession: vi.fn(async () => ({ session: makeFakeSession([]) })),
+      SessionManager: { inMemory: vi.fn(() => ({})) },
+      SettingsManager: { inMemory: vi.fn(() => ({})) },
+      ModelRuntime: {
+        create: vi.fn(async () => ({
+          getModel: vi.fn(() => ({ id: "m1" })),
+          registerProvider: vi.fn(),
+        })),
+      },
+      DefaultResourceLoader: class {
+        constructor(_options: Record<string, unknown>) {}
+        async reload(): Promise<void> {}
+      },
+    };
+    const store = new PiAgentSessionStore({ loadFactory: async () => factory });
+    await store.ensureSession("k1", {
+      systemPrompt: "sys",
+      candidate: { model: "m1", provider: "openai", endpoint: "https://x", maxContext: 1000, source: "primary" },
+      sandboxPolicy: buildPolicy("owner", { allowedTools: ["*"] }),
+    });
+    const pending = store.prompt("k1", "hi", { executionId: "e1", toolContext: makeContext("e1") });
+    const live = (store as unknown as { live: Map<string, { session: FakeSession }> }).live.get("k1")!;
+    live.session.emit({
+      type: "agent_end",
+      willRetry: true,
+      messages: [{ role: "assistant", content: [], stopReason: "error", errorMessage: "transient" }],
+    });
+    live.session.emit({
+      type: "message_end",
+      message: { role: "assistant", content: [{ type: "text", text: "recovered" }], usage: { input: 1, output: 1 } },
+    });
+    live.session.emit({ type: "agent_settled", aborted: false });
+    await expect(pending).resolves.toMatchObject({ text: "recovered" });
   });
 
   it("disposes with clearQueue/abort/waitForIdle/dispose and releases the session", async () => {

@@ -1,7 +1,6 @@
 import { describe, it, expect, vi } from "vitest";
 import { buildPrompt } from "./prompt-builder.js";
 import { createDisabledRuntime } from "../memory-runtime.js";
-import { PiArchiveOutbox } from "../pi-session/pi-archive-outbox.js";
 
 vi.mock("../spin.js", () => ({ spin: { getSessionById: vi.fn(() => undefined) } }));
 
@@ -21,8 +20,6 @@ function baseDeps(runtime: unknown, memoryEnabled = true) {
     sessionManager: { getActiveSessionId: () => "master_A_1" },
     conversationBuffer: { drain: () => "" },
     contextPercent: -1,
-    // #1932: isolate the live-process archive outbox by default.
-    archiveOutbox: new PiArchiveOutbox(),
   } as never;
 }
 
@@ -214,58 +211,21 @@ describe("buildPrompt durable-context classification (#1529)", () => {
     expect(result.durableContextIntent).toEqual({ mode: "required_unavailable", reason: "record_failed" });
   });
 
-  it("retries a pending terminal write first and proceeds on durable confirmation (ACP #1932)", async () => {
-    const { PiArchiveOutbox } = await import("../pi-session/pi-archive-outbox.js");
-    const outbox = new PiArchiveOutbox();
-    outbox.note({
-      role: "assistant",
-      content: "already delivered",
-      timestamp: 1,
-      userId: "master",
-      sessionId: "master_A_1",
-      operationKey: "op-old",
-    });
-    const seenKeys: string[] = [];
-    const recordMessage = vi.fn(async (_input: unknown, key: string) => {
-      seenKeys.push(key);
-      return seenKeys.length === 1 ? { id: 9 } : { id: 42 };
+  it("#1940: no outbox — a failed archive write reports its own failure, no retry subsystem", async () => {
+    const recordMessage = vi.fn(async (input: unknown, key: string) => {
+      if ((input as { role?: string })?.role === "assistant") throw new Error("owner down");
+      return { id: 9 };
     });
     const result = await buildPrompt(
       { userId: "master", channelId: "1", platform: "telegram", isGroup: false, messageId: "m5" } as never,
       "hello",
-      { ...(baseDeps(readyRuntime(recordMessage)) as unknown as Record<string, unknown>), archiveOutbox: outbox, isAcp: true } as never,
+      baseDeps(readyRuntime(recordMessage)),
       masterRegistry(),
     );
-    expect(result.durableContextIntent).toEqual({ mode: "durable", beforeMessageId: 42 });
-    expect(seenKeys[0]).toBe("op-old");
-    expect(outbox.has("master_A_1")).toBe(false);
-  });
-
-  it("fails closed without recording inbound when the pending terminal retry fails (ACP #1932)", async () => {
-    const { PiArchiveOutbox } = await import("../pi-session/pi-archive-outbox.js");
-    const outbox = new PiArchiveOutbox();
-    outbox.note({
-      role: "assistant",
-      content: "already delivered",
-      timestamp: 1,
-      userId: "master",
-      sessionId: "master_A_1",
-      operationKey: "op-old",
-    });
-    const seenKeys: string[] = [];
-    const recordMessage = vi.fn(async (_input: unknown, key: string) => {
-      seenKeys.push(key);
-      throw new Error("owner down");
-    });
-    const result = await buildPrompt(
-      { userId: "master", channelId: "1", platform: "telegram", isGroup: false, messageId: "m6" } as never,
-      "hello",
-      { ...(baseDeps(readyRuntime(recordMessage)) as unknown as Record<string, unknown>), archiveOutbox: outbox, isAcp: true } as never,
-      masterRegistry(),
-    );
-    expect(result.durableContextIntent).toEqual({ mode: "required_unavailable", reason: "record_failed" });
-    expect(seenKeys).toEqual(["op-old"]);
-    expect(outbox.has("master_A_1")).toBe(true);
+    // The inbound write succeeds on its own key; the failure belongs to the
+    // assistant write, which the pipeline reports per turn. No pending retry
+    // is queued: the next turn starts clean.
+    expect(result.durableContextIntent).toEqual({ mode: "durable", beforeMessageId: 9 });
   });
 
   it("maps a null record ID to required_unavailable/cursor_missing", async () => {
