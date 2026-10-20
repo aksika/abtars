@@ -267,11 +267,6 @@ function fetchLogs() {
 
 // ── Memory Search ────────────────────────────────────────────────────────────
 let keywordFilters = [];
-let searchMode = "or";
-
-function getSelectedStages() {
-  return [...document.querySelectorAll("#layer-toggles .layer-btn.active")].map(b => b.dataset.layer);
-}
 
 function renderFilters() {
   const container = document.getElementById("keyword-filters");
@@ -284,12 +279,10 @@ function renderFilters() {
 function searchMemory() {
   const container = document.getElementById("mem-search-results");
   if (keywordFilters.length === 0) { if (container) container.innerHTML = ""; return; }
-  const stages = getSelectedStages();
-  if (stages.length === 0) { if (container) container.innerHTML = '<div style="color:#666;padding:6px 0;">No stages selected</div>'; return; }
   const userId = document.getElementById("mem-userid-input")?.value.trim() || "";
   const entity = document.getElementById("mem-entity-input")?.value || "";
   const keywords = keywordFilters.join(",");
-  let url = "/api/memory/search?keywords=" + encodeURIComponent(keywords) + "&original=" + encodeURIComponent(keywords) + "&stages=" + encodeURIComponent(stages.join(",")) + "&mode=" + searchMode;
+  let url = "/api/memory/search?keywords=" + encodeURIComponent(keywords);
   if (entity) url += "&entity=" + encodeURIComponent(entity);
   if (userId) url += "&userId=" + encodeURIComponent(userId);
   fetch(url, { headers: authHeaders() }).then(r => r.json()).then(data => {
@@ -308,17 +301,6 @@ function searchMemory() {
       return '<div class="search-result-item"><div class="result-meta">' + meta + '</div><div class="result-content">' + content + "</div></div>";
     }).join("");
   }).catch(err => { if (container) container.innerHTML = '<div style="color:#f44336;">Search failed: ' + escHtml(err.message) + "</div>"; });
-}
-
-function listChatIds() {
-  fetch("/api/memory/chats", { headers: authHeaders() }).then(r => r.json()).then(data => {
-    const container = document.getElementById("mem-search-results");
-    if (!container) return;
-    if (data.error) { container.innerHTML = '<div style="color:#f44336;">' + escHtml(data.error) + "</div>"; return; }
-    if (!data.userIds?.length) { container.innerHTML = '<div style="color:#666;">No chats found</div>'; return; }
-    container.innerHTML = '<div style="padding:6px 0;color:#e0e0e0;"><strong>Stored Chat IDs:</strong><br>' +
-      data.userIds.map(id => `<span style="cursor:pointer;color:#64b5f6;margin-right:12px;" data-action="select-chat-id" data-id="${id}">${id}</span>`).join("") + "</div>";
-  }).catch(() => {});
 }
 
 // ── Subsystem Health Grid ─────────────────────────────────────────────────────
@@ -365,10 +347,6 @@ document.body.addEventListener("click", (e) => {
       if (panel) panel.style.display = panel.style.display === "none" ? "flex" : "none";
       break;
     }
-    case "load-universe": {
-      if (window.initMemoryUniverse) window.initMemoryUniverse(token);
-      break;
-    }
     case "toggle-log-level": {
       const level = target.dataset.level;
       logLevels[level] = !logLevels[level];
@@ -376,24 +354,8 @@ document.body.addEventListener("click", (e) => {
       fetchLogs();
       break;
     }
-    case "toggle-layer": {
-      target.classList.toggle("active");
-      searchMemory();
-      break;
-    }
-    case "toggle-search-mode": {
-      searchMode = searchMode === "or" ? "and" : "or";
-      target.textContent = searchMode.toUpperCase();
-      target.classList.toggle("active", searchMode === "or");
-      searchMemory();
-      break;
-    }
     case "search-memory": {
       searchMemory();
-      break;
-    }
-    case "list-chat-ids": {
-      listChatIds();
       break;
     }
     case "remove-filter": {
@@ -406,11 +368,6 @@ document.body.addEventListener("click", (e) => {
       fetch("/api/cron/" + target.dataset.id + "/" + target.dataset.op, { method: "POST", headers: authHeaders() })
         .then(r => r.json()).then(d => { if (d.error) alert("Error: " + d.error); })
         .catch(err => alert("Request failed: " + err.message));
-      break;
-    }
-    case "select-chat-id": {
-      const input = document.getElementById("mem-userid-input");
-      if (input) input.value = target.dataset.id;
       break;
     }
   }

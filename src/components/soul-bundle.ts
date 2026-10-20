@@ -3,7 +3,6 @@
  * One function, one matrix. Replaces scattered injection logic.
  */
 import { logAndSwallow } from "./log-and-swallow.js";
-import { getEnv } from "./env-schema.js";
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { logInfo, logDebug, logWarn, logError } from "./logger.js";
@@ -33,14 +32,6 @@ const TYPE_IDENTITY: Record<SessionType, string | null> = {
   H: "I am the Healer. I stand at the edge of the abyss and look for cracks. I diagnose system failures from the symptoms, logs, and error messages given to me — trace them to the root, attempt a repair, and act now. Do not ask for symptoms or introduce yourself. If unfixable by available means, state plainly: Requires human intervention.",
   K: null, // Skill — skill instructions define behavior; never loads A's SOUL
 };
-
-function buildModelInstructions(): string {
-  const lines: string[] = [];
-  if (getEnv().primingModelTopics) {
-    lines.push("End each response with [TOPICS: kw1, kw2, kw3] — your top 3 topics from this exchange. Keep them English, lowercase, concise.");
-  }
-  return lines.length > 0 ? `# Model Instructions\n\n${lines.join("\n")}` : "";
-}
 
 function buildCurrentTime(): string {
   const now = new Date();
@@ -107,9 +98,6 @@ export function buildSoulBundle(type: SessionType, bundle?: SessionSoulBundle | 
 
     const skillsCatalog = readOr(join(abtarsHome(), "skills", "skills_catalog.md"));
     if (skillsCatalog) parts.push(skillsCatalog);
-
-    const modelInstructions = buildModelInstructions();
-    if (modelInstructions) parts.push(modelInstructions);
 
     try {
       const registry = loadUsers();

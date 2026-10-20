@@ -27,7 +27,7 @@ done
 
 ## Memory DB
 ```bash
-sqlite3 ~/.abtars/memory/memory.db "SELECT 'messages', COUNT(*) FROM messages UNION ALL SELECT 'extracted', COUNT(*) FROM extracted_memories;"
+sqlite3 ~/.abtars/memory/memory.db "SELECT 'messages', COUNT(*) FROM messages UNION ALL SELECT 'durables', COUNT(*) FROM long_term_memories;"
 timeout 3 sqlite3 ~/.abtars/memory/memory.db "SELECT COUNT(*) FROM messages;" && echo "DB OK" || echo "DB LOCKED"
 ```
 

@@ -305,7 +305,6 @@ function buildBridgeEnv(
   env.LOG_FORMAT = "text";
   env.MEMORY = "abmind";
   env.ACTIVE_MEMORY = "false";
-  env.PRIMING_MODEL_TOPICS = "false";
   env.TUI_ENABLED = "true";
   env.TELEGRAM_ENABLED = "false";
   env.DISCORD_ENABLED = "false";

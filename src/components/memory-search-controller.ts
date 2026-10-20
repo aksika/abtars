@@ -26,14 +26,6 @@ export class MemorySearchController {
     this.deps = deps;
   }
 
-  listChats(): { status: number; body: object } {
-    return { status: 501, body: { error: "chat enumeration is not exposed by the bounded memory runtime" } };
-  }
-
-  listAll(): { status: number; body: object } {
-    return { status: 501, body: { error: "memory enumeration is not exposed by the bounded memory runtime" } };
-  }
-
   async handle(params: URLSearchParams): Promise<{ status: number; body: object }> {
     const keywordsRaw = params.get("keywords")?.trim() ?? "";
     if (!keywordsRaw) return { status: 400, body: { error: "keywords required" } };

@@ -35,9 +35,4 @@ describe("MemorySearchController", () => {
     expect(runtime.recall).toHaveBeenCalledWith({ query: "hello world", profile: "recall_normal", text: "hello world", keywords: ["hello", "world"], userId: "alice", limit: 10, timeStart: 1, timeEnd: undefined });
   });
 
-  it("does not pretend unsupported enumeration is available", () => {
-    const { controller } = makeController();
-    expect(controller.listChats().status).toBe(501);
-    expect(controller.listAll().status).toBe(501);
-  });
 });

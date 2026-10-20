@@ -662,7 +662,7 @@ export class AbtarsSignedWssClient implements AbmindClientLike {
 
 // Methods that require an idempotency key on the wire (mirrors abmind's registry).
 const METHOD_IS_MUTATING = new Set([
-  "private.instantStore", "private.edit", "private.reclassify", "private.adjustRelevance",
+  "private.instantStore", "private.edit", "private.reclassify",
   "private.merge", "private.cascadeDelete", "private.rebuildFts", "private.recordMessage",
   "private.dreamQuestions.markAsked",
   "private.dreamQuestions.dismiss", "sleep.start", "sleep.resume", "sleep.cancel",

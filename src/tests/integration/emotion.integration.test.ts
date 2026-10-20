@@ -34,26 +34,4 @@ describe("emotion integration (#829)", () => {
     expect(row.emotion_tags).toBe("pride,excitement");
     expect(row.emotion_score).toBe(4); // pride=4, excitement=4 → max abs = 4
   });
-
-  it("emoji reaction overrides existing emotion_tags", async () => {
-    await h.memory.editor.instantStore({
-      userId: "u1", contentEn: "Interesting observation about design patterns",
-      contentOriginal: "patterns", memoryType: "fact", emotionScore: 0,
-      emotionTags: "curiosity", topic: "coding",
-    });
-
-    // Record a message linked to this memory
-    h.memory.recordMessage({
-      role: "user", content: "Interesting observation about design patterns",
-      timestamp: Date.now(), userId: "u1", sessionId: "sess_1", platformMessageId: 555,
-    });
-
-    // Simulate angry emoji reaction → should override curiosity with anger
-    const updated = h.memory.updateEmotionByPlatformId("u1", 555, -4, "anger");
-    expect(updated).toBe(true);
-
-    const db = memoryDb(h.memory);
-    const msg = db.prepare("SELECT emotion_score FROM messages WHERE platform_message_id = 555").get() as { emotion_score: number };
-    expect(msg.emotion_score).toBe(-4);
-  });
 });

@@ -25,17 +25,10 @@ export type {
 
 export type {
   MessageRecord,
-  MemoryTier,
   SearchResult,
-  VectorSearchResult,
   SearchOptions,
-  ExtractedMemory,
-  MemorySearchParams,
-  MemorySearchResult,
   InstantStoreParams,
   InstantStoreResult,
-  EditMemoryParams,
-  EditMemoryResult,
 } from "abmind";
 
 export type HeartbeatTaskOutcome = {

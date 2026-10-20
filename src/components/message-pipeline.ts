@@ -50,7 +50,6 @@ import { abmind } from "../utils/abmind-lazy.js";
 import type { ResolvedHailMary } from "./transport-config.js";
 
 const TAG = "pipeline";
-const PRIMING_MAX = 8;
 const BOOT_GREETING_TEXT = "[SESSION START] You just came online. Greet the user.";
 
 /** #1515: code-owned, deterministic user-visible suffix prefix for boot
@@ -82,20 +81,6 @@ export async function settleDreamQuestion(
   }
 }
 
-const STOPWORDS = new Set(["the","a","an","is","are","was","were","be","been",
-  "have","has","had","do","does","did","will","would","could","should","can",
-  "may","might","shall","it","its","this","that","what","how","when","where",
-  "who","which","why","about","for","with","from","into","just","also","very",
-  "not","but","and","or","if","so","too","let","lets","dont","you","we",
-  "my","your","our","me","us","them","they","he","she"]);
-
-function extractKeywords(text: string): string[] {
-  return text.toLowerCase()
-    .replace(/[^\p{L}\p{N}\s]/gu, " ")
-    .split(/\s+/)
-    .filter(w => w.length >= 3 && !STOPWORDS.has(w))
-    .slice(0, 3);
-}
 /** Reset by bridge-app on inbound message to re-enable floating compaction. */
 
 /** Shared session reset: reset transport, clear buffer, mark pendingStart. */
@@ -666,7 +651,7 @@ export async function handleInboundMessage(
       reconciledResponse = reconciled;
     }
     const rawResponse = reconciledResponse;
-    const { text: cleanedText, reactionEmoji, noReply, topics } = cleanResponse(rawResponse);
+    const { text: cleanedText, reactionEmoji, noReply } = cleanResponse(rawResponse);
     let userResponse = cleanedText;
     // #1724: a reaction-only turn is a chat control signal, never a
     // deliverable announcement payload — it must not settle as "sent".
@@ -838,14 +823,6 @@ export async function handleInboundMessage(
       } else {
         await adapter.sendMessage(channelId, reactionEmoji, { threadId: msg.threadId });
       }
-    }
-
-    // --- Update priming buffer ---
-    if (getEnv().activeMemory) {
-      const modelTopics = getEnv().primingModelTopics && topics ? topics : [];
-      const regexKw = extractKeywords(text);
-      const existing = pSession.primingTerms ?? [];
-      pSession.primingTerms = [...new Set([...modelTopics, ...regexKw, ...existing])].slice(0, PRIMING_MAX);
     }
 
     // --- Record to memory (skipped for K — skill-isolated; guests and generic
