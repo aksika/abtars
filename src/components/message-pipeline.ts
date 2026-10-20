@@ -49,7 +49,7 @@ import { buildPrompt } from "./pipeline/prompt-builder.js";
 import { getEnv } from "./env-schema.js";
 import { sanitizeOutbound } from "./sanitize-outbound.js";
 import { abmind } from "../utils/abmind-lazy.js";
-import { getSessionControlService } from "./session-control/instance.js";
+
 import type { ResolvedHailMary } from "./transport-config.js";
 
 const TAG = "pipeline";
@@ -776,10 +776,8 @@ export async function handleInboundMessage(
           await settleDreamQuestion(deps, bootQuestion!, userId, operationKey);
         }
       }
-      // #1406: automatic durable compaction also applies to simple delivery.
-      if (assistantDurablyRecorded) {
-        scheduleAutomaticCompaction(deps, userId, activeSessionId, durableContextIntent);
-      }
+      // #1940: Pi owns threshold and overflow compaction; abmind
+      // conversation compaction is retired (R8). No automatic scheduling.
       // #1724: terminal receipt — after all chunks were externally delivered
       // (and the assistant record attempt completed), never for a
       // reaction-only turn.
@@ -911,14 +909,8 @@ export async function handleInboundMessage(
       }
     }
 
-    // --- #1406: automatic durable compaction, scheduled once after the
-    // assistant row is durably recorded. Fire-and-forget: it must never delay
-    // or revoke the already delivered response. Deduplication happens in the
-    // control service and the daemon's generation CAS. No timer or heartbeat
-    // entry is added. ---
-    if (assistantDurablyRecorded) {
-      scheduleAutomaticCompaction(deps, userId, activeSessionId, durableContextIntent);
-    }
+    // #1940: Pi owns threshold and overflow compaction; abmind
+    // conversation compaction is retired (R8). No automatic scheduling.
 
     // #1724: terminal receipt — after all chunks were externally delivered
     // (and the assistant record attempt completed), never for a
@@ -1080,26 +1072,4 @@ export async function submitTrustedInternalMessage(
  * response; failures are logged bounded and content-free. Deduplication lives
  * in the control service and the daemon's generation CAS.
  */
-function scheduleAutomaticCompaction(
-  deps: PipelineDeps,
-  userId: string,
-  sessionId: string,
-  durableContextIntent: { mode: string; beforeMessageId?: number },
-): void {
-  if (deps.memoryRuntime?.state !== "ready") return;
-  if (durableContextIntent?.mode !== "durable") return;
-  if (typeof durableContextIntent.beforeMessageId !== "number") return;
-  const sessionControl = getSessionControlService();
-  if (!sessionControl) return;
-  sessionControl.execute(
-    {
-      kind: "durable_conversation",
-      principalId: userId,
-      sessionId,
-      beforeMessageId: durableContextIntent.beforeMessageId,
-    },
-    { kind: "compact", reason: "automatic" },
-  ).catch(err => logAndSwallow(TAG, "automatic compaction", err));
-}
-
 /** Build session-start prompt with SOUL + context + greeting, send to transport, push response to adapter. */

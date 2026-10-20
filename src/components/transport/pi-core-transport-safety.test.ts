@@ -1,33 +1,15 @@
 /**
  * pi-core-transport-safety.test.ts — #1595: the safety terminal cause leads.
  *
- * With maxPromptRounds 0 the SDK transform's round gate stops the turn; the
- * fake store settles it empty (production behavior) and the transport
- * surfaces the terminal diagnostic instead of prior assistant text.
+ * With maxPromptRounds 0 the safety controller stops the turn; the session
+ * settles empty and the transport surfaces the terminal diagnostic instead
+ * of a successful empty answer.
  */
-import { describe, expect, it, vi, beforeEach } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
-  FakeSdkAgent,
-  FakeSdkConversationStore,
-} from "../../test-support/fake-sdk-conversation.js";
+  makeAgentSessionHarness,
+} from "../../test-support/fake-agent-session.js";
 
-vi.mock("./pi-sdk-conversation.js", () => ({ PiSdkConversationStore: FakeSdkConversationStore }));
-vi.mock("./pi-core-types.js", async (importOriginal) => {
-  const actual = await importOriginal<typeof import("./pi-core-types.js")>();
-  return {
-    ...actual,
-    loadAndValidatePiAgentCore: vi.fn().mockResolvedValue({
-      module: { Agent: FakeSdkAgent },
-      installation: { executable: "/usr/bin/pi", packageRoot: "/usr/lib/pi", version: "0.85.1", source: "path", pinStatus: "at-pin", moduleRoots: { ai: "", tui: "", agentCore: "" } },
-    }),
-  };
-});
-vi.mock("./pi-stream-fn.js", () => ({
-  createPiStreamFn: vi.fn(),
-}));
-
-// #1573: initialize() gates readiness on the runtime contract probe; unrelated
-// safety tests receive a successful probe.
 vi.mock("./pi-runtime-contract.js", () => ({
   validatePiRuntimeContract: vi.fn(async () => {}),
 }));
@@ -35,7 +17,7 @@ vi.mock("./pi-runtime-contract.js", () => ({
 import { PiCoreTransport } from "./pi-core-transport.js";
 import type { ModelCandidate } from "./model-candidates.js";
 
-function makeTransport(): PiCoreTransport {
+function makeTransport(harness: ReturnType<typeof makeAgentSessionHarness>): PiCoreTransport {
   const candidate: ModelCandidate = {
     model: "test-model",
     provider: "test-provider",
@@ -47,29 +29,29 @@ function makeTransport(): PiCoreTransport {
   return new PiCoreTransport({
     role: "main",
     systemPrompt: "system",
-    candidate: candidate,
+    candidate,
     sandboxPolicy: { allowedTools: ["*"], allowedRead: ["*"], allowedWrite: ["*"], canExecuteBash: true },
+    sessionFactoryLoader: harness.loader,
     maxPromptRounds: 0,
   });
 }
 
 describe("PiCoreTransport terminal safety precedence (#1595)", () => {
-  beforeEach(() => {
-    FakeSdkConversationStore.resetAll();
-  });
-
-  it("reports the safety terminal cause instead of returning prior assistant text", async () => {
-    const transport = makeTransport();
+  it("reports the safety terminal cause instead of returning assistant text", async () => {
+    const harness = makeAgentSessionHarness();
+    const transport = makeTransport(harness);
     await transport.initialize();
-    // The transform stops at the round bound and records the incident; the
-    // fake settles the turn empty and the tail leads with the terminal cause.
-    FakeSdkConversationStore.queueTurn("session", { text: "partial tool call" });
 
-    await expect(transport.sendPrompt("session", "continue")).rejects.toMatchObject({
+    // maxPromptRounds 0 trips the round bound before any provider work;
+    // the turn fails closed with the terminal diagnostic even though Pi
+    // would have delivered text.
+    const err = await transport.sendPrompt("session", "continue").catch((e: unknown) => e);
+    expect(err).toMatchObject({
       diagnostic: expect.objectContaining({
         reason: "prompt_round_limit",
         safety_incident: "prompt_round_limit",
       }),
     });
+    expect((transport as unknown as { activeSlot: unknown }).activeSlot).toBeNull();
   });
 });

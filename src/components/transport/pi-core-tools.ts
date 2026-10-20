@@ -15,7 +15,7 @@ import type { ToolExecutionScope } from "../tasks/task-package.js";
 
 const TAG = "pi-core-tools";
 
-function limitPiCoreToolResult(toolName: string, result: string): string {
+export function limitPiCoreToolResult(toolName: string, result: string): string {
   if (result.length <= PI_CORE_TOOL_RESULT_MAX_CHARS) return result;
   logWarn(
     TAG,

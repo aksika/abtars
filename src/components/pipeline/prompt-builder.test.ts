@@ -214,7 +214,7 @@ describe("buildPrompt durable-context classification (#1529)", () => {
     expect(result.durableContextIntent).toEqual({ mode: "required_unavailable", reason: "record_failed" });
   });
 
-  it("retries a pending terminal write first and proceeds on durable confirmation (#1932)", async () => {
+  it("retries a pending terminal write first and proceeds on durable confirmation (ACP #1932)", async () => {
     const { PiArchiveOutbox } = await import("../pi-session/pi-archive-outbox.js");
     const outbox = new PiArchiveOutbox();
     outbox.note({
@@ -233,7 +233,7 @@ describe("buildPrompt durable-context classification (#1529)", () => {
     const result = await buildPrompt(
       { userId: "master", channelId: "1", platform: "telegram", isGroup: false, messageId: "m5" } as never,
       "hello",
-      { ...(baseDeps(readyRuntime(recordMessage)) as unknown as Record<string, unknown>), archiveOutbox: outbox } as never,
+      { ...(baseDeps(readyRuntime(recordMessage)) as unknown as Record<string, unknown>), archiveOutbox: outbox, isAcp: true } as never,
       masterRegistry(),
     );
     expect(result.durableContextIntent).toEqual({ mode: "durable", beforeMessageId: 42 });
@@ -241,7 +241,7 @@ describe("buildPrompt durable-context classification (#1529)", () => {
     expect(outbox.has("master_A_1")).toBe(false);
   });
 
-  it("fails closed without recording inbound when the pending terminal retry fails (#1932)", async () => {
+  it("fails closed without recording inbound when the pending terminal retry fails (ACP #1932)", async () => {
     const { PiArchiveOutbox } = await import("../pi-session/pi-archive-outbox.js");
     const outbox = new PiArchiveOutbox();
     outbox.note({
@@ -260,7 +260,7 @@ describe("buildPrompt durable-context classification (#1529)", () => {
     const result = await buildPrompt(
       { userId: "master", channelId: "1", platform: "telegram", isGroup: false, messageId: "m6" } as never,
       "hello",
-      { ...(baseDeps(readyRuntime(recordMessage)) as unknown as Record<string, unknown>), archiveOutbox: outbox } as never,
+      { ...(baseDeps(readyRuntime(recordMessage)) as unknown as Record<string, unknown>), archiveOutbox: outbox, isAcp: true } as never,
       masterRegistry(),
     );
     expect(result.durableContextIntent).toEqual({ mode: "required_unavailable", reason: "record_failed" });
@@ -396,14 +396,14 @@ describe("#1869 — session-start owns profile/notes/coreFacts via parts", () =>
     return haystack.split(needle).length - 1;
   }
 
-  it("injects profile/notes/coreFacts exactly once each, never soul/memoryTools", async () => {
+  it("injects profile/notes/coreFacts exactly once each, never soul/memoryTools (ACP)", async () => {
     const result = await buildPrompt(
       sessionMsg(),
       "hello",
-      baseDeps(partsRuntime({
+      { ...(baseDeps(partsRuntime({
         coreKnowledge: "LEGACY-1869", recall: "RECALL-1869", wakeUp: "WAKE-1869",
         soulBundle: PARTS, parts: PARTS,
-      })),
+      })) as unknown as Record<string, unknown>), isAcp: true } as never,
       masterRegistry(),
     );
     const prompt = result.prompt;
@@ -420,27 +420,46 @@ describe("#1869 — session-start owns profile/notes/coreFacts via parts", () =>
     expect(idx("RECALL-1869")).toBeLessThan(idx("WAKE-1869"));
   });
 
-  it("falls back to the legacy joined field when parts are absent (old daemon)", async () => {
+  it("falls back to the legacy joined field when parts are absent (old daemon, ACP)", async () => {
     const result = await buildPrompt(
       sessionMsg(),
       "hello",
-      baseDeps(partsRuntime({ coreKnowledge: "LEGACY-1869", recall: "", wakeUp: "" })),
+      { ...(baseDeps(partsRuntime({ coreKnowledge: "LEGACY-1869", recall: "", wakeUp: "" })) as unknown as Record<string, unknown>), isAcp: true } as never,
       masterRegistry(),
     );
     expect(result.prompt).toContain("LEGACY-1869");
   });
 
-  it("falls back to legacy when parts are malformed, never a partial bundle", async () => {
+  it("falls back to legacy when parts are malformed, never a partial bundle (ACP)", async () => {
+    const result = await buildPrompt(
+      sessionMsg(),
+      "hello",
+      { ...(baseDeps(partsRuntime({
+        coreKnowledge: "LEGACY-1869", recall: "", wakeUp: "",
+        parts: { soul: 1, profile: null, notes: "x", memoryTools: "y", coreFacts: "z" },
+      })) as unknown as Record<string, unknown>), isAcp: true } as never,
+      masterRegistry(),
+    );
+    expect(result.prompt).toContain("LEGACY-1869");
+  });
+
+  it("#1940: on the Pi route session-start carries hydration only, never the SOUL core", async () => {
     const result = await buildPrompt(
       sessionMsg(),
       "hello",
       baseDeps(partsRuntime({
-        coreKnowledge: "LEGACY-1869", recall: "", wakeUp: "",
-        parts: { soul: 1, profile: null, notes: "x", memoryTools: "y", coreFacts: "z" },
+        coreKnowledge: "LEGACY-1869", recall: "RECALL-1869", wakeUp: "WAKE-1869",
+        soulBundle: PARTS, parts: PARTS,
       })),
       masterRegistry(),
     );
-    expect(result.prompt).toContain("LEGACY-1869");
+    const prompt = result.prompt;
+    for (const marker of ["RECALL-1869", "WAKE-1869"]) {
+      expect(prompt).toContain(marker);
+    }
+    for (const marker of ["PROFILE-1869", "NOTES-1869", "FACTS-1869", "SOUL-1869", "TOOLS-1869", "LEGACY-1869"]) {
+      expect(prompt).not.toContain(marker);
+    }
   });
 });
 
@@ -474,13 +493,17 @@ describe("#1869 — post-compaction core rehydration is core-only", () => {
 
   const msg = () => ({ userId: "master", channelId: "1", platform: "telegram", isGroup: false, messageId: "rehy-1" } as never);
 
-  it("re-injects the core parts without the history hydration that compaction just reduced", async () => {
+  it("re-injects the core parts without the history hydration that compaction just reduced (ACP)", async () => {
     const { runtime, assemble } = runtimeFor({
       coreKnowledge: "", recall: "RECALL-REHY", wakeUp: "WAKE-REHY",
       soulBundle: PARTS, parts: PARTS,
     });
     const session = rehydrateSession();
-    const result = await buildPrompt(msg(), "hello", baseDeps(runtime), masterRegistry(), session);
+    const result = await buildPrompt(
+      msg(), "hello",
+      { ...(baseDeps(runtime) as unknown as Record<string, unknown>), isAcp: true } as never,
+      masterRegistry(), session,
+    );
 
     expect(result.isSessionStart).toBe(false);
     for (const marker of ["PROFILE-REHY", "NOTES-REHY", "FACTS-REHY"]) {
@@ -501,9 +524,27 @@ describe("#1869 — post-compaction core rehydration is core-only", () => {
 
   it("is a no-op against an older daemon, whose system prompt still carries the parts", async () => {
     const { runtime } = runtimeFor({ coreKnowledge: "LEGACY-REHY", recall: "", wakeUp: "" });
-    const result = await buildPrompt(msg(), "hello", baseDeps(runtime), masterRegistry(), rehydrateSession());
+    const result = await buildPrompt(
+      msg(), "hello",
+      { ...(baseDeps(runtime) as unknown as Record<string, unknown>), isAcp: true } as never,
+      masterRegistry(), rehydrateSession(),
+    );
     // Re-injecting here would duplicate what the legacy system prompt holds.
     expect(result.prompt).not.toContain("LEGACY-REHY");
+  });
+
+  it("#1940: on the Pi route there is no post-compaction rehydration — Pi owns compaction", async () => {
+    const { runtime, assemble } = runtimeFor({
+      coreKnowledge: "", recall: "RECALL-REHY", wakeUp: "WAKE-REHY",
+      soulBundle: PARTS, parts: PARTS,
+    });
+    const session = rehydrateSession();
+    const result = await buildPrompt(msg(), "hello", baseDeps(runtime), masterRegistry(), session);
+    expect(result.isSessionStart).toBe(false);
+    expect(result.prompt).not.toContain("PROFILE-REHY");
+    expect(result.prompt).not.toContain("FACTS-REHY");
+    expect(assemble).not.toHaveBeenCalled();
+    expect((session as unknown as { pendingCoreRehydrate: boolean }).pendingCoreRehydrate).toBe(false);
   });
 
   it("does not fire on an ordinary turn", async () => {

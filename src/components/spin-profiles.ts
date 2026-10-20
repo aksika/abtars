@@ -39,6 +39,12 @@ export interface SessionProfile {
 // ── Reusable decorators ────────────────────────────────────────────────
 
 const soulBundle: PromptDecorator = async (prompt, { session }) => {
+  // #1940: on the Pi AgentSession route the role SOUL bundle is the session
+  // system prompt (captured once at session creation, surviving Pi
+  // compaction). Re-injecting it per turn would duplicate it into history
+  // and compaction input. Other routes (ACP) keep the decorator.
+  const transport = (session as { transport?: { piAgentSessionRoute?: boolean } }).transport;
+  if (transport?.piAgentSessionRoute === true) return prompt;
   const { buildSoulBundle } = await import("./soul-bundle.js");
   const bundle = buildSoulBundle(sessionType(session));
   return bundle ? `${bundle}\n\n---\n\n${prompt}` : prompt;

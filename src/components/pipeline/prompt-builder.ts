@@ -133,7 +133,12 @@ export async function buildPrompt(
   // which would partly undo the compaction that just ran.
   const isCoreRehydrate = !isSessionStart && entry?.pendingCoreRehydrate === true;
   logDebug(TAG, `session-state: key=${sessionKey} seen=${entry?.seen} pendingStart=${entry?.pendingStart} isSessionStart=${isSessionStart} coreRehydrate=${isCoreRehydrate} memoryMode=${memoryMode}`);
-  if (isCoreRehydrate && memoryRuntime?.state === "ready" && memoryMode !== "skill-isolated") {
+  // #1940: on the Pi route the role SOUL bundle is the AgentSession system
+  // prompt (captured once at session creation, surviving Pi compaction), so
+  // per-turn text must not repeat it. The ACP route (isAcp) keeps the
+  // session-start bundle behavior unchanged.
+  const omitSoulForPiRoute = !deps.isAcp;
+  if (isCoreRehydrate && memoryRuntime?.state === "ready" && memoryMode !== "skill-isolated" && !omitSoulForPiRoute) {
     try {
       // includeHistory: false — abmind does not even build the hydration
       // block, so core-only is structural rather than a filter we could
@@ -169,9 +174,14 @@ export async function buildPrompt(
       // Older daemons omit parts: fall back to the legacy joined field, which
       // still yields a working full bundle.
       const parts = asSessionSoulBundle(sessionCtx.parts);
-      const coreBlocks = parts !== undefined
-        ? [parts.profile, parts.notes, parts.coreFacts]
-        : [sessionCtx.coreKnowledge];
+      // #1940: on the Pi route the SOUL core blocks live in the session
+      // system prompt — session-start carries only hydration (recall +
+      // wake-up). The ACP route keeps the full bundle.
+      const coreBlocks = omitSoulForPiRoute
+        ? []
+        : (parts !== undefined
+          ? [parts.profile, parts.notes, parts.coreFacts]
+          : [sessionCtx.coreKnowledge]);
       const sessionParts = [...coreBlocks, sessionCtx.recall, sessionCtx.wakeUp].filter(Boolean);
       if (sessionParts.length > 0) volatileContext.push({ kind: "session_start", content: sessionParts.join("\n\n") });
       logDebug(TAG, `session-assembly: key=${sessionKey} outcome=${sessionParts.length > 0 ? "ok" : "empty"} parts=${parts !== undefined ? "parts" : "legacy"} coreChars=${parts !== undefined ? coreBlocks.join("").length : sessionCtx.coreKnowledge.length} recallChars=${sessionCtx.recall.length} wakeChars=${sessionCtx.wakeUp.length}`);
@@ -205,18 +215,16 @@ export async function buildPrompt(
   if (durableRequired && memoryRuntime?.state !== "ready") {
     durableContextIntent = { mode: "required_unavailable", reason: "runtime_unavailable" };
   } else if (durableRequired) {
-    // #1932: a previous turn's required terminal write may still be
-    // unacknowledged (delivered but its archive row never confirmed). Retry
-    // it first under the original operation key — the server keeps the
-    // first row, so a lost acknowledgement retries safely. If the retry
-    // fails, fail the turn closed instead of silently crossing the known
-    // archive gap. Turns that never consume durable history (guest,
-    // skill-isolated, session-start) bypass: they cross no gap.
-    const outbox = deps.archiveOutbox ?? sharedArchiveOutbox;
-    if (outbox.has(sessionKey)) {
-      const flushed = await outbox.flush(sessionKey, (input, key) => memoryRuntime!.recordMessage(input, key));
-      if (!flushed) {
-        durableContextIntent = { mode: "required_unavailable", reason: "record_failed" };
+    // #1940: no archive outbox or retry subsystem on the Pi route — after
+    // boot, memory operations report their own failures. The ACP route
+    // keeps the outbox flush.
+    if (!omitSoulForPiRoute) {
+      const outbox = deps.archiveOutbox ?? sharedArchiveOutbox;
+      if (outbox.has(sessionKey)) {
+        const flushed = await outbox.flush(sessionKey, (input, key) => memoryRuntime!.recordMessage(input, key));
+        if (!flushed) {
+          durableContextIntent = { mode: "required_unavailable", reason: "record_failed" };
+        }
       }
     }
   }

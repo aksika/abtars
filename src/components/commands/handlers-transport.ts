@@ -56,28 +56,25 @@ export async function handleCompact(text: string, ctx: CommandContext): Promise<
       await ctx.reply("Compaction not available for this session.");
       return true;
     }
-    // #1406: exact durable target through the backend-neutral control plane.
-    const { getSessionControlService } = await import("../session-control/instance.js");
-    const service = getSessionControlService();
-    if (!service) {
-      await ctx.reply("Compaction is unavailable (control service not initialized).");
-      return true;
-    }
     const instructions = text.replace(/^\/compact\b/i, "").trim();
     if (Buffer.byteLength(instructions, "utf-8") > MAX_COMPACT_INSTRUCTIONS_BYTES) {
       await ctx.reply(`Custom instructions exceed ${MAX_COMPACT_INSTRUCTIONS_BYTES} bytes.`);
       return true;
     }
-    const result = await service.execute(
-      { kind: "durable_conversation", principalId: ctx.userId, sessionId: ctx.sessionKey },
-      { kind: "compact", reason: "manual", customInstructions: instructions || undefined },
-    );
-    // #1619: a completed durable compaction invalidates the attached
-    // transport's measured context usage so stale fill is never shown again.
-    if (result.status === "completed") {
-      resolveAttachedTransport(ctx).invalidateContextUsage?.();
+    // #1940: /compact compacts the Pi session (SOUL survives: it is the
+    // session system prompt, not history).
+    const attached = resolveAttachedTransport(ctx) as unknown as {
+      compactSession?: (sessionKey: string, customInstructions?: string) => Promise<unknown>;
+      invalidateContextUsage?: () => void;
+    };
+    if (attached && typeof attached.compactSession === "function") {
+      await attached.compactSession(ctx.sessionKey, instructions || undefined);
+      attached.invalidateContextUsage?.();
+      await ctx.reply("Compaction complete.");
+      return true;
     }
-    await ctx.reply(formatCompactReply(result));
+    // Non-Pi routes: ACP session compaction is not maintained (#1940 R8).
+    await ctx.reply("Compaction is not supported for this session.");
   } catch (err) {
     logError(TAG, "Manual compaction failed", err);
     await ctx.reply("Compaction failed.");
@@ -319,7 +316,12 @@ export async function handleModels(text: string, ctx: CommandContext): Promise<b
       await ctx.reply(`❌ Cannot switch: ${result.issues.map(i => i.reason).join("; ")}`);
       return true;
     }
-    if ("setModel" in ctx.transport) {
+    // #1940: /model keeps the conversation — apply to the attached
+    // session's own transport (Pi setModel switches without dispose).
+    const attached = resolveAttachedTransport(ctx) as unknown as { setModel?: (m: string) => Promise<void> };
+    if (attached && typeof attached.setModel === "function") {
+      await attached.setModel(newModel);
+    } else if ("setModel" in ctx.transport) {
       await (ctx.transport as unknown as { setModel: (m: string) => Promise<void> }).setModel(newModel);
     }
     await ctx.reply(`✓ Switched to ${newModel}`);

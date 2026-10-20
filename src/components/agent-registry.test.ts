@@ -117,27 +117,19 @@ describe("createSubagentTransport #1527", () => {
     expect(transport.isReady).toBe(true);
   });
 
-  it("passes the late-bound provider holder into the constructed transport", async () => {
+  it("accepts the retired late-bound provider holder option (ignored, #1940)", async () => {
     const holder: DurableContextProviderHolder = { current: null };
     const { transport } = await createSubagentTransport("task", holder);
     expect(transport).toBeInstanceOf(PiCoreTransport);
-    const stored = (transport as unknown as { _contextProvider: typeof holder })._contextProvider;
-    expect(stored).toBe(holder);
-
-    // Late binding must reach the transport after construction. The provider
-    // is never invoked here — only its identity propagates — so it rejects
-    // loudly if anything ever calls it.
-    const provider: NonNullable<DurableContextProviderHolder["current"]> = {
-      projectContext: () => Promise.reject(new Error("holder fake never serves")),
-    };
-    holder.current = provider;
-    expect(stored.current).toBe(provider);
+    // The Pi route no longer reads durable context per turn; the option is
+    // accepted for boot-composition compatibility and ignored.
+    expect((transport as unknown as { piAgentSessionRoute: boolean }).piAgentSessionRoute).toBe(true);
   });
 
-  it("defaults to an empty holder when none is composed", async () => {
+  it("constructs without a composed provider (fail-closed baseline)", async () => {
     const { transport } = await createSubagentTransport("task");
-    const stored = (transport as unknown as { _contextProvider: { current: unknown } })._contextProvider;
-    expect(stored.current).toBeNull();
+    expect(transport).toBeInstanceOf(PiCoreTransport);
+    expect(transport.isReady).toBe(true);
   });
 });
 

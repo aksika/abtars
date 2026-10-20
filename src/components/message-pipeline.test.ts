@@ -1240,7 +1240,9 @@ describe("session-start hydration lifecycle (#1776)", () => {
       // Ordering probe: the assembly must observe the session unseen —
       // the pipeline must not have marked seen before prompt construction.
       seenDuringAssembly = session.seen;
-      return { coreKnowledge: "HYDRATION-PROBE-1776", recall: "", wakeUp: "" };
+      // #1940: hydration (recall) reaches the first turn via the pipeline;
+      // the SOUL core lives in the Pi session system prompt instead.
+      return { coreKnowledge: "CORE-NOT-IN-TURN-1776", recall: "HYDRATION-PROBE-1776", wakeUp: "" };
     });
     const adapter = mockAdapter();
     const deps = mockDeps(transport, {
