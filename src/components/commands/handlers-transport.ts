@@ -1,9 +1,7 @@
 import { logInfo, logError } from "../logger.js";
-import { logAndSwallow } from "../log-and-swallow.js";
 import type { CommandContext } from "./types.js";
 import { triggerResetSession} from "./registry.js";
 import { MAX_COMPACT_INSTRUCTIONS_BYTES } from "../session-control/types.js";
-import { modelHealthProbeBody } from "../transport/model-health-probe.js";
 
 const TAG = "cmd";
 
@@ -123,10 +121,9 @@ export async function handleModels(text: string, ctx: CommandContext): Promise<b
   const arg = text.replace(/^\/(models?)\s*/i, "").trim().toLowerCase();
 
   // #1875: hot-reload Pi model data on every /model(s) entry so the picker
-  // menu and the dispatch gates agree on the current catalog (covers /change,
-  // /model change, /models quick, the Discord-routed /model switch, and
-  // /model doctor's stale-ID validation below). Best-effort and bounded — a
-  // failed refresh keeps the previous snapshot and never blocks the command.
+  // menu and the dispatch gates agree on the current catalog. Best-effort
+  // and bounded — a failed refresh keeps the previous snapshot and never
+  // blocks the command.
   {
     const { refreshPiCatalog } = await import("../transport/pi-catalog.js");
     const { refreshPiRuntime } = await import("../transport/pi-runtime.js");
@@ -174,105 +171,12 @@ export async function handleModels(text: string, ctx: CommandContext): Promise<b
     return true;
   }
 
-  // /model doctor — probe all models under current transport
+  // /model doctor — retired with the HTTP model-health probes
+  // (#1940: Pi owns retry and availability; no endpoint probes, no
+  // models.json writes). The command shape stays so existing muscle memory
+  // lands on a truthful reply instead of an unknown-subcommand fallthrough.
   if (arg === "doctor") {
-    if (!prof) { await ctx.reply("❌ No transport configured."); return true; }
-    // #1757: Pi-managed providers own their endpoint and auth — a raw HTTP
-    // probe cannot observe them. Report Pi's live auth state per model
-    // (presence-only) instead.
-    if (prof.provider.authSource === "pi") {
-      const { checkPiManagedAuth, isPiManagedModelKnown } = await import("../transport/pi-runtime.js");
-      const readiness = await checkPiManagedAuth(prof.providerName);
-      await ctx.reply(`🩺 Checking Pi-managed provider ${prof.providerName}...`);
-      const results: string[] = [];
-      const { loadModels } = await import("../transport-config.js");
-      const catalog = loadModels();
-      const models = new Set<string>();
-      const ra = tc ? (await import("../transport-config.js")).routeAssignments(tc) : null;
-      if (ra) {
-        for (const [, agent] of Object.entries(ra.agents)) {
-          if (agent.provider === prof.providerName) models.add(agent.model);
-        }
-        for (const fb of ra.fallbacks ?? []) {
-          if (fb.provider === prof.providerName) models.add(fb.model);
-        }
-      }
-      if (tc!.hailMary?.provider === prof.providerName) models.add(tc!.hailMary.model);
-      for (const model of models) {
-        const known = await isPiManagedModelKnown(prof.providerName, model);
-        if (readiness.ok && known) {
-          results.push(`✓ ${model} — alive (Pi auth ${readiness.state})`);
-          if (catalog[model]) catalog[model]!.status = "alive";
-        } else if (!known) {
-          results.push(`❌ ${model} — unknown to Pi provider ${prof.providerName}`);
-          if (catalog[model]) catalog[model]!.status = "dead" as any;
-        } else {
-          results.push(`❌ ${model} — ${readiness.detail}`);
-          if (catalog[model]) catalog[model]!.status = "dead" as any;
-        }
-        if (catalog[model]) (catalog[model] as any).lastChecked = new Date().toISOString();
-      }
-      const { writeFileSync } = await import("node:fs");
-      const { join } = await import("node:path");
-      const { configDir } = await import("../transport-config.js");
-      writeFileSync(join(configDir(), "models.json"), JSON.stringify(catalog, null, 2) + "\n");
-      await ctx.reply(`🩺 Model Health:\n${results.join("\n")}`);
-      return true;
-    }
-    const endpoint = prof.provider.endpoint ?? "http://localhost:11434/v1";
-    const apiKey = prof.provider.apiKeyEnv ? (await import("../env-schema.js")).getEnv().getApiKey(prof.provider.apiKeyEnv) : undefined;
-
-    // Collect all models under this provider from the active route block + hailMary
-    const models = new Set<string>();
-    const ra = tc ? (await import("../transport-config.js")).routeAssignments(tc) : null;
-    if (ra) {
-      for (const [, agent] of Object.entries(ra.agents)) {
-        if (agent.provider === prof.providerName) models.add(agent.model);
-      }
-      for (const fb of ra.fallbacks ?? []) {
-        if (fb.provider === prof.providerName) models.add(fb.model);
-      }
-    }
-    if (tc!.hailMary?.provider === prof.providerName) models.add(tc!.hailMary.model);
-
-    await ctx.reply(`🩺 Checking ${models.size} models on ${prof.providerName}...`);
-    const results: string[] = [];
-    const { loadModels } = await import("../transport-config.js");
-    const catalog = loadModels();
-
-    for (const model of models) {
-      try {
-        const res = await fetch(`${endpoint}/chat/completions`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json", ...(apiKey ? { Authorization: `Bearer ${apiKey}` } : {}) },
-          body: JSON.stringify(modelHealthProbeBody(model)),
-          signal: AbortSignal.timeout(10_000),
-        });
-        if (res.ok) {
-          results.push(`✓ ${model} — alive`);
-          if (catalog[model]) catalog[model]!.status = "alive";
-        } else {
-          const body = await res.text().catch(err => { logAndSwallow(TAG, "read model probe error body", err); return ""; });
-          const short = body.slice(0, 80).replace(/\n/g, " ");
-          const status = res.status === 404 ? "dead" : res.status === 403 ? "subscription" : res.status === 429 ? "rate_limited" : "error";
-          results.push(`❌ ${model} — ${status} (${res.status}: ${short})`);
-          if (catalog[model]) { catalog[model]!.status = status as any; (catalog[model] as any).error = `${res.status}: ${short}`; }
-        }
-      } catch (err) {
-        const msg = err instanceof Error ? err.message : String(err);
-        results.push(`⚠️ ${model} — timeout/error (${msg.slice(0, 60)})`);
-        if (catalog[model]) { catalog[model]!.status = "dead" as any; (catalog[model] as any).error = msg.slice(0, 80); }
-      }
-      if (catalog[model]) (catalog[model] as any).lastChecked = new Date().toISOString();
-    }
-
-    // Write updated catalog
-    const { writeFileSync } = await import("node:fs");
-    const { join } = await import("node:path");
-    const { configDir } = await import("../transport-config.js");
-    writeFileSync(join(configDir(), "models.json"), JSON.stringify(catalog, null, 2) + "\n");
-
-    await ctx.reply(`🩺 Model Health:\n${results.join("\n")}`);
+    await ctx.reply("Model health probes are retired — Pi owns retry and availability, so there is nothing to probe.");
     return true;
   }
 
@@ -439,7 +343,7 @@ export async function handleModels(text: string, ctx: CommandContext): Promise<b
   for (const a of agents) {
     const r = tc ? resolveAgent(a, tc) : null;
     // #1757: Pi-managed entries are distinguished from abtars-key and keyless
-    // entries; live auth state is reported by /model doctor (async gate).
+    // entries; Pi owns retry and availability (no health probes).
     const piManaged = r?.provider.authSource === "pi" ? ", Pi-managed" : "";
     let line = `  ${names[a]}: ${r?.model ?? "unknown"} (${r?.providerName ?? "?"}, ${r?.provider.transport ?? "?"}${piManaged})`;
     if (a === "main") {

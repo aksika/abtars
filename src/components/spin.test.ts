@@ -355,6 +355,54 @@ describe("Spin — unified session router (#943)", () => {
       const result = spin.killSession("aksika", "telegram", 999);
       expect(result).toContain("not found on telegram");
     });
+
+    it("killing one session keeps a shared runtime transport alive for the survivor (#1940 leftover)", () => {
+      const shared = mockTransport();
+      const releaseA = vi.fn();
+      const releaseB = vi.fn();
+      const a = spin.getActiveSession("aksika", "telegram");
+      const bResult = spin.createSubSession("aksika", "telegram", "W");
+      expect(typeof bResult).not.toBe("string");
+      const b = bResult as import("./spin-types.js").ManagedSession;
+      for (const s of [a, b]) {
+        s.transport = shared;
+        s.transportOwner = "runtime";
+      }
+      a.releaseTransport = releaseA as unknown as typeof a.releaseTransport;
+      b.releaseTransport = releaseB as unknown as typeof b.releaseTransport;
+
+      const killed = spin.killSession("aksika", "telegram", b.shortIndex);
+      expect(typeof killed).not.toBe("string");
+      expect((killed as import("./spin-types.js").ManagedSession).transport).toBeUndefined();
+      expect(releaseB).not.toHaveBeenCalled();
+      expect(releaseA).not.toHaveBeenCalled();
+      expect(a.transport).toBe(shared);
+      expect(a.status).not.toBe("ended");
+    });
+
+    it("killing a Pi-route session disposes only its Pi session, never the shared transport (#1940 leftover)", () => {
+      const shared = mockTransport() as unknown as IKiroTransport & { piAgentSessionRoute: boolean };
+      (shared as { piAgentSessionRoute: boolean }).piAgentSessionRoute = true;
+      const releaseA = vi.fn();
+      const releaseB = vi.fn();
+      const a = spin.getActiveSession("aksika", "telegram");
+      const bResult = spin.createSubSession("aksika", "telegram", "W");
+      expect(typeof bResult).not.toBe("string");
+      const b = bResult as import("./spin-types.js").ManagedSession;
+      for (const s of [a, b]) {
+        s.transport = shared;
+        s.transportOwner = "runtime";
+      }
+      a.releaseTransport = releaseA as unknown as typeof a.releaseTransport;
+      b.releaseTransport = releaseB as unknown as typeof b.releaseTransport;
+
+      const killed = spin.killSession("aksika", "telegram", b.shortIndex);
+      expect(typeof killed).not.toBe("string");
+      expect(shared.resetSession).toHaveBeenCalledWith(b.id);
+      expect((shared as unknown as { destroy: unknown }).destroy).not.toHaveBeenCalled();
+      expect(releaseB).not.toHaveBeenCalled();
+      expect(a.transport).toBe(shared);
+    });
   });
 
   describe("interruptSession (#1534)", () => {

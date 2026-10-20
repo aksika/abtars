@@ -6,7 +6,6 @@ import { createUserSessionExpiryTask } from "../components/heartbeat-tasks.js";
 import { createHousekeepingTask } from "../components/heartbeat-housekeeping.js";
 import { logInfo, logWarn } from "../components/logger.js";
 import { abtarsHome } from "../paths.js";
-import { runModelHealthCheck } from "./heartbeat-model-health.js";
 import type { BootCtx } from "./context.js";
 
 const TAG = "heartbeat";
@@ -384,8 +383,4 @@ export async function registerTier3Tasks(ctx: BootCtx): Promise<void> {
       ).catch(err => logAndSwallow(TAG, "sendNotification update-check", err));
     },
   }));
-
-  queueMicrotask(() => {
-    runModelHealthCheck(ctx).catch(err => logAndSwallow(TAG, "runModelHealth boot", err));
-  });
 }
