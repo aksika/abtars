@@ -4,10 +4,12 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 const mockSendPrompt = vi.fn();
 const mockDestroy = vi.fn();
 const mockResetSession = vi.fn();
+const mockSetSystemPrompt = vi.fn();
 const mockTransport = {
   sendPrompt: mockSendPrompt,
   destroy: mockDestroy,
   resetSession: mockResetSession,
+  setSystemPrompt: mockSetSystemPrompt,
   isReady: true,
   contextPercent: -1,
   initialize: vi.fn(),
@@ -144,7 +146,7 @@ describe("SubagentRuntime", () => {
 
     try {
       await runtime.spawn("browsie", "slow", { onComplete });
-      for (let i = 0; i < 10 && !mockSendPrompt.mock.calls.length; i++) await Promise.resolve();
+      for (let i = 0; i < 50 && !mockSendPrompt.mock.calls.length; i++) await Promise.resolve();
       expect(mockSendPrompt).toHaveBeenCalled();
 
       await vi.advanceTimersByTimeAsync(10 * 60_000 + 1);
@@ -185,6 +187,54 @@ describe("SubagentRuntime", () => {
   });
 });
 
+describe("SubagentRuntime role SOUL system prompt (#1940)", () => {
+  /** Fresh transport per call so a background spawn from another test can
+   *  never contribute calls to this test's assertion. */
+  async function transportWith(ownSetSystemPrompt: ReturnType<typeof vi.fn>): Promise<void> {
+    const { createSubagentTransport } = await import("./agent-registry.js");
+    // Test double: only the surface this case exercises (the factory mock
+    // replaces the real transport construction).
+    vi.mocked(createSubagentTransport).mockResolvedValueOnce({
+      transport: { ...mockTransport, setSystemPrompt: ownSetSystemPrompt } as unknown as import("./transport/kiro-transport.js").IKiroTransport,
+      model: "test-model",
+    });
+  }
+
+  it("uses the session type, not the agent name, for shared agents (Orc O, task T)", async () => {
+    const orcSet = vi.fn();
+    await transportWith(orcSet);
+    const runtime = new SubagentRuntime();
+    await runtime.session("browsie", "proj", { sessionType: "O" });
+    const orcBundle = orcSet.mock.calls.at(-1)?.[0] as string;
+    expect(orcBundle).toBeDefined();
+    // Browsie's agent-default bundle is B; Orc must not receive it.
+    expect(orcBundle).not.toContain("I am a browse agent");
+
+    const taskSet = vi.fn();
+    await transportWith(taskSet);
+    const second = new SubagentRuntime();
+    mockSendPrompt.mockResolvedValueOnce("ok");
+    await second.complete("professor", "task", { sessionType: "T" });
+    const taskBundle = taskSet.mock.calls.at(-1)?.[0] as string;
+    expect(taskBundle).toContain("I am a task agent");
+  });
+
+  it("does not install a bundle for types whose profile owns none (S, D)", async () => {
+    const skillSet = vi.fn();
+    await transportWith(skillSet);
+    const runtime = new SubagentRuntime();
+    await runtime.session("coding", "skill", { sessionType: "S" });
+    expect(skillSet).not.toHaveBeenCalled();
+
+    const sleepSet = vi.fn();
+    await transportWith(sleepSet);
+    const second = new SubagentRuntime();
+    mockSendPrompt.mockResolvedValueOnce("ok");
+    await second.complete("dreamy", "sleep", { sessionType: "D" });
+    expect(sleepSet).not.toHaveBeenCalled();
+  });
+});
+
 describe("SubagentRuntime composed holders", () => {
   it("forwards holders to createSubagentTransport", async () => {
     const runtime = new SubagentRuntime();
@@ -196,8 +246,7 @@ describe("SubagentRuntime composed holders", () => {
     // #1552: the memory-tool deps holder is the 2nd arg.
     // --- the transport factory's trailing workingDir override (#1807) is
     // undefined here; the assertion pins forwarding of the first args.
-    // #1932: the 5th arg carries the SDK conversation role (dreamy here).
-    expect(createSubagentTransport).toHaveBeenCalledWith("sleep", { current: null }, undefined, undefined, "dreamy");
+    expect(createSubagentTransport).toHaveBeenCalledWith("sleep", { current: null }, undefined, undefined);
   });
 
   it("#1552: forwards the composed memory-tool deps holder to lazy transports", async () => {
@@ -210,7 +259,7 @@ describe("SubagentRuntime composed holders", () => {
     await runtime.complete("dreamy", "test");
 
     const { createSubagentTransport } = await import("./agent-registry.js");
-    expect(createSubagentTransport).toHaveBeenCalledWith("sleep", memoryDepsHolder, undefined, undefined, "dreamy");
+    expect(createSubagentTransport).toHaveBeenCalledWith("sleep", memoryDepsHolder, undefined, undefined);
   });
 
   it("#1611: a persistent session rejects conflicting candidate-policy reuse — never broadens configured-only", async () => {

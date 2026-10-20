@@ -18,7 +18,6 @@ import { mkdirSync, rmSync, writeFileSync, mkdtempSync, existsSync } from "node:
 import { join, dirname } from "node:path";
 import { tmpdir } from "node:os";
 import { EventEmitter } from "node:events";
-import { estimateTokensFromChars } from "../../components/transport/token-budget.js";
 
 let TEST_HOME: string;
 
@@ -637,12 +636,10 @@ describe("#1724 scheduler E2E — journey 13: complete Main-owned announcement j
       recall: vi.fn(async () => ({ hits: [] as unknown[] })),
       recordFeedback: vi.fn(async () => ({})),
       assembleSessionContext: vi.fn(async () => ({ coreKnowledge: "", recall: "", wakeUp: "" })),
-      projectDurableContext: vi.fn(async ({ sessionId, beforeMessageId }: { userId: string; sessionId: string; beforeMessageId: number; maxContext: number }) => {
-        const messages = rows
-          .filter(r => r.sessionId === sessionId && r.id < beforeMessageId)
-          .map(r => ({ role: r.role, content: r.content }));
-        return { messages, estimatedTokens: messages.reduce((s, m) => s + estimateTokensFromChars(m.content.length), 0), sourceMessageCount: rows.length };
-      }),
+      // #1940: continuity comes from the recorded archive (hydration), not a
+      // durable-context projection — the projection contract is retired.
+      getRecentConversation: vi.fn(async ({ userId: _userId, since, limit }: { userId: string; since: number; limit: number }) =>
+        rows.filter(r => r.timestamp >= since).slice(-limit).map(r => ({ role: r.role, content: r.content, timestamp: r.timestamp }))),
     };
     return { runtime, rows };
   }

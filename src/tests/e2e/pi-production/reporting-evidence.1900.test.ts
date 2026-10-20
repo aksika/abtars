@@ -31,6 +31,8 @@ function summary(seq: number, state: string, matched: string[] = []): ProviderSu
     markerHashes: [],
     markerTexts: [],
     matchedMarkers: matched,
+    systemTexts: [],
+    declaredTools: [],
   };
 }
 

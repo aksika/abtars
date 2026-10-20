@@ -16,7 +16,8 @@ import { loadUsers } from "./user-registry.js";
 import { getMasterUserId } from "./master-user.js";
 import type { ManagedSession, SpinRequest, SessionType, SpinSessionSpec, SpinDispatchResult, AwaitedSpinResult, DispatchAwaitedResult, StepEvent, DispatchBackgroundOptions, SpinExecutionDriver, QueuedSessionInstruction } from "./spin-types.js";
 import { sessionType } from "./spin-types.js";
-import { profileFor, type SessionProfile } from "./spin-profiles.js";
+import { profileFor, profileCarriesSoulBundle, type SessionProfile } from "./spin-profiles.js";
+import { subagentAgentUsesPiTransport } from "./agent-registry.js";
 import { WorkerSupervisionService, validateWorkerRootCriteria } from "./worker-supervision-service.js";
 import { WorkerSupervisionStore } from "./worker-supervision-store.js";
 import { pushLog, isHollow, cancelSessionExecution, createSpinSessionRegistry, type SpinSessionRegistry } from "./spin-sessions.js";
@@ -574,7 +575,7 @@ export class Spin {
     let agentSession: import("./subagent-runtime.js").AgentSession;
     try {
       agentSession = await Promise.race([
-        this.runtime!.session(attachAgent, userId),
+        this.runtime!.session(attachAgent, userId, { sessionType: sessionType(session) }),
         new Promise<never>((_, rej) => setTimeout(() => rej(new Error("Session creation timed out")), SESSION_CREATE_TIMEOUT_MS)),
       ]);
     } catch (err) {
@@ -918,7 +919,7 @@ export class Spin {
       if (persistent && !sessionTransport) {
         // #1432: reattachment honors the selected executionAgent recorded at
         // allocation (K) so a resumed session keeps its model configuration.
-        const agentSession = await this.runtime.session(attachAgent, profile.resolution === "active" ? userId : (cycleKey ?? undefined), { candidatePolicy: requestedPolicy, executionScope: sleepScope });
+        const agentSession = await this.runtime.session(attachAgent, profile.resolution === "active" ? userId : (cycleKey ?? undefined), { candidatePolicy: requestedPolicy, executionScope: sleepScope, sessionType: sessionType(session) });
         sessionTransport = agentSession.transport as IKiroTransport;
         session.transport = sessionTransport;
         session.transportOwner = "runtime";
@@ -928,10 +929,21 @@ export class Spin {
         session.status = "ready";
       }
 
-      // 6. Build prompt via decorators
+      // 6. Build prompt via decorators. #1940: resolve the Pi route before
+      // one-shot transports exist so the SOUL decorator does not duplicate
+      // the bundle installed as the session system prompt.
+      let piRoute = false;
+      if (profileCarriesSoulBundle(sessionType(session))) {
+        // Persistent sessions already hold their transport: the marker is
+        // authoritative and needs no config read. One-shots have no transport
+        // yet, so resolve the configured route before creating one.
+        piRoute = sessionTransport
+          ? (sessionTransport as { piAgentSessionRoute?: boolean }).piAgentSessionRoute === true
+          : subagentAgentUsesPiTransport(agent);
+      }
       let prompt = spec.prompt ?? spec.goal ?? "";
       for (const decorate of profile.decorators) {
-        prompt = await decorate(prompt, { session, cardId, parentCardId: spec.parentCardId });
+        prompt = await decorate(prompt, { session, cardId, parentCardId: spec.parentCardId, piRoute });
       }
       // #1366: Inject Worker contract into prompt when contractId is set
       if (spec.contractId && cardId !== undefined) {
@@ -1070,6 +1082,7 @@ export class Spin {
         }
         const executor = await this.runtime!.openExecution(agent, session.id, {
           timeoutMs, session: "fresh", maxToolRounds: spec.maxToolRounds,
+          sessionType: sessionType(session),
         });
         // #1248: Bind execution control to runtime cancel mechanism
         if (spec.executionControl) {

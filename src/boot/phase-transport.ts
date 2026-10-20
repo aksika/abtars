@@ -273,14 +273,12 @@ export async function buildTransport(ctx: BootCtx): Promise<PhaseResult> {
       // is known. The endpoint is transport configuration, never a prompt.
       systemPrompt: "",
       candidate,
-      // #1932: Main conversations partition under the main role; the
-      // post-compaction bundle refresh is wired below after memory lands.
+      // #1940: Pi owns compaction; the role system prompt survives it, so no
+      // post-compaction bundle refresh is wired.
       sandboxPolicy: { allowedTools: ["*"], allowedRead: ["*"], allowedWrite: ["*"], canExecuteBash: true },
       maxPromptRounds: tc?.maxToolRounds,
       // #1932: candidate rotation is retired — the single configured
       // candidate serves every turn, so maxFallbackToolRounds is inert.
-      // #1748: per-provider cache-retention preference (absent → "short").
-      cacheRetention: resolved.provider.cacheRetention,
       // #1552: late-bound memory-tool deps holder — same composition point.
       memoryToolDeps: ctx.memoryToolDependencies,
     });

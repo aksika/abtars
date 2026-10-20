@@ -5,7 +5,7 @@
  */
 import { describe, it, expect, vi } from "vitest";
 import { SessionControlService } from "./service.js";
-import type { SessionControlAdapter, SessionControlResult } from "./types.js";
+import type { SessionControlAdapter, SessionControlResult, SessionCompactionTelemetryV1 } from "./types.js";
 
 function makeResult(status: SessionControlResult["status"]): SessionControlResult {
   return { status, targetKind: "durable_conversation", message: status };

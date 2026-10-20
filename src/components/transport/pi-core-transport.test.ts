@@ -101,8 +101,15 @@ class FakeAgentSession {
     return undefined;
   }
 
+  activeToolNames: string[] = [];
+
   getActiveToolNames(): string[] {
-    return [];
+    return [...this.activeToolNames];
+  }
+
+  setActiveToolsByName(toolNames: string[]): void {
+    this.calls.push("setActiveToolsByName");
+    this.activeToolNames = [...toolNames];
   }
 
   get isStreaming(): boolean {
@@ -158,7 +165,7 @@ class FakeAgentSessionStore {
   }
 }
 
-function makeFactoryLoader(): PiAgentSessionFactoryLoader & { factory: Record<string, unknown> } {
+function makeFactoryLoader() {
   const factory = {
     createAgentSession: vi.fn(async (options: Record<string, unknown>) => {
       FakeAgentSessionStore.created.push(options);
@@ -179,8 +186,9 @@ function makeFactoryLoader(): PiAgentSessionFactoryLoader & { factory: Record<st
       async reload(): Promise<void> {}
     },
   };
-  const loader = (async () => factory) as PiAgentSessionFactoryLoader & { factory: Record<string, unknown> };
-  loader.factory = factory;
+  const loader = Object.assign(async () => factory, { factory }) as PiAgentSessionFactoryLoader & {
+    factory: typeof factory;
+  };
   return loader;
 }
 
@@ -387,20 +395,6 @@ describe("PiCoreTransport", () => {
       sessionFactoryLoader: makeFactoryLoader(),
     });
     expect(t.config.role).toBe("specialist");
-  });
-
-  it("accepts the retired late-bound provider holder option and ignores it (#1940)", () => {
-    // Boot still passes contextProvider while callers migrate; the Pi route
-    // no longer reads durable context per turn.
-    const t = new PiCoreTransport({
-      role: "main",
-      systemPrompt: "",
-      candidate: makeCandidates()[0]!,
-      sandboxPolicy: { allowedTools: ["*"], allowedRead: ["*"], allowedWrite: ["*"], canExecuteBash: true },
-      sessionFactoryLoader: makeFactoryLoader(),
-      contextProvider: { current: { projectContext: vi.fn() } as never },
-    });
-    expect(t.config.role).toBe("main");
   });
 
   it("sendPrompt with no context does not crash — returns text via the session tap", async () => {

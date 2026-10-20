@@ -1015,6 +1015,22 @@ async function lazyTransports(ctx: PiAcceptanceContext): Promise<void> {
     throw new Error("lazy task transport projected the first spawn's exchange into the second");
   }
 
+  // #1940 R3: the spawned task session's system prompt is its role SOUL
+  // bundle (T identity), not the generic transport line — one-shots get the
+  // same session setup as Main, captured once at session creation.
+  const workerSummary = ctx.provider.summariesFor(FIXTURE_MODEL_A).find(
+    (s) => s.markerTexts.some((t) => t.includes(goal1)),
+  );
+  if (!workerSummary) throw new Error("worker provider request for goal1 missing");
+  if (!workerSummary.systemTexts.some((t) => t.includes("I am a task agent"))) {
+    throw new Error(
+      `worker request carries no role SOUL in the system prompt: ${JSON.stringify(workerSummary.systemTexts).slice(0, 300)}`,
+    );
+  }
+  if (workerSummary.markerTexts.some((t) => t.includes("I am a task agent"))) {
+    throw new Error("worker turn text duplicates the role SOUL already installed as its system prompt");
+  }
+
   // #1940: the spawned task ran in its own in-memory Pi session — the
   // second spawn's request carries none of the first spawn's exchange
   // (asserted above), and neither session wrote files to disk.

@@ -4,7 +4,6 @@ import type { CandidateSpec, ModelCandidate } from "./model-candidates.js";
 import { PiAgentSessionStore } from "./pi-agent-session-store.js";
 import type { PiAgentSessionTurnResult } from "./pi-agent-session-store.js";
 import { DurableContextUnavailableError } from "./pi-core-context.js";
-import type { PiConversationRole } from "../pi-session/pi-conversation-identity.js";
 import { createPiExecutionSafetyController } from "./pi-core-safety.js";
 import type { PiCoreToolContext } from "./pi-core-tools.js";
 import type { SandboxPolicy } from "../tool-sandbox.js";
@@ -50,37 +49,7 @@ export interface PiCoreTransportOptions {
   session?: { instructionQueue: Array<import("../spin-types.js").QueuedSessionInstruction>; id: string };
   /** #1552: late-bound memory-tool dependencies holder (runtime + quota). */
   memoryToolDeps?: import("../memory-store-quota.js").MemoryToolDependenciesHolder;
-  /** #1932: state directory for the durable provider-availability memo.
-   *  Absent → the shared abtars state dir. Tests inject an isolated dir. */
-  memoStateDir?: string;
   maxPromptRounds?: number;
-  /** #1748: cache-identity scope. Main (absent) derives from the Spin session
-   *  key at first sendPrompt; subagents pass the agent role name (all workers
-   *  of one role share a system prompt, so a role-stable identity lets
-   *  repeated spawns reuse the provider's cached prefix). Never shared between
-   *  Main and subagents. */
-  cacheScope?: string;
-  /** #1748: per-provider prompt-cache retention. Absent → "short" (pi's
-   *  default, pinned explicitly so a pi uplift cannot silently change it);
-   *  "long" is opt-in per provider — Anthropic bills 1h cache writes at 2x
-   *  base input, so it is never a global default. */
-  cacheRetention?: import("@earendil-works/pi-ai").CacheRetention;
-  /** #1932: Pi conversation role for session partitioning. Main transport
-   *  uses "main"; subagent transports pass their worker role (dreamy,
-   *  browsing, coding, task). */
-  piRole?: PiConversationRole;
-  /** #1932: SDK conversation state directory (bindings). Absent → the
-   *  shared abtars state dir. Tests inject an isolated dir. */
-  sdkStateDir?: string;
-  /** #1932: SDK session-file storage root. Absent → state/pi-sessions.
-   *  Tests inject an isolated dir. */
-  sdkSessionRoot?: string;
-  /** #1932: post-compaction bundle refresh (wired by boot for Main;
-   *  subagents re-read their spawn-time bundle). Never throws.
-   *  Retired with the bridge-built conversation (#1940: Pi owns compaction
-   *  and the system prompt survives it); kept for signature compatibility
-   *  and ignored. */
-  onCompactionRefresh?: (sessionKey: string) => void;
   /** #1940: injectable AgentSession factory loader (tests). Production uses
    *  installed-Pi discovery and fails closed when unavailable. */
   sessionFactoryLoader?: import("./pi-agent-session-store.js").PiAgentSessionFactoryLoader;
@@ -173,12 +142,6 @@ export class PiCoreTransport implements IKiroTransport {
     this.session = opts.session;
     this._memoryToolDeps = opts.memoryToolDeps ?? { current: null };
     this.maxPromptRounds = opts.maxPromptRounds;
-    if (opts.cacheScope !== undefined || opts.memoStateDir !== undefined || opts.cacheRetention !== undefined
-      || opts.piRole !== undefined || opts.onCompactionRefresh !== undefined
-      || opts.sdkStateDir !== undefined || opts.sdkSessionRoot !== undefined) {
-      // Legacy Pi-route options (availability memo, SDK bindings, compaction
-      // refresh) are retired with the bridge-built conversation (#1940).
-    }
     this.sessionFactoryLoader = opts.sessionFactoryLoader;
     this.interruptIdleTimeoutMs = opts.interruptIdleTimeoutMs ?? 5000;
     // #1619: baseline from the configured candidate's effort-style config; a

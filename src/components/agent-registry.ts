@@ -7,6 +7,7 @@ import { getEnv } from "./env-schema.js";
  */
 
 import { AcpTransport } from "./transport/acp-transport.js";
+import { resolveAgent, loadTransport, getEnvFallback } from "./transport-config.js";
 import { logInfo, logWarn } from "./logger.js";
 import type { IKiroTransport } from "./transport/kiro-transport.js";
 
@@ -79,10 +80,43 @@ const SUBAGENT_ACP_ROLE: Record<SubagentRole, AgentRole> = {
   task: "task",
 };
 
+/** Runtime agent name -> transport-construction role (the inverse of the
+ *  mapping createSubagentTransport applies). */
+const AGENT_TO_SUBAGENT_ROLE: Record<import("./subagent-runtime.js").AgentName, SubagentRole> = {
+  professor: "task",
+  dreamy: "sleep",
+  browsie: "browse",
+  coding: "coding",
+  task: "task",
+};
+
+/**
+ * #1940: does this agent resolve to the Pi route? Spin needs the answer
+ * BEFORE a one-shot transport exists (the SOUL decorator must not duplicate
+ * a bundle the transport will install as its session system prompt). This
+ * mirrors createSubagentTransport's resolution exactly — same role mapping,
+ * same configured-agent fallback — so route decisions cannot drift.
+ */
+export function subagentAgentUsesPiTransport(
+  agent: import("./subagent-runtime.js").AgentName,
+): boolean {
+  try {
+    const tc = loadTransport();
+    const agentName = SUBAGENT_TO_AGENT[AGENT_TO_SUBAGENT_ROLE[agent]];
+    const resolved = (tc ? resolveAgent(agentName, tc) : null) ?? (tc ? resolveAgent("main", tc) : null);
+    if (resolved) return resolved.provider.transport === "api";
+    return getEnvFallback().provider.transport === "api";
+  } catch {
+    // Unreadable/invalid config cannot build a Pi transport either; the
+    // decorator keeps its ACP default and transport construction reports the
+    // real configuration failure.
+    return false;
+  }
+}
+
 /** Unified transport factory for all subagents. Reads from transport.json + models.json. */
 /** @internal Used only by SubagentRuntime. Do not call directly. */
-export async function createSubagentTransport(role: SubagentRole, memoryToolDeps?: import("./memory-store-quota.js").MemoryToolDependenciesHolder, candidatePolicy: import("./spin-types.js").CandidatePolicy = "fallback-chain", workingDir?: string, piRole?: import("./pi-session/pi-conversation-identity.js").PiConversationRole): Promise<{ transport: IKiroTransport; model: string }> {
-  const { resolveAgent, getEnvFallback, loadTransport } = await import("./transport-config.js");
+export async function createSubagentTransport(role: SubagentRole, memoryToolDeps?: import("./memory-store-quota.js").MemoryToolDependenciesHolder, candidatePolicy: import("./spin-types.js").CandidatePolicy = "fallback-chain", workingDir?: string): Promise<{ transport: IKiroTransport; model: string }> {
   const tc = loadTransport();
   const agentName = SUBAGENT_TO_AGENT[role];
   const resolved = tc ? resolveAgent(agentName, tc) : null;
@@ -117,17 +151,8 @@ export async function createSubagentTransport(role: SubagentRole, memoryToolDeps
       role: "specialist",
       systemPrompt: `You are an abtars ${agentName} agent.`,
       candidate,
-      // #1932: SDK conversation partitioning follows the worker role.
-      // Explicit per-agent (professor serves Main chat); falls back to the
-      // config-family role when the caller does not say.
-      piRole: piRole ?? (role === "sleep" ? "dreamy" : role === "browse" ? "browsing" : role === "coding" ? "coding" : "task"),
       sandboxPolicy: { allowedTools: ["*"], allowedRead: ["*"], allowedWrite: ["*"], canExecuteBash: true },
       maxPromptRounds: tc?.maxToolRounds,
-      // #1748: subagent cache scope = agent role name (all workers of one role
-      // share a system prompt, so repeated spawns can reuse the cached prefix).
-      cacheScope: agentName,
-      // #1748: per-provider cache-retention preference (absent → "short").
-      cacheRetention: agent.provider.cacheRetention,
       // #1552: late-bound memory-tool deps holder from boot composition.
       memoryToolDeps: memoryToolDeps ?? { current: null },
     });

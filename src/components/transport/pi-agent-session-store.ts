@@ -24,7 +24,7 @@ import { join } from "node:path";
 import { logDebug, logWarn } from "../logger.js";
 import { resolvePiInstallation, loadPiModule } from "../pi-installation.js";
 import type { PiModuleSpecifier } from "../pi-installation.js";
-import { getToolDefinitions, executeToolCall } from "./tool-registry.js";
+import { getToolDefinitions, executeToolCall, checkToolAvailability } from "./tool-registry.js";
 import type { ToolExecutionContext } from "./tool-registry.js";
 import { checkTool } from "../tool-sandbox.js";
 import type { SandboxPolicy } from "../tool-sandbox.js";
@@ -93,8 +93,9 @@ export interface PiAgentSessionLike {
   setModel(model: unknown, options?: Record<string, unknown>): Promise<void>;
   setThinkingLevel(level: unknown, options?: Record<string, unknown>): void;
   compact(customInstructions?: string): Promise<unknown>;
-  getContextUsage(): { tokens?: number; percent?: number } | undefined;
   getActiveToolNames(): string[];
+  /** #1940: restore per-turn exact declarations (sandbox + availability). */
+  setActiveToolsByName(toolNames: string[]): void;
   readonly isStreaming: boolean;
 }
 
@@ -170,7 +171,6 @@ export interface PiAgentSessionTurn {
   executionId: string;
   toolContext: PiCoreToolContext;
   images?: Array<{ type: "image"; mimeType?: string; data?: string }>;
-  deadlineAt?: number;
   /** Per-turn event mirror for delivery callbacks; cleared at settle. */
   onEvent?: (event: { type: string } & Record<string, unknown>) => void;
 }
@@ -189,6 +189,8 @@ interface LivePiAgentSession {
   sessionManager: unknown;
   settingsManager: unknown;
   authority: PiAgentSessionToolAuthority;
+  /** Every registered custom tool name (session-creation sandbox allowlist). */
+  allToolNames: string[];
   unsubscribe: () => void;
   settled: { resolve: (result: PiAgentSessionTurnResult) => void; reject: (err: unknown) => void } | null;
   /** Per-turn event mirror for delivery callbacks; cleared at settle. */
@@ -204,7 +206,6 @@ interface LivePiAgentSession {
     terminalError: string | null;
   } | null;
   safety: PiExecutionSafetyController | null;
-  abortedTurn: boolean;
 }
 
 function freshCollector(): NonNullable<LivePiAgentSession["collector"]> {
@@ -458,12 +459,12 @@ export class PiAgentSessionStore {
       sessionManager,
       settingsManager,
       authority: { current: null, generation: 0 },
+      allToolNames: [],
       unsubscribe: () => {},
       settled: null,
       tap: null,
       collector: null,
       safety: null,
-      abortedTurn: false,
     };
     const customTools = this.buildCustomTools(placeholder, init.sandboxPolicy);
     const toolNames = customTools.map((t) => t.name).filter((n): n is string => typeof n === "string");
@@ -482,6 +483,7 @@ export class PiAgentSessionStore {
       noTools: "all",
     });
     placeholder.session = created.session;
+    placeholder.allToolNames = toolNames;
     placeholder.unsubscribe = created.session.subscribe((event) => this.handleSessionEvent(sessionKey, event));
     this.live.set(sessionKey, placeholder);
     logDebug(TAG, `AgentSession opened for ${sessionKey} (${toolNames.length} tools)`);
@@ -508,7 +510,16 @@ export class PiAgentSessionStore {
     record.authority.current = turn.toolContext;
     record.authority.generation += 1;
     record.safety = turn.toolContext.safety;
-    record.abortedTurn = false;
+    // #1940: the registered tool set is session-scoped (sandbox allowlist at
+    // creation), but authorization is per execution. Activate exactly the
+    // tools this turn may present — sandbox plus contextual availability
+    // (unattended delivery, Orc intent) — so the model never sees a tool the
+    // execution boundary would refuse. Execution still re-checks both.
+    const activeToolNames = record.allToolNames.filter((name) =>
+      checkTool(name, turn.toolContext.sandboxPolicy).allowed
+      && checkToolAvailability(name, turn.toolContext).allowed,
+    );
+    record.session.setActiveToolsByName(activeToolNames);
     record.collector = freshCollector();
     let resolveDone!: (result: PiAgentSessionTurnResult) => void;
     let rejectDone!: (err: unknown) => void;
@@ -636,19 +647,6 @@ export class PiAgentSessionStore {
     }
   }
 
-  /** Pi's context usage for status surfaces, or undefined when unknown. */
-  getContextUsage(sessionKey: string): { tokens?: number; percent?: number } | undefined {
-    const record = this.live.get(sessionKey);
-    if (!record) return undefined;
-    try {
-      const usage = record.session.getContextUsage();
-      if (!usage) return undefined;
-      return usage;
-    } catch {
-      return undefined;
-    }
-  }
-
   /** Manual compaction through Pi; SOUL survives (system prompt, not history). */
   async compact(sessionKey: string, customInstructions?: string): Promise<unknown> {
     const record = this.live.get(sessionKey);
@@ -711,20 +709,25 @@ export class PiAgentSessionStore {
         }
       }
     } else if (event.type === "agent_end") {
-      // Terminal provider failures surface here: Pi retries internally and
-      // only the final attempt (willRetry false) settles the run. Record
-      // the latest error; at settle it surfaces only when no committed
-      // text supersedes it (committed output wins, as before).
+      // Pi retries internally; agent_end can fire for an intermediate failed
+      // attempt. Only the LAST assistant message is this attempt's verdict:
+      // record a terminal error when it failed, and CLEAR any earlier retry
+      // failure when it succeeded. Scanning the whole message list would
+      // surface a stale failure after a successful retry that produced no
+      // text (tool-only or empty answer) and fail a completed run.
       const messages = event.messages;
       if (Array.isArray(messages)) {
+        let lastAssistant: { stopReason?: string; errorMessage?: string } | null = null;
         for (const message of messages) {
           const m = message as { role?: string; stopReason?: string; errorMessage?: string };
-          if (m.role === "assistant" && (m.stopReason === "error" || typeof m.errorMessage === "string")) {
-            collector.terminalError = typeof m.errorMessage === "string" && m.errorMessage.length > 0
-              ? m.errorMessage
-              : "provider error";
-          }
+          if (m.role === "assistant") lastAssistant = m;
         }
+        collector.terminalError = lastAssistant
+          && (lastAssistant.stopReason === "error" || typeof lastAssistant.errorMessage === "string")
+          ? (typeof lastAssistant.errorMessage === "string" && lastAssistant.errorMessage.length > 0
+            ? lastAssistant.errorMessage
+            : "provider error")
+          : null;
       }
     } else if (event.type === "agent_settled") {
       const pending = record.settled;
@@ -761,7 +764,3 @@ export class PiAgentSessionStore {
     // end. The terminal point is agent_settled (Pi's full settlement).
   }
 }
-
-/** Visible terminal failure bounds for unattended attempts (kept from the old path). */
-export const PI_AGENT_SESSION_DEADLINE_NOTE =
-  "Unattended attempt/deadline bounds still yield a visible terminal failure.";

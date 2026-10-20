@@ -77,6 +77,7 @@ function makeHarness(): SteeringHarness {
         compact: () => Promise<unknown>;
         getContextUsage: () => undefined;
         getActiveToolNames: () => string[];
+        setActiveToolsByName: (names: string[]) => void;
         readonly isStreaming: boolean;
       };
       Object.assign(record, {
@@ -100,6 +101,7 @@ function makeHarness(): SteeringHarness {
         compact: async () => { session.calls.push("compact"); return {}; },
         getContextUsage: () => undefined,
         getActiveToolNames: () => [],
+        setActiveToolsByName: () => {},
       });
       Object.defineProperty(record, "isStreaming", { get: () => session.streaming });
       sessions.push(session);

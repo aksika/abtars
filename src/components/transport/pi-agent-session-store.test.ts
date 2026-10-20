@@ -20,6 +20,7 @@ import { ProviderExecutionError } from "./provider-failure.js";
 
 interface FakeSession extends PiAgentSessionLike {
   emit(event: { type: string } & Record<string, unknown>): void;
+  setStreaming(value: boolean): void;
   calls: string[];
   prompted: string[];
 }
@@ -29,6 +30,7 @@ function makeFakeSession(toolNames: string[] = []): FakeSession {
   const calls: string[] = [];
   const prompted: string[] = [];
   let streaming = false;
+  let activeToolNames = [...toolNames];
   const session: FakeSession = {
     calls,
     prompted,
@@ -76,8 +78,14 @@ function makeFakeSession(toolNames: string[] = []): FakeSession {
       calls.push("compact");
       return { summary: "compacted" };
     },
-    getContextUsage: () => ({ tokens: 42, percent: 10 }),
-    getActiveToolNames: () => toolNames,
+    setStreaming: (value: boolean) => {
+      streaming = value;
+    },
+    getActiveToolNames: () => activeToolNames,
+    setActiveToolsByName: (names: string[]) => {
+      calls.push("setActiveToolsByName");
+      activeToolNames = [...names];
+    },
     get isStreaming(): boolean {
       return streaming;
     },
@@ -88,12 +96,16 @@ function makeFakeSession(toolNames: string[] = []): FakeSession {
   return session;
 }
 
-function makeContext(executionId: string): PiCoreToolContext {
+function makeContext(
+  executionId: string,
+  overrides: Partial<PiCoreToolContext> = {},
+): PiCoreToolContext {
   return {
     executionId,
     userId: "u1",
     sandboxPolicy: buildPolicy("owner", { allowedTools: ["memory_recall"] }),
     safety: createPiExecutionSafetyController(),
+    ...overrides,
   };
 }
 
@@ -298,6 +310,60 @@ describe("PiAgentSessionStore (#1940)", () => {
     expect((withModels!.models as Array<{ id: string }>)[0]!.id).toBe("fixture-model-a");
   });
 
+  it("activates exactly the per-turn authorized tools (sandbox + availability)", async () => {
+    const factory = {
+      createAgentSession: vi.fn(async () => ({ session: makeFakeSession([]) })),
+      SessionManager: { inMemory: vi.fn(() => ({})) },
+      SettingsManager: { inMemory: vi.fn(() => ({})) },
+      ModelRuntime: {
+        create: vi.fn(async () => ({
+          getModel: vi.fn(() => ({ id: "m1" })),
+          registerProvider: vi.fn(),
+        })),
+      },
+      DefaultResourceLoader: class {
+        constructor(_options: Record<string, unknown>) {}
+        async reload(): Promise<void> {}
+      },
+    };
+    const store = new PiAgentSessionStore({ loadFactory: async () => factory });
+    await store.ensureSession("k1", {
+      systemPrompt: "sys",
+      candidate: { model: "m1", provider: "openai", endpoint: "https://x", maxContext: 1000, source: "primary" },
+      sandboxPolicy: buildPolicy("owner", { allowedTools: ["*"] }),
+    });
+    const live = (store as unknown as { live: Map<string, { session: FakeSession }> }).live.get("k1")!;
+
+    // Unattended scheduled execution: delivery is settlement-owned, so the
+    // model must not even see send_document.
+    const unattended = store.prompt("k1", "scheduled", {
+      executionId: "e1",
+      toolContext: makeContext("e1", {
+        sandboxPolicy: buildPolicy("owner", { allowedTools: ["*"] }),
+        authorizationMode: "unattended-task",
+      }),
+    });
+    const scheduledTools = live.session.getActiveToolNames();
+    expect(scheduledTools).toContain("memory_recall");
+    expect(scheduledTools).not.toContain("send_document");
+    live.session.emit({ type: "agent_settled", aborted: false });
+    live.session.setStreaming(false);
+    await unattended;
+
+    // Operator turn: the full authorized surface returns.
+    const operator = store.prompt("k1", "operator", {
+      executionId: "e2",
+      toolContext: makeContext("e2", {
+        sandboxPolicy: buildPolicy("owner", { allowedTools: ["*"] }),
+        authorizationMode: "interactive",
+      }),
+    });
+    expect(live.session.getActiveToolNames()).toContain("send_document");
+    live.session.emit({ type: "agent_settled", aborted: false });
+    live.session.setStreaming(false);
+    await operator;
+  });
+
   it("surfaces Pi's terminal provider error instead of a silent empty answer", async () => {
     const factory = {
       createAgentSession: vi.fn(async () => ({ session: makeFakeSession([]) })),
@@ -333,6 +399,49 @@ describe("PiAgentSessionStore (#1940)", () => {
     expect((err as ProviderExecutionError).failure.code).toBe("all_candidates_failed");
     expect((err as Error).message).toContain("candidate failed");
     expect((err as Error).message).toContain("500 fixture blowup");
+  });
+
+  it("a successful final attempt clears an earlier retry failure even without text", async () => {
+    const factory = {
+      createAgentSession: vi.fn(async () => ({ session: makeFakeSession([]) })),
+      SessionManager: { inMemory: vi.fn(() => ({})) },
+      SettingsManager: { inMemory: vi.fn(() => ({})) },
+      ModelRuntime: {
+        create: vi.fn(async () => ({
+          getModel: vi.fn(() => ({ id: "m1" })),
+          registerProvider: vi.fn(),
+        })),
+      },
+      DefaultResourceLoader: class {
+        constructor(_options: Record<string, unknown>) {}
+        async reload(): Promise<void> {}
+      },
+    };
+    const store = new PiAgentSessionStore({ loadFactory: async () => factory });
+    await store.ensureSession("k1", {
+      systemPrompt: "sys",
+      candidate: { model: "m1", provider: "openai", endpoint: "https://x", maxContext: 1000, source: "primary" },
+      sandboxPolicy: buildPolicy("owner", { allowedTools: ["*"] }),
+    });
+    const pending = store.prompt("k1", "hi", { executionId: "e1", toolContext: makeContext("e1") });
+    const live = (store as unknown as { live: Map<string, { session: FakeSession }> }).live.get("k1")!;
+    // Intermediate failed attempt (Pi will retry).
+    live.session.emit({
+      type: "agent_end",
+      willRetry: true,
+      messages: [{ role: "assistant", content: [], stopReason: "error", errorMessage: "503 transient" }],
+    });
+    // Final attempt succeeded but produced no text (e.g. tool-only turn).
+    live.session.emit({
+      type: "agent_end",
+      willRetry: false,
+      messages: [
+        { role: "assistant", content: [], stopReason: "error", errorMessage: "503 transient" },
+        { role: "assistant", content: [], stopReason: "stop" },
+      ],
+    });
+    live.session.emit({ type: "agent_settled", aborted: false });
+    await expect(pending).resolves.toMatchObject({ text: "", aborted: false });
   });
 
   it("committed text wins over a recorded terminal error", async () => {

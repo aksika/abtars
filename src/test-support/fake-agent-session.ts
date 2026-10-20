@@ -94,8 +94,15 @@ export class FakeAgentSession {
     return undefined;
   }
 
+  activeToolNames: string[] = [];
+
   getActiveToolNames(): string[] {
-    return [];
+    return [...this.activeToolNames];
+  }
+
+  setActiveToolsByName(toolNames: string[]): void {
+    this.calls.push("setActiveToolsByName");
+    this.activeToolNames = [...toolNames];
   }
 
   get isStreaming(): boolean {

@@ -4,7 +4,7 @@
  * enforced both at target resolution and again at the backend boundary.
  */
 
-import { logInfo, logWarn } from "../logger.js";
+import { logInfo } from "../logger.js";
 import type {
   SessionControlAdapter, SessionControlRequest, SessionControlResult,
   SessionControlTarget, SessionCompactionTelemetryV1,
@@ -22,7 +22,6 @@ export interface SessionControlServiceDeps {
    * (nothing_to_compact, busy, unsupported, stale). Must never throw — a
    * re-injection failure is logged and the control result stands.
    */
-  onCompactionCompleted?: (target: SessionControlTarget) => void;
 }
 
 export class SessionControlService {
@@ -56,23 +55,23 @@ export class SessionControlService {
     const startedAt = Date.now();
     const adapter = this.adapters.get(target.kind);
     if (!adapter) {
-      return this.finish({ status: "unsupported", targetKind: target.kind, message: `No backend supports ${target.kind}` }, request, startedAt, target);
+      return this.finish({ status: "unsupported", targetKind: target.kind, message: `No backend supports ${target.kind}` }, request, startedAt);
     }
     if (!adapter.supports(request)) {
-      return this.finish({ status: "unsupported", targetKind: target.kind, message: `Operation not supported by ${target.kind} backend` }, request, startedAt, target);
+      return this.finish({ status: "unsupported", targetKind: target.kind, message: `Operation not supported by ${target.kind} backend` }, request, startedAt);
     }
 
     const dedupeKey = `${target.kind}:${target.kind === "durable_conversation" ? target.sessionId : target.runId}`;
     if (request.reason === "automatic") {
       if (this.autoInFlight.has(dedupeKey)) {
-        return this.finish({ status: "busy", targetKind: target.kind, message: "Automatic maintenance already in flight for this session" }, request, startedAt, target);
+        return this.finish({ status: "busy", targetKind: target.kind, message: "Automatic maintenance already in flight for this session" }, request, startedAt);
       }
       this.autoInFlight.add(dedupeKey);
       try {
         const result = await adapter.execute(target, request);
-        return this.finish(result, request, startedAt, target);
+        return this.finish(result, request, startedAt);
       } catch {
-        return this.finish({ status: "failed", targetKind: target.kind, message: "Session control operation failed" }, request, startedAt, target);
+        return this.finish({ status: "failed", targetKind: target.kind, message: "Session control operation failed" }, request, startedAt);
       } finally {
         this.autoInFlight.delete(dedupeKey);
       }
@@ -80,9 +79,9 @@ export class SessionControlService {
 
     try {
       const result = await adapter.execute(target, request);
-      return this.finish(result, request, startedAt, target);
+      return this.finish(result, request, startedAt);
     } catch {
-      return this.finish({ status: "failed", targetKind: target.kind, message: "Session control operation failed" }, request, startedAt, target);
+      return this.finish({ status: "failed", targetKind: target.kind, message: "Session control operation failed" }, request, startedAt);
     }
   }
 
@@ -90,29 +89,10 @@ export class SessionControlService {
     result: SessionControlResult,
     request: SessionControlRequest,
     startedAt: number,
-    target: SessionControlTarget,
   ): SessionControlResult {
     const durationMs = Date.now() - startedAt;
     this.emitTelemetry(result, request, durationMs);
-    if (result.status === "completed") {
-      this.rehydrateAfterCompaction(target);
-    }
     return result;
-  }
-
-  /**
-   * #1869 — re-apply the core bundle for the compacted target. The split
-   * moved profile/notes/coreFacts into session-start entries, which provider
-   * compaction summarizes away; marking the session for rehydration makes the
-   * next turn re-assemble session-start fresh (current files, no restart).
-   * Guarded: re-injection must never break the control result.
-   */
-  private rehydrateAfterCompaction(target: SessionControlTarget): void {
-    try {
-      this.deps.onCompactionCompleted?.(target);
-    } catch (err) {
-      logWarn(TAG, `post-compaction rehydration skipped: ${err instanceof Error ? err.message : String(err)}`);
-    }
   }
 
   private emitTelemetry(

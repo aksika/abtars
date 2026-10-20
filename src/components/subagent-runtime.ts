@@ -7,6 +7,7 @@
 import { logAndSwallow } from "./log-and-swallow.js";
 import type { IKiroTransport, PromptRequestContext, RuntimeUsageSnapshot } from "./transport/kiro-transport.js";
 import { logInfo, logDebug, logWarn } from "./logger.js";
+import { profileCarriesSoulBundle } from "./spin-profiles.js";
 import { randomBytes } from "node:crypto";
 import { realpathSync } from "node:fs";
 import type { ToolExecutionScope } from "./tasks/task-package.js";
@@ -250,7 +251,7 @@ export class SubagentRuntime {
   }
 
   /** Get a persistent session handle for multi-turn callers. */
-  async session(agent: AgentName, key?: string, opts?: { candidatePolicy?: import("./spin-types.js").CandidatePolicy; executionScope?: ToolExecutionScope }): Promise<AgentSession> {
+  async session(agent: AgentName, key?: string, opts?: { candidatePolicy?: import("./spin-types.js").CandidatePolicy; executionScope?: ToolExecutionScope; sessionType?: import("./spin-types.js").SessionType }): Promise<AgentSession> {
     const cacheKey = key ? `${agent}:${key}` : agent;
     // #1807: a requested scope must match the transport's recorded creation
     // binding. Mismatch or unverified binding fails before any provider/tool
@@ -267,7 +268,7 @@ export class SubagentRuntime {
         }
       }
     } else {
-      await this.createAgent(agent, undefined, cacheKey, opts?.candidatePolicy, requestedCwd);
+      await this.createAgent(agent, opts?.sessionType, cacheKey, opts?.candidatePolicy, requestedCwd);
     }
     const cached = this.cache.get(cacheKey)!;
     // #1611: the candidate policy is immutable per attached transport. A
@@ -381,7 +382,7 @@ export class SubagentRuntime {
     // candidate that last produced a non-empty response.
     // #1611: configured-only restricts transport construction to the configured
     // candidate — applied before the first Dreamy prompt, never after the fact.
-    const { transport, model } = await createSubagentTransport(role, this._memoryToolDeps, candidatePolicy, workingDir, AGENT_TO_PIROLE[agent]);
+    const { transport, model } = await createSubagentTransport(role, this._memoryToolDeps, candidatePolicy, workingDir);
 
     // #1290: attribute per-turn budget to the agent Spin resolved for this session.
     // External ACP keeps its own agent label; embedded Pi uses this label when
@@ -395,11 +396,17 @@ export class SubagentRuntime {
       import("./transport/bridge-lock-transport.js").then(({ trackAcpPid }) => trackAcpPid((transport as any).agent.pid)).catch(err => logAndSwallow(TAG, "track ACP pid in bridge lock", err));
     }
 
-    // Inject session-type-appropriate SOUL bundle (#744)
+    // #744/#1940: inject the session-type SOUL bundle into the Pi session
+    // system prompt. Only types whose profile owns a bundle (registry
+    // `soulBundle`) receive one; A/K/S/D keep their existing prompts. The
+    // type must be the real Spin type — inferring from the agent name gives
+    // professor types no bundle and gives browsie's W/O the B identity.
     if (resolvedType && "setSystemPrompt" in transport && typeof (transport as any).setSystemPrompt === "function") {
-      const { buildSoulBundle } = await import("./soul-bundle.js");
-      const bundle = buildSoulBundle(resolvedType);
-      if (bundle) (transport as any).setSystemPrompt(bundle);
+      if (profileCarriesSoulBundle(resolvedType)) {
+        const { buildSoulBundle } = await import("./soul-bundle.js");
+        const bundle = buildSoulBundle(resolvedType);
+        if (bundle) (transport as any).setSystemPrompt(bundle);
+      }
     }
 
     const sessionKey = `system:${cacheKey ?? agent}`;
@@ -413,20 +420,6 @@ const AGENT_TO_ROLE: Record<AgentName, import("./agent-registry.js").SubagentRol
   professor: "task",
   dreamy: "sleep",
   browsie: "browse",
-  coding: "coding",
-  task: "task",
-};
-
-/**
- * #1932: SDK conversation role per agent. Professor is the Main
- * conversational agent (its one-shots share Main's config); dedicated
- * worker agents partition under worker roles. Distinct from AGENT_TO_ROLE,
- * which selects the model/config family.
- */
-const AGENT_TO_PIROLE: Record<AgentName, import("./pi-session/pi-conversation-identity.js").PiConversationRole> = {
-  professor: "main",
-  dreamy: "dreamy",
-  browsie: "browsing",
   coding: "coding",
   task: "task",
 };
