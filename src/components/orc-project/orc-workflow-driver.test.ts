@@ -100,6 +100,47 @@ describe("WorkflowDriver", () => {
     }
   });
 
+  it("audit inspects initial planning claims and fails ownerless model jobs explicitly (#1935)", () => {
+    const store = new StoreType();
+    const driver = DriverMod.startWorkflowDriver({ callModel: async () => "{}" });
+    try {
+      const cardRes = store.db.prepare(`INSERT INTO kanban_board (title, source, type, status) VALUES ('c','agent','O','running')`).run();
+      const card = Number(cardRes.lastInsertRowid);
+      const admitted = driver.runner.admitSupervised({ rootCardId: card, source: "interactive" });
+      const runId = admitted.runId as string;
+      // Own the claim with a live registry entry: lawful bounded preparation.
+      const pending = store.findPendingCommand(runId, "__plan__", "plan")!;
+      const claimed = store.claimCommand({
+        runId, generation: pending.generation, nodeId: "__plan__", action: "plan", ordinal: pending.ordinal,
+      }, "spin-planner")!;
+      driver.modelJobs.begin({
+        claim: {
+          key: { runId, generation: pending.generation, nodeId: "__plan__", action: "plan", ordinal: pending.ordinal },
+          owner: "spin-planner", token: claimed.token,
+        },
+        kind: "planning", opId: "op-live", revision: null, timeoutMs: 60_000,
+      });
+      store.db.prepare(`UPDATE workflow_commands SET next_inspection_at = datetime('now','-10 minutes') WHERE run_id = ?`).run(runId);
+      const active = driver.auditOnce(0);
+      expect(active.lawful).toContain(runId);
+      expect(active.inspections).toBe(1);
+      expect(store.getCommand({ runId, generation: 1, nodeId: "__plan__", action: "plan", ordinal: 0 })?.status).toBe("claimed");
+      driver.modelJobs.finish(claimed.token);
+
+      // Ownership absent (generation replacement): explicit observation_unknown,
+      // never five inconclusive guesses or an empty-plan no_workers failure.
+      store.db.prepare(`UPDATE workflow_commands SET next_inspection_at = datetime('now','-10 minutes') WHERE run_id = ?`).run(runId);
+      const ownerless = driver.auditOnce(0);
+      expect(ownerless.inspections).toBe(1);
+      const run = store.getRun(runId);
+      expect(run?.state).toBe("failed");
+      expect(run?.failureCode).toBe("observation_unknown");
+      expect(run?.failureReason).toContain("execution ownership");
+    } finally {
+      driver.stop();
+    }
+  });
+
   it("audit submits due inspections with audit-derived identity", () => {
     const store = new StoreType();
     const runner = new RunnerType(store, ["general"]);

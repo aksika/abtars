@@ -189,6 +189,8 @@ export interface BootCtx {
   reconcilerHandle: import("../components/reconciler.js").ReconcilerHandle | null;
   /** Set by phase-reconciler after successful start. */
   reconcilerRecovery: import("../components/reconciler.js").ReconcilerRecoveryReport | null;
+  /** #1935: generation-owned workflow driver (stopped on bridge shutdown). */
+  workflowDriver: import("../components/orc-project/orc-workflow-driver.js").WorkflowDriver | null;
 }
 
 /**
@@ -274,6 +276,7 @@ export function createBootCtx(overrides: Partial<BootCtx> = {}): BootCtx {
     scheduledRunCoordinator: null,
     reconcilerHandle: null,
     reconcilerRecovery: null,
+    workflowDriver: null,
 
     // Callbacks
     isSleepActive: () => false,

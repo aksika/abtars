@@ -40,12 +40,23 @@ export class LifecycleWakeScheduler {
   private timer: ReturnType<typeof setTimeout> | null = null;
   private armedAt: number | null = null;
   private _stopped = false;
+  private _started = false;
   private _running: Promise<void> | null = null;
   private _rescan = false;
   private readonly waking = new Set<LifecycleDueSourceId>();
 
   register(source: LifecycleDueSource): () => void {
     this.sources.set(source.id, source);
+    // Boot registration must not wake due items: recovery and the startup
+    // interruption barrier run before the explicit start() boot scan. A late
+    // registration after start is scanned immediately.
+    if (this._started && !this._stopped) {
+      if (this._running) {
+        this._rescan = true;
+      } else {
+        void this.scan();
+      }
+    }
     return () => {
       this.sources.delete(source.id);
       if (this._stopped) return;
@@ -59,7 +70,7 @@ export class LifecycleWakeScheduler {
 
   /** A durable source mutated: rescan overdue items and re-arm the earliest. */
   sourceChanged(sourceId: LifecycleDueSourceId): void {
-    if (this._stopped) return;
+    if (this._stopped || !this._started) return;
     if (!this.sources.has(sourceId)) return;
     if (this._running) {
       this._rescan = true;
@@ -74,6 +85,7 @@ export class LifecycleWakeScheduler {
    */
   async start(): Promise<void> {
     if (this._stopped) return;
+    this._started = true;
     if (this._running) {
       this._rescan = true;
       await this._running;
@@ -89,6 +101,7 @@ export class LifecycleWakeScheduler {
 
   stop(): void {
     this._stopped = true;
+    this._started = false;
     this._rescan = false;
     if (this.timer) {
       clearTimeout(this.timer);

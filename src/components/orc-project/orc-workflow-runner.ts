@@ -43,6 +43,11 @@ import {
   sqliteNow,
 } from "../tasks/kanban-board.js";
 import { ProjectReviewStore } from "../project-acceptance/project-review-store.js";
+import type { ClaimAuthority } from "./orc-workflow-model-jobs.js";
+import { notifyWorkflowTerminal } from "./orc-workflow-model-jobs.js";
+
+/** #1935: startup interruption reason (workflow failure code stays observation_unknown). */
+export const INTERRUPTED_BY_RESTART = "interrupted by bridge restart";
 
 // ── proposal types (native structured values; transport serializes) ────
 
@@ -114,7 +119,8 @@ export type ReviewVerdict =
 
 export interface ReviewBackend {
   name: string;
-  startReview(cmd: CommandRow, brief: ReviewBrief): void;
+  /** #1935: production drain passes the original claim authority. */
+  startReview(cmd: CommandRow, brief: ReviewBrief, claim?: ClaimAuthority): void;
 }
 
 export interface PlanningInput {
@@ -129,7 +135,8 @@ export interface PlanningInput {
 
 export interface PlannerBackend {
   name: string;
-  startPlanning(cmd: CommandRow, input: PlanningInput): void;
+  /** #1935: production drain passes the original claim authority. */
+  startPlanning(cmd: CommandRow, input: PlanningInput, claim?: ClaimAuthority): void;
 }
 
 export type DrainPorts =
@@ -699,15 +706,23 @@ export class WorkflowRunner {
   rejectPlanRound(
     runId: string,
     problems: PlanDiagnostic[],
-    opts?: { opId?: string; planRound?: { nodeId: string; ordinal: number; payloadJson: string } },
+    opts?: {
+      opId?: string;
+      planRound?: { nodeId: string; ordinal: number; payloadJson: string };
+      claim?: ClaimAuthority;
+    },
   ): { outcome: "requeued" | "failed"; reason: string } {
     const run = this.requireLive(runId);
     const text = boundText(problems.map((p) => `${p.field}: ${p.reason}`).join("; "), 2000);
     let outcome: "requeued" | "failed" = "requeued";
     const res = this.commitKind(run, "PlanRejected", { problems }, () => {
+      // #1935: the original successful claim (never a refetched live token)
+      // owns the failed round. A stale/duplicate rejection is inert.
+      if (opts?.claim) this.requireOwnedClaim(opts.claim);
       const ok = this.store.consumeBudget(runId, "plan_revision");
       if (!ok) {
         if (opts?.opId) this.store.upsertOperation({ opId: opts.opId, runId, kind: "planning", status: "failed", resultJson: text });
+        if (opts?.claim) this.store.supersedeCommand(opts.claim.key);
         outcome = "failed";
         return { nextState: "failed" as const, failureCode: "plan_rejected", failureReason: text };
       }
@@ -736,6 +751,8 @@ export class WorkflowRunner {
           ordinal: this.store.nextCommandOrdinal(runId, run.generation, pr.nodeId, "plan"),
           payloadJson: pr.payloadJson,
         });
+      } else if (opts?.claim) {
+        this.store.supersedeCommand(opts.claim.key);
       }
       return { nextState: "planning" as const };
     });
@@ -788,15 +805,21 @@ export class WorkflowRunner {
     completesNode?: { revision: number; nodeId: string; outcome: string };
     /** Failed-round identity for rejection retry (the backend's command). */
     planRound?: { nodeId: string; ordinal: number; payloadJson: string };
+    /** #1935: original claim authority for the proposal handoff. */
+    claim?: ClaimAuthority;
   }): AcceptedPlan {
     const run = this.requireLive(runId);
+    // Read-only preflight so a stale callback validates before any mutation.
+    if (opts?.claim) this.requireOwnedClaim(opts.claim);
     const current = this.store.currentRevision(runId);
     if (opts?.baseRevision !== undefined && opts.baseRevision !== current) {
       throw new Error(`workflow runner: revision ${opts.baseRevision} stale for run ${runId} (current ${current})`);
     }
     const problems = this.validatePlanForRun(runId, proposal);
     if (problems.length > 0) {
-      const { reason } = this.rejectPlanRound(runId, problems, { opId: opts?.opId, planRound: opts?.planRound });
+      const { reason } = this.rejectPlanRound(runId, problems, {
+        opId: opts?.opId, planRound: opts?.planRound, claim: opts?.claim,
+      });
       throw new Error(`workflow runner: plan revision rejected: ${reason}`);
     }
     let baseline: string[] = [];
@@ -817,6 +840,9 @@ export class WorkflowRunner {
     const byId = new Map(proposal.nodes.map((n, i) => [hostIds[i] as string, n]));
     let queued = 0;
     const res = this.commitKind(run, "PlanAccepted", { revision }, () => {
+      // #1935: fence the handoff against a successor/replacement claim inside
+      // the transaction; the claim settles together with domain admission.
+      if (opts?.claim) this.requireOwnedClaim(opts.claim);
       // Replacement cancels prior non-terminal work but never rewrites it:
       // review nodes stay open (verdicts span revisions); the authoring
       // planning node completes with its proposal as the outcome.
@@ -851,6 +877,9 @@ export class WorkflowRunner {
       // this is normally a no-op — see appendHostReviewIfMissing).
       this.appendHostReviewIfMissing(runId, run.generation, revision);
       if (opts?.opId) this.store.upsertOperation({ opId: opts.opId, runId, kind: "planning", revision, status: "succeeded" });
+      // Domain admission, operation update and command disposition commit
+      // together; a stale token cannot complete another claim.
+      if (opts?.claim) this.store.completeCommand(opts.claim.key, opts.claim.owner, opts.claim.token);
       return { nextState: "dispatched" as const };
     });
     if (res.disposition === "conflict") throw new Error(`workflow runner: ${res.diagnostics}`);
@@ -864,8 +893,14 @@ export class WorkflowRunner {
   // protocol correction for malformed verdicts; persistent malformed verdicts
   // fail the review with their own reason — never a fresh execution turn.
 
-  submitVerdict(runId: string, nodeId: string, rawVerdict: ReviewVerdict): VerdictOutcome {
+  submitVerdict(
+    runId: string,
+    nodeId: string,
+    rawVerdict: ReviewVerdict,
+    opts?: { claim?: ClaimAuthority },
+  ): VerdictOutcome {
     const run = this.requireLive(runId);
+    if (opts?.claim) this.requireOwnedClaim(opts.claim);
     // Sanitize model-supplied text at the boundary (bounded diagnostics, req 12).
     const verdict: ReviewVerdict = rawVerdict.verdict === "accept" ? { verdict: "accept" }
       : rawVerdict.verdict === "cannot_assess" ? { verdict: "cannot_assess", reason: boundText(rawVerdict.reason, 2000) }
@@ -885,6 +920,7 @@ export class WorkflowRunner {
     if (malformed !== null) {
       let corrected = false;
       const res = this.commitKind(run, "ReviewInvalid", { nodeId, judged, verdict, malformed }, () => {
+        if (opts?.claim) this.requireOwnedClaim(opts.claim);
         if (this.store.consumeBudget(runId, "protocol_correction")) {
           const ordinal = this.store.nextCommandOrdinal(runId, run.generation, nodeId, "review");
           this.store.queueCommand({
@@ -892,10 +928,12 @@ export class WorkflowRunner {
             payloadJson: JSON.stringify({ nodeId, revision: home, correctionOf: malformed }),
           });
           corrected = true;
+          if (opts?.claim) this.store.completeCommand(opts.claim.key, opts.claim.owner, opts.claim.token);
           return {};
         }
         this.store.upsertOperation({ opId: opIdFor(runId, home, nodeId), runId, kind: "review", revision: home, status: "failed", resultJson: malformed });
         this.store.setNodeOutcome(runId, home, nodeId, "failed", malformed);
+        if (opts?.claim) this.store.completeCommand(opts.claim.key, opts.claim.owner, opts.claim.token);
         return this.evaluateTerminal(runId, judged, `malformed verdict: ${malformed}`);
       });
       if (res.disposition === "conflict") throw new Error(`workflow runner: ${res.diagnostics}`);
@@ -903,6 +941,7 @@ export class WorkflowRunner {
     }
     if (verdict.verdict === "accept") {
       const res = this.commitKind(run, "ReviewAccepted", { nodeId, judged, home }, () => {
+        if (opts?.claim) this.requireOwnedClaim(opts.claim);
         this.requireNode(runId, home, nodeId, ["queued", "running"]);
         this.store.upsertOperation({ opId: opIdFor(runId, home, nodeId), runId, kind: "review", revision: home, status: "succeeded", resultJson: JSON.stringify({ ...verdict, judgedRevision: judged }) });
         this.store.setNodeOutcome(runId, home, nodeId, "succeeded", JSON.stringify({ ...verdict, judgedRevision: judged }));
@@ -916,6 +955,7 @@ export class WorkflowRunner {
           ordinal: this.store.nextCommandOrdinal(runId, run.generation, nodeId, "deliver"),
           payloadJson: JSON.stringify({ nodeId, revision: judged }),
         });
+        if (opts?.claim) this.store.completeCommand(opts.claim.key, opts.claim.owner, opts.claim.token);
         return this.evaluateTerminal(runId, judged);
       });
       if (res.disposition === "conflict") throw new Error(`workflow runner: ${res.diagnostics}`);
@@ -923,9 +963,11 @@ export class WorkflowRunner {
     }
     if (verdict.verdict === "cannot_assess") {
       const res = this.commitKind(run, "ReviewUnassessable", { nodeId, judged, verdict }, () => {
+        if (opts?.claim) this.requireOwnedClaim(opts.claim);
         this.requireNode(runId, home, nodeId, ["queued", "running"]);
         this.store.upsertOperation({ opId: opIdFor(runId, home, nodeId), runId, kind: "review", revision: home, status: "failed", resultJson: JSON.stringify(verdict) });
         this.store.setNodeOutcome(runId, home, nodeId, "failed", verdict.reason);
+        if (opts?.claim) this.store.completeCommand(opts.claim.key, opts.claim.owner, opts.claim.token);
         return this.evaluateTerminal(runId, judged, `review cannot assess: ${verdict.reason}`);
       });
       if (res.disposition === "conflict") throw new Error(`workflow runner: ${res.diagnostics}`);
@@ -935,10 +977,12 @@ export class WorkflowRunner {
     // on the SAME node (which stays running across the repair revision).
     let repaired = false;
     const res = this.commitKind(run, "ReviewChangesRequested", { nodeId, judged, verdict }, () => {
+      if (opts?.claim) this.requireOwnedClaim(opts.claim);
       this.requireNode(runId, home, nodeId, ["queued", "running"]);
       if (!this.store.consumeBudget(runId, "review_repair")) {
         this.store.upsertOperation({ opId: opIdFor(runId, home, nodeId), runId, kind: "review", revision: home, status: "failed", resultJson: JSON.stringify(verdict) });
         this.store.setNodeOutcome(runId, home, nodeId, "failed", "repair allowance exhausted with unresolved defects");
+        if (opts?.claim) this.store.completeCommand(opts.claim.key, opts.claim.owner, opts.claim.token);
         return this.evaluateTerminal(runId, judged, "repair allowance exhausted with unresolved defects");
       }
       const opId = `op-${runId}-repair-r${judged}-${nodeId}`;
@@ -948,6 +992,7 @@ export class WorkflowRunner {
         payloadJson: JSON.stringify({ nodeId, revision: judged, purpose: "repair", defects: verdict.defects, opId }),
       });
       repaired = true;
+      if (opts?.claim) this.store.completeCommand(opts.claim.key, opts.claim.owner, opts.claim.token);
       return {};
     });
     if (res.disposition === "conflict") throw new Error(`workflow runner: ${res.diagnostics}`);
@@ -1232,19 +1277,22 @@ export class WorkflowRunner {
       if (key.action === "review" || key.action === "plan") {
         // No backend observability for model invocations: count inconclusive,
         // fail terminally at the bound (never silently retry, never wait forever).
+        const home = this.locateAnyRevision(run.runId, key.nodeId);
+        // #1935: initial planning has no admitted node/revision. Resolve the
+        // operation from the command payload instead of dropping it, and never
+        // let execution loss settle as an empty-plan `no_workers` failure.
+        const initialPlan = key.action === "plan" && home === null;
+        const opId = this.opIdOfCommand(cmd);
         return this.applyInconclusive(run, fullKey, expectedGen, () => {
-          const rev = this.store.currentRevision(run.runId);
-          const node = this.store.listNodes(run.runId, rev).find((n) => n["node_id"] === key.nodeId);
-          const home = node ? rev : this.locateAnyRevision(run.runId, key.nodeId);
+          this.store.upsertOperation({
+            opId, runId: run.runId,
+            kind: key.action === "review" ? "review" : "planning",
+            revision: home, status: "failed", resultJson: "inspection cap reached",
+          });
           if (home !== null) {
-            this.store.upsertOperation({
-              opId: opIdFor(run.runId, home, key.nodeId), runId: run.runId,
-              kind: key.action === "review" ? "review" : "planning",
-              revision: home, status: "failed", resultJson: "inspection cap reached",
-            });
             this.store.setNodeOutcome(run.runId, home, key.nodeId, "failed", "inspection cap reached without verdict");
           }
-        });
+        }, initialPlan);
       }
       // dispatch: inspect the attempt by stable identity.
       const rev = this.store.currentRevision(run.runId);
@@ -1795,6 +1843,120 @@ export class WorkflowRunner {
   }
 
   /**
+   * #1935: live inspection of a planning/review claim against the current
+   * generation's model-job registry.
+   *
+   * - `active` extends the claim, but never beyond the call's own deadline.
+   * - `expired` fails explicitly as `observation_unknown`: the deadline
+   *   interrupted external work whose termination is unconfirmed, so no
+   *   executable retry is published.
+   * - `ownerless` fails the run explicitly as `observation_unknown`; the
+   *   durable operation and executable work are closed in the same commit.
+   */
+  submitModelJobInspection(
+    runId: string, token: string, gen: number, disposition: "active" | "expired" | "ownerless",
+    activeWithinMs?: number,
+  ): string {
+    const run = this.store.getRun(runId);
+    if (!run) throw new Error(`workflow runner: run ${runId} missing`);
+    if (TERMINAL_RUN_STATES.includes(run.state)) return "terminal:noop";
+    const cmd = this.store.findCommandByToken(token);
+    if (!cmd || cmd.runId !== runId) return "gone:noop";
+    if (cmd.status !== "claimed" || cmd.owner === null) return "settled:noop";
+    if (cmd.inspectGen !== gen - 1) return "stale:noop";
+    const key = { runId, generation: cmd.generation, nodeId: cmd.nodeId, action: cmd.action, ordinal: cmd.ordinal };
+    if (disposition === "active") {
+      if (activeWithinMs !== undefined) {
+        this.store.noteInspectionAliveForMillis(key, gen, activeWithinMs);
+      } else {
+        this.store.noteInspectionAlive(key, gen, COMMAND_CLAIM_LEASE_MIN);
+      }
+      return "active:extended";
+    }
+    const claim: ClaimAuthority = { key, owner: cmd.owner, token };
+    if (disposition === "expired") {
+      // The deadline interrupted an external call whose termination this
+      // generation cannot confirm. Never publish an executable retry on that
+      // evidence: fail explicitly as observation_unknown.
+      return `expired:${this.failModelJob(
+        runId, claim, "model call deadline exceeded; external termination unconfirmed",
+      ).disposition}`;
+    }
+    return `ownerless:${this.failModelJob(runId, claim, "model job has no current execution ownership").disposition}`;
+  }
+
+  /**
+   * #1935: fail a claimed planning/review job explicitly when this generation
+   * has no execution ownership. No allowance is consumed and no retry is
+   * published; the open operation and executable work close with the run.
+   */
+  failModelJob(runId: string, claim: ClaimAuthority, reason: string): CommitResult {
+    const run = this.requireLive(runId);
+    ensureRunnerTables(this.store.db);
+    const payloadJson = JSON.stringify({ kind: "ModelJobUnobserved", body: { key: claim.key, reason } });
+    const event: RunnerIngress = {
+      eventId: `model-unobserved-${claim.token}`,
+      runId,
+      payloadHash: createHash("sha256").update(payloadJson).digest("hex"),
+      payloadJson, generation: run.generation, stateVersion: run.stateVersion,
+    };
+    const res = this.commitWithProjections(runId, event, () => {
+      const cmd = this.requireOwnedClaim(claim);
+      let revision: number | null = null;
+      try {
+        const parsed = JSON.parse(cmd.payloadJson) as { revision?: unknown };
+        if (typeof parsed.revision === "number") revision = parsed.revision;
+      } catch {
+        revision = null;
+      }
+      if (cmd.action === "review") {
+        const home = this.locateAnyRevision(runId, cmd.nodeId);
+        if (home !== null) this.store.setNodeOutcome(runId, home, cmd.nodeId, "failed", reason);
+      }
+      this.store.upsertOperation({
+        opId: this.opIdOfCommand(cmd), runId,
+        kind: cmd.action === "review" ? "review" : "planning",
+        revision, status: "failed", resultJson: reason,
+      });
+      this.store.cancelRun(runId, run.rootCardId);
+      this.store.closeOpenOperations(runId, "failed", reason);
+      return { nextState: "failed" as const, failureCode: "observation_unknown", failureReason: boundText(reason, 2000) };
+    });
+    if (res.disposition === "conflict") throw new Error(`workflow runner: ${res.diagnostics}`);
+    return res;
+  }
+
+  /**
+   * #1935: startup interruption for one pre-existing workflow. Cancels
+   * executable commands/nodes and fences worker attempts through the existing
+   * cancellation path, preserves receipts/artifacts, and consumes no
+   * retry/correction/planning allowance.
+   */
+  interruptRun(runId: string): boolean {
+    const run = this.store.getRun(runId);
+    if (!run || TERMINAL_RUN_STATES.includes(run.state)) return false;
+    ensureRunnerTables(this.store.db);
+    const payloadJson = JSON.stringify({ kind: "StartupInterrupted", body: { reason: INTERRUPTED_BY_RESTART } });
+    const event: RunnerIngress = {
+      eventId: `restart-interrupt-${runId}`,
+      runId,
+      payloadHash: createHash("sha256").update(payloadJson).digest("hex"),
+      payloadJson, generation: run.generation, stateVersion: run.stateVersion,
+    };
+    const res = this.commitWithProjections(runId, event, () => {
+      this.store.cancelRun(runId, run.rootCardId);
+      this.store.closeOpenOperations(runId, "cancelled", INTERRUPTED_BY_RESTART);
+      return {
+        nextState: "failed" as const,
+        failureCode: "observation_unknown",
+        failureReason: INTERRUPTED_BY_RESTART,
+      };
+    });
+    if (res.disposition === "conflict") throw new Error(`workflow runner: ${res.diagnostics}`);
+    return res.disposition === "applied";
+  }
+
+  /**
    * Commit a worker-settlement outcome with an EXPLICIT ingress identity
    * (settlement joint commit and recovery redrive). The caller owns
    * idempotency: settlement uses `attempt-<id>-<lifecycle>`, recovery reuses
@@ -1885,7 +2047,7 @@ export class WorkflowRunner {
 
   drain(limit: number, ports: DrainPorts, opts?: DrainOpts): number {
     const policy = opts?.policy;
-    const route = (cmd: CommandRow): { owner: string; start: () => void } => {
+    const route = (cmd: CommandRow): { owner: string; start: (claim?: ClaimAuthority) => void } => {
       if (!isJobPorts(ports) || cmd.action === "dispatch" || cmd.action === "deliver" || cmd.action === "notify") {
         const exec = isJobPorts(ports) ? ports.executor : ports;
         return { owner: exec.name, start: () => exec.dispatch(cmd) };
@@ -1894,33 +2056,33 @@ export class WorkflowRunner {
         const backend = (ports as { reviewer: ReviewBackend }).reviewer;
         return {
           owner: backend.name,
-          start: () => {
+          start: (claim) => {
             const payload = JSON.parse(cmd.payloadJson) as { nodeId: string; revision: number };
             this.store.upsertOperation({
               opId: opIdFor(cmd.runId, payload.revision, cmd.nodeId),
               runId: cmd.runId, kind: "review", revision: payload.revision, status: "running",
             });
-            backend.startReview(cmd, this.assembleBrief(cmd.runId, this.store.currentRevision(cmd.runId), cmd.nodeId));
+            backend.startReview(cmd, this.assembleBrief(cmd.runId, this.store.currentRevision(cmd.runId), cmd.nodeId), claim);
           },
         };
       }
       const planner = (ports as { planner: PlannerBackend }).planner;
       return {
         owner: planner.name,
-        start: () => {
+        start: (claim) => {
           const payload = JSON.parse(cmd.payloadJson) as {
             nodeId: string; revision: number | null; purpose: PlanningInput["purpose"];
             defects?: Array<{ criterion: string; detail: string }>; opId?: string;
           };
+          const opId = payload.opId ?? opIdFor(cmd.runId, payload.revision ?? 0, cmd.nodeId);
           this.store.upsertOperation({
-            opId: payload.opId ?? opIdFor(cmd.runId, payload.revision ?? 0, cmd.nodeId),
-            runId: cmd.runId, kind: "planning", revision: payload.revision, status: "running",
+            opId, runId: cmd.runId, kind: "planning", revision: payload.revision, status: "running",
           });
           planner.startPlanning(cmd, {
             runId: cmd.runId, revision: payload.revision, purpose: payload.purpose,
             defects: payload.defects ?? [], requiredOutputs: this.plannerRequiredOutputs(cmd.runId),
-            nodeId: cmd.nodeId, opId: payload.opId,
-          });
+            nodeId: cmd.nodeId, opId,
+          }, claim);
         },
       };
     };
@@ -2000,7 +2162,11 @@ export class WorkflowRunner {
             target.owner, claimed.token, sender,
           );
         } else {
-          target.start();
+          target.start({
+            key: keyOf(cmd),
+            owner: target.owner,
+            token: claimed.token,
+          });
         }
       } catch (err) {
         // Capacity refusal releases the claim for redrive (the lease would
@@ -2121,22 +2287,24 @@ export class WorkflowRunner {
     const dueInspections: Array<{ runId: string; claimToken: string; inspectGen: number }> = [];
     for (const root of roots) {
       nextCursor = Math.max(nextCursor, root.rootCardId);
+      const p = this.store.probeRun(root.runId, root.rootCardId);
+      // #1935: due claims are collected in every live state, including initial
+      // planning. Waiting for a plan is lawful; an expired claim is not.
+      if (p.dueClaim) {
+        for (const d of this.store.dueInspections(root.runId, 10)) {
+          dueInspections.push({ runId: root.runId, claimToken: d.claimToken, inspectGen: d.inspectGen });
+        }
+      }
       // Admitted/planning runs await plan admission (a durable planning command
       // from Task 3); they are lawfully pending, never ownerless.
       if (root.state === "admitted" || root.state === "planning") {
         lawful.push(root.runId);
         continue;
       }
-      const p = this.store.probeRun(root.runId, root.rootCardId);
       // AstraMaster-7: due claims are inspected even when an open operation
       // is also present. Previously openOp counted as lawful ownership first
       // and shadowed the due claim — an abandoned model job (op row stuck
       // running, backend gone) wedged its run forever.
-      if (p.dueClaim) {
-        for (const d of this.store.dueInspections(root.runId, 10)) {
-          dueInspections.push({ runId: root.runId, claimToken: d.claimToken, inspectGen: d.inspectGen });
-        }
-      }
       if (p.pending || p.freshClaim || p.liveAttempt || p.pendingInput || p.openOp || p.pendingDelivery) {
         lawful.push(root.runId);
       } else if (p.dueClaim) {
@@ -2197,6 +2365,10 @@ export class WorkflowRunner {
     if (res.disposition !== "applied") return;
     const run = this.store.getRun(runId);
     if (!run || !TERMINAL_RUN_STATES.includes(run.state)) return;
+    // Revoke generation-owned model-call authority as soon as the terminal
+    // fact commits, regardless of which runner instance committed it.
+    // Projection recovery is independent of cancellation.
+    notifyWorkflowTerminal(runId);
     if (!this.projectTerminalProjections(runId)) {
       throw new Error(`workflow runner: terminal projections incomplete for run ${runId}`);
     }
@@ -2382,6 +2554,33 @@ export class WorkflowRunner {
       throw new Error(`workflow runner: run ${runId} terminal (${run.state}); late result rejected`);
     }
     return run;
+  }
+
+  /**
+   * #1935: the only authority a model handoff may carry is the claim row
+   * returned by `claimCommand`. Owner + token must still be live; anything
+   * else (superseded round, successor claim, inspection settlement) is inert.
+   */
+  private requireOwnedClaim(claim: ClaimAuthority): CommandRow {
+    const cmd = this.store.getCommand(claim.key);
+    if (!cmd || cmd.status !== "claimed" || cmd.owner !== claim.owner || cmd.claimToken !== claim.token) {
+      throw new Error(
+        `workflow runner: stale model-job claim for ${claim.key.runId}/${claim.key.nodeId}/${claim.key.action}#${claim.key.ordinal}`,
+      );
+    }
+    return cmd;
+  }
+
+  /** Stable operation id from a command payload, falling back to opIdFor. */
+  private opIdOfCommand(cmd: CommandRow): string {
+    try {
+      const parsed = JSON.parse(cmd.payloadJson) as { opId?: unknown; revision?: unknown };
+      if (typeof parsed.opId === "string" && parsed.opId.length > 0) return parsed.opId;
+      const revision = typeof parsed.revision === "number" ? parsed.revision : 0;
+      return opIdFor(cmd.runId, revision, cmd.nodeId);
+    } catch {
+      return opIdFor(cmd.runId, this.store.currentRevision(cmd.runId), cmd.nodeId);
+    }
   }
 
   private requireNode(runId: string, revision: number, nodeId: string, allowed: string[]): void {

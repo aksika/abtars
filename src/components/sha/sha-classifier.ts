@@ -281,6 +281,12 @@ function classifyScheduled(event: ScheduledFailureEvent, policy: ShaPolicyView):
     return { classification: "system", reason: `system-kind task (${event.taskKind}) is outside SHA remediation authority` };
   }
   const d = event.diagnostic;
+  // #1935: a bridge restart truthfully interrupts unfinished work. That is an
+  // operational event, not a defect: classify it non-actionable by structured
+  // fields (never message text), while the operator notification stays active.
+  if (d.category === "interruption" && d.code === "restart_interrupted") {
+    return { classification: "suppressed", reason: "workflow interrupted by bridge restart — not an actionable defect" };
+  }
   if (d.category === "execution" && d.code === "credits_exhausted") {
     return { classification: "credits", reason: "provider credits exhausted — human remediation required" };
   }

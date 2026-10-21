@@ -1000,10 +1000,18 @@ export class WorkflowStore {
          WHERE run_id = ? AND status IN ('queued','running')`,
       )
       .run(runId);
+    // #1935: an input wait is an unfinished obligation too. Expire the open
+    // request so no operator/UI prompt survives the run's terminal fact.
+    this.db
+      .prepare(
+        `UPDATE project_input_requests SET status = 'expired', answered_at = datetime('now')
+         WHERE project_card_id = ? AND status = 'pending'`,
+      )
+      .run(rootCardId);
     this.db
       .prepare(
         `UPDATE workflow_deliveries SET outcome = 'unknown',
-           receipt_json = '{"cancelled":true}', updated_at = datetime('now')
+           receipt_json = COALESCE(receipt_json, '{"cancelled":true}'), updated_at = datetime('now')
          WHERE run_id = ? AND outcome = 'pending'`,
       )
       .run(runId);
@@ -1022,6 +1030,21 @@ export class WorkflowStore {
     return Number(res.changes);
   }
 
+  /**
+   * #1935: close every open planning/review operation for a terminal run.
+   * Startup interruption and ownerless-model-job failure use this so no
+   * operation row survives its run as `running`.
+   */
+  closeOpenOperations(runId: string, status: "failed" | "cancelled", resultJson: string): number {
+    const res = this.db
+      .prepare(
+        `UPDATE workflow_operations SET status = ?, result_json = ?, updated_at = datetime('now')
+         WHERE run_id = ? AND status IN ('pending','claimed','running')`,
+      )
+      .run(status, resultJson, runId);
+    return Number(res.changes);
+  }
+
   /** Record a confirmed-alive inspection: reset inconclusive, schedule next look. */
   noteInspectionAlive(key: CommandKey, gen: number, intervalMin: number): void {
     this.db.prepare(
@@ -1029,6 +1052,19 @@ export class WorkflowStore {
          next_inspection_at = datetime('now', '+' || ? || ' minutes')
        WHERE run_id = ? AND generation = ? AND node_id = ? AND action = ? AND ordinal = ?`,
     ).run(gen, intervalMin, key.runId, key.generation, key.nodeId, key.action, key.ordinal);
+  }
+
+  /**
+   * #1935: extend a live model-job claim by an exact remaining lifetime so the
+   * next inspection never falls beyond the call's own deadline.
+   */
+  noteInspectionAliveForMillis(key: CommandKey, gen: number, intervalMs: number): void {
+    const seconds = Math.max(1, Math.ceil(intervalMs / 1000));
+    this.db.prepare(
+      `UPDATE workflow_commands SET inspect_gen = ?, consecutive_inconclusive = 0,
+         next_inspection_at = datetime('now', '+' || ? || ' seconds')
+       WHERE run_id = ? AND generation = ? AND node_id = ? AND action = ? AND ordinal = ?`,
+    ).run(gen, seconds, key.runId, key.generation, key.nodeId, key.action, key.ordinal);
   }
 
   /** Record an inconclusive inspection: bump counter, schedule next look. */

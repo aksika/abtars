@@ -23,10 +23,13 @@ import {
   workflowCapabilities,
   type ModelCall,
 } from "./orc-workflow-ports.js";
+import { ModelJobRegistry, MODEL_JOB_SHUTDOWN_REASON, subscribeWorkflowTerminal } from "./orc-workflow-model-jobs.js";
 import type { TaskDatabase } from "../tasks/kanban-board.js";
 
 export interface WorkflowDriver {
   readonly runner: WorkflowRunner;
+  /** Generation-owned model-call registry (diagnostics/tests). */
+  readonly modelJobs: ModelJobRegistry;
   drainWake(reason: string): number;
   auditOnce(cursor?: number): {
     nextCursor: number; checked: number; lawful: string[]; ownerless: string[];
@@ -51,10 +54,14 @@ export function startWorkflowDriver(deps: {
   // general Spin work. Capability validation stays in the runner; routing
   // stays capability-based and explicit (isPiCapability).
   const runner = new WorkflowRunner(store, workflowCapabilities());
+  // #1935: one registry per driver generation. Terminal transitions revoke
+  // call authority immediately; shutdown aborts everything still live.
+  const modelJobs = new ModelJobRegistry();
+  const offTerminal = subscribeWorkflowTerminal((runId) => { modelJobs.abortRun(runId); });
   const ports: DrainPorts = deps.ports ?? {
     executor: new RoutingWorkflowWorkerPort({ runner }),
-    reviewer: new SpinReviewerBackend({ runner, callModel: deps.callModel, onSettled: () => drainWake("model:verdict") }),
-    planner: new SpinPlannerBackend({ runner, callModel: deps.callModel, onSettled: () => drainWake("model:proposal") }),
+    reviewer: new SpinReviewerBackend({ runner, modelJobs, callModel: deps.callModel, onSettled: () => drainWake("model:verdict") }),
+    planner: new SpinPlannerBackend({ runner, modelJobs, callModel: deps.callModel, onSettled: () => drainWake("model:proposal") }),
     // AstraMaster-2: production delivery is connected — without a sender the
     // drain routes deliver commands into the worker executor, which throws
     // (a review node is in no plan revision) and wedges the run.
@@ -84,6 +91,9 @@ export function startWorkflowDriver(deps: {
     nextCursor: number; checked: number; lawful: string[]; ownerless: string[];
     recovered: number; inspections: number; projected: number;
   } {
+    if (stopped) {
+      return { nextCursor: cursor, checked: 0, lawful: [], ownerless: [], recovered: 0, inspections: 0, projected: 0 };
+    }
     if (fromCursor !== undefined) cursor = fromCursor;
     // #1792 live-fix: the audit redrives persisted commands (checkpoint §6).
     // Admission queues the initial planning command without a guaranteed
@@ -106,7 +116,21 @@ export function startWorkflowDriver(deps: {
     for (const item of tick.dueInspections) {
       if (inspections >= INSPECTION_CAP_PER_TICK) break;
       try {
-        runner.submitClaimInspection(item.runId, item.claimToken, item.inspectGen + 1);
+        const cmd = runner.store.findCommandByToken(item.claimToken);
+        if (cmd && (cmd.action === "plan" || cmd.action === "review")) {
+          // #1935: consult this generation's ownership before classifying a
+          // model claim. Active calls extend within their deadline; expired
+          // calls enter their timeout settlement; absent ownership fails
+          // explicitly (never a blind retry or five inconclusive guesses).
+          const disposition = modelJobs.classify(item.claimToken);
+          if (disposition === "expired") modelJobs.abort(item.claimToken, "deadline");
+          runner.submitModelJobInspection(
+            item.runId, item.claimToken, item.inspectGen + 1, disposition,
+            disposition === "active" ? modelJobs.remainingMs(item.claimToken) : undefined,
+          );
+        } else {
+          runner.submitClaimInspection(item.runId, item.claimToken, item.inspectGen + 1);
+        }
         inspections++;
       } catch (err) {
         logWarn("workflow-driver", `inspection submit contained: ${boundText(err instanceof Error ? err.message : String(err), 200)}`);
@@ -120,11 +144,16 @@ export function startWorkflowDriver(deps: {
 
   return {
     runner,
+    modelJobs,
     drainWake,
     auditOnce,
     recover: (port?: ExecutionPort) => runner.startupRecovery(port),
     stop: () => {
       stopped = true;
+      offTerminal();
+      // Generation shutdown revokes callback authority before aborting the
+      // provider executions (Spin interrupts on the signal).
+      modelJobs.abortAll(MODEL_JOB_SHUTDOWN_REASON);
       nerve.off("card:queued", onQueued);
       nerve.off("card:done", onDone);
       nerve.off("card:failed", onFailed);

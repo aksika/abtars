@@ -29,6 +29,8 @@ export interface AgentOpts {
   maxToolRounds?: number;
   /** #1338: call-local observer for live TUI output mirroring. Forwarded to the transport. */
   outputObserver?: import("./session-output-feed.js").OutputObserver;
+  /** #1935: generation-owned cancellation; aborts acquisition and execution. */
+  signal?: AbortSignal;
 }
 
 /** #1361: Per-execution handle for one-shot or continuation-capable LLM calls. */
@@ -143,111 +145,135 @@ export class SubagentRuntime {
   /** #1361: Open a uniquely-keyed execution handle. Key must be unique per concurrent
    *  execution (use ManagedSession ID for one-shot sessions, not the agent name alone). */
   async openExecution(agent: AgentName, key: string, opts?: AgentOpts): Promise<RuntimeExecution> {
-    const { checkBudget, sendBudgetNotification } = await import("./budget.js");
-    const budgetCheck = checkBudget(agent);
-    if (!budgetCheck.allowed) {
-      const reason = budgetCheck.remaining.tokens <= 0 ? "token" : "call";
-      void sendBudgetNotification(agent, reason);
-      throw new Error(`Daily ${reason} budget exceeded for ${agent}. Resets at midnight.`);
-    }
-
-    const sessionStrategy = opts?.session ?? DEFAULT_SESSION[agent] ?? "fresh";
-
-    const cached = this.cache.get(key);
-    if (cached && sessionStrategy === "fresh") {
-      await cached.transport.resetSession?.(cached.sessionKey);
-    }
-
-    const cacheKey = key;
-    const entry = this.cache.get(cacheKey) ?? await this.createAgent(agent, opts?.sessionType, key);
-    const { transport, model } = entry;
-    const sessionKey = entry.sessionKey;
-
-    // Per-call timeout override
-    if (opts?.timeoutMs && transport.setTimeoutOverride) {
-      transport.setTimeoutOverride(opts.timeoutMs);
-    }
-    // Per-call tool-round circuit breaker override
-    if (opts?.maxToolRounds != null && transport.setMaxToolRoundsOverride) {
-      transport.setMaxToolRoundsOverride(opts.maxToolRounds);
-    }
-
-    let closed = false;
-    let cancelled = false;
-    let timeoutHandle: ReturnType<typeof setTimeout> | undefined;
+    // #1935: the per-call deadline starts at call entry, covering the budget
+    // check, transport acquisition and execution. A call aborted during
+    // acquisition disposes the acquired transport before any send.
     const start = Date.now();
-
-    const execId = `runtime_${sessionKey}_${Date.now()}_${randomBytes(4).toString("hex")}`;
-
-    const exec: RuntimeExecution = {
-      transport,
-      sessionKey,
-      executionId: execId,
-      ephemeral: sessionStrategy === "fresh",
-      lastUsage: () => transport.lastUsage?.() ?? null,
-
-      send: async (prompt, image, context) => {
-        if (cancelled) throw new Error("Execution cancelled");
-        const response = await transport.sendPrompt(sessionKey, prompt, image, {
-          ...context,
-          executionId: context?.executionId ?? execId,
-        });
-        if (cancelled) throw new Error("Execution cancelled");
-        logDebug(TAG, `${key} exec.send: ${prompt.length}ch → ${response?.length ?? 0}ch (${model})`);
-        return response ?? "";
-      },
-
-      cancel: async (reason: import("./swarm-executor-types.js").CancelReason) => {
-        if (closed || cancelled) return;
-        cancelled = true;
-        if (timeoutHandle) clearTimeout(timeoutHandle);
-        logDebug(TAG, `${key} exec.cancel (${reason})`);
-        // Each open execution has a unique cache key, so interrupting this
-        // transport cannot cancel a sibling execution. This is required for
-        // ACP and tmux, which do not implement setTimeoutOverride().
-        try {
-          await transport.sendInterrupt(reason);
-        } catch (err) {
-          logAndSwallow(TAG, "exec.cancel", err);
-        }
-      },
-
-      close: async () => {
-        if (closed) return;
-        closed = true;
-        if (timeoutHandle) clearTimeout(timeoutHandle);
-
-        if (sessionStrategy === "fresh") {
-          // Interrupt if still active, destroy transport, remove cache entry
-          if (!cancelled) {
-            try { await transport.sendInterrupt?.("execution_closed"); } catch { /* best effort */ }
-          }
-          try { transport.destroy(); } catch { /* best effort */ }
-          this.cache.delete(cacheKey);
-          logDebug(TAG, `${key} ephemeral exec closed — transport destroyed, cache removed`);
-        } else {
-          // Reset overrides — persistent transport stays in cache
-          if (opts?.timeoutMs && transport.setTimeoutOverride) {
-            transport.setTimeoutOverride(null);
-          }
-          if (opts?.maxToolRounds != null && transport.setMaxToolRoundsOverride) {
-            transport.setMaxToolRoundsOverride(null);
-          }
-          logDebug(TAG, `${key} exec closed (${Date.now() - start}ms, ${model})`);
-        }
-      },
-    };
-
-    // PiCoreTransport has its own host timer, but ACP and tmux do not expose
-    // a timeout override. Keep this execution-level deadline as the universal
-    // fallback; duplicate cancellation on PiCore is harmless and idempotent.
+    let deadlineExpired = false;
+    let exec: RuntimeExecution | null = null;
+    let acquiredEntry: CachedAgent | undefined;
+    let timeoutHandle: ReturnType<typeof setTimeout> | undefined;
     if (opts?.timeoutMs && opts.timeoutMs > 0) {
       timeoutHandle = setTimeout(() => {
-        void exec.cancel("deadline");
-      }, opts.timeoutMs);
+        deadlineExpired = true;
+        void exec?.cancel("deadline");
+      }, Math.max(1, opts.timeoutMs));
+      timeoutHandle.unref?.();
     }
+    const failIfStopped = (): void => {
+      if (!deadlineExpired && !opts?.signal?.aborted) return;
+      if (timeoutHandle) clearTimeout(timeoutHandle);
+      throw new Error(deadlineExpired ? "Execution deadline exceeded" : "Execution cancelled");
+    };
+    try {
+      failIfStopped();
+      const { checkBudget, sendBudgetNotification } = await import("./budget.js");
+      const budgetCheck = checkBudget(agent);
+      if (!budgetCheck.allowed) {
+        const reason = budgetCheck.remaining.tokens <= 0 ? "token" : "call";
+        void sendBudgetNotification(agent, reason);
+        throw new Error(`Daily ${reason} budget exceeded for ${agent}. Resets at midnight.`);
+      }
 
-    return exec;
+      const sessionStrategy = opts?.session ?? DEFAULT_SESSION[agent] ?? "fresh";
+
+      const cached = this.cache.get(key);
+      if (cached && sessionStrategy === "fresh") {
+        await cached.transport.resetSession?.(cached.sessionKey);
+      }
+
+      const cacheKey = key;
+      const existingEntry = this.cache.get(cacheKey);
+      const entry = existingEntry ?? await this.createAgent(agent, opts?.sessionType, key);
+      const acquiredHere = existingEntry === undefined;
+      acquiredEntry = acquiredHere ? entry : undefined;
+      failIfStopped();
+      const { transport, model } = entry;
+      const sessionKey = entry.sessionKey;
+
+      // Per-call timeout override
+      if (opts?.timeoutMs && transport.setTimeoutOverride) {
+        transport.setTimeoutOverride(opts.timeoutMs);
+      }
+      // Per-call tool-round circuit breaker override
+      if (opts?.maxToolRounds != null && transport.setMaxToolRoundsOverride) {
+        transport.setMaxToolRoundsOverride(opts.maxToolRounds);
+      }
+
+      let closed = false;
+      let cancelled = false;
+      const execId = `runtime_${sessionKey}_${Date.now()}_${randomBytes(4).toString("hex")}`;
+
+      exec = {
+        transport,
+        sessionKey,
+        executionId: execId,
+        ephemeral: sessionStrategy === "fresh",
+        lastUsage: () => transport.lastUsage?.() ?? null,
+
+        send: async (prompt, image, context) => {
+          if (cancelled || deadlineExpired) throw new Error("Execution cancelled");
+          const response = await transport.sendPrompt(sessionKey, prompt, image, {
+            ...context,
+            executionId: context?.executionId ?? execId,
+          });
+          if (cancelled || deadlineExpired) throw new Error("Execution cancelled");
+          logDebug(TAG, `${key} exec.send: ${prompt.length}ch → ${response?.length ?? 0}ch (${model})`);
+          return response ?? "";
+        },
+
+        cancel: async (reason: import("./swarm-executor-types.js").CancelReason) => {
+          if (closed || cancelled) return;
+          cancelled = true;
+          if (timeoutHandle) clearTimeout(timeoutHandle);
+          logDebug(TAG, `${key} exec.cancel (${reason})`);
+          // Each open execution has a unique cache key, so interrupting this
+          // transport cannot cancel a sibling execution. This is required for
+          // ACP and tmux, which do not implement setTimeoutOverride().
+          try {
+            await transport.sendInterrupt(reason);
+          } catch (err) {
+            logAndSwallow(TAG, "exec.cancel", err);
+          }
+        },
+
+        close: async () => {
+          if (closed) return;
+          closed = true;
+          if (timeoutHandle) clearTimeout(timeoutHandle);
+
+          if (sessionStrategy === "fresh") {
+            // Interrupt if still active, destroy transport, remove cache entry
+            if (!cancelled) {
+              try { await transport.sendInterrupt?.("execution_closed"); } catch { /* best effort */ }
+            }
+            try { transport.destroy(); } catch { /* best effort */ }
+            this.cache.delete(cacheKey);
+            logDebug(TAG, `${key} ephemeral exec closed — transport destroyed, cache removed`);
+          } else {
+            // Reset overrides — persistent transport stays in cache
+            if (opts?.timeoutMs && transport.setTimeoutOverride) {
+              transport.setTimeoutOverride(null);
+            }
+            if (opts?.maxToolRounds != null && transport.setMaxToolRoundsOverride) {
+              transport.setMaxToolRoundsOverride(null);
+            }
+            logDebug(TAG, `${key} exec closed (${Date.now() - start}ms, ${model})`);
+          }
+        },
+      };
+      failIfStopped();
+      return exec;
+    } catch (err) {
+      if (timeoutHandle) clearTimeout(timeoutHandle);
+      // Acquisition may have completed while the call was already aborted:
+      // dispose a transport created for this call before the caller can use it.
+      if (acquiredEntry && (deadlineExpired || opts?.signal?.aborted)) {
+        try { acquiredEntry.transport.destroy(); } catch { /* best effort */ }
+        this.cache.delete(key);
+      }
+      throw err;
+    }
   }
 
   /** Get a persistent session handle for multi-turn callers. */

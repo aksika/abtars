@@ -89,6 +89,20 @@ describe("classifyShaFailure — scheduled guard precedence (R3)", () => {
     expect(long.classification).toBe("ambiguous");
   });
 
+  it("classifies restart interruption as non-actionable before message rules (#1935)", () => {
+    const policy: ShaPolicyView = {
+      fixes: [{ pattern: "interrupted by bridge restart", action: "run", command: ["true"], cooldownMin: 1 }],
+      logAdmissionAllowed: true,
+    };
+    const r = classifyShaFailure(
+      scheduled({ diagnostic: makeTaskFailure("interruption", "restart_interrupted", "executing", "interrupted by bridge restart", "none") }),
+      "full",
+      policy,
+    );
+    expect(r.classification).toBe("suppressed");
+    expect(r.reason).toContain("bridge restart");
+  });
+
   it("suppress rules suppress; run rules classify known_fix; otherwise unknown actionable", () => {
     const policy: ShaPolicyView = {
       fixes: [

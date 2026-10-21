@@ -259,25 +259,27 @@ export function verifyTerminalCustody(first: PlanningCustodyFacts, second: Plann
   return violations;
 }
 
-/** #1902: deterministic planning-failure scripts on the route production
- *  planning actually takes. S-profile planning is routed to the main
- *  candidate by the production fallback chain, so the scheduled goal is
- *  scripted there — never on B, and production routing is never changed to
- *  feed a fixture. Each script is consumed once by one goal-bearing request;
- *  exhaustion falls back to unscripted 503s, which fail the round in the same
- *  direction. Constrained to the scheduled goal so unrelated A traffic can
- *  neither consume these responses nor satisfy planning evidence. */
+/** #1902/#1935: deterministic planning-failure scripts on the route production
+ *  planning actually takes. S-profile planning is routed to the configured main
+ *  candidate; the full profile can leave the previous scenario on either
+ *  fixture model, so both are scripted. The goal marker still restricts matches
+ *  to planner traffic (no worker exists before a plan is admitted), and
+ *  production routing is never changed to feed the fixture. Each script is
+ *  consumed once by one goal-bearing request; exhaustion falls back to
+ *  unscripted 503s, which fail the round in the same direction. */
 function enqueueInvalidPlans(ctx: PiAcceptanceContext, count: number): void {
   ctx.provider.registerMarker(SCHEDULED_GOAL);
-  for (let i = 0; i < count; i++) {
-    ctx.provider.enqueue({
-      candidate: FIXTURE_MODEL_A,
-      expectation: {
-        candidate: FIXTURE_MODEL_A,
-        orderedContains: [SCHEDULED_GOAL],
-      },
-      action: { kind: "text", chunks: [SCHEDULED_INVALID_PLAN] },
-    });
+  for (const candidate of [FIXTURE_MODEL_A, FIXTURE_MODEL_B] as const) {
+    for (let i = 0; i < count; i++) {
+      ctx.provider.enqueue({
+        candidate,
+        expectation: {
+          candidate,
+          orderedContains: [SCHEDULED_GOAL],
+        },
+        action: { kind: "text", chunks: [SCHEDULED_INVALID_PLAN] },
+      });
+    }
   }
 }
 
@@ -320,18 +322,22 @@ function enqueueHealthProbe(ctx: PiAcceptanceContext): void {
 }
 
 /** Goal-bearing requests on the production planning route after a boundary.
- *  Planning is routed to the main candidate; B traffic can never satisfy
- *  planning evidence, and unrelated A traffic cannot match the goal. */
+ *  Planning uses whichever fixture candidate is the configured main; both are
+ *  accepted here because the goal marker exists only on planner traffic before
+ *  any plan is admitted. */
 function scheduledPlanningRequests(summaries: ProviderSummary[], afterSeq: number): ProviderSummary[] {
-  return summaries.filter((s) => s.seq > afterSeq && s.candidate === FIXTURE_MODEL_A && isScheduledSummary(s));
+  return summaries.filter((s) =>
+    s.seq > afterSeq
+    && (s.candidate === FIXTURE_MODEL_A || s.candidate === FIXTURE_MODEL_B)
+    && isScheduledSummary(s));
 }
 
-/** #1902: one bounded observation budget after each restart becomes ready,
- *  covering planning attempts plus explicit failure settlement. No fresh
- *  timeout per probe. Catches the run after its first explicit PlanRejected:
- *  real planner work reached the model boundary on the production route, the
- *  finite policy recorded the failure (budget consumed), and no revision was
- *  admitted — the run is mid-redrive, not terminal. */
+/** #1902/#1935: one bounded observation budget after each restart becomes
+ *  ready, covering planning attempts plus explicit failure settlement. The
+ *  deterministic provider may drive the finite policy to terminal failure
+ *  before the first poll; both the mid-redrive fact and the completed
+ *  plan_rejected exhaustion are explicit durable outcomes. A transient
+ *  awaiting_contract state is never required. */
 async function waitForPlanningFailure(
   ctx: PiAcceptanceContext,
   afterSeq: number,
@@ -343,10 +349,18 @@ async function waitForPlanningFailure(
     if (evidence.dbReadError) return null;
     if (!evidence.runId || evidence.cardId === undefined) return null;
     if (evidence.workflowRunCount !== 1) return null;
+    if (evidence.planRevisionAdmitted !== 0) return null;
+    if (evidence.workflowState === "failed") {
+      // Terminal plan_rejected exhaustion: consumed == allowed, projected.
+      if (evidence.planRevisionConsumed === undefined || evidence.planRevisionAllowed === undefined) return null;
+      if (evidence.planRevisionConsumed !== evidence.planRevisionAllowed) return null;
+      if (evidence.supervisionState !== "blocked") return null;
+      return { goalRequests: goal, evidence };
+    }
+    // Mid-redrive: the first rejection is durable and no revision was admitted.
     if (evidence.supervisionState !== "awaiting_contract") return null;
     if (evidence.terminalOutcome !== undefined) return null;
     if ((evidence.planRevisionConsumed ?? 0) < 1) return null;
-    if (evidence.planRevisionAdmitted !== 0) return null;
     return { goalRequests: goal, evidence };
   }, TIMEOUTS.scheduledObservationMs, `scheduled planning failure for ${SCHEDULED_TASK_ID} (180s budget)`, () => {
     // Bounded diagnostics for the timeout — counts and identities only.
@@ -394,12 +408,15 @@ async function waitForTerminalFailure(ctx: PiAcceptanceContext): Promise<BridgeH
  *  planning round exhaust its corrections; the cell observes real planner
  *  work on the production route plus the explicit bounded failure fact. */
 export async function scheduledOrcRoundLimit(ctx: PiAcceptanceContext): Promise<void> {
-  installScheduledRoundLimitFixture(ctx);
   enqueueInvalidPlans(ctx, 32); // several rounds of corrections plus restart redrive
   enqueueBootGreeting(ctx);
   enqueueHealthProbe(ctx);
   const afterSeq = ctx.provider.requestCount;
-  ctx.bridge = await ctx.restartBridge();
+  // #1935: install the due occurrence only after the predecessor is confirmed
+  // stopped and before the replacement starts. Writing it while the old bridge
+  // is alive lets that generation claim `__plan__` and turns the restart into a
+  // fixture-induced interruption.
+  ctx.bridge = await ctx.restartBridge(() => installScheduledRoundLimitFixture(ctx));
 
   const observed = await waitForPlanningFailure(ctx, afterSeq);
   const goalRequests = observed.goalRequests;
@@ -434,20 +451,35 @@ export async function scheduledOrcRoundLimit(ctx: PiAcceptanceContext): Promise<
   if (evidence.workflowRunCount !== 1) {
     throw new Error(`scheduled-orc-round-limit: expected exactly one workflow run for the occurrence, found ${evidence.workflowRunCount}`);
   }
-  if (evidence.terminalOutcome !== undefined) {
-    throw new Error(`scheduled-orc-round-limit: run settled ${evidence.terminalOutcome} — expected the mid-redrive failure fact, not a terminal row`);
-  }
   if (evidence.cardId === undefined) {
     throw new Error("scheduled-orc-round-limit: scheduled run has no root project card");
   }
-  if (evidence.supervisionState !== "awaiting_contract") {
-    throw new Error(`scheduled-orc-round-limit: supervision ${evidence.supervisionState ?? "none"} — expected awaiting_contract (no plan admitted yet)`);
-  }
-  if ((evidence.planRevisionConsumed ?? 0) < 1) {
-    throw new Error("scheduled-orc-round-limit: no explicit planning failure recorded (plan_revision unconsumed)");
-  }
   if (evidence.planRevisionAdmitted !== 0) {
     throw new Error(`scheduled-orc-round-limit: plan revision admitted (${evidence.planRevisionAdmitted}) — this journey must fail before custody`);
+  }
+  if (evidence.workflowState === "failed") {
+    // The deterministic stimulus may exhaust the finite policy before the
+    // first poll. That is the completed journey, not a missing observation.
+    if (evidence.planRevisionConsumed === undefined || evidence.planRevisionAllowed === undefined
+      || evidence.planRevisionConsumed !== evidence.planRevisionAllowed) {
+      throw new Error(`scheduled-orc-round-limit: terminal run without exhausted plan_revision (consumed=${evidence.planRevisionConsumed ?? "none"} allowed=${evidence.planRevisionAllowed ?? "none"})`);
+    }
+    if (evidence.supervisionState !== "blocked") {
+      throw new Error(`scheduled-orc-round-limit: terminal run without blocked supervision (${evidence.supervisionState ?? "none"})`);
+    }
+    if (evidence.terminalOutcome !== "failed") {
+      throw new Error(`scheduled-orc-round-limit: workflow failed but task run settled ${evidence.terminalOutcome ?? "none"}`);
+    }
+  } else {
+    if (evidence.terminalOutcome !== undefined) {
+      throw new Error(`scheduled-orc-round-limit: run settled ${evidence.terminalOutcome} — expected the mid-redrive failure fact, not a terminal row`);
+    }
+    if (evidence.supervisionState !== "awaiting_contract") {
+      throw new Error(`scheduled-orc-round-limit: supervision ${evidence.supervisionState ?? "none"} — expected awaiting_contract (no plan admitted yet)`);
+    }
+    if ((evidence.planRevisionConsumed ?? 0) < 1) {
+      throw new Error("scheduled-orc-round-limit: no explicit planning failure recorded (plan_revision unconsumed)");
+    }
   }
 }
 
@@ -458,10 +490,12 @@ export async function scheduledOrcRoundLimit(ctx: PiAcceptanceContext): Promise<
  *  within a bounded window — terminal custody is: the same logical job,
  *  explicitly failed, never resurrected or duplicated. */
 export async function scheduledOrcRoundLimitRestart(ctx: PiAcceptanceContext): Promise<void> {
+  // #1935: this cell inherits the live generation from the previous cell. The
+  // run is mid-redrive; let the finite planning policy reach terminal failure
+  // in the SAME generation before the custody restart. A restart here would
+  // (correctly) interrupt the run instead, and plan_rejected exhaustion would
+  // no longer be observable.
   enqueueInvalidPlans(ctx, 32);
-  enqueueBootGreeting(ctx);
-  enqueueHealthProbe(ctx);
-  ctx.bridge = await ctx.restartBridge();
 
   // Settle to terminal BEFORE the custody restart (no lease race: rounds
   // settle every few seconds on the live bridge).

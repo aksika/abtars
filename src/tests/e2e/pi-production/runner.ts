@@ -303,7 +303,7 @@ async function runLane(
     // spawnBridge so a boot timeout cannot leak it.
     if (isExpired()) throw laneTimeout("lane-setup");
     bridge = await Promise.race([
-      spawnBridge(opts.abtarsRoot, logDir, bridgeEnv, lane, provider),
+      spawnBridge(opts.abtarsRoot, logDir, bridgeEnv, lane),
       laneExpiry,
     ]);
 
@@ -361,17 +361,20 @@ async function runLane(
     }
 
     // 7. Scenarios serially against the isolated state.
-    const laneProvider = provider;
     const currentOwner = owner;
     const currentTui = tui;
-    const restartBridge = async (): Promise<SpawnedChild> => {
+    const restartBridge = async (beforeSpawn?: () => void): Promise<SpawnedChild> => {
       // #1900: check deadline before spawning a replacement; no late
       // continuation may restart a bridge after teardown.
       if (laneTornDown || isExpired()) throw laneTimeout("restart");
       if (bridge && !bridge.exited) await bridge.terminate();
       if (laneTornDown || isExpired()) throw laneTimeout("restart");
+      // #1935: fixture installation that must be invisible to the old
+      // generation runs after it is confirmed stopped and before replacement.
+      beforeSpawn?.();
+      if (laneTornDown || isExpired()) throw laneTimeout("restart");
       bridge = await Promise.race([
-        spawnBridge(opts.abtarsRoot, logDir, bridgeEnv, lane, laneProvider),
+        spawnBridge(opts.abtarsRoot, logDir, bridgeEnv, lane),
         laneExpiry,
       ]);
       return bridge;
@@ -696,9 +699,7 @@ async function spawnBridge(
   logDir: string,
   env: NodeJS.ProcessEnv,
   lane: PiAcceptanceLane,
-  provider: ScriptedProvider,
 ): Promise<SpawnedChild> {
-  const preBootRequests = provider.summaries.length;
   const bridge = new SpawnedChild({
     execPath: process.execPath,
     args: [resolve(abtarsRoot, "bundle/abtars.js")],
@@ -723,15 +724,12 @@ async function spawnBridge(
       "bridge TUI socket",
       () => `${bridge.stdoutTail}\n${bridge.stderrTail}`,
     );
-    // The fresh bridge fires its autonomous boot greeting turn ([SESSION START])
-    // against the provider. Wait until that request has been observed so the
-    // greeting can never consume a scenario script enqueued right after boot.
-    await waitFor(
-      async () => (provider.summaries.length > preBootRequests ? true : undefined),
-      TIMEOUTS.bridgeReadinessMs,
-      "bridge boot greeting provider request",
-      () => `${bridge.stdoutTail}\n${bridge.stderrTail}`,
-    );
+    // The TUI platform has no autonomous boot-greeting turn (#1939 retired the
+    // pre-connect model-health probe that this wait used to observe). Waiting
+    // for an unsolicited provider request can never succeed before the client
+    // attaches, so readiness is the socket plus the scripted TUI smoke below.
+    // Scenario scripts enqueued after spawnBridge are not at risk of being
+    // consumed by a background turn.
   } catch (err) {
     try {
       await bridge.terminate();

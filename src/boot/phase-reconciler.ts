@@ -97,8 +97,9 @@ export async function phaseReconciler(ctx: BootCtx): Promise<PhaseResult> {
     const { startWorkflowDriver } = await import("../components/orc-project/orc-workflow-driver.js");
     const { spin } = await import("../components/spin.js");
     workflowDriver = startWorkflowDriver({
-      callModel: (prompt, timeoutMs) => spin.dispatchBackground({ prompt, timeoutMs }),
+      callModel: (prompt, timeoutMs, signal) => spin.dispatchBackground({ prompt, timeoutMs, signal }),
     });
+    ctx.workflowDriver = workflowDriver;
     try {
       workflowDriver.recover();
     } catch (err) {
@@ -164,6 +165,7 @@ export async function phaseReconciler(ctx: BootCtx): Promise<PhaseResult> {
       try { workflowDriver.stop(); } catch (stopErr) {
         logWarn(TAG, `Workflow driver rollback failed: ${stopErr instanceof Error ? stopErr.message : String(stopErr)}`);
       }
+      if (ctx.workflowDriver === workflowDriver) ctx.workflowDriver = null;
     }
     if (handle) {
       try { await handle.stop(); } catch (stopErr) {

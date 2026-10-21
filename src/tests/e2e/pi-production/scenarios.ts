@@ -29,8 +29,12 @@ export interface PiAcceptanceContext {
   markers: MarkerFactory;
   /** Timestamp captured before scenario messages were recorded (for row assertions). */
   scenarioStart: number;
-  /** Kill the exact bridge PID and spawn bundle/abtars.js with the same home/env. */
-  restartBridge: () => Promise<SpawnedChild>;
+  /**
+   * Kill the exact bridge PID and spawn bundle/abtars.js with the same
+   * home/env. `beforeSpawn` runs only after the old bridge is confirmed
+   * stopped and before the replacement starts (#1935 fixture ordering).
+   */
+  restartBridge: (beforeSpawn?: () => void) => Promise<SpawnedChild>;
   /** #1776: bounded bridge-log tail (re-read from disk on every call). */
   readBridgeLog: () => string;
   /** #1548: isolated abtars home the bridge reads/writes (tasks, state, kanban). */

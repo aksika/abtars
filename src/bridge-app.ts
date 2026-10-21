@@ -62,6 +62,14 @@ export class Bridge {
     };
 
     await step("agent-api", () => this.ctx.agentApiServer?.stop());
+    // #1935: stop the workflow driver generation first: it closes admission,
+    // revokes model-call callback authority and aborts live calls before the
+    // executor/reconciler teardown. Without this an in-process restart would
+    // leave the old driver's wakes and callbacks alive beside the successor.
+    await step("workflow-driver", () => {
+      this.ctx.workflowDriver?.stop();
+      this.ctx.workflowDriver = null;
+    });
     // #1554: drain the Reconciler while its transport, Pi executor, and
     // lifecycle scheduler dependencies are still available. New ingress is
     // already fenced by the agent-api stop above.
@@ -197,6 +205,44 @@ export async function startBridge(): Promise<number> {
       ctx.phaseHealth.set(phaseConfig.name, { status: "failed", error: err instanceof Error ? err.message : String(err) });
       logError("boot", `✗ ${phaseConfig.name} failed — continuing with empty defaults`, err);
     }
+  }
+
+  // #1935: startup interruption barrier. The watermark is captured before the
+  // boot graph can start any ingress path (peer API, chat platforms, heartbeat
+  // admission), then every unfinished workflow from earlier generations fails
+  // before recovery, drains or new admission can advance it. A barrier failure
+  // aborts boot rather than permitting old work to resume. A missing task
+  // database cannot advance workflow work either; boot stays degraded.
+  {
+    let db: import("./components/tasks/kanban-board.js").TaskDatabase | null = null;
+    try {
+      const { requireTaskDatabase } = await import("./components/tasks/kanban-board.js");
+      db = requireTaskDatabase();
+    } catch (err) {
+      logWarn("boot", `Workflow startup barrier skipped — task database unavailable: ${err instanceof Error ? err.message : String(err)}`);
+    }
+    if (db) {
+      try {
+        const { initWorkflowSchema } = await import("./components/orc-project/workflow-schema.js");
+        const { readWorkflowRowWatermark, failInterruptedWorkflows } = await import("./components/orc-project/orc-workflow-startup.js");
+        initWorkflowSchema(db);
+        const watermark = readWorkflowRowWatermark(db);
+        const interrupted = failInterruptedWorkflows(db, watermark);
+        if (interrupted > 0) {
+          logInfo("boot", `Workflow startup interruption barrier failed ${interrupted} unfinished workflow(s) from an earlier generation`);
+        }
+      } catch (err) {
+        logError("boot", "Workflow startup interruption barrier failed — refusing to boot with old work live", err);
+        throw err;
+      }
+    }
+  }
+
+  // #1935: the in-process restart loop closes the task database. Bind the new
+  // generation's shared scheduled-project runner to the fresh connection.
+  {
+    const { resetScheduledProjectRunner } = await import("./components/tasks/scheduled-project-runner.js");
+    resetScheduledProjectRunner();
   }
 
   // Boot-time doctor fix — chmod secrets, fix dirs (#1180, #1439)

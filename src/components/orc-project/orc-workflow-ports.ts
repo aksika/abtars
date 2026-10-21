@@ -30,6 +30,7 @@ import { WorkerSupervisionService } from "../worker-supervision-service.js";
 import { channelPostOnce } from "../tasks/kanban-channel.js";
 import { RUNNER_ROOT_RUNNING_PREDICATE, kanbanTransition, type TaskDatabase } from "../tasks/kanban-board.js";
 import { loadPiConfig } from "../pi-executor/config.js";
+import { logWarn } from "../logger.js";
 import {
   WorkflowRunner,
   boundText,
@@ -43,6 +44,7 @@ import {
   type ReviewBrief,
   type ReviewVerdict,
 } from "./orc-workflow-runner.js";
+import { ModelJobRegistry, MODEL_JOB_SHUTDOWN_REASON, type ClaimAuthority } from "./orc-workflow-model-jobs.js";
 import type { CommandRow, RunnerRootRunRef } from "./orc-workflow-store.js";
 
 /** Dispatch failures fail the node visibly (bounded); never wedge the drain. */
@@ -56,11 +58,68 @@ export class WorkflowDispatchError extends Error {
 }
 
 export interface ModelCall {
-  (prompt: string, timeoutMs: number): Promise<string>;
+  /**
+   * #1935: `signal` is the generation-owned abort/deadline control. Production
+   * forwards it to Spin; the caller always races its own deadline so a
+   * non-cooperative provider promise cannot hold domain settlement.
+   */
+  (prompt: string, timeoutMs: number, signal?: AbortSignal): Promise<string>;
 }
 
 const PLANNER_TIMEOUT_MS = 300_000;
 const REVIEWER_TIMEOUT_MS = 300_000;
+
+/**
+ * #1935: an interrupted external call whose termination this generation cannot
+ * confirm fails the run as observation_unknown. A rejected promise or an abort
+ * signal is not proof that provider work stopped.
+ */
+function failUnconfirmedModelJob(
+  runner: WorkflowRunner, runId: string, claim: ClaimAuthority, cause: string,
+): void {
+  const run = runner.store.getRun(runId);
+  if (!run || run.state === "succeeded" || run.state === "failed" || run.state === "cancelled") return;
+  runner.failModelJob(runId, claim, `model call terminated without confirmed external cleanup: ${cause}`);
+}
+
+/**
+ * Run one model call under the job's absolute deadline. The timeout starts at
+ * call entry (preparation, acquisition and execution share one budget), and a
+ * non-settling provider promise is abandoned after domain settlement rather
+ * than blocking the backend forever. The abandoned promise's late result is
+ * rejected by the caller's settle-once fence.
+ */
+function callModelBeforeDeadline(
+  callModel: ModelCall, prompt: string, deadlineAt: number, signal?: AbortSignal,
+): Promise<string> {
+  const remaining = deadlineAt - Date.now();
+  if (remaining <= 0) return Promise.reject(new Error("model call deadline exceeded"));
+  return new Promise<string>((resolve, reject) => {
+    let done = false;
+    const finish = (fn: () => void): void => {
+      if (done) return;
+      done = true;
+      clearTimeout(timer);
+      signal?.removeEventListener("abort", onAbort);
+      fn();
+    };
+    const timer = setTimeout(
+      () => finish(() => reject(new Error("model call deadline exceeded"))),
+      remaining,
+    );
+    timer.unref?.();
+    const onAbort = (): void => finish(() => reject(new Error("model call cancelled")));
+    signal?.addEventListener("abort", onAbort, { once: true });
+    if (signal?.aborted) {
+      onAbort();
+      return;
+    }
+    callModel(prompt, remaining, signal).then(
+      (text) => finish(() => resolve(text)),
+      (err: unknown) => finish(() => reject(err instanceof Error ? err : new Error(String(err)))),
+    );
+  });
+}
 
 function planPrompt(input: {
   goal: string; requiredOutputs: string[]; capabilities: string[];
@@ -615,100 +674,190 @@ export class SpinPlannerBackend implements PlannerBackend {
   private readonly runner: WorkflowRunner;
   private readonly callModel: ModelCall;
   private readonly onSettled: () => void;
+  private readonly modelJobs?: ModelJobRegistry;
 
-  constructor(deps: { runner: WorkflowRunner; callModel: ModelCall; onSettled?: () => void }) {
+  constructor(deps: {
+    runner: WorkflowRunner; callModel: ModelCall; onSettled?: () => void; modelJobs?: ModelJobRegistry;
+  }) {
     this.runner = deps.runner;
     this.callModel = deps.callModel;
     this.onSettled = deps.onSettled ?? (() => {});
+    this.modelJobs = deps.modelJobs;
   }
 
-  startPlanning(cmd: CommandRow, input: PlanningInput): void {
-    void this.run(cmd, input).catch(() => {
-      // Start/parse failures leave the claim for lease expiry + inspection
-      // (bounded by MAX_CONSECUTIVE_INCONCLUSIVE, terminating explicitly).
-      // Never throw past drain: one bad model turn must not wedge the queue.
+  startPlanning(cmd: CommandRow, input: PlanningInput, claim?: ClaimAuthority): void {
+    void this.run(cmd, input, claim).catch((err) => {
+      // The settle-once path above resolved the domain obligation; this log
+      // is the bounded diagnostic for an unexpected settlement failure. Never
+      // throw past drain: one bad model turn must not wedge the queue.
+      logWarn("workflow-planner", `planning job contained: ${boundText(err instanceof Error ? err.message : String(err), 300)}`);
     });
   }
 
-  private async run(cmd: CommandRow, input: PlanningInput): Promise<void> {
+  private async run(cmd: CommandRow, input: PlanningInput, claim?: ClaimAuthority): Promise<void> {
     const store = this.runner.store;
-    // #1795: the complete saved goal — never a silently shortened task.
-    // Provider/context failures stay explicit errors downstream.
-    const goal = this.goalOf(cmd.runId);
-    // #1795: the immutable bound workspace, when one is bound. Unbound runs
-    // keep the generic workspace-relative rule above (no concrete root to
-    // state); a bound root is always stated explicitly, never assumed.
-    const workspace = this.runner.boundWorkspaceOf(cmd.runId);
-    // #1804: the model sees only the planner vocabulary, never the runner's
-    // compatibility set (which still admits stored alias plans elsewhere).
-    const caps = plannerCapabilities();
-    let problems = "";
-    let lastDiagnostics: PlanDiagnostic[] = [];
-    for (let attempt = 0; attempt < 2; attempt++) {
-      const text = await this.callModel(planPrompt({
-        goal, requiredOutputs: input.requiredOutputs, capabilities: caps,
-        priorResults: input.defects.length > 0 ? JSON.stringify(input.defects) : "",
-        attempt, problem: attempt === 0 ? undefined : problems,
-        workspace,
-      }), PLANNER_TIMEOUT_MS);
-      let proposal: PlanProposal;
-      try {
-        proposal = parseProposal(text);
-      } catch (err) {
-        problems = err instanceof Error ? err.message : String(err);
-        lastDiagnostics = [{ field: "proposal", reason: problems }];
-        if (attempt === 0) continue;
-        break;
+    const job = claim && this.modelJobs
+      ? this.modelJobs.begin({
+          claim, kind: "planning",
+          opId: this.operationIdOf(cmd, input),
+          revision: input.revision,
+          timeoutMs: PLANNER_TIMEOUT_MS,
+        })
+      : null;
+    const deadlineAt = job?.deadlineAt ?? Date.now() + PLANNER_TIMEOUT_MS;
+    try {
+      // #1795: the complete saved goal — never a silently shortened task.
+      // Provider/context failures stay explicit errors downstream.
+      const goal = this.goalOf(cmd.runId);
+      // #1795: the immutable bound workspace, when one is bound. Unbound runs
+      // keep the generic workspace-relative rule above (no concrete root to
+      // state); a bound root is always stated explicitly, never assumed.
+      const workspace = this.runner.boundWorkspaceOf(cmd.runId);
+      // #1804: the model sees only the planner vocabulary, never the runner's
+      // compatibility set (which still admits stored alias plans elsewhere).
+      const caps = plannerCapabilities();
+      let problems = "";
+      let lastDiagnostics: PlanDiagnostic[] = [];
+      for (let attempt = 0; attempt < 2; attempt++) {
+        const text = await callModelBeforeDeadline(this.callModel, planPrompt({
+          goal, requiredOutputs: input.requiredOutputs, capabilities: caps,
+          priorResults: input.defects.length > 0 ? JSON.stringify(input.defects) : "",
+          attempt, problem: attempt === 0 ? undefined : problems,
+          workspace,
+        }), deadlineAt, job?.signal);
+        let proposal: PlanProposal;
+        try {
+          proposal = parseProposal(text);
+        } catch (err) {
+          problems = err instanceof Error ? err.message : String(err);
+          lastDiagnostics = [{ field: "proposal", reason: problems }];
+          if (attempt === 0) continue;
+          break;
+        }
+        // #1804: model proposals are gated on the planner vocabulary first, so
+        // a bare alias (for example `default`) enters the bounded
+        // correction/revision path here. Runner-side admission stays
+        // compatibility-wide for stored alias plans and explicit contracts.
+        // Never silently rewrite a rejected Pi/alias proposal to general.
+        const plannerDiagnostics = validatePlannerProposal(proposal);
+        const runnerDiagnostics = this.runner.validatePlanForRun(cmd.runId, proposal);
+        const diagnostics = [...plannerDiagnostics, ...runnerDiagnostics];
+        if (diagnostics.length > 0) {
+          problems = diagnostics.map((p) => `${p.field}: ${p.reason}`).join("; ");
+          lastDiagnostics = diagnostics;
+          if (attempt === 0) continue;
+          break;
+        }
+        // #1935: the proposal was started for exactly this revision (initial
+        // planning is revision 0). A successor revision or replacement claim
+        // cannot adopt this result.
+        const expectedRevision = input.revision ?? 0;
+        const base = store.currentRevision(cmd.runId);
+        if (job && !this.modelJobs!.claimSettlement(job.token)) return;
+        this.runner.submitPlanProposal(cmd.runId, proposal, {
+          baseRevision: expectedRevision,
+          opId: input.opId,
+          claim,
+          completesNode: input.purpose === "next_wave"
+            ? { revision: input.revision ?? base, nodeId: input.nodeId, outcome: "proposed" }
+            : undefined,
+          // Failed-round identity: a rejected proposal requeues this same
+          // round (runner-side, bounded by plan_revision) instead of stranding
+          // a claimed command.
+          planRound: { nodeId: cmd.nodeId, ordinal: cmd.ordinal, payloadJson: cmd.payloadJson },
+        });
+        // Without a captured claim (legacy direct callers/tests), complete the
+        // live claim as before. The drain path always passes a claim, and the
+        // runner then completes it inside the admission transaction.
+        if (!claim) {
+          const key = { runId: cmd.runId, generation: cmd.generation, nodeId: cmd.nodeId, action: cmd.action, ordinal: cmd.ordinal };
+          const live = store.getCommand(key);
+          if (live && live.status === "claimed") {
+            store.completeCommand(key, live.owner ?? this.name, live.claimToken ?? "");
+          }
+        }
+        // AstraMaster-3: the newly queued work (dispatch/review commands) needs
+        // a drain. The driver only listens for card events, so without this
+        // wake the run waits for the periodic audit.
+        this.onSettled();
+        return;
       }
-      // #1804: model proposals are gated on the planner vocabulary first, so
-      // a bare alias (for example `default`) enters the bounded
-      // correction/revision path here. Runner-side admission stays
-      // compatibility-wide for stored alias plans and explicit contracts.
-      // Never silently rewrite a rejected Pi/alias proposal to general.
-      const plannerDiagnostics = validatePlannerProposal(proposal);
-      const runnerDiagnostics = this.runner.validatePlanForRun(cmd.runId, proposal);
-      const diagnostics = [...plannerDiagnostics, ...runnerDiagnostics];
-      if (diagnostics.length > 0) {
-        problems = diagnostics.map((p) => `${p.field}: ${p.reason}`).join("; ");
-        lastDiagnostics = diagnostics;
-        if (attempt === 0) continue;
-        break;
-      }
-      const base = store.currentRevision(cmd.runId);
-      this.runner.submitPlanProposal(cmd.runId, proposal, {
-        baseRevision: input.purpose === "initial" ? undefined : base,
+      // #1795: both local attempts failed — hand the rejection to the runner.
+      // #1935: the captured claim settles with the rejection; a stale or
+      // already-settled claim is inert and consumes no allowance here.
+      if (job && !this.modelJobs!.claimSettlement(job.token)) return;
+      const { outcome } = this.runner.rejectPlanRound(cmd.runId, lastDiagnostics, {
         opId: input.opId,
-        completesNode: input.purpose === "next_wave"
-          ? { revision: input.revision ?? base, nodeId: input.nodeId, outcome: "proposed" }
-          : undefined,
-        // Failed-round identity: a rejected proposal requeues this same
-        // round (runner-side, bounded by plan_revision) instead of stranding
-        // a claimed command the swallowed error below would abandon.
+        claim,
         planRound: { nodeId: cmd.nodeId, ordinal: cmd.ordinal, payloadJson: cmd.payloadJson },
       });
-      // Complete our claim: the proposal is admitted.
-      const key = { runId: cmd.runId, generation: cmd.generation, nodeId: cmd.nodeId, action: cmd.action, ordinal: cmd.ordinal };
-      const live = store.getCommand(key);
-      if (live && live.status === "claimed") {
-        store.completeCommand(key, live.owner ?? this.name, live.claimToken ?? "");
+      if (outcome === "requeued") this.onSettled();
+    } catch (err) {
+      // #1935: every backend exit resolves its obligation. Generation shutdown
+      // leaves the run for the startup interruption barrier; another authority
+      // (inspection, deadline sweep, terminal transition) makes this inert.
+      if (job?.signal.aborted === true && job.signal.reason === MODEL_JOB_SHUTDOWN_REASON) return;
+      if (job && !this.modelJobs!.claimSettlement(job.token)) return;
+      if (claim) {
+        this.settleExecutionFailure(cmd, input, claim, err, job?.signal.aborted === true);
+        return;
       }
-      // AstraMaster-3: the newly queued work (dispatch/review commands) needs
-      // a drain. The driver only listens for card events, so without this
-      // wake the run waits for the periodic audit.
-      this.onSettled();
+      throw err;
+    } finally {
+      if (job) this.modelJobs!.finish(job.token);
+    }
+  }
+
+  /** Route a settled planner execution failure through the finite round policy. */
+  private settleExecutionFailure(
+    cmd: CommandRow, input: PlanningInput, claim: ClaimAuthority, err: unknown, aborted: boolean,
+  ): void {
+    const cause = boundText(err instanceof Error ? err.message : String(err), 1000);
+    if (aborted) {
+      failUnconfirmedModelJob(this.runner, cmd.runId, claim, cause);
       return;
     }
-    // #1795: both local attempts failed — hand the rejection to the runner
-    // instead of throwing past drain. rejectPlanRound records PlanRejected,
-    // consumes one plan_revision, and requeues this round (or fails the run
-    // on exhaustion). This backend still throws: the claim must not complete
-    // as success, and on exhaustion there is nothing to wake for.
-    const { outcome, reason } = this.runner.rejectPlanRound(cmd.runId, lastDiagnostics, {
-      opId: input.opId,
-      planRound: { nodeId: cmd.nodeId, ordinal: cmd.ordinal, payloadJson: cmd.payloadJson },
-    });
-    if (outcome === "requeued") this.onSettled();
-    throw new Error(`planner corrections exhausted: ${reason}`);
+    try {
+      const { outcome } = this.runner.rejectPlanRound(
+        cmd.runId,
+        [{ field: "execution", reason: `planning call failed: ${cause}` }],
+        {
+          opId: input.opId,
+          claim,
+          planRound: { nodeId: cmd.nodeId, ordinal: cmd.ordinal, payloadJson: cmd.payloadJson },
+        },
+      );
+      if (outcome === "requeued") this.onSettled();
+    } catch (settleErr) {
+      // A terminal/transitioned run or superseded claim has already resolved
+      // the obligation. Otherwise fail explicitly rather than abandoning a
+      // live operation.
+      const live = this.runner.store.getRun(cmd.runId);
+      const command = this.runner.store.getCommand(claim.key);
+      const claimLive = command !== null && command.status === "claimed"
+        && command.owner === claim.owner && command.claimToken === claim.token;
+      if (!live || live.state === "succeeded" || live.state === "failed" || live.state === "cancelled" || !claimLive) return;
+      try {
+        this.runner.failModelJob(cmd.runId, claim, `planner settlement failed: ${cause}`);
+      } catch (fallbackErr) {
+        throw new Error(
+          `planner failure settlement could not close work: ` +
+          `${settleErr instanceof Error ? settleErr.message : String(settleErr)}; ` +
+          `${fallbackErr instanceof Error ? fallbackErr.message : String(fallbackErr)}`,
+        );
+      }
+    }
+  }
+
+  private operationIdOf(cmd: CommandRow, input: PlanningInput): string {
+    if (input.opId) return input.opId;
+    try {
+      const parsed = JSON.parse(cmd.payloadJson) as { opId?: unknown };
+      if (typeof parsed.opId === "string" && parsed.opId.length > 0) return parsed.opId;
+    } catch {
+      // Unparseable payload: use the durable command identity.
+    }
+    return `plan-${cmd.runId}-${cmd.generation}-${cmd.ordinal}`;
   }
 
   private goalOf(runId: string): string {
@@ -728,43 +877,121 @@ export class SpinReviewerBackend implements ReviewBackend {
   private readonly runner: WorkflowRunner;
   private readonly callModel: ModelCall;
   private readonly onSettled: () => void;
+  private readonly modelJobs?: ModelJobRegistry;
 
-  constructor(deps: { runner: WorkflowRunner; callModel: ModelCall; onSettled?: () => void }) {
+  constructor(deps: {
+    runner: WorkflowRunner; callModel: ModelCall; onSettled?: () => void; modelJobs?: ModelJobRegistry;
+  }) {
     this.runner = deps.runner;
     this.callModel = deps.callModel;
     this.onSettled = deps.onSettled ?? (() => {});
+    this.modelJobs = deps.modelJobs;
   }
 
-  startReview(cmd: CommandRow, brief: ReviewBrief): void {
-    void this.run(cmd, brief).catch(() => {
-      // Verdict never arrived: the claim stays for lease expiry + inspection,
-      // which fails the review explicitly at the bound. Never throw past drain.
+  startReview(cmd: CommandRow, brief: ReviewBrief, claim?: ClaimAuthority): void {
+    void this.run(cmd, brief, claim).catch((err) => {
+      // The settle-once path resolved the review; log bounded cause only.
+      logWarn("workflow-reviewer", `review job contained: ${boundText(err instanceof Error ? err.message : String(err), 300)}`);
     });
   }
 
-  private async run(cmd: CommandRow, brief: ReviewBrief): Promise<void> {
-    for (let attempt = 0; attempt < 2; attempt++) {
-      const text = await this.callModel(reviewPrompt(brief), REVIEWER_TIMEOUT_MS);
-      let verdict: ReviewVerdict;
-      try {
-        verdict = parseVerdict(text);
-      } catch (err) {
-        if (attempt === 0) continue;
-        throw err;
+  private async run(cmd: CommandRow, brief: ReviewBrief, claim?: ClaimAuthority): Promise<void> {
+    const job = claim && this.modelJobs
+      ? this.modelJobs.begin({
+          claim, kind: "review", opId: this.operationIdOf(cmd),
+          revision: brief.revision, timeoutMs: REVIEWER_TIMEOUT_MS,
+        })
+      : null;
+    const deadlineAt = job?.deadlineAt ?? Date.now() + REVIEWER_TIMEOUT_MS;
+    try {
+      let lastMalformed = "verdict never arrived";
+      for (let attempt = 0; attempt < 2; attempt++) {
+        const text = await callModelBeforeDeadline(
+          this.callModel, reviewPrompt(brief), deadlineAt, job?.signal,
+        );
+        let verdict: ReviewVerdict;
+        try {
+          verdict = parseVerdict(text);
+        } catch (err) {
+          lastMalformed = err instanceof Error ? err.message : String(err);
+          if (attempt === 0) continue;
+          break;
+        }
+        // Runner validates criterion linkage + budgets; malformed verdicts take
+        // the bounded protocol-correction path (never a fresh execution turn).
+        if (job && !this.modelJobs!.claimSettlement(job.token)) return;
+        this.runner.submitVerdict(cmd.runId, cmd.nodeId, verdict, { claim });
+        if (!claim) {
+          const key = { runId: cmd.runId, generation: cmd.generation, nodeId: cmd.nodeId, action: cmd.action, ordinal: cmd.ordinal };
+          const live = this.runner.store.getCommand(key);
+          if (live && live.status === "claimed") {
+            this.runner.store.completeCommand(key, live.owner ?? this.name, live.claimToken ?? "");
+          }
+        }
+        // AstraMaster-3: an accept queues delivery, changes_required queues
+        // repair planning — both need a drain wake, not just the audit.
+        this.onSettled();
+        return;
       }
-      // Runner validates criterion linkage + budgets; malformed verdicts take
-      // the bounded protocol-correction path (never a fresh execution turn).
-      this.runner.submitVerdict(cmd.runId, cmd.nodeId, verdict);
-      const key = { runId: cmd.runId, generation: cmd.generation, nodeId: cmd.nodeId, action: cmd.action, ordinal: cmd.ordinal };
-      const live = this.runner.store.getCommand(key);
-      if (live && live.status === "claimed") {
-        this.runner.store.completeCommand(key, live.owner ?? this.name, live.claimToken ?? "");
-      }
-      // AstraMaster-3: an accept queues delivery, changes_required queues
-      // repair planning — both need a drain wake, not just the audit.
+      // Correction opportunities are exhausted: the reviewer's existing
+      // cannot-assess policy resolves the verdict (never an execution retry).
+      if (job && !this.modelJobs!.claimSettlement(job.token)) return;
+      this.runner.submitVerdict(
+        cmd.runId, cmd.nodeId,
+        { verdict: "cannot_assess", reason: `invalid review verdict after corrections: ${boundText(lastMalformed, 1000)}` },
+        { claim },
+      );
       this.onSettled();
-      return;
+    } catch (err) {
+      // #1935: reviewer execution errors use the existing cannot-assess path
+      // after their correction opportunities. Generation shutdown leaves the
+      // run for the startup barrier; a settled/superseded token is inert.
+      if (job?.signal.aborted === true && job.signal.reason === MODEL_JOB_SHUTDOWN_REASON) return;
+      if (job && !this.modelJobs!.claimSettlement(job.token)) return;
+      if (!claim) throw err;
+      const cause = boundText(err instanceof Error ? err.message : String(err), 1000);
+      // Deadline/cancellation without confirmed external cleanup is unknown,
+      // not an assessable reviewer error. Never publish a retry or verdict.
+      if (job?.signal.aborted === true) {
+        failUnconfirmedModelJob(this.runner, cmd.runId, claim, cause);
+        return;
+      }
+      try {
+        this.runner.submitVerdict(
+          cmd.runId, cmd.nodeId,
+          { verdict: "cannot_assess", reason: `review call failed: ${cause}` },
+          { claim },
+        );
+        this.onSettled();
+      } catch (settleErr) {
+        const live = this.runner.store.getRun(cmd.runId);
+        const command = this.runner.store.getCommand(claim.key);
+        const claimLive = command !== null && command.status === "claimed"
+          && command.owner === claim.owner && command.claimToken === claim.token;
+        if (!live || live.state === "succeeded" || live.state === "failed" || live.state === "cancelled" || !claimLive) return;
+        try {
+          this.runner.failModelJob(cmd.runId, claim, `reviewer settlement failed: ${cause}`);
+        } catch (fallbackErr) {
+          throw new Error(
+            `reviewer failure settlement could not close work: ` +
+            `${settleErr instanceof Error ? settleErr.message : String(settleErr)}; ` +
+            `${fallbackErr instanceof Error ? fallbackErr.message : String(fallbackErr)}`,
+          );
+        }
+      }
+    } finally {
+      if (job) this.modelJobs!.finish(job.token);
     }
+  }
+
+  private operationIdOf(cmd: CommandRow): string {
+    try {
+      const parsed = JSON.parse(cmd.payloadJson) as { opId?: unknown };
+      if (typeof parsed.opId === "string" && parsed.opId.length > 0) return parsed.opId;
+    } catch {
+      // Unparseable payload: use the durable command identity.
+    }
+    return `review-${cmd.runId}-${cmd.generation}-${cmd.ordinal}`;
   }
 }
 

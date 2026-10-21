@@ -15,7 +15,7 @@ import { nerve } from "../nerve.js";
 import { logInfo } from "../logger.js";
 import { kanbanEnqueue, kanbanRunning, kanbanGetCard, kanbanGetChildren, kanbanPromoteDueRetry } from "./kanban-board.js";
 import { readState, advanceRun } from "./task-state-store.js";
-import { WorkflowRunner } from "../orc-project/orc-workflow-runner.js";
+import { WorkflowRunner, INTERRUPTED_BY_RESTART } from "../orc-project/orc-workflow-runner.js";
 import { WorkflowStore } from "../orc-project/orc-workflow-store.js";
 import { WorkerSupervisionStore } from "../worker-supervision-store.js";
 import { makeTaskFailure } from "./task-failure.js";
@@ -32,6 +32,15 @@ let sharedRunner: WorkflowRunner | null = null;
 function workflowRunner(): WorkflowRunner {
   if (!sharedRunner) sharedRunner = new WorkflowRunner(new WorkflowStore());
   return sharedRunner;
+}
+
+/**
+ * #1935: bridge generations own their database connection. The in-process
+ * restart loop closes the task database, so the next generation must not reuse
+ * a runner bound to the closed handle.
+ */
+export function resetScheduledProjectRunner(): void {
+  sharedRunner = null;
 }
 
 export interface ScheduledProjectRequest {
@@ -370,6 +379,15 @@ function selectSupervisionCode(
   return { code: "project_blocked", message: "project blocked" };
 }
 
+/**
+ * #1935: a workflow interrupted by bridge restart reports the interruption
+ * fact, never a lane outcome that restart itself produced. Structured reason
+ * check only — the run's code stays observation_unknown.
+ */
+export function isInterruptedWorkflowReason(reason: string | null | undefined): boolean {
+  return typeof reason === "string" && reason.startsWith(INTERRUPTED_BY_RESTART);
+}
+
 function readWorkflowTerminal(rootCardId: number): ProjectTerminalRead | undefined {
   const runner = workflowRunner();
   const run = runner.store.findLatestRunByCard(rootCardId);
@@ -382,6 +400,15 @@ function readWorkflowTerminal(rootCardId: number): ProjectTerminalRead | undefin
     }
     const reason = (runTerminal.failureReason ?? runTerminal.failureCode ?? "project blocked").slice(0, 500);
     const lanes = gatherLaneFacts(rootCardId);
+    // #1935: restart interruption wins over lane refinement. The interrupted
+    // lanes settle cancelled by design; reporting that as lane_failed would
+    // misstate the cause and (via SHA) open a self-heal project for a truthful
+    // restart.
+    if (isInterruptedWorkflowReason(runTerminal.failureReason)) {
+      const diagnostic = makeTaskFailure("interruption", "restart_interrupted", "executing",
+        reason, "none", { rootCardId, lanes, remediationHint: reason });
+      return { accepted: false, diagnostic, factAt: cardTimeMs(card.updated_at) };
+    }
     // Lane evidence refines the diagnostic (reporting only — progression
     // already settled in the runner): a specific lane fault wins over the
     // generic run reason; otherwise the run's own reason surfaces verbatim.
@@ -403,6 +430,12 @@ function readWorkflowTerminal(rootCardId: number): ProjectTerminalRead | undefin
   if (card.status === "failed") {
     const reason = (card.error ?? "project blocked").slice(0, 500);
     const lanes = gatherLaneFacts(rootCardId);
+    // #1935: the interruption reason survives projection into the card error.
+    if (isInterruptedWorkflowReason(card.error)) {
+      const diagnostic = makeTaskFailure("interruption", "restart_interrupted", "executing",
+        reason, "none", { rootCardId, lanes, remediationHint: reason });
+      return { accepted: false, diagnostic, factAt: cardTimeMs(card.updated_at) };
+    }
     const { code, message } = selectSupervisionCode(lanes, []);
     const diagnostic = makeTaskFailure("supervision", code, "executing",
       code === "project_blocked" ? reason : message, "none",

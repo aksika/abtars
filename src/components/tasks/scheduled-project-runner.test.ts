@@ -192,6 +192,52 @@ describe("scheduled-project-runner #1516", () => {
     await expect(pending).rejects.toThrow(/blocker_class_xyz/);
   });
 
+  it("#1935 restart interruption wins over cancelled lanes and is never lane_failed", async () => {
+    await seedReservation();
+    const pending = mod.scheduledProjectRunner(makeRequest());
+    const root = kanban.kanbanList("*")[0]!;
+
+    // A lane interrupted by the restart settles cancelled; lane refinement
+    // must not rewrite the cause to lane_failed.
+    const workerId = kanban.kanbanEnqueue("Lane 1 - Research", "agent", undefined, {
+      parent_id: root.id,
+      type: "W",
+      goal: "Research the topic",
+      delivery: "silent",
+    });
+    const supStore = new (await import("../worker-supervision-store.js")).WorkerSupervisionStore();
+    const contract: import("../worker-contract.js").WorkerAcceptanceContractV1 = {
+      schema_version: 1,
+      id: "c_restart",
+      digest: "dg_restart",
+      goal: "Research the topic",
+      criteria: [{ id: "c1", description: "Research recorded" }],
+      expected_artifacts: [{ id: "a1", kind: "file", ref: "notes/research.md", required: true, criterion_ids: ["c1"] }],
+      verification_commands: [],
+      required_capabilities: [],
+      limits: { max_duration_ms: 120000 },
+      provenance: { root_card_id: root.id, card_id: workerId, authored_by: "orc", created_at: new Date().toISOString() },
+    };
+    supStore.insertContract(contract, workerId);
+    supStore.insertAttempt({ id: "a_restart", card_id: workerId, contract_id: contract.id, ordinal: 1, executor_kind: "agent", executor_id: "spin", status: "running", started_at: new Date().toISOString() });
+    supStore.lifecycleTransition("a_restart", ["running"], "cancelled", { cancel_reason: "run-cancelled" });
+
+    const { runner, store } = await workflowTools();
+    const run = store.findLatestRunByCard(root.id)!;
+    runner.acceptPlan(run.runId, simplePlan());
+    expect(runner.interruptRun(run.runId)).toBe(true);
+
+    const err = await pending.catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(mod.SupervisedProjectFailure);
+    const failure = err as InstanceType<typeof mod.SupervisedProjectFailure>;
+    expect(failure.diagnostic.category).toBe("interruption");
+    expect(failure.diagnostic.code).toBe("restart_interrupted");
+    expect(failure.diagnostic.message).toContain("interrupted by bridge restart");
+    // The interrupted lane is still reported as evidence, not as the cause.
+    expect(failure.diagnostic.context?.lanes[0]?.lifecycle).toBe("cancelled");
+    expect(failure.diagnostic.code).not.toBe("lane_failed");
+  });
+
   it("#1588: a lane completing past its hard deadline yields supervision/lane_late_completion with full lane facts", async () => {
     await seedReservation();
     const pending = mod.scheduledProjectRunner(makeRequest());

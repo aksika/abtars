@@ -1081,8 +1081,14 @@ export class Spin {
         }
         const executor = await this.runtime!.openExecution(agent, session.id, {
           timeoutMs, session: "fresh", maxToolRounds: spec.maxToolRounds,
-          sessionType: sessionType(session),
+          sessionType: sessionType(session), signal: spec.signal,
         });
+        // #1935: an execution returned after the call was aborted is disposed
+        // before use; it must never resume provider/tool work.
+        if (spec.signal?.aborted) {
+          await executor.close();
+          throw new Error("Execution cancelled");
+        }
         // #1248: Bind execution control to runtime cancel mechanism
         if (spec.executionControl) {
           spec.executionControl.bind(async (reason) => {
