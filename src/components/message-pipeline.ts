@@ -30,6 +30,25 @@ function hasDurableMessageId(
   if (!result.ok || !result.value || typeof result.value !== "object") return false;
   return "id" in result.value && typeof (result.value as { id?: unknown }).id === "number";
 }
+import type { IKiroTransport } from "./transport/kiro-transport.js";
+import type { AbtarsMemoryRuntime } from "./memory-runtime.js";
+import type { IdleSave } from "./idle-save.js";
+import type { ConversationBuffer } from "./conversation-buffer.js";
+import type { RunningJob } from "./tasks/task-queue.js";
+import { isTrustedScheduledAnnouncement, type InboundMessage, type PlatformAdapter, type DeliveryCorrelation, type MainDeliveryResult } from "../types/platform.js";
+import { BOOT_GREETING_TOKEN } from "../types/platform.js";
+import { updateOwnedBridgeLockField } from "./transport/bridge-lock-transport.js";
+import { createMessageContext, runPipeline, voiceMiddleware, sessionSelectionMiddleware, commandMiddleware, pausedGuardMiddleware, busyGuardMiddleware, emergencyRouteMiddleware } from "./pipeline/index.js";
+import { codingRouteMiddleware } from "./pipeline/coding-route.js";
+import { releaseBusy } from "./pipeline/busy-guard.js";
+import { hasHooks, fire as fireHook } from "./hooks/hook-system.js";
+import { buildPrompt } from "./pipeline/prompt-builder.js";
+
+import { getEnv } from "./env-schema.js";
+import { sanitizeOutbound } from "./sanitize-outbound.js";
+import { abmind } from "../utils/abmind-lazy.js";
+
+import type { ResolvedHailMary } from "./transport-config.js";
 
 /**
  * Map a turn failure to the bounded operator-visible reason. The typed Pi
@@ -54,25 +73,6 @@ export function describePipelineError(err: unknown): string {
     : errStr.includes("aborted") || errStr.includes("code=20") ? "Request aborted — model connection dropped."
     : `Error: ${errStr.slice(0, 80)}`;
 }
-import type { IKiroTransport } from "./transport/kiro-transport.js";
-import type { AbtarsMemoryRuntime } from "./memory-runtime.js";
-import type { IdleSave } from "./idle-save.js";
-import type { ConversationBuffer } from "./conversation-buffer.js";
-import type { RunningJob } from "./tasks/task-queue.js";
-import { isTrustedScheduledAnnouncement, type InboundMessage, type PlatformAdapter, type DeliveryCorrelation, type MainDeliveryResult } from "../types/platform.js";
-import { BOOT_GREETING_TOKEN } from "../types/platform.js";
-import { updateOwnedBridgeLockField } from "./transport/bridge-lock-transport.js";
-import { createMessageContext, runPipeline, voiceMiddleware, sessionSelectionMiddleware, commandMiddleware, pausedGuardMiddleware, busyGuardMiddleware, emergencyRouteMiddleware } from "./pipeline/index.js";
-import { codingRouteMiddleware } from "./pipeline/coding-route.js";
-import { releaseBusy } from "./pipeline/busy-guard.js";
-import { hasHooks, fire as fireHook } from "./hooks/hook-system.js";
-import { buildPrompt } from "./pipeline/prompt-builder.js";
-
-import { getEnv } from "./env-schema.js";
-import { sanitizeOutbound } from "./sanitize-outbound.js";
-import { abmind } from "../utils/abmind-lazy.js";
-
-import type { ResolvedHailMary } from "./transport-config.js";
 
 const TAG = "pipeline";
 const BOOT_GREETING_TEXT = "[SESSION START] You just came online. Greet the user.";
