@@ -835,34 +835,39 @@ async function providerCooldownSuppresses(ctx: PiAcceptanceContext): Promise<voi
 
 // ── Scenario 4: Fail closed (core) ──────────────────────────────────────────
 
-async function failClosed(ctx: PiAcceptanceContext): Promise<void> {
+/**
+ * #1940 R1: memory readiness is decided once at abtars start. Losing the owner
+ * after boot leaves existing sessions running; memory operations report their
+ * own failures and the turn still reaches the provider with degraded memory.
+ * The pre-#1940 per-turn fail-closed gate (and its provider-suppression
+ * assertion) is retired, so this scenario proves degraded continuation and
+ * leaves the owner down for the recovery cell.
+ */
+async function ownerLossDegradedMemory(ctx: PiAcceptanceContext): Promise<void> {
   const f1 = ctx.markers.next("F1");
   const a1 = ctx.markers.next("F1A");
   const f2 = ctx.markers.next("F2");
+  const a2 = ctx.markers.next("F2A");
 
   ctx.provider.enqueue(textScript(FIXTURE_MODEL_A, { candidate: FIXTURE_MODEL_A, currentTurn: f1 }, a1));
-  await sendExpectReply(ctx.tui, f1, a1, "fail-closed first reply");
-  // #1528: the f1/a1 exchange is the durable history that precedes route
-  // loss; f2 is a fail-closed turn that must never be persisted.
+  await sendExpectReply(ctx.tui, f1, a1, "owner-loss baseline reply");
+  // The f1/a1 exchange is durable history that precedes route loss; f2/a2 is
+  // a degraded turn whose archive write fails and must not become history.
   ctx.durableHistory = [f1, a1];
 
   const before = ctx.provider.requestCountFor(FIXTURE_MODEL_A);
   await ctx.owner.stopOwner();
-  try {
-    await ctx.tui.sendAndAwaitReply(f2, TIMEOUTS.turnMs);
-    // A bounded unavailable/error result is expected; a context-blind model
-    // answer would have required a provider call.
-    const after = ctx.provider.requestCountFor(FIXTURE_MODEL_A);
-    if (after !== before) {
-      throw new Error(`provider request count changed while owner was down (${before} → ${after}) — fail-closed violated`);
-    }
-  } catch (err) {
-    // The turn may time out if the bridge never surfaces an error; that is
-    // acceptable only when no provider request was made.
-    const after = ctx.provider.requestCountFor(FIXTURE_MODEL_A);
-    if (after !== before) {
-      throw new Error(`provider request count changed while owner was down (${before} → ${after}) — fail-closed violated: ${(err as Error).message}`);
-    }
+  ctx.provider.enqueue(textScript(FIXTURE_MODEL_A, {
+    candidate: FIXTURE_MODEL_A,
+    currentTurn: f2,
+    orderedContains: [f1, a1],
+  }, a2));
+  await sendExpectReply(ctx.tui, f2, a2, "degraded-memory reply");
+  // Existing sessions keep running: the provider is reached without a
+  // per-turn memory admission, while the failed archive write stays visible
+  // in the bridge log and out of durable history.
+  if (ctx.provider.requestCountFor(FIXTURE_MODEL_A) <= before) {
+    throw new Error("degraded-memory turn did not reach the provider");
   }
 }
 
@@ -1410,7 +1415,7 @@ export const PI_SCENARIOS: PiScenario[] = [
   { name: "reset-rebuild", profiles: ["core", "full"], run: resetRebuild },
   { name: "session-start-hydration", profiles: ["hydration"], run: sessionStartHydration },
   { name: "provider-cooldown-suppression", profiles: ["core", "full"], run: providerCooldownSuppresses },
-  { name: "fail-closed-provider-suppression", profiles: ["core", "full"], run: failClosed },
+  { name: "owner-loss-degraded-memory", profiles: ["core", "full"], run: ownerLossDegradedMemory },
   { name: "owner-recovery", profiles: ["full"], run: ownerRecovery },
   { name: "bridge-restart", profiles: ["full", "proof"], run: bridgeRestart },
   { name: "lazy-transport-composition", profiles: ["full"], run: lazyTransports },

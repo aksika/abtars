@@ -10,6 +10,7 @@ import { logAndSwallow } from "./log-and-swallow.js";
 import { cleanResponse, extractSupportIds, SUPPORT_STRIP_RE } from "./clean-response.js";
 import { loadUsers } from "./user-registry.js";
 import { ModelNotFoundError } from "./transport/acp-transport.js";
+import { isProviderExecutionError } from "./transport/provider-failure.js";
 import type { SttConfig } from "./stt.js";
 import { synthesizeSpeech, type TtsConfig } from "./tts.js";
 import { attemptMemoryMutation } from "./memory-runtime.js";
@@ -28,6 +29,30 @@ function hasDurableMessageId(
 ): boolean {
   if (!result.ok || !result.value || typeof result.value !== "object") return false;
   return "id" in result.value && typeof (result.value as { id?: unknown }).id === "number";
+}
+
+/**
+ * Map a turn failure to the bounded operator-visible reason. The typed Pi
+ * provider settlement is authoritative: its inner provider text can contain
+ * words like "aborted" without meaning the transport connection dropped, so
+ * generic substring mapping must not rewrite it (#1935).
+ */
+export function describePipelineError(err: unknown): string {
+  if (isProviderExecutionError(err)) {
+    if (err.failure.code === "credits_exhausted") {
+      return "OpenRouter credits exhausted — top up at openrouter.ai/credits";
+    }
+    const message = err.failure.message.trim().slice(0, 300);
+    return message.length > 0 ? `Error: ${message}` : "Error: All models exhausted.";
+  }
+  const errStr = String(err instanceof Error ? err.message : JSON.stringify(err));
+  return errStr.includes("credits") ? "OpenRouter credits exhausted — top up at openrouter.ai/credits"
+    : errStr.includes("rate") || errStr.includes("429") ? "Rate limited."
+    : errStr.includes("auth") || errStr.includes("401") || errStr.includes("403") ? "Authentication failed."
+    : errStr.includes("connect") || errStr.includes("ECONNREFUSED") ? "Connection lost."
+    : errStr.includes("exhausted") || errStr.includes("no candidates") ? "All models exhausted."
+    : errStr.includes("aborted") || errStr.includes("code=20") ? "Request aborted — model connection dropped."
+    : `Error: ${errStr.slice(0, 80)}`;
 }
 import type { IKiroTransport } from "./transport/kiro-transport.js";
 import type { AbtarsMemoryRuntime } from "./memory-runtime.js";
@@ -939,13 +964,7 @@ export async function handleInboundMessage(
       logWarn(TAG, `Request timeout — not resetting session`);
       if (notifyUser) await adapter.sendMessage(channelId, "❌ Model timed out.", { threadId: msg.threadId }).catch(err => logAndSwallow(TAG, "adapter call", err));
     } else {      logError(TAG, `Pipeline error: ${errStr.slice(0, 500)}`);
-      const reason = errStr.includes("credits") ? "OpenRouter credits exhausted — top up at openrouter.ai/credits"
-        : errStr.includes("rate") || errStr.includes("429") ? "Rate limited."
-        : errStr.includes("auth") || errStr.includes("401") || errStr.includes("403") ? "Authentication failed."
-        : errStr.includes("connect") || errStr.includes("ECONNREFUSED") ? "Connection lost."
-        : errStr.includes("exhausted") || errStr.includes("no candidates") ? "All models exhausted."
-        : errStr.includes("aborted") || errStr.includes("code=20") ? "Request aborted — model connection dropped."
-        : `Error: ${errStr.slice(0, 80)}`;
+      const reason = describePipelineError(err);
       if (notifyUser) await adapter.sendMessage(channelId, `❌ ${reason}`, { threadId: msg.threadId }).catch(err => logAndSwallow(TAG, "adapter call", err));
     }
   } finally {

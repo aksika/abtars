@@ -28,7 +28,7 @@ const MAIN_NOTICE_REGISTRY: UserRegistry = {
   byPlatformId: new Map([["master:telegram", { userId: "master", role: "master", maxClass: 3, tools: ["all"], platforms: { telegram: 100 } }]]),
   byUserId: new Map([["master", { userId: "master", role: "master", maxClass: 3, tools: ["all"], platforms: { telegram: 100 } }]]),
 };
-import { handleInboundMessage, submitTrustedInternalMessage, type PipelineDeps } from "./message-pipeline.js";
+import { handleInboundMessage, submitTrustedInternalMessage, describePipelineError, type PipelineDeps } from "./message-pipeline.js";
 
 import { lookupAnswerRecord } from "./answer-evidence.js";
 import type { PlatformAdapter, InboundMessage } from "../types/platform.js";
@@ -139,6 +139,28 @@ function makeMsg(overrides: Partial<InboundMessage> = {}): InboundMessage {
     ...overrides,
   };
 }
+
+describe("describePipelineError", () => {
+  it("keeps the typed provider settlement instead of rewriting it as a dropped connection", () => {
+    const err = new ProviderExecutionError({
+      code: "all_candidates_failed",
+      retryable: false,
+      attemptedCandidates: 1,
+      message: "The configured model candidate failed: This operation was aborted",
+    });
+    const reason = describePipelineError(err);
+    expect(reason).toContain("configured model candidate failed");
+    expect(reason).not.toContain("connection dropped");
+  });
+
+  it("keeps credits exhaustion and generic transport mapping", () => {
+    const credits = new ProviderExecutionError({
+      code: "credits_exhausted", retryable: false, attemptedCandidates: 1, message: "quota",
+    });
+    expect(describePipelineError(credits)).toContain("credits exhausted");
+    expect(describePipelineError(new Error("socket aborted"))).toContain("connection dropped");
+  });
+});
 
 describe("handleInboundMessage", () => {
   let transport: ReturnType<typeof mockTransport>;
