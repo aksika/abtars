@@ -12,7 +12,7 @@ function localDate() {
 function logAndSwallow(_tag, _ctx, _err) {
   return void 0;
 }
-import { join, basename } from "node:path";
+import { join } from "node:path";
 const AB_HOME = abtarsHome();
 const TWITTER_DIR = join(AB_HOME, "workspace", "twitterX");
 const COOKIE_PATH = join(AB_HOME, "secret", "x-cookies.json");
@@ -44,25 +44,8 @@ function readEncryptedSecret(filePath) {
 const BASE_FOLLOWS = join(TWITTER_DIR, process.env["TWEET_BASE_FOLLOWS_FILE"] ?? "base.follows.json");
 const AGENT_FOLLOWS = join(TWITTER_DIR, process.env["TWEET_FOLLOWS_FILE"] ?? "agent.follows.json");
 const OUTPUT_DIR = join(TWITTER_DIR, "output");
-async function sendReportToTelegram(filePath, caption) {
-  const token = process.env["TELEGRAM_BOT_TOKEN"];
-  const chatId = process.env["AGENTBRIDGE_MAIN_CHAT_ID"];
-  if (!token || !chatId) return;
-  if (!existsSync(filePath)) return;
-  const buf = readFileSync(filePath);
-  const form = new FormData();
-  form.append("chat_id", chatId);
-  const blob = new Blob([buf], { type: "text/markdown" });
-  form.append("document", blob, basename(filePath));
-  form.append("caption", caption.slice(0, 1024));
-  const res = await fetch(`https://api.telegram.org/bot${token}/sendDocument`, { method: "POST", body: form });
-  if (!res.ok) {
-    const text = await res.text().catch(() => "");
-    throw new Error(`Telegram sendDocument failed (${res.status}): ${text}`);
-  }
-}
 const AI_BIO_KEYWORDS = /\b(ai|ml|llm|machine.?learning|deep.?learning|neural|nlp|computer.?vision|reinforcement|transformer|diffusion|robotics|research|phd|professor|scientist)\b/i;
-function loadApiKey() {
+function requireApiKey() {
   // Priority: TWITTER_COOKIES env (from get_secret tool) > file on disk
   let raw;
   if (process.env["TWITTER_COOKIES"]) {
@@ -140,9 +123,15 @@ async function loadRettiwt() {
     process.exit(1);
   }
 }
-async function fetchUser(handle) {
+async function newRettiwt() {
+  // Guest instances resolve user ids through X's unauthenticated API, which
+  // started rejecting every lookup (2026-09-25) and silently produced empty
+  // feeds. Always drive Rettiwt with the cookie-backed apiKey instead.
   const { Rettiwt } = await loadRettiwt();
-  const r = new Rettiwt();
+  return new Rettiwt({ apiKey: requireApiKey() });
+}
+async function fetchUser(handle) {
+  const r = await newRettiwt();
   const d = await r.user.details(handle.replace(/^@/, ""));
   if (!d) {
     console.error("User not found");
@@ -152,18 +141,14 @@ async function fetchUser(handle) {
 }
 const GQL_USER_TWEETS = "https://x.com/i/api/graphql/E3opETHurmVJflFsUBVuUQ/UserTweets";
 async function fetchTimeline(handle, count) {
-  const { Rettiwt } = await loadRettiwt();
-  const r = new Rettiwt();
+  const r = await newRettiwt();
   const clean = handle.replace(/^@/, "");
   const user = await r.user.details(clean);
   if (!user) throw new Error(`User @${clean} not found`);
-  const auth = loadCookieHeader();
-  if (auth) {
-    try {
-      return await fetchTimelineGql(user.id, user.fullName ?? clean, clean, count);
-    } catch (err) {
-      logAndSwallow("abtars_tweet", "op", err);
-    }
+  try {
+    return await fetchTimelineGql(user.id, user.fullName ?? clean, clean, count);
+  } catch (err) {
+    logAndSwallow("abtars_tweet", "op", err);
   }
   const data = await r.user.timeline(user.id, count);
   return (data?.list ?? []).map((t) => {
@@ -262,9 +247,6 @@ async function runFeed(format, count, topN, discover, outputPath) {
     mkdirSync(join(outputPath, ".."), { recursive: true });
     writeFileSync(outputPath, md, "utf8");
     console.error(`📰 Newsletter written to ${outputPath}`);
-    await sendReportToTelegram(outputPath, `AI Daily ${date}`).catch((err) => {
-      console.error(`⚠ Telegram send failed: ${err instanceof Error ? err.message : String(err)}`);
-    });
   }
 }
 const BEARER = "AAAAAAAAAAAAAAAAAAAAANRILgAAAAAAnNwIzUejRCOuH5E6I8xnZz4puTs%3D1Zv7ttfk8LF81IUq16cHjhLTvJu4FA33AGWWjCpTnA";
@@ -392,13 +374,7 @@ async function searchTweets(_query, _count) {
   process.exit(1);
 }
 async function runDiscover(topTweets, knownHandles) {
-  const auth = loadCookieHeader();
-  if (!auth) {
-    console.error("  \u26A0 Skipping discovery \u2014 user auth required. Refresh cookies.");
-    return [];
-  }
-  const { Rettiwt } = await loadRettiwt();
-  const guestRettiwt = new Rettiwt();
+  const rettiwt = await newRettiwt();
   const known = new Set(knownHandles.map((h) => h.toLowerCase()));
   const candidates = [];
   const seen = /* @__PURE__ */ new Set();
@@ -424,7 +400,7 @@ async function runDiscover(topTweets, knownHandles) {
         if (!rHandle || known.has(rHandle) || seen.has(rHandle)) continue;
         seen.add(rHandle);
         try {
-          const profile = await guestRettiwt.user.details(rHandle);
+          const profile = await rettiwt.user.details(rHandle);
           if (!profile) continue;
           const pj = profile;
           const bio = pj.description ?? "";
@@ -582,6 +558,3 @@ main().catch((e) => {
   console.error(`Fatal: ${e.message}`);
   process.exit(1);
 });
-export {
-  loadApiKey
-};
