@@ -144,7 +144,7 @@ node ~/.abtars-releases/src/abtars/bundle/abtars-cli.js install
 For subsequent updates from source:
 ```bash
 cd ~/.abtars-releases/src/abtars && git pull && npm run bundle
-node ~/.abtars-releases/src/abtars/bundle/abtars-cli.js update --from-local
+node ~/.abtars-releases/src/abtars/bundle/abtars-cli.js update --dev ~/.abtars-releases/src/abtars
 ```
 
 ---
@@ -171,7 +171,8 @@ cd ~/.abtars-releases/src/abtars && git pull origin dev
 bash ~/.abtars-releases/src/abtars/scripts/emergency-update.sh
 ```
 
-The watchdog health probe runs for ~120s after the script. If the bridge is still not healthy, check `~/.abtars/logs/bridge.log`.
+The watchdog health probe runs for ~3 min after the script (same budget as
+the deploy health probe). If the bridge is still not healthy, check `~/.abtars/logs/bridge.log`.
 
 ### `abtars update` hangs or stalls
 

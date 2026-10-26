@@ -173,10 +173,10 @@ machine; keep it limited to this recovery path.
 
 ## Doctor on every boot
 
-The watchdog runs `doctor.sh --fix` before every bridge spawn:
+The watchdog runs `abtars doctor --fix` before every bridge spawn:
 
 ```
-watchdog.sh → doctor.sh --fix → node app/bundle/abtars.js
+watchdog.sh → abtars doctor --fix → node app/bundle/abtars.js
 ```
 
 ## Platform enablement

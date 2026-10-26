@@ -21,7 +21,22 @@ Use abtars status to inspect the service. The --cold option starts a fresh bridg
 | **L3: External watchdog** | The watchdog monitors the bridge process and heartbeat, then restarts the bridge when recovery is needed. |
 | **L4: OS service manager** | launchd or systemd starts and supervises the watchdog. |
 
-The heartbeat interval is configurable. L1 tasks do not replace the watchdog's process monitoring.
+The heartbeat interval is configurable (`HEARTBEAT_INTERVAL_SEC`, default
+60). L1 tasks do not replace the watchdog's process monitoring.
+
+## Resume policy (`INSTALL_TYPE`)
+
+After a suspend/wake cycle, `INSTALL_TYPE` decides whether the bridge exits
+for a supervised restart or continues in place:
+
+| `INSTALL_TYPE` | Behavior |
+|---|---|
+| `server` (default) | Daemon-mode bridge with an attached supervisor exits so the supervisor respawns it fresh |
+| `notebook` | Always continues in place (laptops that sleep with no supervisor to respawn) |
+
+Any other combination (simple mode, unsupervised process) continues in
+place — the bridge never exits without someone to restart it. Unrecognized
+values fall back to `server` with a warning.
 
 ## Repeated failures
 

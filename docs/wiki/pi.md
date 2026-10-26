@@ -5,9 +5,9 @@ and coding runtime. Pi's agent core runs the model and tool loop on the API
 route, and Pi's provider engine connects that route to model providers.
 
 abTARS supplies the surrounding agent service: messaging, session lifecycle,
-tool permissions, task tracking, provider selection and fallback, and delivery
-of results. Pi is installed separately and discovered at runtime; it is not
-bundled into abmind.
+tool permissions, task tracking, single-model dispatch with availability
+admission, and delivery of results. Pi is installed separately and
+discovered at runtime; it is not bundled into abTARS.
 
 ## Routes
 
@@ -21,13 +21,14 @@ installation with **abtars deps install pi** and **abtars deps update pi**.
 
 ## Pi features
 
-- **Model providers:** Use the providers supported by Pi, with abTARS managing
-  candidate selection, health, and fallback.
+- **Model providers:** Use the providers supported by Pi. abTARS dispatches
+  the single configured model per conversation, gated by availability
+  admission — there is no in-turn fallback or health rotation.
 - **Terminal interface:** Run **abtars tui** to use abTARS from a local terminal.
 - **Coding work:** Start supervised Pi coding runs in configured workspaces.
   Runs are tracked and reconciled by abTARS.
 
-Pi is pinned to the tested 0.85.x line. The current pin is recorded in
+Pi is pinned to the tested 1.3.x line. The current pin is recorded in
 PI_COMPATIBILITY and mirrored in the development dependencies. abTARS warns
 when it finds a newer Pi minor line so you can return to the tested version.
 

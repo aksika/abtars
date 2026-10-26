@@ -8,7 +8,7 @@ abTARS can run supervised coding tasks in a Pi RPC subprocess. The executor uses
 - pi-executor.json configured at ~/.abtars/config/pi-executor.json.
 - Executor enabled in that file.
 
-Pi is pinned to the tested 0.85.x line; see [Pi Integration](/abtars/pi).
+Pi is pinned to the tested 1.3.x line; see [Pi Integration](/abtars/pi).
 
 ## Enable a workspace
 

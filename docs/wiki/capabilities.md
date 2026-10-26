@@ -4,14 +4,17 @@ Self-contained subsystems that register themselves at startup. Add features with
 
 ## How it works
 
-On boot, `discoverCapabilities()` scans `src/capabilities/` for directories with a `capability.json` manifest. Each is dynamically imported and its `register(api)` function called.
+On boot, capabilities register from a generated registry (built at bundle
+time from each capability's `capability.json` manifest plus its
+`register(api)` entrypoint). The parallel boot graph starts them once
+their dependencies resolve.
 
 ## Built-in capabilities
 
 | Capability | What it provides |
 |------------|-----------------|
 | **Hotskills** | Live-reload skill files, dependency preparation, and eligibility gating via `requires` frontmatter |
-| **Sleep** | Dreamy spawn + retry, progress protocol |
+| **Sleep** | Sleep-cycle dispatch + resume, daemon progress protocol |
 
 ## Adding a capability
 
@@ -38,7 +41,7 @@ What a capability can register:
 
 | Method | Purpose |
 |--------|---------|
-| `registerHeartbeatTask(name, fn)` | Runs every heartbeat tick (5 min) |
+| `registerHeartbeatTask(name, fn)` | Runs every heartbeat tick (60s) |
 | `registerCommand(name, handler)` | Chat command |
 | `registerService(name, service)` | Background service with start/stop lifecycle |
 | `runtime` | Access to SubagentRuntime for spawning agents |

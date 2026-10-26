@@ -114,7 +114,7 @@ abtars restore ~/.backup-abtars/abmind-2026-06-05.abm
 npm install -g abtars abmind
 abmind install --non-interactive --passphrase "$ABMIND_PASSPHRASE"
 abtars install
-abtars update
+abtars update --alpha
 
 # 2. Restore
 abtars restore ~/path/to/abtars-2026-06-05.zip
@@ -128,7 +128,7 @@ abtars restart --cold
 
 ```bash
 abtars install --force
-abtars update
+abtars update --alpha
 abtars restore ~/.backup-abtars/abtars-2026-06-05.zip
 abtars restart --cold
 ```

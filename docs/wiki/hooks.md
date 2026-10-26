@@ -29,10 +29,12 @@ Place hook definitions in `~/.abtars/config/hooks.json`:
 
 | Event | When it fires |
 |-------|--------------|
-| `BridgeStart` | Bridge process started, all phases complete |
-| `SessionStart` | New session created (`/new`, `/reset`) |
+| `BridgeStart` | Bridge process started, all boot nodes settled |
+| `SessionStart` | New session created (`/session new`) |
 | `SessionEnd` | Session ending (before reset) |
-| `BeforeMessage` | Before processing a user message |
+| `BeforeMessage` | Before processing a user message (the only event that can block the pipeline) |
+| `AfterMessage` | After a user message is processed |
+| `AfterPrompt` | After a prompt completes |
 
 ## Hook behavior
 

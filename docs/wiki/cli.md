@@ -5,7 +5,7 @@ The `abtars` command manages installation, updates, and lifecycle of the bridge.
 ## Usage
 
 ```
-abtars install    [--force] [--mode=simple|daemon] [--restore <backup.zip>]
+abtars install    [--non-interactive --accept-risk --user-name ...] [--force] [--mode=simple|daemon] [--restore <backup.zip>]
 abtars uninstall  [--yes]
 abtars update     [--dev [DIR] | --alpha | --stable]
 abtars rollback   [--to <slot>]
@@ -16,8 +16,7 @@ abtars restart    [--cold]
 abtars status
 abtars logs
 abtars config
-abtars doctor     [<args passed to doctor.sh>...]
-abtars onboard    [--non-interactive --accept-risk --telegram-token ... --telegram-chat-id ...]
+abtars doctor     [<doctor args>...]
 abtars daemon     install|uninstall|start|stop|restart
 abtars deps       install|list|update|remove
 ```
@@ -26,11 +25,15 @@ abtars deps       install|list|update|remove
 
 ### install
 
-First-time setup. Creates `~/.abtars/`, installs the bridge, sets up the watchdog.
+First-time setup. Creates `~/.abtars/`, installs the bridge, runs the
+interactive first-run wizard (agent name, install mode, security settings,
+messaging credentials), sets up the watchdog.
 
 - `--force` — overwrite existing installation
 - `--mode` — `simple` or `daemon`
 - `--restore <backup.zip>` — restore config/state from a backup archive
+- `--non-interactive` — skip prompts, use flags instead (requires `--user-name`, owner identity, and `--accept-risk`)
+- `--default-provider` / `--default-model` — override the shipped pi-stack defaults
 
 ### uninstall
 
@@ -78,14 +81,15 @@ Diagnoses common issues (stale locks, missing config, port conflicts, dependency
 
 - `--fix` — attempt automatic repair of detected issues
 
-### onboard
+### First-run wizard
 
-Interactive first-run wizard. Configures the install mode, security settings, and messaging platform credentials.
+`abtars install` ends with an interactive wizard (agent name, install mode,
+security settings, messaging credentials). Unattended installs pass the same
+values as flags:
 
-- `--non-interactive` — skip prompts, use flags instead
-- `--telegram-token` — bot token
-- `--telegram-chat-id` — owner chat ID
-- `--accept-risk` — acknowledge security implications
+```bash
+abtars install --non-interactive --accept-risk --user-name "yourname" ...
+```
 
 ### logs
 
@@ -111,7 +115,7 @@ Use `abtars status` to inspect bridge and service state.
 
 ### deps
 
-Manage optional CLI npm package groups (native, twitter, pdf, youtube, image, pi), auto-managed browser runtimes (`lightpanda`, `cloak`), and manual system binaries (`ollama`, `bwrap`). Skill-script dependencies are lifecycle-managed separately; see [Dependencies](./dependencies.md#skill-script-dependencies).
+Manage optional CLI npm package groups (native, twitter, pdf, youtube, image), auto-managed browser runtimes (`lightpanda`, `cloak`), and manual system binaries (`ollama`, `bwrap`). Pi is not an npm group — it is a separate distribution managed via `abtars deps install pi` / `abtars deps update pi` (pinned to the tested line, with a compatibility check). Skill-script dependencies are lifecycle-managed separately; see [Dependencies](./dependencies.md#skill-script-dependencies).
 
 | Subcommand | Description |
 |------------|-------------|
@@ -123,7 +127,8 @@ Manage optional CLI npm package groups (native, twitter, pdf, youtube, image, pi
 ### tui
 
 Attach a terminal UI to a running bridge over a unix-domain socket.
-The bridge must have been started with `TUI_ENABLED=true` (or `--tui`).
+The TUI socket server is enabled by default — only an explicit
+`TUI_ENABLED=false` disables it.
 
 ```bash
 abtars deps install pi                 # install Pi, including its TUI library

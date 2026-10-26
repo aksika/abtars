@@ -22,8 +22,8 @@ The agent is NOT interrupted — it finishes its current tool call, reads your i
 
 | Transport | Injection timing |
 |-----------|-----------------|
-| Pi API route | Between tool calls (true mid-run) |
-| ACP | After prompt completes (best-effort, injected as follow-up) |
+| Pi API route | Between tool calls (true mid-run), via session steering with native bounds |
+| ACP | After prompt completes (best-effort, injected as follow-up; ACP session steering is not maintained) |
 
 ## Multiple `/wait` messages
 
@@ -31,7 +31,10 @@ If you send several `/wait` before the agent drains them, they're concatenated w
 
 ## `/wait` while idle
 
-If the agent isn't busy, `/wait` is treated as a normal message — no special handling needed.
+If the agent isn't busy, there is no queue to inject into:
+
+- `/wait` with no text while idle replies that nothing is running
+- `/wait <message>` with text while idle is treated as a normal message
 
 ## `/stop` behavior
 
@@ -39,4 +42,4 @@ Immediately kills the current generation. The agent stops, and you can send a ne
 
 ## Legacy
 
-Bare `wait` (without slash) is a hard interrupt for backward compatibility. Use `/wait` for the non-interrupting version.
+There is no bare `wait` command — steering goes through `/wait` and `/steer`.

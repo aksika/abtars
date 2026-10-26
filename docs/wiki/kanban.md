@@ -20,11 +20,9 @@ Any source can create cards:
 |---------|---------------|
 | `/kanban` | Active board (queued, running, done, failed) |
 | `/kanban all` | Everything including delivered |
-| `/kanban status=done` | Filter by status |
-| `/kanban source=task` | Only task-scheduler cards |
-| `/kanban priority=HIGH` | Urgent items |
-| `/kanban type=research` | By card type |
-| `/kanban labels=finance` | By tag |
+| `/kanban <id>` | Full ticket detail |
+| `/kanban "<term>"` | Search (quotes mandatory) |
+| `/kanban nuke` | Reset board DB on next start (owner-only) |
 
 ## Card lifecycle
 
@@ -55,7 +53,10 @@ The agent has a `kanban_manage` tool and can:
 
 SQLite database at `~/.abtars/kanban/kanban.db`. Included in `abtars backup --config`.
 
-Cards older than 7 days (after delivery) are automatically purged.
+Cards in a terminal state (`delivered`, `done`, `failed`) older than 7 days
+are automatically purged. Purge is FK-safe: cards linked to Pi run
+telemetry (`pi_runs`) and cards with live children are retained, so
+terminal card cleanup converges instead of failing on constraints.
 
 ## Recovery
 

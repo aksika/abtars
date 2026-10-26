@@ -12,15 +12,18 @@ Workers can attach small files to a task result. The recipient can access them i
 
 ## S3-compatible storage
 
-For larger files, configure an S3-compatible endpoint and bucket in ~/.abtars/config/.env:
+For larger files, configure an S3-compatible endpoint, bucket, and
+credentials in ~/.abtars/config/.env:
 
 ~~~bash
 ARTIFACT_S3_ENDPOINT=https://storage.example.com
 ARTIFACT_S3_BUCKET=abtars-artifacts
 ARTIFACT_S3_REGION=auto
+ARTIFACT_S3_KEY=<access-key-id>
+ARTIFACT_S3_SECRET=<secret-access-key>
 ~~~
 
-Store the access key and secret in abTARS's local credential storage. Do not put them in .env or share them with a task prompt. Use HTTPS with the storage provider.
+Do not share credentials with a task prompt. Use HTTPS with the storage provider.
 
 The artifact tools are available when their configuration and required dependencies are present.
 

@@ -67,7 +67,6 @@ Token usage (today):
 
 | System | What it controls | Coexists with budget? |
 |--------|-----------------|----------------------|
-| `SLEEP_MAX_LLM_CALLS` | Max LLM calls per sleep cycle (default 18) | Yes — safety cap per cycle, budget is daily total |
 | `max_tokens` on kanban cards | Token budget per project | Yes — project-level cap, budget is global |
 | `maxRunsPerDay` on tasks | Execution count per task | Yes — per-task count, budget is per-agent |
 

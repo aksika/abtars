@@ -6,7 +6,7 @@ abTARS supports multiple concurrent conversation sessions per platform. Each ses
 
 **Transport session** — an actual conversation context (message history sent to the model). Created by `/session new`, switched with `/session <#>`.
 
-**Storage session ID** — a tag written to the memory database. Used by the sleep cycle to group and extract memories per session.
+**Storage session ID** — the session key messages are archived under. The sleep cycle uses it to group episodes per session.
 
 ## Session ID Format
 
@@ -22,10 +22,22 @@ Example: `1747563282_A_01`
 | B | Browse |
 | C | Code |
 | T | Task |
+| P | Peer |
+| S | System |
+| O | Orc |
+| W | Worker |
+| D | Dreamy |
+| H | Healer |
+| K | Skill |
+
+`/session new` creates Main, Browse, Code, or Task sessions. The other
+types are created by the system itself (peer traffic, scheduled work,
+supervised runs, sleep, skill sessions).
 
 ## Commands
 
-All session commands are **master-only**.
+Session commands are available to all roles (destructive resets stay
+owner-gated elsewhere).
 
 | Command | Description |
 |---------|-------------|
@@ -35,14 +47,16 @@ All session commands are **master-only**.
 | `/session new code` | Create Code session |
 | `/session new task` | Create Task session |
 | `/session <#>` | Switch to session by number |
-| `/session end [#]` | End session (messages kept in memory) |
-| `/session kill <#>` | Kill session and wipe its messages |
+| `/session end [#]` | End session (defaults to the active one) |
+| `/session kill <#>` | Kill session by number (required) |
+| `/session pause [#]` | Pause session (defaults to the active one) |
+| `/session resume [#]` | Resume a paused session (defaults to the active one) |
 
 ## Lifecycle
 
 ### Manual sessions
 
-Created with `/session new [type]`. Each gets its own conversation context with the appropriate system prompt (Main gets soul/greeting, Code/Browse/Task get their agent-specific prompts). Stay open until explicitly ended or killed.
+Created with `/session new [browse|code|task]`. Each gets its own conversation context: Main sessions greet on creation and carry the role SOUL bundle once as the Pi session system prompt (never re-injected per turn). Sessions stay open until explicitly ended or killed.
 
 ### Auto-spawned sessions
 
@@ -50,14 +64,14 @@ When the model invokes a tool (browse, task), a sub-session is automatically cre
 - Run inline (no context switch — responses appear in the current conversation)
 - Are visible in `/session` list
 - Can be killed by the user
-- Auto-end after inactivity timeout (`AUTO_SESSION_TIMEOUT_MIN`, default: 60 minutes)
 
 ### End vs Kill
 
 | | `/session end` | `/session kill` |
 |---|---|---|
-| Messages in memory | Kept | Wiped |
-| Extracted memories | Kept | Kept |
+| Session state | Marked ended | Marked ended |
+| Messages in memory | Kept | Kept — message deletion is owner-side; kill does not reach into storage |
+| Extracted memories | Kept | Kept (the legacy `extracted_memories` store is retired) |
 | Session removed | Yes | Yes |
 
 ## Rules
@@ -73,12 +87,12 @@ When the model invokes a tool (browse, task), a sub-session is automatically cre
 
 | Env variable | Default | Description |
 |---|---|---|
-| `MAX_SESSIONS` | 10 | Hard cap on concurrent sessions per platform |
-| `AUTO_SESSION_TIMEOUT_MIN` | 60 | Inactivity timeout for auto-spawned sessions (0 = end immediately) |
+| `MAX_SESSIONS` | 10 | Hard cap on concurrent sessions per user |
+| `MAX_TOTAL_SESSIONS` | 12 | Hard cap on concurrent sessions globally |
 
 ## Memory Integration
 
-- Messages are tagged with the session ID in the memory database
-- The sleep cycle (Dreamy) only extracts memories from Main (A) sessions
-- Non-Main session messages are stored but not processed for memory extraction
-- `/session kill` wipes raw messages but extracted memories survive
+- Messages are archived to memory as they are recorded
+- The sleep cycle (Dreamy) builds topic episodes from Main (A) sessions
+- Non-Main session messages are stored but not used for episode grouping
+- `/session kill` ends the session without reaching into memory storage

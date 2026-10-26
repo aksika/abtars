@@ -13,7 +13,7 @@ The agent detects the intent, runs the CLI, and confirms.
 
 ## Storage
 
-Plain markdown at `~/.abtars/memory/todo.md`:
+Plain markdown at `~/.abtars/workspace/todo/todo.md`:
 
 ```markdown
 # Todo List

@@ -4,7 +4,7 @@
 
 ## Requirements
 
-- Bridge running with `TUI_ENABLED=true` (or `--tui` flag)
+- Bridge running (the TUI socket server is enabled by default; only an explicit `TUI_ENABLED=false` disables it)
 - Pi support installed (`abtars deps install pi`)
 - A terminal that supports raw mode (SSH works, tmux works)
 

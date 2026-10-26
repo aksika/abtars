@@ -2,7 +2,8 @@
 
 ## Log Levels
 
-Set via `LOG_LEVEL` in `~/.abtars/config/.env`. Default: `low`.
+Set via `LOG_LEVEL` in `~/.abtars/config/.env`. Schema default: `low`
+(fresh installs ship `LOG_LEVEL=debug`).
 
 | Level | What you'll see |
 |-------|-----------------|
@@ -32,7 +33,7 @@ These are diagnostic noise at trace level, not bugs. Use TRACE when debugging a 
 ~/.abtars/logs/bridge-YYYY-MM-DD.log
 ```
 
-Rotated daily. Retention controlled by `doctor.sh --fix` (default: 7 days).
+Rotated daily. Retention controlled by `abtars doctor --fix` (default: 7 days).
 
 ## Useful grep patterns
 

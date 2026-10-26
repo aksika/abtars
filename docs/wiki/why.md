@@ -4,7 +4,7 @@ abTARS is a personal agent you run on your own machine and configure yourself. I
 
 ## Built around Pi
 
-On the API route, Pi's agent core runs the model and tool loop and Pi's provider engine connects to API providers. abTARS supplies everything product-specific around that engine: sessions and message delivery, tool definitions with per-execution filtering and in-process execution, permission and sandbox policy around every call, turn safety and loop guards, provider selection with health tracking and fallback, durable context projection, and usage telemetry. The ACP route connects to a compatible agent CLI instead and does not use Pi.
+On the API route, Pi's agent core runs the model and tool loop and Pi's provider engine connects to API providers. abTARS supplies everything product-specific around that engine: sessions and message delivery, tool definitions with per-execution filtering and in-process execution, permission and sandbox policy around every call, turn safety and loop guards, single-model dispatch with availability admission, Pi-owned compaction, abmind session hydration, and usage telemetry. The ACP route connects to a compatible agent CLI instead and does not use Pi.
 
 ## Use it where you already work
 
@@ -12,7 +12,7 @@ Talk to the agent through Telegram or Discord, or connect the optional local ter
 
 ## Choose your integrations
 
-Configure model providers and fallback candidates for the API route, or use an ACP-compatible CLI. Add persistent memory with abmind, which installs separately and remains an independent product — abTARS also runs without it. Delegate larger coding goals to supervised Pi coding sessions, and extend behavior with skills, scheduled tasks, and MCP servers.
+Configure the model for the API route (one configured model per conversation — fallback lists apply to boot-time selection and the ACP route only), or use an ACP-compatible CLI. Add persistent memory with abmind, which installs separately and remains an independent product — abTARS also runs without it. Delegate larger coding goals to supervised Pi coding sessions, and extend behavior with skills, scheduled tasks, and MCP servers.
 
 ## Operate the service yourself
 

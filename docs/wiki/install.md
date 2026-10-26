@@ -51,8 +51,8 @@ abtars install
 ```
 
 `abtars install` creates config, clones source, builds, deploys the release, and
-starts the bridge. The install ships a pi-stack default model (GPT-6 Luna
-realtime via OpenRouter) on all agents — no provider questions. Add your
+starts the bridge. The install ships a pi-stack default model (`openai/gpt-5.6-luna`
+via OpenRouter) on all agents — no provider questions. Add your
 `OPENROUTER_API_KEY` to `~/.abtars/secret/` afterwards (`doctor` flags it until
 then). Install pi with `abtars deps install pi` and switch models anytime via
 `/model`.

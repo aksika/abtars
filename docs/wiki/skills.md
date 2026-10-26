@@ -64,21 +64,32 @@ The agent creates skills when it notices it's repeating a procedure — the cata
 
 ## Usage tracking
 
-Each skill has a `.stats.json` sidecar tracking how often it's used:
+All skills share one stats file at `~/.abtars/skills/.stats.json`,
+tracking reads per skill:
 
 ```json
 {
-  "uses": 14,
-  "lastUsed": "2026-05-20T09:30:00Z",
-  "created": "2026-04-10T14:00:00Z"
+  "my-skill": {
+    "reads": 14,
+    "lastRead": "2026-05-20T09:30:00Z",
+    "createdAt": "2026-04-10T14:00:00Z",
+    "createdBy": "master"
+  }
 }
 ```
 
 ## Commands
 
 ```
-/skill          Reload the skill catalog (picks up new/changed files)
+/skill          List the skill catalog (cached)
+/skill reload   Rebuild the catalog (picks up new/changed files)
+/skill list     List runnable + active skill sessions
+/skill run <name> [message]   Start a skill session
+/skill stop     End the active skill session
 ```
+
+`/skills` is an alias for the catalog list. `reload` is substring-matched,
+so any `/skill ...reload...` form rebuilds the catalog.
 
 ## Declaring npm dependencies (optional)
 

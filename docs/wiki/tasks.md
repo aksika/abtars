@@ -17,7 +17,8 @@ The agent reads the task skill, picks the right command, and confirms what it cr
 
 ## How it works
 
-The bridge heartbeat checks every 5 minutes for due tasks. When one fires:
+The bridge heartbeat ticks every 60 seconds (`HEARTBEAT_INTERVAL_SEC=60`)
+and checks for due tasks. When one fires:
 
 | Type | Behavior |
 |------|----------|
@@ -30,7 +31,7 @@ The bridge heartbeat checks every 5 minutes for due tasks. When one fires:
 | Command | Description |
 |---------|-------------|
 | `/tasks` | List all tasks with today's status |
-| `/tasks trigger <id>` | Run a task immediately |
+| `/tasks run <id>` | Run a task immediately |
 | `/tasks log <id>` | Show last 5 runs |
 | `/task validate` | Dry-run check of the task registry (read-only) |
 
@@ -129,9 +130,13 @@ Standard cron: `minute hour day month weekday`
 ## Status indicators
 
 ```
-✓  ran successfully today
-✗  failed today
+/tasks list tick marks:
++  succeeded today, or scheduled and pending
 ~  currently running
-+  scheduled, not yet run
-—  not scheduled for today
+x  failed today
+-  not scheduled for today
+p  paused (auto-paused shows the resume command)
 ```
+
+Kanban cards (`/kanban`) use a different set: `✓` delivered, `+` done,
+`~` running, `✗` failed, `-` anything else.
