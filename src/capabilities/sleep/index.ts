@@ -88,6 +88,12 @@ function classifyHostFailure(message: string, opts?: { reachedModel?: boolean })
   if (has("401", "unauthorized", "unauthenticated", "forbidden", "403", "credit", "billing", "quota", "insufficient", "payment", "policy_rejected", "capability_mismatch", "permission denied")) {
     return { failureClass: "permanent", ...(reached !== undefined ? { reachedModel: reached } : {}), effects, reasonCode: "auth-policy" };
   }
+  // Session exhaustion (round caps, context limits) never clears on retry:
+  // the pump reuses the capped session, so re-issue is futile. Fail fast
+  // with the signal preserved instead of burning the transient schedule.
+  if (has("prompt_round_limit", "round_limit", "round exhausted", "context_length_exceeded", "context limit exceeded")) {
+    return { failureClass: "permanent", ...(reached !== undefined ? { reachedModel: reached } : {}), effects, reasonCode: "session-exhausted" };
+  }
   if (has("429", "rate limit", "503", "502", "504", "overload", "temporarily", "try again", "timeout", "timed out", "deadline", "etime", "econn", "refused", "reset", "network", "socket hang up")) {
     return { failureClass: "transient", ...(reached !== undefined ? { reachedModel: reached } : {}), effects };
   }

@@ -223,11 +223,14 @@ describe("Peer round trip — production-shaped two-node (#1618)", () => {
 
   /** Minimal receiver plan: one work node judged by one review node. */
   function receiverPlan() {
+    // Work only: the runner appends its mandatory host review node
+    // (n{rev}_host_review). A plan-carried review node would suppress that
+    // append, and peer settlement requires the host verdict — see
+    // submitHostAccept below.
     return {
       requiredOutputs: ["result"],
       nodes: [
         { label: "work", kind: "work", instructions: "do the delegated work", capability: "general", outputs: ["result"], acceptance: ["done"], dependsOn: [] },
-        { label: "judge", kind: "review", instructions: "assess", capability: "general", outputs: [], acceptance: [], dependsOn: ["work"] },
       ],
     };
   }
@@ -253,6 +256,19 @@ describe("Peer round trip — production-shaped two-node (#1618)", () => {
     receiverRunner.attemptSucceeded(runId, acc.nodeIds[0] as string, attemptId, "{}");
     receiverRunner.drain(10, ports);
     return acc.nodeIds as string[];
+  }
+
+  /** Complete the mandatory host review node the runner appends per revision
+   *  and return its id for delivery. #1849: a succeeded peer run settles
+   *  through acceptance — without this verdict the terminal projection fails
+   *  closed instead of recording a baseless acceptance. The scripted reviewer
+   *  port never completes review nodes, so the fixture submits the accept
+   *  verdict explicitly. */
+  function submitHostAccept(runId: string): string {
+    const rev = receiverRunner.store.currentRevision(runId);
+    const nodeId = `n${rev}_host_review`;
+    expect(receiverRunner.submitVerdict(runId, nodeId, { verdict: "accept" })).toBe("accepted");
+    return nodeId;
   }
 
   /** Delivery sender fake: captures the send and returns a receipt. The
@@ -346,8 +362,8 @@ describe("Peer round trip — production-shaped two-node (#1618)", () => {
     // claim it.
     const { hasLiveContributionForProject } = M.csMod as typeof import("../../components/peer-help/contribution-store.js");
     expect(hasLiveContributionForProject(requester.taskDb as never, delegated.projectCardId)).toBe(true);
-    const nodeIds = succeedReceiverWork(admittedRun.runId, "att-recv-r1");
-    expect(receiverRunner.submitVerdict(admittedRun.runId, nodeIds[1] as string, { verdict: "accept" })).toBe("accepted");
+    succeedReceiverWork(admittedRun.runId, "att-recv-r1");
+    const hostReview = submitHostAccept(admittedRun.runId);
     // Accepted content is not proof of delivery: the run waits for ack.
     expect(receiverRunner.store.getRun(admittedRun.runId)?.state).not.toBe("succeeded");
 
@@ -356,13 +372,13 @@ describe("Peer round trip — production-shaped two-node (#1618)", () => {
     // terminal contribution event to the real requester reducer — the same
     // transport-doubling seam the old acceptance-outbox drain provided.
     const captured: Array<{ idempotenceKey: string }> = [];
-    expect(receiverRunner.executeDelivery(admittedRun.runId, nodeIds[1] as string, capturingSender(captured))).toBe("acknowledged");
+    expect(receiverRunner.executeDelivery(admittedRun.runId, hostReview, capturingSender(captured))).toBe("acknowledged");
     expect(captured).toHaveLength(1);
     expect(receiverRunner.store.getRun(admittedRun.runId)?.state).toBe("succeeded");
     expect(reviewStore.getSupervision(receiverCard.id)?.state).toBe("accepted");
     expect((receiver.db.prepare("SELECT status FROM kanban_board WHERE id = ?").get(receiverCard.id) as any).status).toBe("done");
     // A second delivery attempt is rejected on the terminal run — exactly once.
-    expect(() => receiverRunner.executeDelivery(admittedRun.runId, nodeIds[1] as string, capturingSender(captured))).toThrow(/terminal.*late result rejected/);
+    expect(() => receiverRunner.executeDelivery(admittedRun.runId, hostReview, capturingSender(captured))).toThrow(/terminal.*late result rejected/);
     expect(captured).toHaveLength(1);
 
     const decisionId = `rd_runner_${receiverCard.id}_t1`;
@@ -451,10 +467,10 @@ describe("Peer round trip — production-shaped two-node (#1618)", () => {
     // contribution event below carries that verdict's stable decision id.
     const admittedRun = receiverRunner.store.findRunByCard(receiverCard.id);
     expect(admittedRun).toBeTruthy();
-    const nodeIds = succeedReceiverWork(admittedRun.runId, "att-recv-r3");
-    expect(receiverRunner.submitVerdict(admittedRun.runId, nodeIds[1] as string, { verdict: "accept" })).toBe("accepted");
+    succeedReceiverWork(admittedRun.runId, "att-recv-r3");
+    const hostReview = submitHostAccept(admittedRun.runId);
     const captured: Array<{ idempotenceKey: string }> = [];
-    expect(receiverRunner.executeDelivery(admittedRun.runId, nodeIds[1] as string, capturingSender(captured))).toBe("acknowledged");
+    expect(receiverRunner.executeDelivery(admittedRun.runId, hostReview, capturingSender(captured))).toBe("acknowledged");
     expect(captured).toHaveLength(1);
     const decisionId = `rd_runner_${receiverCard.id}_t1`;
     const event = terminalEventPayload("completed", decisionId, "peer finished", "r3");

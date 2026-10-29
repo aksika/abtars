@@ -7,7 +7,7 @@
  * with a deterministic fake provider (no external model).
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
-import { mkdtempSync, rmSync, readFileSync, existsSync, mkdirSync } from "node:fs";
+import { mkdtempSync, rmSync, readFileSync, existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { ActionGate } from "../../components/action-gate.js";
@@ -122,6 +122,10 @@ describe("1752 E2E — normal sleep authorization and failure/recovery truth", (
       mkdirSync(join(memoryDir, "prompts", "sleep"), { recursive: true });
       cpSync(srcPrompts, join(memoryDir, "prompts"), { recursive: true });
     }
+    // The embedded daemon requires a saved primary identity (manifest.json
+    // encryptionUser, as written by install) before serving ownership-sensitive
+    // work — ambient ABMIND_USER_ID alone no longer suffices.
+    writeFileSync(join(memoryDir, "manifest.json"), JSON.stringify({ encryptionUser: "test" }));
     const MEM_CONFIG = {
       memoryEnabled: true,
       memoryDir,
@@ -147,11 +151,16 @@ describe("1752 E2E — normal sleep authorization and failure/recovery truth", (
     // Seed a message so sleep has work to do
     await client.privateMemory.recordMessage({ userId: "test", sessionId: "test-session", role: "user", content: "Test message for sleep — triggers retrospective", timestamp: Date.now() });
     // Fake session manager that fails with prompt_round_limit on first model call
+    // Fake session manager: only the extraction turn fails, with
+    // prompt_round_limit — pre-extraction steps fail soft on the "ok"
+    // placeholder under current supervision semantics, so failing the first
+    // call would abort before extraction and never exercise the failure-truth
+    // path this test covers.
     let callCount = 0;
     const sessionManager = {
-      spin: vi.fn(async () => {
+      spin: vi.fn(async (opts: { prompt?: string }) => {
         callCount++;
-        if (callCount === 1) {
+        if (typeof opts?.prompt === "string" && opts.prompt.includes("PROPOSAL-EXTRACTION-V1")) {
           throw new PiCoreToolExecutionError({
             version: 1,
             execution_id: "e1",
@@ -236,6 +245,8 @@ describe("1752 E2E — normal sleep authorization and failure/recovery truth", (
       mkdirSync(join(memoryDir, "prompts", "sleep"), { recursive: true });
       cpSync2(srcPrompts2, join(memoryDir, "prompts"), { recursive: true });
     }
+    // Same saved-identity requirement as above.
+    writeFileSync(join(memoryDir, "manifest.json"), JSON.stringify({ encryptionUser: "test" }));
     const MEM_CONFIG2 = {
       memoryEnabled: true,
       memoryDir,
